@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  AlertCircle, ArrowUp, ListTodo, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtNum, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -122,11 +122,36 @@ export function Chat({
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
-  // "@ho" at the end of the text: suggest agents to mention (the message also goes to them).
-  const mentionQuery = /(?:^|\s)@([^\s@]*)$/.exec(text)?.[1]?.toLowerCase();
-  const mentionMatches =
-    mentionQuery === undefined ? [] : agents.filter((a) => a.id !== agent.id && a.name.toLowerCase().startsWith(mentionQuery)).slice(0, 6);
-  const mention = (a: Agent) => setText((t) => t.replace(/@[^\s@]*$/, `@${a.name} `));
+  // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
+  // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
+  // Only agents in the same project: the backend doesn't deliver to others.
+  const atToken = /(?:^|\s)@([^\s@]*)$/.exec(text)?.[1];
+  const mentionQuery = atToken?.toLowerCase();
+  const agentMatches =
+    mentionQuery === undefined ? [] : agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim() && a.name.toLowerCase().startsWith(mentionQuery)).slice(0, 6);
+  const fileDir = atToken === undefined ? undefined : atToken.slice(0, atToken.lastIndexOf("/") + 1);
+  const filePrefix = atToken?.slice(fileDir?.length ?? 0).toLowerCase() ?? "";
+  const [listing, setListing] = useState<{ typed: string; dir: string; entries: { name: string; dir: boolean }[] }>();
+  useEffect(() => {
+    if (fileDir === undefined) return;
+    let live = true;
+    api.ls(agent.id, fileDir).then(
+      (r) => live && setListing({ typed: fileDir, ...r }),
+      () => live && setListing({ typed: fileDir, dir: "", entries: [] }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [agent.id, fileDir]);
+  const fileMatches =
+    listing && listing.typed === fileDir
+      ? listing.entries.filter((e) => e.name.toLowerCase().startsWith(filePrefix) && (filePrefix.startsWith(".") || !e.name.startsWith("."))).slice(0, 50)
+      : [];
+  type Pick = { agent: Agent } | { file: { name: string; dir: boolean } };
+  const mentionMatches: Pick[] = [...agentMatches.map((a) => ({ agent: a })), ...fileMatches.map((f) => ({ file: f }))];
+  // A folder keeps the menu open on its contents, like tab completion in a shell.
+  const mention = (p: Pick) =>
+    setText((t) => t.replace(/@[^\s@]*$/, "agent" in p ? `@${p.agent.name} ` : `@${fileDir}${p.file.name}${p.file.dir ? "/" : " "}`));
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
     const m = new Map<string, PullRequest[]>();
@@ -471,27 +496,48 @@ export function Chat({
             />
           )}
           {mentionMatches.length > 0 && (
-            <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Mention an agent">
-              {mentionMatches.map((a, i) => (
-                <button
-                  key={a.id}
-                  role="option"
-                  aria-selected={i === menuIndex}
-                  onMouseEnter={() => setMenuIndex(i)}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    mention(a);
-                  }}
-                  className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === menuIndex && "bg-white/[0.06]")}
-                >
-                  <Sticker avatar={a.avatar} size={20} />
-                  <span className="text-[13px]">{a.name}</span>
-                  <span className="truncate text-[12px] text-fg-3">{a.title}</span>
-                </button>
+            <div className="mb-2 max-h-80 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Mention an agent or a file">
+              {mentionMatches.map((p, i) => (
+                <Fragment key={"agent" in p ? p.agent.id : p.file.name}>
+                  {"file" in p && i === agentMatches.length && (
+                    <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{listing?.dir ? `${listing.dir}/` : "./"}</div>
+                  )}
+                  <button
+                    role="option"
+                    aria-selected={i === menuIndex}
+                    ref={(el) => {
+                      if (i === menuIndex) el?.scrollIntoView({ block: "nearest" });
+                    }}
+                    onMouseEnter={() => setMenuIndex(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      mention(p);
+                    }}
+                    className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === menuIndex && "bg-white/[0.06]")}
+                  >
+                    {"agent" in p ? (
+                      <>
+                        <Sticker avatar={p.agent.avatar} size={20} />
+                        <span className="text-[13px]">{p.agent.name}</span>
+                        <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
+                      </>
+                    ) : (
+                      <>
+                        {p.file.dir ? <Folder className="size-4 shrink-0 text-fg-3" /> : <FileText className="size-4 shrink-0 text-fg-3" />}
+                        <span className="truncate font-mono text-[12.5px]">
+                          {p.file.name}
+                          {p.file.dir && "/"}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                  {"agent" in p && i === agentMatches.length - 1 && (
+                    <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">
+                      The message also goes to them, and their reply shows here. Start with @… to send it only to them.
+                    </div>
+                  )}
+                </Fragment>
               ))}
-              <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">
-                The message also goes to them, and their reply shows here. Start with @… to send it only to them.
-              </div>
             </div>
           )}
           {matches.length > 0 && (
@@ -603,7 +649,7 @@ export function Chat({
                 placeholder={
                   watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                   : running ? `${agent.name} is working. Your message will be delivered next.`
-                  : `Message ${agent.name}… (/ for commands, @ to mention)`
+                  : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                 }
                 className="max-h-48 flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"
               />

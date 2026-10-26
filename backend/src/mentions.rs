@@ -15,7 +15,8 @@ pub const TAG: &str = "[You were mentioned by the user in ";
 
 /// The agents `text` mentions (other than `exclude`), in order, and whether the message opens with
 /// mentions. Names match case-insensitively at an `@` that starts a word, longest name first, and must
-/// end at a word boundary ("@Web Dev," but not "@Web Developer").
+/// end at a word boundary ("@Web Dev," but not "@Web Developer"). A name that goes on as a
+/// file path ("@qa/report.md", "@QA.txt") isn't a mention; a sentence's closing period ("@QA.") is.
 pub fn parse<'a>(text: &str, agents: &'a [Agent], exclude: &str) -> (Vec<&'a Agent>, bool) {
     let mut by_len: Vec<&Agent> = agents.iter().filter(|a| a.id != exclude && !a.name.trim().is_empty()).collect();
     by_len.sort_by_key(|a| std::cmp::Reverse(a.name.chars().count()));
@@ -30,7 +31,14 @@ pub fn parse<'a>(text: &str, agents: &'a [Agent], exclude: &str) -> (Vec<&'a Age
             let rest = &lower[i + 1..];
             let hit = by_len.iter().find(|a| {
                 let n = a.name.to_lowercase();
-                rest.starts_with(&n) && rest[n.len()..].chars().next().is_none_or(|e| !e.is_alphanumeric() && e != '_' && e != '-')
+                let mut after = rest.get(n.len()..).unwrap_or("").chars();
+                let path = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || "_-/.".contains(c));
+                rest.starts_with(&n) && match after.next() {
+                    None => true,
+                    Some('/') => false,
+                    Some('.') => !path(after.next()),
+                    Some(e) => !e.is_alphanumeric() && e != '_' && e != '-',
+                }
             });
             if let Some(a) = hit {
                 if !found.iter().any(|f| f.id == a.id) {
@@ -118,6 +126,8 @@ mod tests {
         assert_eq!(names("mail me at sam@QA.com").0, Vec::<String>::new(), "only an @ that starts a word");
         assert_eq!(names("@Orchestrator hi").0, Vec::<String>::new(), "the chat's own agent isn't a mention");
         assert_eq!(names("@QA @QA twice").0, vec!["QA".to_string()]);
+        assert_eq!(names("read @qa/report.md and @QA.txt").0, Vec::<String>::new(), "a file path isn't a mention");
+        assert_eq!(names("ask @QA. Thanks").0, vec!["QA".to_string()], "a closing period still mentions");
         assert_eq!(names("no mentions here"), (vec![], false));
         let _ = (dev, qa);
     }
