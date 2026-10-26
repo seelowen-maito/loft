@@ -25,6 +25,8 @@ export type Agent = {
   max_subagents: number | null;
   /** Planning: it can grill the user (guided interviews). Off by default. */
   planning: boolean;
+  /** Leads its project's team (one per project); implies Planning. Wears a captain hat. */
+  lead?: boolean;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;
@@ -350,7 +352,7 @@ export const api = {
   agentsSummary: () => req<AgentSummary[]>("GET", "/agents/summary"),
   createAgent: (a: Partial<Agent>) => req<Agent>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
-  updateAgent: (id: string, a: Partial<Agent>) => req<Agent>("PATCH", `/agents/${id}`, a),
+  updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */

@@ -44,6 +44,9 @@ pub struct Agent {
     /// optional `grill` flag when that is all an agent has, so an explicit setting carries over.
     #[serde(default, alias = "grill", deserialize_with = "null_is_false")]
     pub planning: bool,
+    /// Leads its team (the agents sharing its project): at most one per project, always with Planning.
+    #[serde(default)]
+    pub lead: bool,
     pub avatar: Avatar,
     pub status: String,
     pub status_text: String,

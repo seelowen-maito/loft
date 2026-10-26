@@ -346,7 +346,7 @@ export function Chat({
       )}
       {/* header */}
       <div className="flex items-center gap-4 border-b border-line px-6 py-4 max-md:gap-3 max-md:px-4 max-md:py-3">
-        <Sticker avatar={agent.avatar} size={52} className="max-md:!size-9" />
+        <Sticker avatar={agent.avatar} lead={agent.lead} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
@@ -431,7 +431,7 @@ export function Chat({
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
-              <Sticker avatar={agent.avatar} size={112} className="animate-rise" />
+              <Sticker avatar={agent.avatar} lead={agent.lead} size={112} className="animate-rise" />
               <div className="mt-5 font-serif text-[30px] leading-tight">Say hello to {agent.name}.</div>
               <p className="mt-2 max-w-md text-[13.5px] text-fg-2">
                 It works inside its own workspace, keeps long-term memory, and asks you before it uses anything it hasn't been granted.
@@ -517,7 +517,7 @@ export function Chat({
                   >
                     {"agent" in p ? (
                       <>
-                        <Sticker avatar={p.agent.avatar} size={20} />
+                        <Sticker avatar={p.agent.avatar} lead={p.agent.lead} size={20} />
                         <span className="text-[13px]">{p.agent.name}</span>
                         <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
                       </>
@@ -777,7 +777,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
             <MessageTasks m={m} />
           </div>
         </div>
-        {from && <Sticker avatar={from.avatar} size={26} className="mt-5" />}
+        {from && <Sticker avatar={from.avatar} lead={from.lead} size={26} className="mt-5" />}
       </div>
     );
   }
@@ -814,7 +814,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
   const replier = m.meta?.mention_reply ? findAgent(agents, m.meta.from_agent?.id) : undefined;
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={(replier ?? agent).avatar} size={26} className="mt-0.5" />
+      <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).lead} size={26} className="mt-0.5" />
       <div className={cx("prose-chat min-w-0 flex-1", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (
           <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{replier?.name ?? m.meta.from_agent?.name} · answering your mention</div>
@@ -829,10 +829,10 @@ function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Me
   const to = findAgent(agents, use.meta?.input?.agent);
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={agent.avatar} size={26} className="mt-5" />
+      <Sticker avatar={agent.avatar} lead={agent.lead} size={26} className="mt-5" />
       <div className="flex min-w-0 max-w-[80%] flex-col items-start">
         <div className={cx("mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3", !result && "animate-pulse-soft")}>
-          {agent.name} → {to && <Sticker avatar={to.avatar} size={16} />} {to?.name ?? use.meta?.input?.agent}
+          {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.lead} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
         <div className="whitespace-pre-wrap rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
       </div>

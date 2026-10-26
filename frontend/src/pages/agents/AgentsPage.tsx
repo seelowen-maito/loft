@@ -258,7 +258,7 @@ export default function AgentsPage() {
                       )}
                     >
                       <div className="relative">
-                        <Sticker avatar={a.avatar} size={40} />
+                        <Sticker avatar={a.avatar} lead={a.lead} size={40} />
                         <span className={cx("absolute -bottom-0.5 -right-0.5 size-3 rounded-full border-2 border-ink-950", s.dot)} />
                       </div>
                       <div className="min-w-0 flex-1">

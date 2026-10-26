@@ -85,7 +85,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
       style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
     >
       <div className="flex items-start gap-3">
-        <Sticker avatar={a.avatar} size={44} />
+        <Sticker avatar={a.avatar} lead={a.lead} size={44} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[15px] font-medium tracking-tight group-hover:text-accent">{a.name}</span>

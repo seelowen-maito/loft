@@ -83,7 +83,7 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
                     <GitPullRequest className="size-3" />#{pr.number}
                   </a>
                 ))}
-                {a && <Sticker avatar={a.avatar} size={20} />}
+                {a && <Sticker avatar={a.avatar} lead={a.lead} size={20} />}
               </Link>
             </li>
           );

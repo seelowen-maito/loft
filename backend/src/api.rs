@@ -206,6 +206,9 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     if let Some(v) = p.get("planning") {
         a.planning = v.as_bool().ok_or_else(|| bad("planning must be true or false"))?;
     }
+    if let Some(v) = p.get("lead") {
+        a.lead = v.as_bool().ok_or_else(|| bad("lead must be true or false"))?;
+    }
     if let Some(v) = str_field("permission_mode") {
         const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan", "manual"];
         if !MODES.contains(&v.as_str()) {
@@ -251,17 +254,51 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
+    if a.lead {
+        if a.project.trim().is_empty() {
+            return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
+        }
+        // A Lead can always plan.
+        a.planning = true;
+    }
     Ok(())
 }
 
+/// Makes `a` its project's only Lead: clears the mark on any other agent in the project and returns
+/// the one it moved from.
+fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
+    if !a.lead {
+        return Ok(None);
+    }
+    let mut moved = None;
+    for mut o in state.db.list_agents()? {
+        if o.lead && o.id != a.id && o.project.trim() == a.project.trim() {
+            o.lead = false;
+            state.db.save_agent(&o)?;
+            emit_agent(state, &o);
+            moved = Some(o);
+        }
+    }
+    Ok(moved)
+}
+
+/// The agent as JSON, plus a notice naming both agents when the Lead mark moved to it.
+fn with_lead_notice(mut v: Value, a: &Agent, moved: Option<Agent>) -> Value {
+    if let Some(o) = moved {
+        v["lead_moved_from"] = json!({ "id": o.id, "name": o.name });
+        v["notice"] = json!(format!("Lead moved from {} to {}.", o.name, a.name));
+    }
+    v
+}
+
 pub async fn create_agent(State(state): State<AppState>, Json(p): Json<Value>) -> ApiResult<Value> {
-    let a = new_agent(&state, uuid::Uuid::new_v4().to_string(), &p, None)?;
-    Ok(Json(agent_json(&state, &a)))
+    let (a, moved) = new_agent(&state, uuid::Uuid::new_v4().to_string(), &p, None)?;
+    Ok(Json(with_lead_notice(agent_json(&state, &a), &a, moved)))
 }
 
 /// Create, save and announce an agent with `id`, defaults overridden by the patch `p`. `created_by` is the agent
-/// that asked for it, if one did.
-pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<String>) -> Result<Agent, ApiError> {
+/// that asked for it, if one did. Also returns the agent the Lead mark moved from, if it took it.
+pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<String>) -> Result<(Agent, Option<Agent>), ApiError> {
     let mut a = Agent {
         id: id.clone(),
         name: "New agent".into(),
@@ -282,6 +319,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         subagent_model: String::new(),
         max_subagents: None,
         planning: false,
+        lead: false,
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -303,12 +341,13 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
     .map_err(anyhow::Error::from)?;
     state.db.save_agent(&a)?;
     emit_agent(state, &a);
+    let moved = take_lead(state, &a)?;
     // A description of the look it should have: the agent draws its own sticker. An explicit `avatar` wins.
     match p["avatar_brief"].as_str().map(str::trim) {
         Some(brief) if !brief.is_empty() && p.get("avatar").is_none() => agents::design_avatar(state, &id, brief),
         _ => {}
     }
-    Ok(a)
+    Ok((a, moved))
 }
 
 pub async fn update_agent(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<Value>) -> ApiResult<Value> {
@@ -316,7 +355,8 @@ pub async fn update_agent(State(state): State<AppState>, Path(id): Path<String>,
     apply_patch(&mut a, &p)?;
     state.db.save_agent(&a)?;
     emit_agent(&state, &a);
-    Ok(Json(agent_json(&state, &a)))
+    let moved = take_lead(&state, &a)?;
+    Ok(Json(with_lead_notice(agent_json(&state, &a), &a, moved)))
 }
 
 #[derive(Deserialize)]
@@ -812,7 +852,7 @@ mod tests {
     #[test]
     fn planning_is_off_by_default_and_set_through_the_patch() {
         let st = crate::tasks::tests::state();
-        let mut a = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Orchestrator" }), None).unwrap();
+        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Orchestrator" }), None).unwrap();
         assert!(!a.planning, "no name rule");
         apply_patch(&mut a, &serde_json::json!({ "planning": true })).unwrap();
         assert!(a.planning);
@@ -821,6 +861,52 @@ mod tests {
         assert!(apply_patch(&mut a, &serde_json::json!({ "planning": null })).is_err());
         apply_patch(&mut a, &serde_json::json!({ "planning": false })).unwrap();
         assert!(!a.planning);
+    }
+
+    async fn patch(st: &crate::state::AppState, id: &str, p: serde_json::Value) -> Result<serde_json::Value, super::ApiError> {
+        use axum::extract::{Path, State};
+        super::update_agent(State(st.clone()), Path(id.into()), axum::Json(p)).await.map(|j| j.0)
+    }
+
+    #[tokio::test]
+    async fn one_lead_per_project_and_a_lead_always_plans() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut ids = vec![];
+        for (name, project) in [("Dev", "homebase"), ("Lead", "homebase"), ("Other", "imole"), ("Loose", "")] {
+            let mut a = agent(&st, name);
+            a.project = project.into();
+            st.db.save_agent(&a).unwrap();
+            ids.push(a.id);
+        }
+        let get = |i: usize| st.db.get_agent(&ids[i]).unwrap().unwrap();
+
+        // Lead turns Planning on, and stays on while Lead.
+        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true })).await.unwrap();
+        assert_eq!((v["lead"].clone(), v["planning"].clone(), v.get("notice")), (true.into(), true.into(), None));
+        patch(&st, &ids[0], serde_json::json!({ "planning": false })).await.unwrap();
+        assert!(get(0).planning, "a Lead always plans");
+        patch(&st, &ids[2], serde_json::json!({ "lead": true })).await.unwrap();
+
+        // A second Lead in the same project moves the mark; other projects keep theirs.
+        let v = patch(&st, &ids[1], serde_json::json!({ "lead": true })).await.unwrap();
+        assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
+        assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
+        assert!(!get(0).lead && get(0).planning, "the old Lead keeps Planning");
+        assert!(get(1).lead && get(2).lead);
+
+        // No project, no Lead: neither setting it nor clearing the Lead's project.
+        let err = patch(&st, &ids[3], serde_json::json!({ "lead": true })).await.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.starts_with("Only an agent with a project can be Lead"), "{}", err.1);
+        assert!(!get(3).lead);
+        assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
+        patch(&st, &ids[1], serde_json::json!({ "lead": false, "project": "" })).await.unwrap();
+        assert!(!get(1).lead);
+
+        // Moving the Lead to another project takes that project's mark.
+        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true, "project": "imole" })).await.unwrap();
+        assert_eq!(v["notice"], "Lead moved from Other to Dev.");
     }
 
     #[test]

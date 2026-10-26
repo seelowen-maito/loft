@@ -195,7 +195,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
         </div>
         {t.note && t.status === "in_progress" && <div className="mt-1 truncate text-[12px] text-fg-2">{t.note}</div>}
       </div>
-      {agent && <Sticker avatar={agent.avatar} size={22} />}
+      {agent && <Sticker avatar={agent.avatar} lead={agent.lead} size={22} />}
     </button>
   );
 }
@@ -248,7 +248,7 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
-          <Sticker avatar={agent.avatar} size={36} />
+          <Sticker avatar={agent.avatar} lead={agent.lead} size={36} />
           <div className="min-w-0 flex-1">
             <div className="text-[13.5px]">{agent.name}</div>
             <div className="truncate font-mono text-[11px] text-fg-3">{agent.running ? agent.status_text || "Working…" : "Open conversation"}</div>
@@ -338,7 +338,7 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   }
   return (
     <li className="flex gap-3">
-      {agent ? <Sticker avatar={agent.avatar} size={26} /> : <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-accent/15 font-mono text-[11px] text-accent">you</span>}
+      {agent ? <Sticker avatar={agent.avatar} lead={agent.lead} size={26} /> : <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-accent/15 font-mono text-[11px] text-accent">you</span>}
       <div className={cx("min-w-0 flex-1 rounded-xl border px-3 py-2", c.kind === "note" ? "border-line bg-transparent" : "border-line-strong bg-ink-850")}>
         <div className="mb-1 flex items-center gap-1.5 font-mono text-[10.5px] text-fg-3">
           {c.kind === "note" && <NotebookPen className="size-3" />}
