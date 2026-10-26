@@ -574,6 +574,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
             "list_projects" => "Looking through the projects".into(),
             "list_agent_templates" => "Reading the agent templates".into(),
             "create_agent" => format!("Creating {}", if s("name").is_empty() { s("template") } else { s("name") }),
+            "set_schedule" => "Changing its schedule".into(),
             "comment_task" => "Commenting on a task".into(),
             "get_task" => "Reading a task".into(),
             other => other.replace('_', " "),

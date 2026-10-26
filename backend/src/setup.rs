@@ -17,6 +17,9 @@ pub const LOFT_ID: &str = "loft";
 /// The permission rule that lets an agent create agents without asking each time.
 pub const CREATE_RULE: &str = "mcp__loft__create_agent";
 
+/// The permission rule that lets an agent change its own schedule without asking each time.
+pub const SCHEDULE_RULE: &str = "mcp__loft__set_schedule";
+
 /// `loft`'s sticker on a new install: a little house. The user can change it like any other agent's.
 const LOFT_AVATAR: &str = include_str!("loft-avatar.svg");
 
@@ -42,7 +45,7 @@ When the user is new, or asks you to set things up:
 1. Call `mcp__loft__list_agents` to see what already exists, so you never duplicate an agent.
 2. Call `mcp__loft__list_projects`. It lists the git repos in the projects folder with recent commit activity, languages, GitHub remote, whether they have tests, CI or dependency manifests, and the agents already on them.
 3. Pick the most active projects (commits in the last 30 days first, then the most recent commit). Usually three to five; skip forks, archives, tutorials and repos untouched for months unless the user asks for them. Look inside the ones you pick (read the README and the top-level files in `{projects}/<name>`) so you know what each one actually is: a web app, an API, a library, a CLI, a mobile app, a script, a dotfiles repo, notes.
-4. Call `mcp__loft__list_agent_templates` and choose, per project, only the templates that make sense for it. Each template says when it fits and when it doesn't. Judge it the way a senior engineer would: a personal shell script doesn't need a security agent, because nothing reaches it from outside; a notes repo doesn't need a test agent; a project with no GitHub remote can't have issues to triage or CI to watch. Fewer, well-chosen agents beat a full set on every repo.
+4. Call `mcp__loft__list_agent_templates` and choose, per project, only the templates that make sense for it. Each template says when it fits and when it doesn't. Judge it the way a senior engineer would: a personal shell script doesn't need a security agent, because nothing reaches it from outside; a notes repo doesn't need a test agent; a project with no GitHub remote can't have issues to triage or CI to watch. Fewer, well-chosen agents beat a full set on every repo. Suggest a Dev agent for the projects the user is actively building, unless one already has a developer agent: it starts by chatting with them about where to take the project, and only works on its own once they agree.
 5. Show the plan before creating anything, in exactly this shape and nothing more:
    ```
    **homebase** (Rust/TS dashboard, 472 commits/30d)
@@ -85,11 +88,55 @@ pub struct Template {
     /// Standing instructions. `{project}` and `{path}` are filled in; the creator adds project specifics.
     pub prompt: &'static str,
     pub model: &'static str,
-    /// Default schedule, in minutes.
+    /// Default schedule, in minutes. 0: it only runs when messaged until it sets its own (`set_schedule`).
     pub interval_minutes: i64,
+    /// Guided interviews (the `grill_*` tools) on, for agents that start by asking the user questions.
+    pub grill: bool,
+    /// Its first run, right after it is created: `{creator}` is filled in. Empty: it waits to be messaged.
+    pub kickoff: &'static str,
+    /// Posted in its chat as its first message when it is created, so the user knows who it is before the
+    /// kickoff run speaks. `{name}` and `{project}` are filled in.
+    pub greeting: &'static str,
 }
 
 pub const TEMPLATES: &[Template] = &[
+    Template {
+        key: "dev",
+        name: "Dev",
+        title: "Feature developer",
+        fits: "Projects the user is actively building and wants to push forward: apps, products, tools with a roadmap or a backlog of ideas. Suggest it for the most active projects.",
+        skip: "Projects that already have a developer agent the user set up, finished or archived projects, and repos that only hold notes, config or dotfiles.",
+        personality: "A builder who loves shipping. Curious about where the user wants to take the project, asks sharp questions before writing code, then delivers in small, reviewable steps. Upbeat, but never pads a reply.",
+        prompt: r#"You build new features for **{project}** (`{path}`), toward the direction the user sets. You start with no schedule: you only act when the user talks to you, until the two of you have agreed on a direction and a rhythm.
+
+## 1. Agree on a direction
+Before writing any code:
+1. Keep a clone of the repo in your workspace and read it: the README, the structure, recent commits, open issues and pull requests. Know what the project is and where it stands.
+2. Interview the user with a grill (`mcp__loft__grill_start`): who the project is for, where they want it to be in a few months, the next features they care about most, what is out of scope, constraints (stack, design, performance, budget), and how they like to review work. Ask about the project as it really is, not generic questions.
+3. Turn the answers into a short roadmap: the goal in one line, then a prioritized list of features, each small enough for one pull request. Save it as `notes/roadmap.md` in your workspace and remember the goal and the top items (`mcp__loft__remember`).
+4. Show the user the roadmap and ask them to confirm or reorder it.
+
+## 2. Agree on a rhythm
+Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours, outside their working hours). When they agree, call `mcp__loft__set_schedule` with that interval and their working hours as quiet hours. Until then, don't start work on your own.
+
+## 3. Build
+On each check-in, and whenever the user asks:
+1. Pull the repo. Check your open pull requests first: answer review comments and fix what was asked before starting anything new. If two or more of your pull requests are still waiting for review, don't start a new feature; say so in one line.
+2. Take the top roadmap item that isn't done. Build it as a small, complete slice on its own branch, with tests, following the project's conventions.
+3. Build and run the tests. Open a pull request (`gh pr create`) that says what it adds, why (which roadmap item) and how to try it.
+4. Update the roadmap: mark what shipped and note anything you learned.
+5. Report in a few lines: what you built, the pull request link, and what is next.
+
+## Rules
+- Never push to the default branch and never merge: every change goes through a pull request the user reviews.
+- When the direction is unclear, or a feature needs a decision (a new dependency, a data model change, a paid service), ask instead of guessing.
+- When the user changes direction, update the roadmap first, then follow it."#,
+        model: "sonnet",
+        interval_minutes: 0,
+        grill: true,
+        kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with `mcp__loft__grill_start` in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
+        greeting: "Hey! I'm {name}, and I'll be building new features for **{project}**. Before I write any code, I want to know where you want to take it, so I have a few quick questions. Once we agree on a roadmap and how often I should work, I'll start shipping it one pull request at a time.",
+    },
     Template {
         key: "reviewer",
         name: "Reviewer",
@@ -109,6 +156,9 @@ On each check-in:
 If nothing changed, say so in one line."#,
         model: "sonnet",
         interval_minutes: 240,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "security",
@@ -130,6 +180,9 @@ On each check-in:
 If you found nothing new, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "tests",
@@ -150,6 +203,9 @@ On each check-in:
 If everything passes and nothing new needs tests, say so in one line."#,
         model: "sonnet",
         interval_minutes: 720,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "deps",
@@ -170,6 +226,9 @@ On each check-in:
 If everything is current, say so in one line."#,
         model: "sonnet",
         interval_minutes: 10080,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "docs",
@@ -189,6 +248,9 @@ On each check-in:
 If the docs are already accurate, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "triage",
@@ -209,6 +271,9 @@ On each check-in:
 If there is nothing new, say so in one line."#,
         model: "haiku",
         interval_minutes: 180,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
     Template {
         key: "ci",
@@ -228,6 +293,9 @@ On each check-in:
 If CI is green, say so in one line."#,
         model: "haiku",
         interval_minutes: 120,
+        grill: false,
+        kickoff: "",
+        greeting: "",
     },
 ];
 
@@ -301,6 +369,19 @@ pub fn mcp_tools() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
+            "name": "set_schedule",
+            "description": "Change your own schedule: how often you wake up on your own, and the quiet hours when you don't. The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
+            "inputSchema": { "type": "object", "properties": {
+                "interval_minutes": { "type": "integer", "description": "Minutes between check-ins: 0 to stop, otherwise at least 60." },
+                "quiet_hours": { "type": "array", "description": "When check-ins pause, usually the user's working hours. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
+                    "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
+                    "start": { "type": "string", "description": "HH:MM" },
+                    "end": { "type": "string", "description": "HH:MM" }
+                } } },
+                "reason": { "type": "string", "description": "Why, in one line, as agreed with the user." }
+            }, "required": ["interval_minutes"] }
+        }),
+        json!({
             "name": "create_agent",
             "description": "Create a new Loft agent. Start from a template and customize its instructions for the project, or write one from scratch. It gets Loft's default tool permissions and asks the user for anything more. Only create agents the user agreed to. Agents can't delete agents; only the user can.",
             "inputSchema": { "type": "object", "properties": {
@@ -331,6 +412,7 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
         "list_projects" => Ok(list_projects(state, args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize).await),
         "list_agent_templates" => Ok(list_templates()),
         "create_agent" => create_agent(state, me, args).await,
+        "set_schedule" => set_schedule(state, me, args).await,
         _ => return None,
     })
 }
@@ -340,13 +422,14 @@ fn list_templates() -> String {
         .iter()
         .map(|t| {
             format!(
-                "## {key}: {name} ({title})\nFits: {fits}\nSkip: {skip}\nDefault: every {every}, model {model}.\nInstructions:\n{prompt}",
+                "## {key}: {name} ({title})\nFits: {fits}\nSkip: {skip}\nDefault: {every}, model {model}.{starts}\nInstructions:\n{prompt}",
                 key = t.key,
                 name = t.name,
                 title = t.title,
                 fits = t.fits,
                 skip = t.skip,
-                every = every(t.interval_minutes),
+                every = if t.interval_minutes > 0 { format!("every {}", every(t.interval_minutes)) } else { "no schedule (only runs when messaged, until it sets its own)".into() },
+                starts = if t.kickoff.is_empty() { "" } else { " It starts on its own right after it is created, by chatting with the user." },
                 model = t.model,
                 prompt = t.prompt,
             )
@@ -486,6 +569,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "interval_minutes": interval,
         "quiet_hours": quiet,
         "avatar_brief": s("avatar_brief"),
+        "grill": tpl.is_some_and(|t| t.grill),
     });
 
     let allowed = me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, CREATE_RULE, &patch));
@@ -505,7 +589,88 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "runs only when messaged".into()
     };
     let drawing = if s("avatar_brief").is_empty() { "" } else { " It is drawing its avatar now." };
-    Ok(format!("Created {} (id {}) for {}; it {schedule}.{drawing}", a.name, a.id, if a.project.is_empty() { "no project" } else { &a.project }))
+    // Runs after the avatar drawing, which new_agent started.
+    if let Some(g) = tpl.map(|t| t.greeting).filter(|g| !g.is_empty()) {
+        let project = if a.project.is_empty() { "your projects" } else { &a.project };
+        crate::agents::add_msg(state, &a.id, None, "assistant", "text", &g.replace("{name}", &a.name).replace("{project}", project), json!({ "greeting": true }));
+    }
+    let starts = match tpl.filter(|t| !t.kickoff.is_empty()) {
+        Some(t) if t.grill => {
+            open_interview(state, &a.id, t.kickoff.replace("{creator}", &me.name));
+            " It greeted the user and is opening an interview with them now."
+        }
+        Some(t) => {
+            crate::agents::wake(state, &a.id, t.kickoff.replace("{creator}", &me.name), "setup");
+            " It is introducing itself to the user in its chat now."
+        }
+        None => "",
+    };
+    Ok(format!("Created {} (id {}) for {}; it {schedule}.{drawing}{starts}", a.name, a.id, if a.project.is_empty() { "no project" } else { &a.project }))
+}
+
+/// Run a new agent's kickoff as a grill run: only the interview questions reach the chat, which the grill
+/// tools post themselves. Models tend to narrate around a grill, before it (a second introduction after
+/// Loft's greeting) or after it (Claude Code asks for visible text when a turn ends with none), so its own
+/// text is never shown. If the run ends without an interview, it is woken once to ask in a normal reply.
+fn open_interview(state: &AppState, agent_id: &str, prompt: String) {
+    crate::agents::wake(state, agent_id, prompt, "grill");
+    let (state, id) = (state.clone(), agent_id.to_string());
+    tokio::spawn(async move {
+        // The avatar drawing may run first; both finish within the hour or something is stuck.
+        for _ in 0..1800 {
+            if !crate::agents::is_running(&state, &id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        let started = state.db.list_grills(&id).map(|g| !g.is_empty()).unwrap_or(true);
+        if !started && state.db.get_agent(&id).ok().flatten().is_some() {
+            crate::agents::wake(&state, &id, INTERVIEW_FALLBACK.into(), "setup");
+        }
+    });
+}
+
+const INTERVIEW_FALLBACK: &str = "[Loft: your interview didn't start] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Ask your first questions about the project's direction in a normal reply instead: three or four, short and specific to the project.";
+
+/// An agent changes its own schedule, with the user's approval.
+async fn set_schedule(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    let interval = args["interval_minutes"].as_i64().ok_or("interval_minutes is required")?;
+    if interval != 0 && interval < MIN_INTERVAL {
+        return Err(format!("interval_minutes must be 0 or at least {MIN_INTERVAL}"));
+    }
+    let quiet = match args.get("quiet_hours") {
+        None | Some(Value::Null) => me.quiet_hours.clone(),
+        Some(v) => {
+            let w: Vec<QuietWindow> = serde_json::from_value(v.clone()).map_err(|_| "quiet_hours must be a list of { days, start, end }".to_string())?;
+            crate::schedule::validate(w)?
+        }
+    };
+    let patch = json!({ "interval_minutes": interval, "quiet_hours": quiet });
+    if !me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, SCHEDULE_RULE, &patch)) {
+        let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(String::from).unwrap_or_else(|| format!("{} wants to change its schedule.", me.name));
+        let d = crate::agents::ask_permission(state, &me.id, "prompt", SCHEDULE_RULE, patch.clone(), &reason, SCHEDULE_RULE.into()).await;
+        if !d.allow {
+            return Err(format!("The user declined.{}", d.message.map(|m| format!(" Their note: {m}")).unwrap_or_default()));
+        }
+    }
+    let a = state
+        .db
+        .update_agent(&me.id, |a| {
+            if a.interval_minutes != interval || a.quiet_hours != quiet {
+                a.next_run_at = None;
+            }
+            a.interval_minutes = interval;
+            a.quiet_hours = quiet;
+        })
+        .map_err(|e| e.to_string())?
+        .ok_or("agent not found")?;
+    crate::agents::emit_agent(state, &a);
+    Ok(if a.interval_minutes == 0 {
+        "Schedule off: you only run when messaged.".into()
+    } else {
+        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(", paused {}", crate::schedule::describe(&a.quiet_hours)) };
+        format!("You now check in every {}{quiet}.", every(a.interval_minutes))
+    })
 }
 
 #[cfg(test)]
@@ -621,6 +786,90 @@ mod tests {
         assert!(st.rt.lock().unwrap().queued.get("a2").is_none() && st.rt.lock().unwrap().queued.get("a3").is_none());
     }
 
+    #[tokio::test]
+    async fn a_dev_agent_waits_for_a_direction_and_opens_the_interview() {
+        let st = state();
+        // The avatar run really starts: point it at a stand-in for claude that stays busy and does nothing.
+        let bin = st.cfg.storage_dir.parent().unwrap().join("idle-claude");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut set = st.settings.get();
+        set.claude_bin = bin.to_string_lossy().into();
+        st.settings.save(set).unwrap();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
+        assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
+        let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
+        assert_eq!((a.interval_minutes, a.grill), (0, Some(true)));
+        assert!(crate::grill::enabled(&a));
+        // The avatar run started; the interview is queued right behind it, as a quiet grill run.
+        let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
+        assert!(g.len() == 1 && g[0].1 == "grill" && g[0].0.starts_with("[Loft: you were just created by loft]") && g[0].0.contains("grill_start"), "{g:?}");
+        assert!(st.rt.lock().unwrap().queued.get(&a.id).is_none_or(|q| q.is_empty()));
+        let first = st.db.list_messages(&a.id, 10, None).unwrap().into_iter().find(|m| m.kind == "text").unwrap();
+        assert!(first.role == "assistant" && first.content.starts_with("Hey! I'm Dev, and I'll be building new features for **homebase**."), "{}", first.content);
+        // Other templates don't interview and wait to be woken.
+        create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
+        let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
+        assert_eq!(r.grill, Some(false));
+        assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
+        let st = state();
+        // A model that only narrates: it never calls grill_start.
+        let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
+        std::fs::write(&bin, r#"#!/bin/sh
+prompt=$(cat)
+printf '%s\n---\n' "$prompt" >> prompts.log
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hi, I am Dev!"}]}}'
+echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+"#).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut set = st.settings.get();
+        set.claude_bin = bin.to_string_lossy().into();
+        st.settings.save(set).unwrap();
+        let a = agent(&st, "Dev");
+        open_interview(&st, &a.id, "kickoff".into());
+        let log = crate::agents::workspace(&st, &a.id).join("prompts.log");
+        let end = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !std::fs::read_to_string(&log).is_ok_and(|l| l.contains("your interview didn't start")) {
+            assert!(tokio::time::Instant::now() < end, "the fallback never ran");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        while crate::agents::is_running(&st, &a.id) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // The quiet kickoff's "Hi, I am Dev!" never reached the chat; the fallback's reply did, once.
+        let said = st.db.list_messages(&a.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "text").count();
+        assert_eq!(said, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_schedule_needs_the_users_approval() {
+        let st = state();
+        let me = agent(&st, "Dev");
+        assert!(set_schedule(&st, &me, &json!({ "interval_minutes": 10 })).await.is_err());
+        let (st2, me2) = (st.clone(), me.clone());
+        let call = tokio::spawn(async move {
+            set_schedule(&st2, &me2, &json!({ "interval_minutes": 360, "quiet_hours": [{ "days": [0, 1, 2, 3, 4], "start": "09:00", "end": "18:00" }], "reason": "Agreed: every 6h" })).await
+        });
+        let req = loop {
+            if let Some(p) = st.db.list_permissions(None).unwrap().into_iter().find(|p| p.status == "pending") {
+                break p;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!((req.tool_name.as_str(), req.reason.as_str()), (SCHEDULE_RULE, "Agreed: every 6h"));
+        crate::agents::decide(&st, &req.id, "allow_once", None, None).unwrap();
+        assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), paused Mon–Fri 09:00–18:00.");
+        let a = st.db.get_agent(&me.id).unwrap().unwrap();
+        assert_eq!((a.interval_minutes, a.quiet_hours.len()), (360, 1));
+    }
+
     #[test]
     fn features_look_one_folder_down() {
         let dir = std::env::temp_dir().join(format!("loft-features-{}", uuid::Uuid::new_v4()));
@@ -635,7 +884,7 @@ mod tests {
     fn every_template_fills_in_its_project() {
         for t in TEMPLATES {
             assert!(t.prompt.contains("{project}") && t.prompt.contains("{path}"), "{}", t.key);
-            assert!(t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
+            assert!(t.interval_minutes == 0 || t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
         }
         assert!(list_templates().contains("## security: Security (Security auditor)"));
     }
