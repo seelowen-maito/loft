@@ -1,0 +1,6 @@
+// Signing identifiers stay out of the repo. Set them in Config/Local.xcconfig (gitignored; copy
+// Local.xcconfig.example), or as environment variables when building with xcodebuild or the scripts:
+//   LOFT_TEAM_ID     your Apple Developer team id (needed for a device, an archive or TestFlight)
+//   LOFT_BUNDLE_ID   the app's bundle id (default com.example.loft, enough for the Simulator)
+// Nothing is set here, so environment variables apply when Local.xcconfig doesn't set them.
+#include? "Local.xcconfig"

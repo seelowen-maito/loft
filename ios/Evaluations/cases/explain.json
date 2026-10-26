@@ -1,0 +1,166 @@
+{
+ "job": "explain",
+ "minPassRate": 0.8,
+ "cases": [
+  {
+   "input": "Bash\nrm -rf build/ DerivedData/",
+   "context": "delete|remove",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit push origin main",
+   "context": "push|upload|send",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit push --force origin feature/login",
+   "context": "push|upload|send",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nxcodebuild test -scheme Loft",
+   "context": "test",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ncat .env",
+   "context": "env|secret|password|key",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nsecurity find-generic-password -s loft -w",
+   "context": "password",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ncurl -X POST https://api.stripe.com/v1/charges -d amount=500",
+   "context": "stripe|charge|payment",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nosascript -e 'tell application \"Messages\" to send \"done\" to buddy \"+15550100100\"'",
+   "context": "message|text",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngh pr merge 108 --squash",
+   "context": "merge",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngh pr comment 97 --body \"Finding 39 must not merge\"",
+   "context": "comment|message|post",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nnpm install",
+   "context": "install|download",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nls -la ~/dev",
+   "context": "list|show",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit status",
+   "context": "status|changed|changes",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit branch -D old-feature",
+   "context": "branch",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\npsql -c 'DROP TABLE sessions'",
+   "context": "table",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nterraform apply -auto-approve",
+   "context": "terraform|infrastructure|cloud",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nssh deploy@staging.example.com 'systemctl restart api'",
+   "context": "restart",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nprintenv",
+   "context": "environment|variable|secret|setting",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nswift build -c release",
+   "context": "build|compile",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ncp ~/.ssh/id_ed25519 /tmp/key",
+   "context": "key|authkey|push",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit clean -fdx",
+   "context": "remove|delete",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nnpm publish",
+   "context": "publish",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nbrew install restic",
+   "context": "restic|backup",
+   "expected": "ok"
+  },
+  {
+   "input": "Write\n/Users/sam/dev/loft/README.md",
+   "context": "readme",
+   "expected": "ok"
+  },
+  {
+   "input": "Edit\n/Users/sam/dev/loft/ios/Loft/App/LoftStore.swift",
+   "context": "loftstore|edit|change",
+   "expected": "ok"
+  },
+  {
+   "input": "Read\n/Users/sam/dev/api/.env.production",
+   "context": "env|secret|password|key",
+   "expected": "ok"
+  },
+  {
+   "input": "WebFetch\nhttps://developer.apple.com/documentation/foundationmodels",
+   "context": "apple|documentation|page",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit push origin fix/login-keyboard",
+   "context": "push|upload|send",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\nrm ~/Library/Application\\ Support/Loft/apns/AuthKey.p8",
+   "context": "key|authkey|push",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\naws configure list",
+   "context": "aws|credential|configuration|setting",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\ngit reset --hard origin/main",
+   "context": "reset|discard|erase|overwrite",
+   "expected": "ok"
+  },
+  {
+   "input": "Bash\npython3 scripts/send_email.py --to team@example.com",
+   "context": "email|mail",
+   "expected": "ok"
+  }
+ ]
+}

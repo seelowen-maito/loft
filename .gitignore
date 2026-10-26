@@ -1,0 +1,27 @@
+# runtime state
+.loft/
+# agent workspaces (the backend creates this folder on startup)
+agent-local-storage/
+
+# build output
+backend/target/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+ios/build/
+ios/**/xcuserdata/
+.DS_Store
+
+# your own setup, kept out of the repo
+ios/Config/Local.xcconfig
+ios/Evaluations/local/
+
+# no screenshots or recordings in the repo (the app icon is the one image)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.heic
+*.mov
+*.mp4
+!ios/Loft/Resources/Assets.xcassets/**/*.png

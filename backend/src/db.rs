@@ -1,0 +1,919 @@
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use chrono::Utc;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::avatar::Avatar;
+
+#[derive(Clone)]
+pub struct Db(Arc<Mutex<Connection>>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    /// Free-form project or tag; agents sharing one are grouped in the UI.
+    #[serde(default)]
+    pub project: String,
+    pub personality: String,
+    pub prompt: String,
+    pub model: String,
+    pub effort: String,
+    /// Minutes between autonomous runs. 0 disables the heartbeat.
+    pub interval_minutes: i64,
+    /// Windows when autonomous wake-ups are held (e.g. working hours). Empty runs around the clock.
+    #[serde(default)]
+    pub quiet_hours: Vec<QuietWindow>,
+    pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+    /// Map of MCP server name -> Claude Code MCP server config.
+    pub mcp_servers: Value,
+    pub permission_mode: String,
+    /// Model for the subagents it spawns, Explore included. Empty uses Claude Code's default.
+    #[serde(default)]
+    pub subagent_model: String,
+    /// Subagents allowed to run at once. None is Claude Code's default; 0 turns subagents off.
+    #[serde(default)]
+    pub max_subagents: Option<u32>,
+    /// Grill mode (guided interviews). None is the default: on for the Orchestrator only.
+    #[serde(default)]
+    pub grill: Option<bool>,
+    pub avatar: Avatar,
+    pub status: String,
+    pub status_text: String,
+    pub session_id: Option<String>,
+    /// Tokens in the Claude session's context as of its last reply. None until a run reports one.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub total_cost_usd: f64,
+    pub created_at: String,
+}
+
+/// A weekly window with no autonomous wake-ups, in this Mac's local time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuietWindow {
+    /// Days the window starts on, 0 = Monday … 6 = Sunday.
+    pub days: Vec<u8>,
+    /// "HH:MM". An end at or before the start runs past midnight; equal times cover the whole day.
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub agent_id: String,
+    pub run_id: Option<String>,
+    /// user | assistant | system
+    pub role: String,
+    /// text | thinking | tool_use | tool_result | permission | error | run_start | run_end
+    pub kind: String,
+    pub content: String,
+    pub meta: Value,
+    pub created_at: String,
+}
+
+/// One entry in a task's thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskComment {
+    pub id: i64,
+    pub task_id: String,
+    /// "user", or the id of the agent that wrote it.
+    pub author: String,
+    /// comment (someone wrote it) | note (an agent's progress note) | status (a change: started, done, reassigned…)
+    pub kind: String,
+    pub text: String,
+    pub meta: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: i64,
+    pub agent_id: String,
+    pub content: String,
+    pub tags: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: String,
+    pub agent_id: String,
+    /// prompt (blocked tool call) | request (agent asked explicitly)
+    pub source: String,
+    pub tool_name: String,
+    pub input: Value,
+    pub reason: String,
+    /// Suggested rule to add to allowed_tools when granted "always".
+    pub rule: String,
+    /// pending | allowed_once | allowed_always | denied | expired
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PullRequest {
+    pub id: String,
+    pub agent_id: String,
+    /// owner/repo
+    pub slug: String,
+    pub number: i64,
+    pub url: String,
+    /// The tool call that opened it; the chat renders the card right after it.
+    pub tool_use_id: Option<String>,
+    pub title: String,
+    /// open | closed | merged
+    pub state: String,
+    pub draft: bool,
+    /// None while GitHub is still computing it.
+    pub mergeable: Option<bool>,
+    /// clean | dirty | blocked | behind | unstable | has_hooks | draft | unknown
+    pub mergeable_state: String,
+    pub merge_methods: Vec<String>,
+    pub head_ref: String,
+    pub head_sha: String,
+    pub base_ref: String,
+    pub author: String,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    pub commits: i64,
+    pub comments: i64,
+    /// { total, passed, failed, pending }
+    pub checks: Value,
+    pub merged_by: Option<String>,
+    pub merged_at: Option<String>,
+    pub closed_at: Option<String>,
+    pub error: Option<String>,
+    pub checked_at: Option<String>,
+    pub created_at: String,
+}
+
+/// A unit of work: a personal todo, or work handed to an agent. Agents report
+/// progress on the tasks they own through MCP; the user owns the rest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    /// todo (personal; never runs by itself) | work (meant for an agent)
+    pub kind: String,
+    /// inbox | ready | in_progress | blocked | waiting_approval | done | failed | cancelled
+    pub status: String,
+    /// low | normal | high | urgent
+    pub priority: String,
+    pub project: String,
+    pub agent_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub depends_on: Vec<String>,
+    pub due_at: Option<String>,
+    /// "user", or the id of the agent that created it (a delegated subtask).
+    pub created_by: String,
+    /// Latest progress note from the agent working on it.
+    pub note: String,
+    pub summary: String,
+    pub error: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+pub fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    run_id TEXT,
+    role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS messages_agent ON messages(agent_id, id);
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memories_agent ON memories(agent_id, id);
+CREATE TABLE IF NOT EXISTS permissions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pull_requests (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(agent_id, slug, number)
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS grill_sessions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS grill_sessions_agent ON grill_sessions(agent_id, created_at);
+CREATE TABLE IF NOT EXISTS push_seen (
+    item_id TEXT PRIMARY KEY,
+    seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS devices (
+    token TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    author TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_comments_task ON task_comments(task_id, id);
+CREATE TABLE IF NOT EXISTS needs_you_dismissed (
+    item_id TEXT PRIMARY KEY,
+    dismissed_at TEXT NOT NULL
+);
+"#;
+
+fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
+    let meta: String = r.get(6)?;
+    Ok(Message {
+        id: r.get(0)?,
+        agent_id: r.get(1)?,
+        run_id: r.get(2)?,
+        role: r.get(3)?,
+        kind: r.get(4)?,
+        content: r.get(5)?,
+        meta: serde_json::from_str(&meta).unwrap_or(Value::Null),
+        created_at: r.get(7)?,
+    })
+}
+
+fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: r.get(0)?,
+        agent_id: r.get(1)?,
+        content: r.get(2)?,
+        tags: r.get(3)?,
+        created_at: r.get(4)?,
+    })
+}
+
+impl Db {
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.execute_batch(SCHEMA)?;
+        // Roster order the user sets by dragging; kept out of `data` so status saves can't clobber it.
+        let has_position: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'position'", [], |r| r.get(0))?;
+        if !has_position {
+            conn.execute("ALTER TABLE agents ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        // Anything left "running" from a previous backend process is stale.
+        let db = Db(Arc::new(Mutex::new(conn)));
+        for mut a in db.list_agents()? {
+            if a.status != "idle" {
+                a.status = "idle".into();
+                a.status_text = String::new();
+                db.save_agent(&a)?;
+            }
+        }
+        for mut p in db.list_permissions(None)? {
+            if p.status == "pending" {
+                p.status = "expired".into();
+                db.save_permission(&p)?;
+            }
+        }
+        Ok(db)
+    }
+
+    // ---- agents -------------------------------------------------------
+
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM agents ORDER BY position, created_at")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row("SELECT data FROM agents WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(match data {
+            Some(d) => Some(serde_json::from_str(&d)?),
+            None => None,
+        })
+    }
+
+    pub fn save_agent(&self, a: &Agent) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO agents (id, data, created_at, position)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), 0) + 1 FROM agents))
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            params![a.id, serde_json::to_string(a)?, a.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Read-modify-write an agent under the connection lock's ordering.
+    pub fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> Result<Option<Agent>> {
+        let Some(mut a) = self.get_agent(id)? else {
+            return Ok(None);
+        };
+        f(&mut a);
+        self.save_agent(&a)?;
+        Ok(Some(a))
+    }
+
+    /// Store the roster order. Ids not listed keep their position.
+    pub fn reorder_agents(&self, ids: &[String]) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute("UPDATE agents SET position = ?1 WHERE id = ?2", params![i as i64, id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_agent(&self, id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+        c.execute("DELETE FROM messages WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM memories WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ---- tasks --------------------------------------------------------
+
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM tasks ORDER BY created_at DESC")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// An agent's grill sessions, newest first.
+    pub fn list_grills(&self, agent_id: &str) -> Result<Vec<crate::grill::Session>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE agent_id = ?1 ORDER BY created_at DESC LIMIT 20")?;
+        let rows = st.query_map([agent_id], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// Grill sessions that haven't ended, for the idle timeouts.
+    pub fn open_grills(&self) -> Result<Vec<crate::grill::Session>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE json_extract(data, '$.status') <> 'ended'")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_grill(&self, id: &str) -> Result<Option<crate::grill::Session>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c.query_row("SELECT data FROM grill_sessions WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn save_grill(&self, s: &crate::grill::Session) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_task(&self, id: &str) -> Result<Option<Task>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c.query_row("SELECT data FROM tasks WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn save_task(&self, t: &Task) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO tasks (id, data, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            params![t.id, serde_json::to_string(t)?, t.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_task(&self, id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        c.execute("DELETE FROM task_comments WHERE task_id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn add_task_comment(&self, task_id: &str, author: &str, kind: &str, text: &str, meta: Value) -> Result<TaskComment> {
+        let c = self.0.lock().unwrap();
+        let created_at = now();
+        c.execute(
+            "INSERT INTO task_comments (task_id, author, kind, text, meta, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_id, author, kind, text, meta.to_string(), created_at],
+        )?;
+        Ok(TaskComment { id: c.last_insert_rowid(), task_id: task_id.into(), author: author.into(), kind: kind.into(), text: text.into(), meta, created_at })
+    }
+
+    /// The newest `limit` entries (older than `before`, an id, when paging), oldest first.
+    pub fn list_task_comments(&self, task_id: &str, limit: i64, before: Option<i64>) -> Result<Vec<TaskComment>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT id, task_id, author, kind, text, meta, created_at FROM task_comments
+             WHERE task_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        )?;
+        let mut rows = st
+            .query_map(params![task_id, before.unwrap_or(i64::MAX), limit], |r| {
+                let meta: String = r.get(5)?;
+                Ok(TaskComment {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    author: r.get(2)?,
+                    kind: r.get(3)?,
+                    text: r.get(4)?,
+                    meta: serde_json::from_str(&meta).unwrap_or(Value::Null),
+                    created_at: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// "Needs you" item ids already considered for push (last 30 days).
+    pub fn push_seen_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let c = self.0.lock().unwrap();
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?;
+        let mut st = c.prepare("SELECT item_id FROM push_seen")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub fn mark_push_seen(&self, item_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR IGNORE INTO push_seen (item_id, seen_at) VALUES (?1, ?2)", params![item_id, now()])?;
+        Ok(())
+    }
+
+    pub fn list_devices(&self) -> Result<Vec<crate::apns::Device>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM devices ORDER BY created_at")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().filter_map(|d| serde_json::from_str(&d).ok()).collect())
+    }
+
+    pub fn get_device(&self, token: &str) -> Result<Option<crate::apns::Device>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c.query_row("SELECT data FROM devices WHERE token = ?1", [token], |r| r.get(0)).optional()?;
+        Ok(data.and_then(|d| serde_json::from_str(&d).ok()))
+    }
+
+    pub fn save_device(&self, d: &crate::apns::Device) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO devices (token, data, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(token) DO UPDATE SET data = excluded.data",
+            params![d.token, serde_json::to_string(d)?, d.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_device(&self, token: &str) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("DELETE FROM devices WHERE token = ?1", [token])? > 0)
+    }
+
+
+    /// "Needs you" items the user dismissed in the last 30 days (older ones are forgotten).
+    pub fn dismissed_needs_you(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        c.execute("DELETE FROM needs_you_dismissed WHERE dismissed_at < ?1", [&cutoff])?;
+        let mut st = c.prepare("SELECT item_id FROM needs_you_dismissed")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    pub fn dismiss_needs_you(&self, item_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO needs_you_dismissed (item_id, dismissed_at) VALUES (?1, ?2)", params![item_id, now()])?;
+        Ok(())
+    }
+
+    /// A comment previously posted with this client id, so a retried post isn't added twice.
+    pub fn find_task_comment_by_client(&self, task_id: &str, client_id: &str) -> Result<Option<i64>> {
+        let c = self.0.lock().unwrap();
+        Ok(c
+            .query_row(
+                "SELECT id FROM task_comments WHERE task_id = ?1 AND json_extract(meta, '$.client_id') = ?2",
+                params![task_id, client_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A user message previously sent with this client id, so a retried send isn't delivered twice.
+    pub fn find_client_message(&self, agent_id: &str, client_id: &str) -> Result<Option<Message>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages
+             WHERE agent_id = ?1 AND role = 'user' AND json_extract(meta, '$.client_id') = ?2 LIMIT 1",
+            params![agent_id, client_id],
+            message_from_row,
+        )
+        .optional()?)
+    }
+
+    /// Messages across all agents that make up the activity feed, newest first.
+    pub fn activity_messages(&self, limit: i64, before: Option<&str>) -> Result<Vec<Message>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages
+             WHERE created_at < ?1
+               AND (kind IN ('run_start', 'run_end', 'error', 'permission')
+                    OR (role = 'user' AND kind = 'text' AND json_extract(meta, '$.from_agent') IS NOT NULL))
+             ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![before.unwrap_or("9999"), limit], message_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    // ---- messages -----------------------------------------------------
+
+    pub fn add_message(
+        &self,
+        agent_id: &str,
+        run_id: Option<&str>,
+        role: &str,
+        kind: &str,
+        content: &str,
+        meta: Value,
+    ) -> Result<Message> {
+        let c = self.0.lock().unwrap();
+        let created_at = now();
+        c.execute(
+            "INSERT INTO messages (agent_id, run_id, role, kind, content, meta, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![agent_id, run_id, role, kind, content, meta.to_string(), created_at],
+        )?;
+        Ok(Message {
+            id: c.last_insert_rowid(),
+            agent_id: agent_id.into(),
+            run_id: run_id.map(Into::into),
+            role: role.into(),
+            kind: kind.into(),
+            content: content.into(),
+            meta,
+            created_at,
+        })
+    }
+
+    /// Most recent `limit` messages, returned oldest-first. `before` pages backwards.
+    pub fn list_messages(&self, agent_id: &str, limit: i64, before: Option<i64>) -> Result<Vec<Message>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages
+             WHERE agent_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![agent_id, before.unwrap_or(i64::MAX), limit], message_from_row)?;
+        let mut out: Vec<Message> = rows.collect::<Result<_, _>>()?;
+        out.reverse();
+        Ok(out)
+    }
+
+    pub fn clear_messages(&self, agent_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM messages WHERE agent_id = ?1", [agent_id])?;
+        Ok(())
+    }
+
+    // ---- memories -----------------------------------------------------
+
+    pub fn add_memory(&self, agent_id: &str, content: &str, tags: &str) -> Result<Memory> {
+        let c = self.0.lock().unwrap();
+        let created_at = now();
+        c.execute(
+            "INSERT INTO memories (agent_id, content, tags, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![agent_id, content, tags, created_at],
+        )?;
+        Ok(Memory {
+            id: c.last_insert_rowid(),
+            agent_id: agent_id.into(),
+            content: content.into(),
+            tags: tags.into(),
+            created_at,
+        })
+    }
+
+    pub fn list_memories(&self, agent_id: &str) -> Result<Vec<Memory>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT id, agent_id, content, tags, created_at FROM memories WHERE agent_id = ?1 ORDER BY id",
+        )?;
+        let rows = st.query_map([agent_id], memory_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn search_memories(&self, agent_id: &str, query: &str) -> Result<Vec<Memory>> {
+        let c = self.0.lock().unwrap();
+        let like = format!("%{}%", query.to_lowercase());
+        let mut st = c.prepare(
+            "SELECT id, agent_id, content, tags, created_at FROM memories
+             WHERE agent_id = ?1 AND (lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY id",
+        )?;
+        let rows = st.query_map(params![agent_id, like], memory_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn delete_memory(&self, agent_id: &str, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("DELETE FROM memories WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])? > 0)
+    }
+
+    // ---- permissions --------------------------------------------------
+
+    pub fn save_permission(&self, p: &PermissionRequest) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO permissions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            params![p.id, p.agent_id, serde_json::to_string(p)?, p.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_permission(&self, id: &str) -> Result<Option<PermissionRequest>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row("SELECT data FROM permissions WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(match data {
+            Some(d) => Some(serde_json::from_str(&d)?),
+            None => None,
+        })
+    }
+
+    pub fn list_permissions(&self, agent_id: Option<&str>) -> Result<Vec<PermissionRequest>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT data FROM permissions WHERE (?1 IS NULL OR agent_id = ?1) ORDER BY created_at DESC LIMIT 200",
+        )?;
+        let rows = st.query_map([agent_id], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    // ---- pull requests ------------------------------------------------
+
+    pub fn save_pull_request(&self, p: &PullRequest) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO pull_requests (id, agent_id, slug, number, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            params![p.id, p.agent_id, p.slug, p.number, serde_json::to_string(p)?, p.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pull_request(&self, id: &str) -> Result<Option<PullRequest>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row("SELECT data FROM pull_requests WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn find_pull_request(&self, agent_id: &str, slug: &str, number: i64) -> Result<Option<PullRequest>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row(
+                "SELECT data FROM pull_requests WHERE agent_id = ?1 AND slug = ?2 AND number = ?3",
+                params![agent_id, slug, number],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn list_pull_requests(&self, agent_id: Option<&str>) -> Result<Vec<PullRequest>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT data FROM pull_requests WHERE (?1 IS NULL OR agent_id = ?1) ORDER BY created_at DESC",
+        )?;
+        let rows = st.query_map([agent_id], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// Tool calls that may have opened a PR, paired with their results.
+    pub fn pr_tool_uses(&self) -> Result<Vec<(Message, Message)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT u.id, u.agent_id, u.run_id, u.role, u.kind, u.content, u.meta, u.created_at,
+                    r.id, r.agent_id, r.run_id, r.role, r.kind, r.content, r.meta, r.created_at
+             FROM messages u JOIN messages r
+               ON r.agent_id = u.agent_id AND r.kind = 'tool_result'
+              AND json_extract(r.meta, '$.tool_use_id') = json_extract(u.meta, '$.id')
+             WHERE u.kind = 'tool_use'
+               AND (u.meta LIKE '%gh pr create%' OR u.meta LIKE '%/pulls%' OR u.meta LIKE '%pull_request%')
+             ORDER BY u.id",
+        )?;
+        let rows = st.query_map([], |r| {
+            let m = |o: usize| -> rusqlite::Result<Message> {
+                let meta: String = r.get(o + 6)?;
+                Ok(Message {
+                    id: r.get(o)?,
+                    agent_id: r.get(o + 1)?,
+                    run_id: r.get(o + 2)?,
+                    role: r.get(o + 3)?,
+                    kind: r.get(o + 4)?,
+                    content: r.get(o + 5)?,
+                    meta: serde_json::from_str(&meta).unwrap_or(Value::Null),
+                    created_at: r.get(o + 7)?,
+                })
+            };
+            Ok((m(0)?, m(8)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+
+    // ---- activity summary ---------------------------------------------
+
+    /// Raw activity for one agent since `since` (RFC 3339), for the dashboard.
+    pub fn agent_activity(&self, agent_id: &str, since: &str) -> Result<Value> {
+        let c = self.0.lock().unwrap();
+        let mut runs = vec![];
+        {
+            let mut st = c.prepare(
+                "SELECT created_at, COALESCE(json_extract(meta, '$.trigger'), 'user') FROM messages
+                 WHERE agent_id = ?1 AND kind = 'run_start' AND created_at >= ?2",
+            )?;
+            for r in st.query_map(params![agent_id, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+                let (at, trigger) = r?;
+                runs.push(serde_json::json!({ "at": at, "trigger": trigger }));
+            }
+        }
+        let count = |kind: &str| -> rusqlite::Result<i64> {
+            c.query_row(
+                "SELECT count(*) FROM messages WHERE agent_id = ?1 AND kind = ?2 AND created_at >= ?3",
+                params![agent_id, kind, since],
+                |r| r.get(0),
+            )
+        };
+        let tool_calls = count("tool_use")?;
+        let user_messages: i64 = c.query_row(
+            "SELECT count(*) FROM messages WHERE agent_id = ?1 AND role = 'user' AND json_extract(meta, '$.from_agent') IS NULL AND created_at >= ?2",
+            params![agent_id, since],
+            |r| r.get(0),
+        )?;
+        let cost: f64 = c.query_row(
+            "SELECT COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages
+             WHERE agent_id = ?1 AND kind = 'run_end' AND created_at >= ?2",
+            params![agent_id, since],
+            |r| r.get(0),
+        )?;
+        let mut top_tools = vec![];
+        {
+            let mut st = c.prepare(
+                "SELECT json_extract(meta, '$.name') AS n, count(*) AS k FROM messages
+                 WHERE agent_id = ?1 AND kind = 'tool_use' AND created_at >= ?2
+                   AND n IS NOT NULL AND n != 'ToolSearch'
+                 GROUP BY n ORDER BY k DESC LIMIT 4",
+            )?;
+            for r in st.query_map(params![agent_id, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+                let (n, k) = r?;
+                top_tools.push(serde_json::json!([n, k]));
+            }
+        }
+        let last_reply: Option<(String, String)> = c
+            .query_row(
+                "SELECT content, created_at FROM messages
+                 WHERE agent_id = ?1 AND role = 'assistant' AND kind = 'text'
+                 ORDER BY id DESC LIMIT 1",
+                [agent_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // The latest message (ignoring run bookkeeping), if it was an error.
+        let last_error: Option<String> = c
+            .query_row(
+                "SELECT kind, content FROM messages
+                 WHERE agent_id = ?1 AND kind NOT IN ('run_start', 'run_end')
+                 ORDER BY id DESC LIMIT 1",
+                [agent_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .and_then(|(kind, content)| (kind == "error").then_some(content));
+        let memories: i64 = c.query_row("SELECT count(*) FROM memories WHERE agent_id = ?1", [agent_id], |r| r.get(0))?;
+        Ok(serde_json::json!({
+            "runs": runs,
+            "tool_calls": tool_calls,
+            "last_error": last_error,
+            "user_messages": user_messages,
+            "cost_usd": cost,
+            "top_tools": top_tools,
+            "last_reply": last_reply.map(|(text, at)| serde_json::json!({ "text": text, "at": at })),
+            "memories": memories,
+        }))
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str) -> Agent {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "title": "", "personality": "", "prompt": "", "model": "sonnet", "effort": "",
+            "interval_minutes": 0, "allowed_tools": [], "disallowed_tools": [], "mcp_servers": {},
+            "permission_mode": "auto", "avatar": { "svg": "" }, "status": "idle", "status_text": "",
+            "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn roster_order() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        for id in ["a", "b", "c"] {
+            db.save_agent(&agent(id)).unwrap();
+        }
+        let ids = |db: &Db| db.list_agents().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(&db), ["a", "b", "c"]);
+        db.reorder_agents(&["c".into(), "a".into(), "b".into()]).unwrap();
+        // A later save (e.g. a status change) keeps the order.
+        db.save_agent(&agent("a")).unwrap();
+        assert_eq!(ids(&db), ["c", "a", "b"]);
+        // New agents land at the bottom.
+        db.save_agent(&agent("d")).unwrap();
+        assert_eq!(ids(&db), ["c", "a", "b", "d"]);
+    }
+}

@@ -1,0 +1,196 @@
+{
+ "job": "chat_replies",
+ "minPassRate": 0.8,
+ "cases": [
+  {
+   "input": "Tests are green on #99. Should I merge it now or wait for QA?",
+   "context": "merge",
+   "expected": "ok"
+  },
+  {
+   "input": "I found two ways to fix the crash: guard the mic format, or retry after a second. Which do you prefer?",
+   "context": "guard",
+   "expected": "ok"
+  },
+  {
+   "input": "The build takes 9 minutes. Want me to turn on caching?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Should I open the PR as a draft?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Do you want dark mode in this PR or a separate one?",
+   "context": "separate",
+   "expected": "ok"
+  },
+  {
+   "input": "I can boot the iPhone 17 Pro or create a new simulator. Which one?",
+   "context": "17",
+   "expected": "ok"
+  },
+  {
+   "input": "The docs site is ready. Deploy to staging or production?",
+   "context": "staging",
+   "expected": "ok"
+  },
+  {
+   "input": "Backblaze B2 is $1 a month, S3 about $3. B2 or S3?",
+   "context": "b2",
+   "expected": "ok"
+  },
+  {
+   "input": "I'm done with the endpoints. Should I start on the iOS screen next?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "The test is flaky. Skip it for now or fix it first?",
+   "context": "skip",
+   "expected": "ok"
+  },
+  {
+   "input": "Do you want me to delete the old branches?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Should the badge count include tasks waiting for approval?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "I need the APNs key to test push. Can you upload it in Settings?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Rename the setting to \"Know when I've finished\" or keep the old name?",
+   "context": "keep",
+   "expected": "ok"
+  },
+  {
+   "input": "Two options for the digest: show it on Overview or on Agents. Which tab?",
+   "context": "agents",
+   "expected": "ok"
+  },
+  {
+   "input": "Is it ok to bump the deployment target to iOS 17?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Should I retry the failed run?",
+   "context": "retry",
+   "expected": "ok"
+  },
+  {
+   "input": "The PR has a conflict with main. Rebase or merge main in?",
+   "context": "rebase",
+   "expected": "ok"
+  },
+  {
+   "input": "Do you want screenshots in light and dark?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Shall I post the findings on the PR?",
+   "context": "yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Os testes passaram no #99. Faço o merge agora ou espero o QA?",
+   "context": "merge",
+   "expected": "ok"
+  },
+  {
+   "input": "Achei dois jeitos de corrigir: validar o formato do microfone ou tentar de novo depois de um segundo. Qual você prefere?",
+   "context": "validar",
+   "expected": "ok"
+  },
+  {
+   "input": "O build leva 9 minutos. Quer que eu ative o cache?",
+   "context": "sim",
+   "expected": "ok"
+  },
+  {
+   "input": "Abro o PR como rascunho?",
+   "context": "sim",
+   "expected": "ok"
+  },
+  {
+   "input": "Quer o modo escuro neste PR ou em outro?",
+   "context": "outro",
+   "expected": "ok"
+  },
+  {
+   "input": "O site está pronto. Publico em staging ou em produção?",
+   "context": "staging",
+   "expected": "ok"
+  },
+  {
+   "input": "Terminei os endpoints. Começo a tela do iOS agora?",
+   "context": "sim",
+   "expected": "ok"
+  },
+  {
+   "input": "O teste é instável. Pulo por enquanto ou corrijo antes?",
+   "context": "pul",
+   "expected": "ok"
+  },
+  {
+   "input": "Posso apagar as branches antigas?",
+   "context": "sim",
+   "expected": "ok"
+  },
+  {
+   "input": "Tem conflito com a main. Faço rebase ou merge?",
+   "context": "rebase",
+   "expected": "ok"
+  },
+  {
+   "input": "Done: the plan card is merged and the chat settles in tests.",
+   "expected": "none"
+  },
+  {
+   "input": "I opened #107. Tester is running the suite now.",
+   "expected": "none"
+  },
+  {
+   "input": "Here's the summary of today's work:\n\n- push\n- digest\n- plan card",
+   "expected": "none"
+  },
+  {
+   "input": "The build failed because of a missing import. Fixing it now.",
+   "expected": "none"
+  },
+  {
+   "input": "```swift\nlet x = y ?? z\n```\n\nThat's the fix I pushed.",
+   "expected": "none"
+  },
+  {
+   "input": "Pronto: o PR está aberto e o QA já está testando.",
+   "expected": "none"
+  },
+  {
+   "input": "Why did it fail? A missing key in the config. I added it and the build is green again.",
+   "expected": "none"
+  },
+  {
+   "input": "Merged #99 and #106. Nothing else is waiting on you.",
+   "expected": "none"
+  },
+  {
+   "input": "Terminei a revisão de segurança. Nenhum problema novo.",
+   "expected": "none"
+  },
+  {
+   "input": "I'll check back in an hour.",
+   "expected": "none"
+  }
+ ]
+}

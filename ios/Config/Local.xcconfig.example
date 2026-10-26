@@ -1,0 +1,3 @@
+// Copy to Local.xcconfig (gitignored) and fill in.
+LOFT_TEAM_ID = ABCDE12345
+LOFT_BUNDLE_ID = com.example.loft

@@ -1,0 +1,126 @@
+{
+ "job": "assist",
+ "minPassRate": 0.8,
+ "cases": [
+  {
+   "input": "Dev asked you something\nI looked at the backup options for the Mac mini. Backblaze B2 costs about $1 a month and restic supports it; S3 is about $3 and needs a lifecycle rule. Should I use B2 or S3?",
+   "context": "b2|b2",
+   "expected": "ok"
+  },
+  {
+   "input": "Run the suite\nBlocked: Which simulator should I use? The suite needs iOS 26, but the only booted one is on iOS 18.6. I can boot the iPhone 17 Pro or create a new one.",
+   "context": "simulator|17",
+   "expected": "ok"
+  },
+  {
+   "input": "Web Dev asked you something\nThe plan card needs a new endpoint. Do you want it in this PR or a separate one after the task comments land?",
+   "context": "endpoint|separate",
+   "expected": "ok"
+  },
+  {
+   "input": "Tablebook Dev asked you something\nThe booking page loads 3 MB of images on mobile. I can lazy-load them now, or wait for the redesign next week. Which do you prefer?",
+   "context": "images|lazy",
+   "expected": "ok"
+  },
+  {
+   "input": "Approve: Renew the domain\nI'm ready to renew loft.dev for one year at $12. It expires in 5 days. Shall I go ahead?",
+   "context": "renew|yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Fix the build\nFailed: Xcode 27 is missing on the Mac mini, so the iOS 27 targets can't build. Install it, or I keep building against iOS 26.",
+   "context": "xcode|install",
+   "expected": "ok"
+  },
+  {
+   "input": "Vaultly Marketing asked you something\nTwo headlines for the launch post: \"Passwords that just work\" or \"One vault for the whole team\". Which one?",
+   "context": "headline|vault",
+   "expected": "ok"
+  },
+  {
+   "input": "Security asked you something\nFinding 47: the QA environment uses the production Firebase project. I can switch it to the QA project now, but QA testers will lose their test accounts. OK to switch?",
+   "context": "firebase|yes",
+   "expected": "ok"
+  },
+  {
+   "input": "QA Agent asked you something\nMobile QA can't reach your iPhone; it shows offline. Can you unlock it and connect it by cable, or should I test only in the Simulator for now?",
+   "context": "iphone|simulator",
+   "expected": "ok"
+  },
+  {
+   "input": "Orchestrator asked you something\nWeb Dev and iOS Dev both want to change the chat's message format. Should they agree on it first, or should backend go first?",
+   "context": "message format|first",
+   "expected": "ok"
+  },
+  {
+   "input": "Ledgerly Dev asked you something\nThe currency rounding differs between the report and the export. Should both round half up, or keep banker's rounding in the export?",
+   "context": "rounding|half",
+   "expected": "ok"
+  },
+  {
+   "input": "Measure sizes\nDone: the Mac mini has 15 GB free after cleanup. Do you want me to schedule this cleanup weekly?",
+   "context": "cleanup|yes",
+   "expected": "ok"
+  },
+  {
+   "input": "Web Dev asked you something\nPush needs an APNs key from your Apple Developer account. Can you create one, or should I write the steps down for you?",
+   "context": "apns|steps",
+   "expected": "ok"
+  },
+  {
+   "input": "Tablebook QA asked you something\nThe new onboarding passes on iPhone but fails on Android at step 3. Should I file it for Tablebook Dev or try a fix myself?",
+   "context": "android|file",
+   "expected": "ok"
+  },
+  {
+   "input": "Backend Agent asked você algo\nOlhei as opções de backup do Mac mini. O Backblaze B2 custa cerca de 1 dólar por mês e o restic suporta; o S3 custa 3 dólares. Uso o B2 ou o S3?",
+   "context": "backup|b2",
+   "expected": "ok"
+  },
+  {
+   "input": "Rodar a suíte\nBloqueado: qual simulador eu uso? A suíte precisa do iOS 26, mas o único ligado está no iOS 18.6. Posso ligar o iPhone 17 Pro ou criar um novo.",
+   "context": "simulador|17",
+   "expected": "ok"
+  },
+  {
+   "input": "Tablebook Dev perguntou algo\nA página de reservas carrega 3 MB de imagens no celular. Faço o carregamento sob demanda agora ou espero o redesign da semana que vem?",
+   "context": "imagens|agora",
+   "expected": "ok"
+  },
+  {
+   "input": "Aprovar: renovar o domínio\nEstou pronto para renovar o loft.dev por um ano por 12 dólares. Ele vence em 5 dias. Posso seguir?",
+   "context": "renovar|sim",
+   "expected": "ok"
+  },
+  {
+   "input": "Corrigir o build\nFalhou: o Xcode 27 não está instalado no Mac mini, então os alvos do iOS 27 não compilam. Instale ou eu continuo com o iOS 26.",
+   "context": "xcode|instal",
+   "expected": "ok"
+  },
+  {
+   "input": "Security perguntou algo\nAchado 47: o ambiente de QA usa o projeto Firebase de produção. Posso trocar agora, mas os testadores perdem as contas de teste. Posso trocar?",
+   "context": "firebase|sim",
+   "expected": "ok"
+  },
+  {
+   "input": "Orchestrator perguntou algo\nO Web Dev e o iOS Dev querem mudar o formato das mensagens. Eles combinam antes, ou o backend vai primeiro?",
+   "context": "formato|combin",
+   "expected": "ok"
+  },
+  {
+   "input": "Vaultly Marketing perguntou algo\nDois títulos para o post: \"Senhas que funcionam\" ou \"Um cofre para o time todo\". Qual?",
+   "context": "título|cofre",
+   "expected": "ok"
+  },
+  {
+   "input": "Medir tamanhos\nPronto: o Mac mini tem 15 GB livres depois da limpeza. Quer que eu agende essa limpeza toda semana?",
+   "context": "limpeza|sim",
+   "expected": "ok"
+  },
+  {
+   "input": "QA Agent perguntou algo\nO Mobile QA não alcança seu iPhone; ele aparece offline. Você pode desbloquear e ligar no cabo, ou testo só no simulador por enquanto?",
+   "context": "iphone|simulador",
+   "expected": "ok"
+  }
+ ]
+}

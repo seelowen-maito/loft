@@ -1,0 +1,76 @@
+{
+ "job": "spoken",
+ "minPassRate": 0.9,
+ "cases": [
+  {
+   "input": "Done. The docs site is deployed to staging and production.\n\n- Built in 42 s\n- Cache purged on Cloudflare\n- PR [#214](https://github.com/x/y/pull/214) merged\n\nThe old `/v1/` links now redirect to `/docs/`.",
+   "context": "deployed",
+   "expected": "ok"
+  },
+  {
+   "input": "The QA suite **failed** on two checks:\n\n1. `LoginTests.testExpiredToken`: the token refresh returns 500\n2. `CheckoutTests.testCoupon`: timeout after 30 s\n\nEverything else (212 tests) passed. I opened [#88](https://x/88) for the token bug and assigned it to Backend Agent.",
+   "context": "failed",
+   "expected": "ok"
+  },
+  {
+   "input": "I need your decision before going on: should the Pro plan include priority support? Options:\n\n- **Yes**: support costs go up about 8%\n- **Only on yearly**: matches what competitors do\n- **No**: keep it for Enterprise\n\nI'd go with yearly only.",
+   "context": "yearly",
+   "expected": "ok"
+  },
+  {
+   "input": "Backend Agent finished the four endpoints (`GET/POST /api/tasks/{id}/comments`, SSE `task_comment`, feature flag `task_comments`). Tests pass. iOS Agent is now building the screen and expects to finish in about an hour.",
+   "context": "endpoints",
+   "expected": "ok"
+  },
+  {
+   "input": "Merged #63, #65, #67 and #66 in that order. Main builds and all 147 tests pass. Nothing is waiting on you now.",
+   "context": "merged",
+   "expected": "ok"
+  },
+  {
+   "input": "I couldn't run the migration: the database user `app_rw` doesn't have ALTER rights on `orders`. Either grant it with `GRANT ALTER ON orders TO app_rw;` or run the migration yourself with the admin user. I haven't changed anything.",
+   "context": "migration",
+   "expected": "ok"
+  },
+  {
+   "input": "Pronto. O site de documentação está no ar em staging e produção.\n\n- Build em 42 s\n- Cache limpo no Cloudflare\n- PR [#214](https://github.com/x/y/pull/214) mergeado\n\nOs links antigos `/v1/` agora redirecionam.",
+   "context": "staging",
+   "expected": "ok"
+  },
+  {
+   "input": "Os testes de QA **falharam** em dois casos: o login com token expirado retorna 500 e o cupom no checkout dá timeout. Os outros 212 passaram. Abri a [#88](https://x/88) para o bug do token e passei para o Backend Agent.",
+   "context": "falharam",
+   "expected": "ok"
+  },
+  {
+   "input": "Preciso de uma decisão sua: o plano Pro deve incluir suporte prioritário? As opções são sim (custo +8%), só no anual, ou não (fica no Enterprise). Eu iria de só no anual.",
+   "context": "pro",
+   "expected": "ok"
+  },
+  {
+   "input": "Here's the plan for the backup of the Mac mini:\n\n1. Time Machine to the NAS every hour\n2. A nightly `restic` snapshot of `~/dev` and `.loft/` to Backblaze B2 (encrypted, about $1/month)\n3. A weekly restore test into a temp folder\n\nThe password goes in 1Password, item \"Mac mini backup\". I'll set it up once you approve.",
+   "context": "approve",
+   "expected": "ok"
+  },
+  {
+   "input": "Restarted Tablebook Dev: it had been waiting 25 minutes on a background build that hung. The two queued messages are running now.",
+   "context": "restarted",
+   "expected": "ok"
+  },
+  {
+   "input": "Security found 3 issues in the syncly QA environment. Finding 47 (production Firebase project used in QA) is the urgent one: QA writes go to real customer data. 48 and 49 are low. I made tasks for all three; 47 needs your approval before anyone touches the config.",
+   "context": "urgent",
+   "expected": "ok"
+  },
+  {
+   "input": "The QA suite **failed** on two checks:\n\n1. `LoginTests.testExpiredToken`: the token refresh returns 500\n2. `CheckoutTests.testCoupon`: timeout after 30 s\n\nEverything else (212 tests) passed. I opened [#88](https://example.com/88) for the token bug and assigned it to Backend Agent, who is already looking at the refresh endpoint. The coupon timeout looks like the staging database being slow again; I asked QA Agent to rerun it in an hour before anyone digs into it.",
+   "context": "failed",
+   "expected": "ok"
+  },
+  {
+   "input": "Here is where things stand on the voice work. All six PRs are merged and main builds. The Tester ran the whole suite twice: 147 passed and one known flaky test failed once, which isn't related. Mobile QA checked light and dark mode and the largest text size; everything wraps. What's left is your phone: the audio session timing and the read-aloud while the mic is on can only be checked there. When you test, copy the Voice log afterwards and paste it in the chat so I can see each step.",
+   "context": "phone",
+   "expected": "ok"
+  }
+ ]
+}

@@ -1,0 +1,486 @@
+{
+  "count": 9,
+  "generated_at": "2026-10-26T10:20:07.289241+00:00",
+  "items": [
+    {
+      "actions": [
+        {
+          "body": {
+            "decision": "allow_once"
+          },
+          "kind": "approve",
+          "label": "Allow once",
+          "method": "POST",
+          "path": "/api/permissions/p1"
+        },
+        {
+          "body": {
+            "decision": "allow_always",
+            "rule": "Bash(git push *)"
+          },
+          "kind": "approve_always",
+          "label": "Always allow",
+          "method": "POST",
+          "path": "/api/permissions/p1"
+        },
+        {
+          "body": {
+            "decision": "deny"
+          },
+          "kind": "deny",
+          "label": "Deny",
+          "method": "POST",
+          "path": "/api/permissions/p1"
+        },
+        {
+          "kind": "open",
+          "label": "Open chat",
+          "target": {
+            "agent_id": "55da7486-240c-4420-ae3e-84db45433462",
+            "screen": "chat"
+          }
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "name": "Dev"
+      },
+      "created_at": "2026-10-26T10:20:07.287387+00:00",
+      "id": "permission:p1",
+      "links": [],
+      "pr": null,
+      "project": null,
+      "reason": "Waiting for your approval.",
+      "repo": null,
+      "task_id": null,
+      "text": "Push the fix\n$ git push https://x:[redacted]@github.com/o/r",
+      "title": "Dev wants to use Bash",
+      "type": "permission",
+      "urgency": 3
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "send": true,
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Reply on the task",
+          "method": "POST",
+          "path": "/api/tasks/ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc/comments"
+        },
+        {
+          "kind": "open",
+          "label": "Open task",
+          "target": {
+            "screen": "task",
+            "task_id": "ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/task%3Aea4e59d3-26e0-4c5e-8b3b-3e726cf384cc%3Ablocked/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "name": "QA"
+      },
+      "created_at": "2026-10-26T10:20:07.287466+00:00",
+      "id": "task:ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc:blocked",
+      "links": [
+        {
+          "label": "Task",
+          "path": "/tasks/ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc"
+        }
+      ],
+      "pr": null,
+      "project": null,
+      "reason": "Blocked: Which simulator should I use?",
+      "repo": null,
+      "task_id": "ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc",
+      "text": "Which simulator should I use?",
+      "title": "Run the suite",
+      "type": "task_blocked",
+      "urgency": 2
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Reply",
+          "method": "POST",
+          "path": "/api/agents/55da7486-240c-4420-ae3e-84db45433462/messages"
+        },
+        {
+          "kind": "open",
+          "label": "Open chat",
+          "target": {
+            "agent_id": "55da7486-240c-4420-ae3e-84db45433462",
+            "screen": "chat"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/question%3A1/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "name": "Dev"
+      },
+      "created_at": "2026-10-26T10:20:07.287877+00:00",
+      "id": "question:1",
+      "links": [],
+      "pr": null,
+      "project": null,
+      "reason": "Should I use B2 or S3?",
+      "repo": null,
+      "task_id": null,
+      "text": "I found two options.\n\nShould I use B2 or S3?",
+      "title": "Dev asked you something",
+      "type": "question",
+      "urgency": 2
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "meta": {
+              "grill": {
+                "question_id": "8e263326-b30c-4ecd-8eda-3fd1d8fc3be2",
+                "role": "answer",
+                "session_id": "a30c905e-2f70-4d74-9c50-6ad8fa57859c"
+              }
+            },
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Answer",
+          "method": "POST",
+          "path": "/api/agents/f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d/messages"
+        },
+        {
+          "body": {
+            "command": "skip",
+            "question_id": "8e263326-b30c-4ecd-8eda-3fd1d8fc3be2"
+          },
+          "kind": "skip",
+          "label": "Skip",
+          "method": "POST",
+          "path": "/api/grill/a30c905e-2f70-4d74-9c50-6ad8fa57859c/command"
+        },
+        {
+          "kind": "open",
+          "label": "Open chat",
+          "target": {
+            "agent_id": "f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d",
+            "screen": "chat"
+          }
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d",
+        "name": "Orchestrator"
+      },
+      "created_at": "2026-10-26T10:20:07.288176+00:00",
+      "id": "grill:a30c905e-2f70-4d74-9c50-6ad8fa57859c:8e263326-b30c-4ecd-8eda-3fd1d8fc3be2",
+      "links": [],
+      "pr": null,
+      "project": null,
+      "reason": "Question 1",
+      "repo": null,
+      "task_id": null,
+      "text": "Who pays?",
+      "title": "Orchestrator is interviewing you: Pricing",
+      "type": "grill_question",
+      "urgency": 2
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "send": true,
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Reply on the task",
+          "method": "POST",
+          "path": "/api/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be/comments"
+        },
+        {
+          "body": {
+            "reopen": true,
+            "send": true,
+            "text": ""
+          },
+          "kind": "retry",
+          "label": "Reopen and send",
+          "method": "POST",
+          "path": "/api/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be/comments"
+        },
+        {
+          "kind": "open",
+          "label": "Open task",
+          "target": {
+            "screen": "task",
+            "task_id": "cfc9e1e8-e347-494c-b144-eced6e5a00be"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/task%3Acfc9e1e8-e347-494c-b144-eced6e5a00be%3Afailed/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "name": "QA"
+      },
+      "created_at": "2026-10-26T10:20:07.287642+00:00",
+      "id": "task:cfc9e1e8-e347-494c-b144-eced6e5a00be:failed",
+      "links": [
+        {
+          "label": "Task",
+          "path": "/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be"
+        }
+      ],
+      "pr": null,
+      "project": null,
+      "reason": "Failed: Xcode 27 missing",
+      "repo": null,
+      "task_id": "cfc9e1e8-e347-494c-b144-eced6e5a00be",
+      "text": "Xcode 27 missing\nmore lines",
+      "title": "Fix the build",
+      "type": "task_failed",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "method": "squash"
+          },
+          "kind": "merge",
+          "label": "Merge",
+          "method": "POST",
+          "path": "/api/pull-requests/pr1/merge"
+        },
+        {
+          "kind": "open",
+          "label": "Open on GitHub",
+          "target": {
+            "url": "https://github.com/o/r/pull/7"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/pr%3Apr1%3Aabc/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "name": "Dev"
+      },
+      "created_at": "2026-10-26T10:20:07.288353+00:00",
+      "id": "pr:pr1:abc",
+      "links": [
+        {
+          "label": "Pull request",
+          "url": "https://github.com/o/r/pull/7"
+        }
+      ],
+      "pr": {
+        "author": "",
+        "checks": "passing",
+        "checks_green": true,
+        "draft": false,
+        "number": 7,
+        "project": "r",
+        "repo": "o/r",
+        "review_requested": false,
+        "title": "Fix it",
+        "url": "https://github.com/o/r/pull/7"
+      },
+      "project": "r",
+      "reason": "Ready to merge, 3 checks passed.",
+      "repo": "o/r",
+      "task_id": null,
+      "text": "→  · +0 −0 in 0 files",
+      "title": "o/r#7: Fix it",
+      "type": "pr_ready",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "kind": "open",
+          "label": "Open on GitHub",
+          "target": {
+            "url": "https://github.com/acme/shop/pull/41"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/ghpr%3Aacme%2Fshop%2341%3Asha41/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": null,
+      "created_at": "2026-10-26T10:20:07.288528+00:00",
+      "id": "ghpr:acme/shop#41:sha41",
+      "links": [
+        {
+          "label": "Pull request",
+          "url": "https://github.com/acme/shop/pull/41"
+        }
+      ],
+      "pr": {
+        "author": "octocat",
+        "checks": "none",
+        "checks_green": true,
+        "draft": false,
+        "number": 41,
+        "project": "shop",
+        "repo": "acme/shop",
+        "review_requested": false,
+        "title": "PR 41",
+        "url": "https://github.com/acme/shop/pull/41"
+      },
+      "project": "shop",
+      "reason": "Ready to merge.",
+      "repo": "acme/shop",
+      "task_id": null,
+      "text": "by octocat",
+      "title": "acme/shop#41: PR 41",
+      "type": "pr_ready",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "kind": "open",
+          "label": "Open on GitHub",
+          "target": {
+            "url": "https://github.com/acme/api/pull/1800"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/review%3Aacme%2Fapi%231800%3Asha1800/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": null,
+      "created_at": "2026-10-26T10:20:07.288529+00:00",
+      "id": "review:acme/api#1800:sha1800",
+      "links": [
+        {
+          "label": "Pull request",
+          "url": "https://github.com/acme/api/pull/1800"
+        }
+      ],
+      "pr": {
+        "author": "octocat",
+        "checks": "passing",
+        "checks_green": true,
+        "draft": false,
+        "number": 1800,
+        "project": "api",
+        "repo": "acme/api",
+        "review_requested": true,
+        "title": "PR 1800",
+        "url": "https://github.com/acme/api/pull/1800"
+      },
+      "project": "api",
+      "reason": "Your review is requested.",
+      "repo": "acme/api",
+      "task_id": null,
+      "text": "by octocat",
+      "title": "acme/api#1800: PR 1800",
+      "type": "pr_review",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "reopen": true,
+            "send": true,
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Follow up",
+          "method": "POST",
+          "path": "/api/tasks/91551c37-56f1-454e-8379-1c5833c44962/comments"
+        },
+        {
+          "kind": "open",
+          "label": "Open task",
+          "target": {
+            "screen": "task",
+            "task_id": "91551c37-56f1-454e-8379-1c5833c44962"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Dismiss",
+          "method": "POST",
+          "path": "/api/needs-you/done%3A91551c37-56f1-454e-8379-1c5833c44962%3A2026-10-26T10%3A20%3A07.287728%2B00%3A00/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "name": "QA"
+      },
+      "created_at": "2026-10-26T10:20:07.287728+00:00",
+      "id": "done:91551c37-56f1-454e-8379-1c5833c44962:2026-10-26T10:20:07.287728+00:00",
+      "links": [
+        {
+          "label": "Task",
+          "path": "/tasks/91551c37-56f1-454e-8379-1c5833c44962"
+        }
+      ],
+      "pr": null,
+      "project": null,
+      "reason": "Done: 15 GB after cleanup.",
+      "repo": null,
+      "task_id": "91551c37-56f1-454e-8379-1c5833c44962",
+      "text": "**15 GB** after cleanup.",
+      "title": "Measure sizes",
+      "type": "task_done",
+      "urgency": 0
+    }
+  ],
+  "urgent": 4,
+  "version": 1
+}

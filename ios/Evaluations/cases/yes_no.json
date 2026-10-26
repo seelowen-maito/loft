@@ -1,0 +1,26 @@
+{
+  "job": "yes_no",
+  "minPassRate": 0.9,
+  "cases": [
+    {"input": "yes", "context": "Would you like to submit this?", "expected": "yes"},
+    {"input": "yeah go ahead", "context": "Would you like to submit this?", "expected": "yes"},
+    {"input": "sure, send it", "context": "Would you like to submit this?", "expected": "yes"},
+    {"input": "yep", "context": "Would you like to submit this?", "expected": "yes"},
+    {"input": "sim", "context": "Quer enviar isto?", "expected": "yes"},
+    {"input": "pode mandar", "context": "Quer enviar isto?", "expected": "yes"},
+    {"input": "claro, manda", "context": "Quer enviar isto?", "expected": "yes"},
+    {"input": "no", "context": "Would you like to submit this?", "expected": "no"},
+    {"input": "not yet", "context": "Would you like to submit this?", "expected": "no"},
+    {"input": "wait, let me check it first", "context": "Would you like to submit this?", "expected": "no"},
+    {"input": "hold on", "context": "Would you like to submit this?", "expected": "no"},
+    {"input": "não", "context": "Quer enviar isto?", "expected": "no"},
+    {"input": "ainda não, espera", "context": "Quer enviar isto?", "expected": "no"},
+    {"input": "and also deploy the blog", "context": "Would you like to submit this?", "expected": "neither"},
+    {"input": "the docs site is on staging", "context": "Would you like to submit this?", "expected": "neither"},
+    {"input": "e também atualiza o README", "context": "Quer enviar isto?", "expected": "neither"},
+    {"input": "make sure the tests pass first and then merge", "context": "Would you like to submit this?", "expected": "neither"},
+    {"input": "yes and add a changelog entry too", "context": "Would you like to submit this?", "expected": "neither"},
+    {"input": "no idea how the backup works, ask the dev", "context": "Would you like to submit this?", "expected": "neither"},
+    {"input": "send the invoice to the client", "context": "Would you like to submit this?", "expected": "neither"}
+  ]
+}

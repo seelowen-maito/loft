@@ -1,0 +1,216 @@
+{
+ "job": "quick_ack",
+ "minPassRate": 0.75,
+ "cases": [
+  {
+   "input": "Can you check why the backup numbers on the Mac mini look wrong?",
+   "context": "backup",
+   "expected": "ok"
+  },
+  {
+   "input": "The iPhone app crashes when I open the voice log",
+   "context": "voice log",
+   "expected": "ok"
+  },
+  {
+   "input": "Run the full iOS test suite on the latest branch",
+   "context": "test",
+   "expected": "ok"
+  },
+  {
+   "input": "Try the new build on the phone and tell me if the mic works",
+   "context": "build",
+   "expected": "ok"
+  },
+  {
+   "input": "Audit the Loft server for path traversal again",
+   "context": "audit",
+   "expected": "ok"
+  },
+  {
+   "input": "The Tablebook booking page is slow on mobile",
+   "context": "booking",
+   "expected": "ok"
+  },
+  {
+   "input": "Check the syncly QA environment for leaked secrets",
+   "context": "syncly",
+   "expected": "ok"
+  },
+  {
+   "input": "Test the new restaurant onboarding flow end to end",
+   "context": "onboarding",
+   "expected": "ok"
+  },
+  {
+   "input": "Vaultly's login page shows a blank screen",
+   "context": "login",
+   "expected": "ok"
+  },
+  {
+   "input": "Write a launch post for the new Vaultly feature",
+   "context": "launch",
+   "expected": "ok"
+  },
+  {
+   "input": "Merge the approved Vaultly PRs",
+   "context": "vaultly",
+   "expected": "ok"
+  },
+  {
+   "input": "Fix the currency rounding in the Ledgerly report",
+   "context": "rounding",
+   "expected": "ok"
+  },
+  {
+   "input": "Run the Vaultly regression tests before the release",
+   "context": "regression",
+   "expected": "ok"
+  },
+  {
+   "input": "Is the Vaultly API leaking user emails?",
+   "context": "email",
+   "expected": "ok"
+  },
+  {
+   "input": "What is everyone working on right now?",
+   "context": "working",
+   "expected": "ok"
+  },
+  {
+   "input": "Summarize what happened today across all projects",
+   "context": "today",
+   "expected": "ok"
+  },
+  {
+   "input": "Plan the work for the settings screen and split it between backend and iOS",
+   "context": "settings",
+   "expected": "ok"
+  },
+  {
+   "input": "Remind me what's waiting for my approval",
+   "context": "approval",
+   "expected": "ok"
+  },
+  {
+   "input": "Add a dark mode toggle to the Loft web dashboard",
+   "context": "dark mode",
+   "expected": "ok"
+  },
+  {
+   "input": "The Talk screen doesn't read the reply aloud",
+   "context": "read",
+   "expected": "ok"
+  },
+  {
+   "input": "Update the Tablebook wrapper app to the new SDK",
+   "context": "wrapper",
+   "expected": "ok"
+  },
+  {
+   "input": "Add a new endpoint for task comments to the Loft backend",
+   "context": "endpoint",
+   "expected": "ok"
+  },
+  {
+   "input": "Por que os números do backup do Mac mini estão errados?",
+   "context": "backup",
+   "expected": "ok"
+  },
+  {
+   "input": "O app do iPhone trava quando abro o log de voz",
+   "context": "log",
+   "expected": "ok"
+  },
+  {
+   "input": "Roda todos os testes do iOS na branch nova",
+   "context": "testes",
+   "expected": "ok"
+  },
+  {
+   "input": "Testa o build novo no celular e me diz se o microfone funciona",
+   "context": "microfone",
+   "expected": "ok"
+  },
+  {
+   "input": "A página de reservas do Tablebook está lenta no celular",
+   "context": "reservas",
+   "expected": "ok"
+  },
+  {
+   "input": "Verifica se o ambiente de QA do syncly está vazando segredos",
+   "context": "syncly",
+   "expected": "ok"
+  },
+  {
+   "input": "Testa o cadastro novo de restaurantes do começo ao fim",
+   "context": "cadastro",
+   "expected": "ok"
+  },
+  {
+   "input": "A tela de login do Vaultly fica em branco",
+   "context": "login",
+   "expected": "ok"
+  },
+  {
+   "input": "Escreve um post de lançamento da nova função do Vaultly",
+   "context": "lançamento",
+   "expected": "ok"
+  },
+  {
+   "input": "Corrige o arredondamento da moeda no relatório do Ledgerly",
+   "context": "arredondamento",
+   "expected": "ok"
+  },
+  {
+   "input": "O que todo mundo está fazendo agora?",
+   "context": "fazendo",
+   "expected": "ok"
+  },
+  {
+   "input": "Resume o que aconteceu hoje em todos os projetos",
+   "context": "hoje",
+   "expected": "ok"
+  },
+  {
+   "input": "Planeja a tela de configurações e divide entre backend e iOS",
+   "context": "configura",
+   "expected": "ok"
+  },
+  {
+   "input": "O que está esperando minha aprovação?",
+   "context": "aprova",
+   "expected": "ok"
+  },
+  {
+   "input": "Faz uma auditoria de segurança no servidor do Loft",
+   "context": "auditoria",
+   "expected": "ok"
+  },
+  {
+   "input": "A tela de conversa por voz não lê a resposta em voz alta",
+   "context": "voz",
+   "expected": "ok"
+  },
+  {
+   "input": "Adiciona um modo escuro no painel web do Loft",
+   "context": "escuro",
+   "expected": "ok"
+  },
+  {
+   "input": "Atualiza o app wrapper do Tablebook para o SDK novo",
+   "context": "wrapper",
+   "expected": "ok"
+  },
+  {
+   "input": "Merge os PRs aprovados do Vaultly",
+   "context": "vaultly",
+   "expected": "ok"
+  },
+  {
+   "input": "Roda os testes de regressão do Vaultly antes do lançamento",
+   "context": "regress",
+   "expected": "ok"
+  }
+ ]
+}
