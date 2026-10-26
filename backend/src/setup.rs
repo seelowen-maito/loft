@@ -240,13 +240,15 @@ fn default_quiet_hours() -> Vec<QuietWindow> {
     vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }]
 }
 
-/// Make sure `loft` exists. A new one introduces itself and suggests a setup on its first run.
+/// Create `loft` on a fresh install (no agents yet); it introduces itself and suggests a setup on its first run.
+/// Installs that already have agents don't get it unasked, and once it exists it stays.
 pub fn ensure_loft(state: &AppState) {
     match state.db.get_agent(LOFT_ID) {
         Ok(Some(a)) if a.builtin => {}
         Ok(Some(_)) => {
             let _ = state.db.update_agent(LOFT_ID, |a| a.builtin = true);
         }
+        Ok(None) if state.db.list_agents().is_ok_and(|all| !all.is_empty()) => {}
         Ok(None) => {
             let projects = state.settings.boot().projects_dir.display().to_string();
             let patch = json!({
@@ -582,8 +584,8 @@ mod tests {
         let st = state();
         // Busy, so the kickoff is queued instead of starting a real claude run.
         st.rt.lock().unwrap().running.insert(LOFT_ID.into(), std::sync::Arc::new(tokio::sync::Notify::new()));
-        let other = agent(&st, "Dev");
         ensure_loft(&st);
+        let other = agent(&st, "Dev");
         ensure_loft(&st);
         let all = st.db.list_agents().unwrap();
         assert_eq!(all.iter().filter(|a| a.id == LOFT_ID).count(), 1);
@@ -601,6 +603,15 @@ mod tests {
         // No MCP tool deletes agents.
         let names: Vec<String> = mcp_tools().iter().chain(crate::tasks::mcp_tools().iter()).map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert!(!names.iter().any(|n| n.contains("delete")), "{names:?}");
+    }
+
+    #[test]
+    fn installs_that_already_have_agents_dont_get_loft() {
+        let st = state();
+        agent(&st, "Dev");
+        ensure_loft(&st);
+        assert!(st.db.get_agent(LOFT_ID).unwrap().is_none());
+        assert!(st.rt.lock().unwrap().queued.is_empty() && st.rt.lock().unwrap().running.is_empty(), "no first run either");
     }
 
     #[tokio::test]
