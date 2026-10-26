@@ -17,6 +17,7 @@ use crate::state::{AppState, Event};
 fn tools(me: Option<&Agent>) -> Value {
     let mut all = base_tools();
     all.as_array_mut().unwrap().extend(crate::tasks::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::setup::mcp_tools());
     if me.is_some_and(crate::grill::enabled) {
         all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
     }
@@ -83,7 +84,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, project, and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -143,6 +144,12 @@ fn tool_error(t: impl Into<String>) -> Value {
 
 async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
+        if let Some(r) = crate::setup::mcp_call(state, &me, name, &args).await {
+            return match r {
+                Ok(t) => text(t),
+                Err(e) => tool_error(e),
+            };
+        }
         let find = |k: &str| find_agent(state, k).map_err(|e| e["content"][0]["text"].as_str().unwrap_or("").to_string());
         if let Some(r) = crate::tasks::mcp_call(state, &me, name, &args, find).or_else(|| crate::grill::mcp_call(state, &me, name, &args)) {
             return match r {
@@ -247,12 +254,13 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
+                        let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {} · {}", a.name, title, a.id, doing)
+                        format!("- {}{} · id {}{project} · {}", a.name, title, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }

@@ -33,6 +33,10 @@ export type Agent = {
   next_run_at: string | null;
   total_cost_usd: number;
   created_at: string;
+  /** Loft's own agent: always there, and it can't be deleted. */
+  builtin?: boolean;
+  /** The agent that created this one, if an agent did. */
+  created_by?: string | null;
   running?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */

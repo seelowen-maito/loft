@@ -193,7 +193,7 @@ pub async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) ->
     Ok(Json(agent_json(&state, &a)))
 }
 
-const DEFAULT_TOOLS: &[&str] = &[
+pub const DEFAULT_TOOLS: &[&str] = &[
     "Read", "Glob", "Grep", "Edit", "Write", "TodoWrite",
     "Bash(git *)", "Bash(ls *)", "Bash(cat *)", "Bash(mkdir *)", "WebSearch",
 ];
@@ -275,7 +275,13 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
 }
 
 pub async fn create_agent(State(state): State<AppState>, Json(p): Json<Value>) -> ApiResult<Value> {
-    let id = uuid::Uuid::new_v4().to_string();
+    let a = new_agent(&state, uuid::Uuid::new_v4().to_string(), &p, None)?;
+    Ok(Json(agent_json(&state, &a)))
+}
+
+/// Create, save and announce an agent with `id`, defaults overridden by the patch `p`. `created_by` is the agent
+/// that asked for it, if one did.
+pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<String>) -> Result<Agent, ApiError> {
     let mut a = Agent {
         id: id.clone(),
         name: "New agent".into(),
@@ -305,17 +311,24 @@ pub async fn create_agent(State(state): State<AppState>, Json(p): Json<Value>) -
         next_run_at: None,
         total_cost_usd: 0.0,
         created_at: now(),
+        builtin: false,
+        created_by,
     };
-    apply_patch(&mut a, &p)?;
-    std::fs::create_dir_all(workspace(&state, &id)).map_err(anyhow::Error::from)?;
+    apply_patch(&mut a, p)?;
+    std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
-        workspace(&state, &id).join("README.md"),
+        workspace(state, &id).join("README.md"),
         format!("# {}'s workspace\n\nPrivate storage for the Loft agent `{}` ({id}).\n", a.name, a.name),
     )
     .map_err(anyhow::Error::from)?;
     state.db.save_agent(&a)?;
-    emit_agent(&state, &a);
-    Ok(Json(agent_json(&state, &a)))
+    emit_agent(state, &a);
+    // A description of the look it should have: the agent draws its own sticker. An explicit `avatar` wins.
+    match p["avatar_brief"].as_str().map(str::trim) {
+        Some(brief) if !brief.is_empty() && p.get("avatar").is_none() => agents::design_avatar(state, &id, brief),
+        _ => {}
+    }
+    Ok(a)
 }
 
 pub async fn update_agent(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<Value>) -> ApiResult<Value> {
@@ -343,7 +356,9 @@ pub struct DeleteOpts {
 }
 
 pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<DeleteOpts>) -> ApiResult<Value> {
-    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    if state.db.get_agent(&id)?.ok_or_else(not_found)?.builtin {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Loft's own agent can't be deleted.".into()));
+    }
     agents::stop(&state, &id);
     state.db.delete_agent(&id)?;
     crate::uploads::remove_all(&state, &id);

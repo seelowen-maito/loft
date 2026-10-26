@@ -54,6 +54,12 @@ pub struct Agent {
     pub next_run_at: Option<String>,
     pub total_cost_usd: f64,
     pub created_at: String,
+    /// Loft's own agent: always present, and the user can't delete it.
+    #[serde(default)]
+    pub builtin: bool,
+    /// The agent that created this one, if an agent did. None when the user did.
+    #[serde(default)]
+    pub created_by: Option<String>,
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.

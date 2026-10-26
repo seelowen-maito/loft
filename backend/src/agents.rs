@@ -362,6 +362,7 @@ Use `mcp__loft__remember` for durable facts worth keeping: user preferences, dec
 - `mcp__loft__request_permission`: ask the user to grant you a tool permission (for example `Bash(npm *)`, `WebFetch`, or `mcp__github`) and explain why. Once granted, it is saved to your config. If a tool call is blocked, the user is prompted automatically, so you only need this for access you plan to use ahead of time.
 - Other agents: `mcp__loft__list_agents` lists the other Loft agents, `mcp__loft__read_agent_chat` reads any agent's chat with the user, and `mcp__loft__message_agent` sends an agent a message. Sending returns right away; the other agent answers later with a message of its own, which arrives here as a new turn. Messages from agents are marked as such; a message without that mark is from the user.
 - Tasks: Loft keeps a shared task list the user follows from their phone. `mcp__loft__list_tasks` shows it. When you work on a task (a message starting with `[Task <id>]`), report progress with `mcp__loft__update_task`: a short `note` as you go, then `done` with a `summary`, or `failed`/`blocked` with an `error`. A message starting with `[Comment on task <id>` is the user commenting on that task: answer with `mcp__loft__comment_task` so the answer stays with the task. To delegate part of a task, call `mcp__loft__create_task` with `parent_id`, the `agent` to do it and `start: true`; you're told when it finishes.
+- New agents: `mcp__loft__list_projects` lists the user's repos by activity, `mcp__loft__list_agent_templates` the ready-made agents, and `mcp__loft__create_agent` creates one. Only create agents the user asked for or agreed to; the user may be asked to approve each one. You can't delete agents, and must never try: only the user deletes agents.
 - Pull requests: when you open one with `gh pr create`, Loft shows the user a live PR card (status, checks, a merge button) automatically. If you opened a PR some other way, call `mcp__loft__share_pull_request` with its URL so the card appears. Always include the PR link in your reply.
 - `mcp__loft__get_avatar` / `mcp__loft__set_avatar`: your face is a vector sticker. When the user asks you to change your look, design a new one and call `set_avatar` with an `svg` string: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` drawn only with path, circle, ellipse, rect, polygon, line, g, gradients and clipPath (no text, images, styles or scripts). Loft cuts a white die-cut border around your silhouette and adds the shadow, so don't draw a border or a background. The style is bold and friendly, like a sheet of stickers:
   - Your body is your face: one chunky, flat-colored shape (a blob, star, drop, cloud, or an object that fits your job like a note or a map pin) filling most of the canvas, roughly from 8 to 92 on both axes.
@@ -415,6 +416,15 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
 /// "grill_revise" also runs on the cheaper `GRILL_REVISE_MODEL`.
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
     start(state, agent_id, Some(prompt), trigger);
+}
+
+/// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
+pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
+    let prompt = format!(
+        "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, title, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
+        brief = brief.trim()
+    );
+    start(state, agent_id, Some(prompt), "avatar");
 }
 
 /// Model for the background runs that revise a grill's question queue after each answer.
@@ -561,6 +571,9 @@ fn tool_summary(name: &str, input: &Value) -> String {
             "list_agents" => "Looking up the other agents".into(),
             "read_agent_chat" => format!("Reading {}'s chat", s("agent")),
             "message_agent" => format!("Messaging {}", s("agent")),
+            "list_projects" => "Looking through the projects".into(),
+            "list_agent_templates" => "Reading the agent templates".into(),
+            "create_agent" => format!("Creating {}", if s("name").is_empty() { s("template") } else { s("name") }),
             "comment_task" => "Commenting on a task".into(),
             "get_task" => "Reading a task".into(),
             other => other.replace('_', " "),
@@ -711,7 +724,7 @@ async fn run_process(
     resume: bool,
 ) -> Result<RunOutcome> {
     let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-    let quiet = trigger.starts_with("grill");
+    let quiet = trigger.starts_with("grill") || trigger == "avatar";
     // Set once the run has called a grill tool: the tools post what the user sees, so any text the agent
     // writes after that (models narrate despite being told not to) would only repeat or spoil it.
     let mut grill_spoke = false;
@@ -731,6 +744,7 @@ async fn run_process(
             "schedule" => "Waking up…".into(),
             "compact" => "Compacting context…".into(),
             "grill" | "grill_revise" => "Following the interview…".into(),
+            "avatar" => "Drawing its avatar…".into(),
             _ => "Thinking…".into(),
         };
         a.last_run_at = Some(started.to_rfc3339());

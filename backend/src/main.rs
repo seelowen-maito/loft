@@ -18,6 +18,7 @@ mod push;
 mod repos;
 mod schedule;
 mod settings;
+mod setup;
 mod signing;
 mod simulator;
 mod state;
@@ -72,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
     };
+    setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
