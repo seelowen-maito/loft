@@ -65,3 +65,7 @@ Each agent runs headless Claude Code in its own folder under `agent-local-storag
 ## Development
 
 Run `./dev.sh` for hot reload and open http://localhost:7421. `LOFT_PORT` changes the backend port (default `7420`).
+
+## License
+
+MIT — see [LICENSE](LICENSE). Free to use, modify, and sell; just keep the copyright notice.
