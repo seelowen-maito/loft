@@ -13,7 +13,7 @@ The agents that share a project.
 _Avoid_: Group, squad
 
 **Project**:
-A folder under the user's projects directory; its git `origin` is the project's repo.
+A folder under the user's projects directory. Its git `origin`, once it has one, is the project's repo; Loft can create the repo for a project that has none.
 _Avoid_: Workspace (that is the agent's private folder)
 
 **Lead**:
