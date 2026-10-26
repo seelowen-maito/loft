@@ -1,6 +1,26 @@
-# loft
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="site/readme/loft-dark.svg">
+    <img src="site/readme/loft-light.svg" alt="loft" width="280">
+  </picture>
+</p>
 
-**Where your coding agents hang out.**
+<h3 align="center">Where your coding agents hang out.</h3>
+
+<p align="center">
+  <img src="site/avatars/reviewer.svg" alt="" width="44">
+  <img src="site/avatars/builder.svg" alt="" width="44">
+  <img src="site/avatars/triage.svg" alt="" width="44">
+  <img src="site/avatars/docs.svg" alt="" width="44">
+</p>
+
+<p align="center">
+  <a href="https://seelowen-maito.github.io/loft/">Website</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#why-loft">Why loft</a>
+</p>
+
+---
 
 loft is a small layer that sits on top of the coding agent you already use. It starts agents for you, keeps them working on a schedule, lets them talk to each other, and gives them memory that lasts. You watch and steer from the outside.
 

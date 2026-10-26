@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 190" width="280" height="190">
+<title>loft</title>
+<style>path { fill: none; stroke: url(#ink); stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }</style>
+<defs><linearGradient id="ink" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="280" y2="0"><stop offset="0" stop-color="#eceae4"/><stop offset=".55" stop-color="#dcefb0"/><stop offset="1" stop-color="#c8f26d"/></linearGradient></defs>
+<path d="M 10 138 C 40 130, 70 90, 78 50 C 84 20, 62 14, 58 40 C 54 70, 50 120, 56 136 C 62 148, 80 142, 92 128 C 100 112, 108 98, 122 96 C 104 96, 96 118, 100 132 C 104 146, 126 142, 132 124 C 137 108, 132 96, 122 96 C 128 100, 136 104, 150 102 C 168 98, 186 60, 190 40 C 194 18, 176 14, 172 38 C 168 70, 170 120, 168 150 C 166 172, 156 182, 152 168 C 148 152, 170 136, 196 124 C 210 116, 222 96, 226 70 C 222 100, 218 126, 222 136 C 226 146, 246 142, 262 126"/>
+<path d="M 206 84 C 220 82, 236 80, 248 80"/>
+</svg>
