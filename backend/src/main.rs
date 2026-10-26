@@ -36,7 +36,6 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::{AppState, Config, Runtime};
@@ -149,8 +148,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", api)
         .route("/mcp/{agent_id}", post(mcp::handle))
+        // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
+        // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
+        // visits read and drive the API from their browser.
         .fallback_service(ServeDir::new(&dist).fallback(ServeFile::new(dist.join("index.html"))))
-        .layer(CorsLayer::permissive())
         .with_state(state.clone());
 
     let addr = format!("127.0.0.1:{}", state.cfg.port);
