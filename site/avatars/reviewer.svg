@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-14 -14 128 128">
+<defs><filter id="hb-sticker" x="-14" y="-14" width="128" height="128" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feGaussianBlur in="SourceAlpha" stdDeviation="3.4"/>
+<feComponentTransfer result="cut"><feFuncA type="linear" slope="36" intercept="-0.9"/></feComponentTransfer>
+<feGaussianBlur in="cut" stdDeviation="2.2"/><feOffset dy="2" result="blur"/>
+<feFlood flood-color="#000" flood-opacity="0.32"/><feComposite in2="blur" operator="in" result="shadow"/>
+<feFlood flood-color="#fff"/><feComposite in2="cut" operator="in" result="paper"/>
+<feMerge><feMergeNode in="shadow"/><feMergeNode in="paper"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter></defs><g filter="url(#hb-sticker)"><defs><clipPath id="body"><ellipse cx="50" cy="55" rx="38" ry="41"/></clipPath></defs><g fill="#6d3fe0"><ellipse cx="50" cy="55" rx="38" ry="41"/></g><g clip-path="url(#body)"><g fill="#8b5cf6" transform="translate(-1 -5)"><ellipse cx="50" cy="55" rx="38" ry="41"/></g></g><ellipse cx="35.5" cy="50.0" rx="12.5" ry="14.0" fill="#fff"/><ellipse cx="33.5" cy="46.2" rx="5.2" ry="7.2" transform="rotate(-5 33.5 46.2)" fill="#17171c"/><ellipse cx="64.5" cy="50.0" rx="12.5" ry="14.0" fill="#fff"/><ellipse cx="62.5" cy="46.2" rx="5.2" ry="7.2" transform="rotate(-5 62.5 46.2)" fill="#17171c"/><path d="M43.5 71.0 Q51.3 74.0 56.5 67.0" fill="none" stroke="#17171c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/></g></svg>

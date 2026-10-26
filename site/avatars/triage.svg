@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-14 -14 128 128">
+<defs><filter id="hb-sticker" x="-14" y="-14" width="128" height="128" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feGaussianBlur in="SourceAlpha" stdDeviation="3.4"/>
+<feComponentTransfer result="cut"><feFuncA type="linear" slope="36" intercept="-0.9"/></feComponentTransfer>
+<feGaussianBlur in="cut" stdDeviation="2.2"/><feOffset dy="2" result="blur"/>
+<feFlood flood-color="#000" flood-opacity="0.32"/><feComposite in2="blur" operator="in" result="shadow"/>
+<feFlood flood-color="#fff"/><feComposite in2="cut" operator="in" result="paper"/>
+<feMerge><feMergeNode in="shadow"/><feMergeNode in="paper"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter></defs><g filter="url(#hb-sticker)"><defs><clipPath id="body"><rect x="10" y="22" width="80" height="70" rx="26"/></clipPath></defs><g fill="#e06a1f"><rect x="10" y="22" width="80" height="70" rx="26"/></g><g clip-path="url(#body)"><g fill="#ff8a3d" transform="translate(-1 -5)"><rect x="10" y="22" width="80" height="70" rx="26"/></g></g><g transform="translate(50 23)"><path d="M0 2 C0 -6 1 -10 3 -13" fill="none" stroke="#3aa437" stroke-width="3.5" stroke-linecap="round"/><path d="M2 -11 C4 -21 16 -22 20 -18 C16 -12 8 -9 2 -11 Z" fill="#4fc94a"/><path d="M1 -9 C-2 -17 -12 -19 -16 -15 C-12 -10 -5 -7 1 -9 Z" fill="#4fc94a"/></g><ellipse cx="35.0" cy="52.0" rx="13.1" ry="14.7" fill="#fff"/><ellipse cx="30.8" cy="47.6" rx="5.5" ry="7.6" transform="rotate(-10 30.8 47.6)" fill="#17171c"/><ellipse cx="65.0" cy="52.0" rx="13.1" ry="14.7" fill="#fff"/><ellipse cx="60.8" cy="47.6" rx="5.5" ry="7.6" transform="rotate(-10 60.8 47.6)" fill="#17171c"/><path d="M43.2 73.0 Q50 79.3 56.8 73.0" fill="none" stroke="#17171c" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>

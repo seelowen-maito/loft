@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loft</title>
+<meta name="description" content="loft is a small, open-source layer on top of the coding agent you already use. It starts agents for you, runs them on a schedule, lets them work together and gives them memory that lasts.">
+<meta property="og:title" content="loft: where your coding agents hang out">
+<meta property="og:description" content="A small, open-source layer on top of the coding agent you already use.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  /* Tokens follow loft's own UI (frontend/src/index.css), on a true black page. */
+  :root {
+    --bg: #000;
+    --ink-950: #08090a;
+    --ink-900: #0d0e10;
+    --ink-850: #121316;
+    --ink-800: #17191c;
+    --ink-700: #212328;
+    --line: rgba(255, 255, 255, .07);
+    --line-strong: rgba(255, 255, 255, .12);
+    --fg: #eceae4;
+    --fg-2: #a9a8a3;
+    --fg-3: #6e6e6b;
+    --accent: #c8f26d;
+    --good: #7fd99a;
+    --warn: #f2c46d;
+    --bad: #f27d6d;
+    --info: #8cb8ff;
+    --merged: #b99bff;
+    --sans: Geist, ui-sans-serif, system-ui, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+    --serif: "Instrument Serif", ui-serif, Georgia, serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 var(--sans); font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  }
+  ::selection { background: rgba(200, 242, 109, .3); }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); font-size: .9em; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  .ico { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .logo { width: 20px; height: 20px; fill: var(--accent); flex: none; }
+
+  /* buttons, as in the app */
+  .btn, .btn-primary, .btn-ghost {
+    display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; white-space: nowrap;
+    font: 500 13px/1 var(--sans); padding: 8px 13px; transition: background .15s, border-color .15s, filter .15s;
+  }
+  .btn { border: 1px solid var(--line-strong); background: var(--ink-800); color: var(--fg); }
+  .btn:hover { border-color: rgba(255,255,255,.2); background: var(--ink-700); }
+  .btn-primary { background: var(--accent); color: var(--ink-950); border: 1px solid var(--accent); }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-ghost { color: var(--fg-2); border: 1px solid transparent; background: transparent; }
+  .lg { padding: 12px 20px; font-size: 15px; }
+  .eyebrow { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .14em; color: var(--fg-3); }
+
+  /* site nav */
+  nav.site {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(0, 0, 0, .8); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  nav.site .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 16px; letter-spacing: -.01em; }
+  .nav-links { display: flex; align-items: center; gap: 26px; font-size: 14px; color: var(--fg-3); }
+  .nav-links a:not(.btn):hover { color: var(--fg); }
+
+  /* hero */
+  .hero { position: relative; padding: 72px 0 80px; text-align: center; }
+  .hero::before {
+    content: ""; position: absolute; inset: -160px 0 auto; height: 620px; z-index: -1; pointer-events: none;
+    background: radial-gradient(45% 50% at 50% 50%, rgba(200, 242, 109, .09), transparent 70%);
+  }
+  .hello { display: block; width: min(300px, 64vw); height: auto; margin: 0 auto; overflow: visible; }
+  .hello path { fill: none; stroke: url(#hello-ink); stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
+  /* Hidden until each stroke starts: a round cap on the not-yet-drawn path would show as a dot. */
+  .hello .w { stroke-dasharray: 1 2; stroke-dashoffset: 1; opacity: 0; animation: write 2.4s cubic-bezier(.55, .1, .35, 1) .25s both; }
+  .hello .x { stroke-dasharray: 1 2; stroke-dashoffset: 1; opacity: 0; animation: write .45s ease-out 2.5s both; }
+  @keyframes write { 0% { opacity: 0; stroke-dashoffset: 1; } 1% { opacity: 1; } 100% { opacity: 1; stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: reduce) { .hello .w, .hello .x { animation: none; stroke-dashoffset: 0; opacity: 1; } }
+  h1 {
+    margin: 18px auto 20px; max-width: 840px;
+    font-size: clamp(40px, 6.6vw, 72px); line-height: 1.04; letter-spacing: -.035em; font-weight: 600;
+  }
+  .serif { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -.01em; color: var(--accent); }
+  .lede { max-width: 640px; margin: 0 auto; font-size: clamp(17px, 2vw, 19px); color: var(--fg-2); }
+  .cta { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
+
+  /* the app mock */
+  .app {
+    margin: 72px auto 0; max-width: 1040px; text-align: left; font-size: 14px;
+    border: 1px solid var(--line-strong); border-radius: 18px; background: var(--ink-950); overflow: hidden;
+    box-shadow: 0 50px 140px -50px rgba(200, 242, 109, .22);
+  }
+  .app-top { display: flex; align-items: center; gap: 20px; height: 52px; padding: 0 18px; border-bottom: 1px solid var(--line); background: rgba(8, 9, 10, .8); }
+  .app-top .name { font-size: 15px; font-weight: 500; letter-spacing: -.01em; }
+  .tabs { display: flex; gap: 4px; padding: 4px; border-radius: 999px; border: 1px solid var(--line); background: var(--ink-900); }
+  .tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; color: var(--fg-3); }
+  .tab.on { background: rgba(255, 255, 255, .08); color: var(--fg); }
+  .top-right { margin-left: auto; display: flex; align-items: center; gap: 16px; font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+  .pending { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(242, 196, 109, .3); background: rgba(242, 196, 109, .1); color: var(--warn); }
+  .live { display: flex; align-items: center; gap: 6px; }
+  .live i { width: 6px; height: 6px; border-radius: 50%; background: var(--good); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; transform: scale(.85); } }
+
+  .app-body { display: grid; grid-template-columns: 252px minmax(0, 1fr); height: 520px; }
+  .roster { border-right: 1px solid var(--line); padding: 18px 8px; }
+  .roster-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 12px; }
+  .roster-head .count { margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+  .plus { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--ink-950); }
+  .plus .ico { width: 16px; height: 16px; }
+  .group { display: flex; align-items: center; gap: 6px; padding: 12px 10px 4px; color: var(--fg-3); }
+  .group .ico { width: 12px; height: 12px; transform: rotate(90deg); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 12px; }
+  .row.on { background: rgba(255, 255, 255, .06); }
+  .row .av { position: relative; flex: none; }
+  .row .av img { width: 40px; height: 40px; display: block; }
+  .row .av i { position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--ink-950); }
+  .row .nm { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+  .row .sub { margin-top: 2px; font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { padding: 0 6px; border-radius: 999px; background: var(--warn); color: var(--ink-950); font-family: var(--mono); font-size: 10px; line-height: 16px; }
+
+  .chat { display: flex; flex-direction: column; min-width: 0; }
+  .chat-head { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+  .chat-head img { width: 34px; height: 34px; }
+  .chat-head .t { font-size: 15px; font-weight: 500; }
+  .pill { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; min-width: 0; }
+  .pill i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .pill .lbl { text-transform: uppercase; letter-spacing: .06em; flex: none; }
+  .pill .tx { color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .transcript { flex: 1; min-height: 0; overflow: hidden; padding: 22px 28px; display: flex; flex-direction: column; gap: 12px; }
+  .m-in { display: flex; justify-content: flex-end; gap: 12px; }
+  .m-in .col { max-width: 80%; display: flex; flex-direction: column; align-items: flex-end; }
+  .who { margin-bottom: 4px; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-3); }
+  .bubble { padding: 10px 16px; border-radius: 16px; border: 1px solid var(--line); background: rgba(255, 255, 255, .04); font-size: 14px; }
+  .m-in .bubble { border-top-right-radius: 6px; }
+  .m-in img { width: 26px; height: 26px; margin-top: 20px; }
+  .toolrow { margin-left: 38px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--ink-900); }
+  .toolrow .ico { color: var(--fg-3); }
+  .toolrow b { font-family: var(--mono); font-weight: 400; font-size: 11.5px; color: var(--fg-2); }
+  .toolrow span { font-size: 12.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .m-out { display: flex; gap: 12px; }
+  .m-out img { width: 26px; height: 26px; flex: none; margin-top: 2px; }
+  .m-out p { margin: 0; line-height: 1.65; }
+  .m-out code, .perm code.inl { padding: 1px 4px; border-radius: 4px; background: rgba(255, 255, 255, .06); font-size: 12.5px; }
+
+  .perm { padding: 16px; border-radius: 16px; border: 1px solid rgba(242, 196, 109, .3); background: rgba(242, 196, 109, .05); box-shadow: 0 0 0 4px rgba(242, 196, 109, .04); }
+  .perm-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .perm-h .ico { width: 16px; height: 16px; color: var(--warn); }
+  .perm-h code { color: var(--accent); font-size: 12.5px; }
+  .perm-h time { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+  .perm pre { margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--ink-950); font: 12px var(--mono); color: var(--fg-2); white-space: pre-wrap; }
+  .perm-rule { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .perm-rule span.in { flex: 1; padding: 5px 12px; border-radius: 12px; border: 1px solid var(--line-strong); background: var(--ink-850); font: 12px var(--mono); }
+  .perm-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .perm-acts .btn-ghost { color: var(--bad); }
+
+  /* sections */
+  section { padding: 112px 0; border-top: 1px solid var(--line); }
+  h2 { margin: 12px 0 16px; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.1; letter-spacing: -.03em; font-weight: 600; }
+  .sub { max-width: 620px; color: var(--fg-2); font-size: 18px; margin: 0; }
+  .center { text-align: center; }
+  .center .sub { margin: 0 auto; }
+
+  .feature { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+  .feature > * { min-width: 0; }
+  .feature + .feature { margin-top: 128px; }
+  .feature.flip .copytext { order: 2; }
+  .feature h3 { margin: 12px 0 14px; font-size: clamp(26px, 3.4vw, 36px); line-height: 1.12; letter-spacing: -.025em; font-weight: 600; }
+  .feature p { margin: 0; color: var(--fg-2); font-size: 17px; }
+  .feature ul { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .feature li { display: flex; gap: 10px; color: #cfcdc7; font-size: 15px; }
+  .feature li::before { content: ""; flex: none; width: 16px; height: 16px; margin-top: 4px; border-radius: 50%; background: rgba(200, 242, 109, .12) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.2l2.2 2.2 4.8-4.8' fill='none' stroke='%23c8f26d' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/16px no-repeat; }
+
+  .card { border: 1px solid var(--line); border-radius: 18px; background: var(--ink-900); padding: 22px; }
+  .card-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .card-title b { font-size: 13px; font-weight: 500; color: var(--fg-2); }
+
+  /* schedule */
+  .week { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 3px; align-items: center; font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); }
+  .week .c { height: 18px; border-radius: 3px; background: var(--ink-800); }
+  .week .q { background: var(--ink-850); background-image: repeating-linear-gradient(135deg, transparent 0 4px, rgba(255,255,255,.05) 4px 6px); }
+  .week .r { background: var(--accent); box-shadow: 0 0 10px rgba(200, 242, 109, .35); }
+  .legend { display: flex; gap: 18px; margin-top: 16px; font-size: 12px; color: var(--fg-3); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  /* agents talking */
+  .team { position: relative; height: 330px; }
+  .team svg.lines { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .node { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 10px; padding: 8px 14px 8px 8px; border-radius: 14px; border: 1px solid var(--line-strong); background: var(--ink-850); font-size: 14px; white-space: nowrap; }
+  .node img { width: 36px; height: 36px; }
+  .node small { display: block; color: var(--fg-3); font-family: var(--mono); font-size: 10.5px; }
+  .note { position: absolute; transform: translate(-50%, -50%); font-family: var(--mono); font-size: 11px; color: var(--accent); background: var(--ink-950); padding: 3px 9px; border-radius: 999px; border: 1px solid rgba(200, 242, 109, .2); white-space: nowrap; }
+
+  /* memory */
+  .mem { display: grid; gap: 8px; }
+  .mem-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--ink-850); font-size: 14px; }
+  .mem-row time { margin-left: auto; flex: none; font-family: var(--mono); font-size: 11px; color: var(--fg-3); padding-top: 2px; }
+  .chip { flex: none; display: inline-flex; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--fg-2); margin-top: 1px; }
+
+  /* control */
+  .stack { display: grid; gap: 12px; }
+  .pr { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--ink-850); font-size: 14px; }
+  .pr img { width: 28px; height: 28px; flex: none; }
+  .pr .meta { font-family: var(--mono); color: var(--fg-3); font-size: 11px; }
+  .pr .state { margin-left: auto; padding: 2px 9px; border-radius: 999px; font-family: var(--mono); font-size: 11px; flex: none; }
+  .open { color: var(--good); border: 1px solid rgba(127, 217, 154, .3); }
+  .merged { color: var(--merged); border: 1px solid rgba(185, 155, 255, .3); }
+
+  /* lean */
+  .tree { font-family: var(--mono); font-size: 13.5px; line-height: 2; color: var(--fg-2); white-space: pre; overflow-x: auto; }
+  .tree .d { color: var(--fg); } .tree .a { color: var(--accent); } .tree .c { color: var(--fg-3); }
+
+  /* any agent */
+  .any { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 48px; }
+  .any .card { display: flex; align-items: center; gap: 14px; padding: 20px 22px; text-align: left; }
+  .any b { font-weight: 500; }
+  .any small { display: block; color: var(--fg-3); font-size: 13px; }
+  .mark { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--ink-800); border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 14px; color: var(--fg-2); flex: none; }
+
+  /* install */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 48px; text-align: left; }
+  .steps > *, .any > * { min-width: 0; }
+  .step { display: flex; flex-direction: column; gap: 12px; }
+  .step .n { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .step h4 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: -.01em; }
+  .step p { margin: 0; color: var(--fg-2); font-size: 15px; }
+  .term { margin-top: auto; padding: 12px 14px; border-radius: 12px; background: var(--ink-950); border: 1px solid var(--line); font-family: var(--mono); font-size: 13px; overflow-x: auto; white-space: nowrap; }
+  .term::before { content: "$ "; color: var(--fg-3); }
+  .reqs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 28px; }
+  .reqs span { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; color: var(--fg-2); }
+
+  .final { text-align: center; padding: 128px 0; position: relative; }
+  .final::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 420px; z-index: -1; background: radial-gradient(50% 60% at 50% 100%, rgba(200, 242, 109, .08), transparent 70%); }
+  .final h2 { font-size: clamp(34px, 5vw, 56px); }
+
+  footer { border-top: 1px solid var(--line); padding: 28px 0; font-size: 14px; color: var(--fg-3); }
+  footer .wrap { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+  footer a:hover { color: var(--fg); }
+
+  @media (max-width: 880px) {
+    .app-body { grid-template-columns: 1fr; height: auto; }
+    .roster { display: none; }
+    .tab span, .top-right .hide-md { display: none; }
+    .feature { grid-template-columns: 1fr; gap: 36px; }
+    .feature.flip .copytext { order: 0; }
+    .feature + .feature { margin-top: 96px; }
+    .any, .steps { grid-template-columns: 1fr; }
+    .nav-links .hide-sm { display: none; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 16px; }
+    .hero { padding: 48px 0 56px; }
+    section { padding: 80px 0; }
+    .app { margin-top: 48px; border-radius: 14px; }
+    .app-top { gap: 10px; padding: 0 12px; }
+    .app-top .name { display: none; }
+    .transcript { padding: 18px 14px; }
+    .chat-head { padding: 12px 14px; }
+    .chat-head .btn { display: none; }
+    .toolrow { margin-left: 0; }
+    .team { height: 380px; }
+    .team .node:nth-of-type(2) { left: 62% !important; }
+    .week { grid-template-columns: 28px repeat(24, 1fr); gap: 2px; }
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+  <symbol id="i-todo" viewBox="0 0 24 24"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-checks" viewBox="0 0 24 24"><path d="M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-house" viewBox="0 0 8 8"><path d="M3 0h2v1H3zM2 1h4v1H2zM1 2h6v1H1zM0 3h8v1H0zM1 4h1v4H1zM6 4h1v4H6zM2 7h4v1H2zM3 5h2v2H3z"/></symbol>
+</svg>
+
+<nav class="site">
+  <div class="wrap">
+    <a class="brand" href="#top"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#install">Install</a>
+      <a class="btn" href="https://github.com/seelowen-maito/loft">
+        <svg class="ico" viewBox="0 0 16 16" style="fill:currentColor;stroke:none"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <svg class="hello" viewBox="0 0 280 190" role="img" aria-label="loft">
+      <defs>
+        <linearGradient id="hello-ink" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="280" y2="0">
+          <stop offset="0" stop-color="#eceae4"/><stop offset=".55" stop-color="#dcefb0"/><stop offset="1" stop-color="#c8f26d"/>
+        </linearGradient>
+      </defs>
+      <path class="w" pathLength="1" d="M 10 138 C 40 130, 70 90, 78 50 C 84 20, 62 14, 58 40 C 54 70, 50 120, 56 136 C 62 148, 80 142, 92 128 C 100 112, 108 98, 122 96 C 104 96, 96 118, 100 132 C 104 146, 126 142, 132 124 C 137 108, 132 96, 122 96 C 128 100, 136 104, 150 102 C 168 98, 186 60, 190 40 C 194 18, 176 14, 172 38 C 168 70, 170 120, 168 150 C 166 172, 156 182, 152 168 C 148 152, 170 136, 196 124 C 210 116, 222 96, 226 70 C 222 100, 218 126, 222 136 C 226 146, 246 142, 262 126"/>
+      <path class="x" pathLength="1" d="M 206 84 C 220 82, 236 80, 248 80"/>
+    </svg>
+    <h1>Where your coding agents <span class="serif">hang out.</span></h1>
+    <p class="lede">loft is a small layer on top of the coding agent you already use. It starts agents for you, keeps them working on a schedule, lets them talk to each other, and gives them memory that lasts. You watch and steer from the outside.</p>
+    <div class="cta">
+      <a class="btn-primary lg" href="https://github.com/seelowen-maito/loft#install">Install loft</a>
+      <a class="btn lg" href="https://github.com/seelowen-maito/loft">View on GitHub</a>
+    </div>
+
+    <div class="app" aria-hidden="true">
+      <div class="app-top">
+        <svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>
+        <span class="name">loft</span>
+        <div class="tabs">
+          <span class="tab"><svg class="ico"><use href="#i-branch"/></svg><span>Repos</span></span>
+          <span class="tab on"><svg class="ico"><use href="#i-bot"/></svg><span>Agents</span></span>
+          <span class="tab"><svg class="ico"><use href="#i-todo"/></svg><span>Tasks</span></span>
+        </div>
+        <div class="top-right">
+          <span class="pending"><svg class="ico"><use href="#i-shield"/></svg>1<span class="hide-md">&nbsp;permission pending</span></span>
+          <span class="live"><i></i>live</span>
+          <span class="hide-md">14:02:37</span>
+          <svg class="ico" style="width:16px;height:16px"><use href="#i-gear"/></svg>
+        </div>
+      </div>
+      <div class="app-body">
+        <aside class="roster">
+          <div class="roster-head">
+            <div><div class="eyebrow">Agents</div><div class="count">4 total · <span style="color:var(--accent)">2 working</span></div></div>
+            <span class="plus"><svg class="ico"><use href="#i-plus"/></svg></span>
+          </div>
+          <div class="group"><svg class="ico"><use href="#i-chev"/></svg><span class="eyebrow">api</span></div>
+          <div class="row on"><div class="av"><img src="avatars/reviewer.svg" alt=""><i style="background:var(--accent)"></i></div><div style="min-width:0"><div class="nm">Reviewer</div><div class="sub" style="color:var(--accent)">Reviewing #42</div></div></div>
+          <div class="row"><div class="av"><img src="avatars/builder.svg" alt=""><i style="background:var(--warn)"></i></div><div style="min-width:0"><div class="nm">Builder <span class="badge">1</span></div><div class="sub" style="color:var(--warn)">Needs you</div></div></div>
+          <div class="group"><svg class="ico"><use href="#i-chev"/></svg><span class="eyebrow">web</span></div>
+          <div class="row"><div class="av"><img src="avatars/triage.svg" alt=""><i style="background:rgba(140,184,255,.7)"></i></div><div style="min-width:0"><div class="nm">Triage</div><div class="sub">issues · 2h ago</div></div></div>
+          <div class="row"><div class="av"><img src="avatars/docs.svg" alt=""><i style="background:var(--fg-3)"></i></div><div style="min-width:0"><div class="nm">Docs</div><div class="sub">writer · yesterday</div></div></div>
+        </aside>
+        <div class="chat">
+          <div class="chat-head">
+            <img src="avatars/reviewer.svg" alt="">
+            <div style="min-width:0;flex:1">
+              <div class="t">Reviewer</div>
+              <div class="pill"><i style="background:var(--accent)"></i><span class="lbl" style="color:var(--accent)">Working</span><span class="tx">· reviewing pull request #42</span></div>
+            </div>
+            <span class="btn"><svg class="ico" style="width:12px;height:12px"><use href="#i-stop"/></svg>Stop</span>
+          </div>
+          <div class="transcript">
+            <div class="m-in"><div class="col"><div class="who">Builder → Reviewer</div><div class="bubble">The retry fix for the sync job is up in #42. Can you take a look before I merge?</div></div><img src="avatars/builder.svg" alt=""></div>
+            <div class="toolrow"><svg class="ico"><use href="#i-wrench"/></svg><b>recall</b><span>sync job retries</span></div>
+            <div class="m-out"><img src="avatars/reviewer.svg" alt=""><p>Found it. Last week we agreed on exponential backoff with a cap of 5 tries, and #42 matches. One test for the cap is missing, so I'll run the suite and leave a comment.</p></div>
+            <div class="perm">
+              <div class="perm-h"><svg class="ico"><use href="#i-shield"/></svg><span>Wants to use <code>Bash</code></span><time>now</time></div>
+              <pre>npm test -- sync</pre>
+              <div class="perm-rule"><span class="eyebrow">Rule</span><span class="in">Bash(npm test:*)</span></div>
+              <div class="perm-acts">
+                <span class="btn"><svg class="ico"><use href="#i-check"/></svg>Allow once</span>
+                <span class="btn-primary"><svg class="ico"><use href="#i-checks"/></svg>Always allow</span>
+                <span class="btn-ghost"><svg class="ico"><use href="#i-x"/></svg>Deny</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="center" style="margin-bottom:104px">
+      <div class="eyebrow">Why loft</div>
+      <h2>A home for agents. <span class="serif">Out of your way.</span></h2>
+      <p class="sub">loft doesn't replace your agent, your prompts or your tools. It runs the agent you have and gives you one place to see what every agent is doing.</p>
+    </div>
+
+    <div class="feature">
+      <div class="copytext">
+        <div class="eyebrow">01 · Autonomy</div>
+        <h3>Agents that run without you.</h3>
+        <p>Create an agent, give it a repo and standing instructions, and it checks in on its own schedule.</p>
+        <ul>
+          <li>Scheduled check-ins that pick up where the agent left off</li>
+          <li>Quiet hours keep background runs out of your working day</li>
+          <li>Tasks you can hand off and track</li>
+        </ul>
+      </div>
+      <div class="card" aria-hidden="true">
+        <div class="card-title"><b>Triage · this week</b><span class="eyebrow">local time</span></div>
+        <div class="week" id="week"></div>
+        <div class="legend"><span><i style="background:var(--accent)"></i>Check-in</span><span><i style="background:var(--ink-700)"></i>Quiet hours</span></div>
+      </div>
+    </div>
+
+    <div class="feature flip">
+      <div class="copytext">
+        <div class="eyebrow">02 · Collaboration</div>
+        <h3>Agents that work together.</h3>
+        <p>Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.</p>
+        <ul>
+          <li>Hand off work from one agent to another</li>
+          <li>Ask a teammate agent for a review or a second opinion</li>
+          <li>Each agent keeps its own role, repo and instructions</li>
+        </ul>
+      </div>
+      <div class="card team" aria-hidden="true">
+        <svg class="lines" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <path d="M28 24 L72 50 M28 24 L30 80 M72 50 L30 80" stroke="rgba(200,242,109,.25)" stroke-width="1.2" fill="none" vector-effect="non-scaling-stroke" stroke-dasharray="4 4"/>
+        </svg>
+        <div class="node" style="left:28%;top:24%"><img src="avatars/builder.svg" alt=""><div>Builder<small>writes the code</small></div></div>
+        <div class="node" style="left:72%;top:50%"><img src="avatars/reviewer.svg" alt=""><div>Reviewer<small>checks it</small></div></div>
+        <div class="node" style="left:30%;top:80%"><img src="avatars/triage.svg" alt=""><div>Triage<small>files the work</small></div></div>
+        <div class="note" style="left:52%;top:35%">message_agent</div>
+        <div class="note" style="left:56%;top:68%">read_agent_chat</div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="copytext">
+        <div class="eyebrow">03 · Memory</div>
+        <h3>Memory that lasts.</h3>
+        <p>Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.</p>
+        <ul>
+          <li>Survives restarts and fresh sessions</li>
+          <li>Agents save, search and forget memories on their own</li>
+          <li>Stored locally, next to everything else loft keeps</li>
+        </ul>
+      </div>
+      <div class="card" aria-hidden="true">
+        <div class="card-title"><b>Reviewer · memory</b><span class="eyebrow">4 of 37</span></div>
+        <div class="mem">
+          <div class="mem-row"><span class="chip">pref</span>Prefers small pull requests, one change each.<time>3d</time></div>
+          <div class="mem-row"><span class="chip">decision</span>Sync job retries: exponential backoff, cap of 5.<time>6d</time></div>
+          <div class="mem-row"><span class="chip">project</span>Staging deploys from the release branch, not main.<time>2w</time></div>
+          <div class="mem-row"><span class="chip">done</span>Removed the old auth middleware; nothing still used it.<time>3w</time></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature flip">
+      <div class="copytext">
+        <div class="eyebrow">04 · Control</div>
+        <h3>You stay in control.</h3>
+        <p>Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.</p>
+        <ul>
+          <li>Agents ask before running anything you haven't allowed</li>
+          <li>Plans and pull requests show up for you to review</li>
+          <li>Works from any device that can reach your machine</li>
+        </ul>
+      </div>
+      <div class="card stack" aria-hidden="true">
+        <div class="perm">
+          <div class="perm-h"><svg class="ico"><use href="#i-shield"/></svg><span>Wants to use <code>Bash</code></span><time>2m</time></div>
+          <pre>gh issue close 118</pre>
+          <div class="perm-acts">
+            <span class="btn"><svg class="ico"><use href="#i-check"/></svg>Allow once</span>
+            <span class="btn-primary"><svg class="ico"><use href="#i-checks"/></svg>Always allow</span>
+            <span class="btn-ghost"><svg class="ico"><use href="#i-x"/></svg>Deny</span>
+          </div>
+        </div>
+        <div class="pr"><img src="avatars/builder.svg" alt=""><div>Add retry cap to sync job<div class="meta">#42 · +48 −12</div></div><span class="state open">open</span></div>
+        <div class="pr"><img src="avatars/docs.svg" alt=""><div>Document the settings file<div class="meta">#41 · +120 −3</div></div><span class="state merged">merged</span></div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="copytext">
+        <div class="eyebrow">05 · Lean</div>
+        <h3>Lean by design.</h3>
+        <p>Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder.</p>
+        <ul>
+          <li>Your own agent settings, hooks and MCP servers stay yours</li>
+          <li>No loft account and no cloud service to sign up for</li>
+          <li>Delete one folder and it's gone</li>
+        </ul>
+      </div>
+      <div class="card" aria-hidden="true">
+        <div class="tree"><span class="d">loft/</span>
+├── <span class="a">.loft/</span>                <span class="c"># settings, chats, memory</span>
+└── <span class="a">agent-local-storage/</span>
+    ├── <span class="d">reviewer/</span>         <span class="c"># its own clone</span>
+    ├── <span class="d">builder/</span>
+    └── <span class="d">triage/</span>
+
+<span class="d">~/projects/</span>           <span class="c"># your repos, untouched</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="center">
+  <div class="wrap">
+    <div class="eyebrow">Bring your own agent</div>
+    <h2>Any agent. <span class="serif">Every agent.</span></h2>
+    <p class="sub">loft aims to support any and every coding agent you use.</p>
+    <div class="any">
+      <div class="card"><div class="mark">&gt;_</div><div><b>Claude Code</b><small>Anthropic's coding agent</small></div></div>
+      <div class="card"><div class="mark">{ }</div><div><b>Codex</b><small>OpenAI's coding agent</small></div></div>
+      <div class="card"><div class="mark">+</div><div><b>What comes next</b><small>The agent you pick tomorrow</small></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="center">
+  <div class="wrap">
+    <div class="eyebrow">Install</div>
+    <h2>Up and running in a few minutes.</h2>
+    <p class="sub">One script checks what you need, tells you how to fix anything missing and builds loft.</p>
+    <div class="steps">
+      <div class="card step"><div class="n">01</div><h4>Clone the repo</h4><p>Grab the source from GitHub.</p><div class="term">git clone https://github.com/seelowen-maito/loft</div></div>
+      <div class="card step"><div class="n">02</div><h4>Run setup</h4><p>Checks requirements, asks where your repos live and builds. On macOS it can run loft in the background.</p><div class="term">./setup.sh</div></div>
+      <div class="card step"><div class="n">03</div><h4>Open loft</h4><p>Create your first agent and check Settings to finish setup.</p><div class="term">open http://localhost:7420</div></div>
+    </div>
+    <div class="reqs"><span>Rust</span><span>Node 22+</span><span>git</span><span>a coding agent, logged in</span><span>gh (optional)</span></div>
+    <p style="margin-top:28px;color:var(--fg-3);font-size:14px">Full instructions are in the <a href="https://github.com/seelowen-maito/loft#install" style="color:var(--accent)">README</a>.</p>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <h2>Give your agents a place <span class="serif">to hang out.</span></h2>
+    <p class="sub" style="margin:0 auto">Open source and running on your own machine.</p>
+    <div class="cta">
+      <a class="btn-primary lg" href="https://github.com/seelowen-maito/loft#install">Install loft</a>
+      <a class="btn lg" href="https://github.com/seelowen-maito/loft">Star on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="#top" style="font-size:15px"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div style="display:flex;gap:22px">
+      <a href="https://github.com/seelowen-maito/loft">GitHub</a>
+      <a href="https://github.com/seelowen-maito/loft#readme">README</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Schedule grid: a check-in every 3 hours, held during weekday quiet hours (9 to 18).
+  (function () {
+    var el = document.getElementById("week");
+    if (!el) return;
+    var html = "";
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (d, di) {
+      html += "<span>" + d + "</span>";
+      for (var h = 0; h < 24; h++) {
+        var quiet = di < 5 && h >= 9 && h < 18;
+        html += '<span class="c' + (quiet ? " q" : h % 3 === 0 ? " r" : "") + '"></span>';
+      }
+    });
+    el.innerHTML = html;
+  })();
+</script>
+</body>
+</html>
