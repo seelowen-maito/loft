@@ -41,7 +41,7 @@ struct TaskPicker: View {
 
     private func row(_ t: HBTask) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: t.state.symbol).foregroundStyle(t.state.color)
+            Image(systemName: t.state.symbol).foregroundStyle(t.state.color).frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 // Concrete label colours: inside the list's button, .primary and .secondary took the accent tint,
                 // so every title read like a link.
