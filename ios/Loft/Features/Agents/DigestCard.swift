@@ -68,6 +68,9 @@ struct DigestCard: View {
                 .buttonStyle(.borderless)
             }
             .padding(.vertical, 4)
+            // A container with its own identifier: on a plain stack it replaced the buttons' own (digestDismiss,
+            // digestReadAloud), as the Tester found.
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("digestCard")
         }
     }

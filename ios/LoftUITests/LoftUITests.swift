@@ -366,6 +366,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["0"].exists)
     }
 
+    /// Away for two hours: "While you were away" heads the Agents tab, with what needs you first.
+    func testWhileYouWereAway() {
+        let app = launch(["-fixture-digest"])
+        app.tabBars.buttons["Agents"].tap()
+        let card = any("digestCard", app)
+        XCTAssertTrue(card.appears(timeout: 5), "the fixture's activity is within the two hours")
+        let label = { (s: String) in app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", s)).firstMatch }
+        XCTAssertTrue(label("While you were away").exists)
+        XCTAssertTrue(label("Waiting for your approval").exists, "iOS Agent's approval")
+        app.buttons["digestDismiss"].tap()
+        XCTAssertTrue(card.disappears(timeout: 5), "Got it clears it")
+    }
+
     func testLoadedButEmptySaysSo() {
         let app = launch(["-fixture-empty"])
         app.tabBars.buttons["Agents"].tap()

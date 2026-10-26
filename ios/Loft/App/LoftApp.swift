@@ -54,11 +54,13 @@ struct LoftApp: App {
                 // Once the server says it can push, register this phone (and again when the server changes).
                 .task(id: store.info?.supports(.push) == true) { await PushRegistrar.shared.start() }
         }
-        .onChange(of: scenePhase, initial: true) { _, phase in
+        .onChange(of: scenePhase, initial: true) { old, phase in
             switch phase {
             case .active: store.activate()
             // A voice session keeps running in the background (audio mode) and needs live updates for the reply.
-            case .background where !voice.isActive:
+            // Only on a real move to the background: the first call (old == phase) can report .background while the
+            // app is still launching, and stamping "last looked" then emptied "While you were away" on every launch.
+            case .background where !voice.isActive && old != phase:
                 UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Prefs.digestLastLooked)
                 store.deactivate()
             default: break
