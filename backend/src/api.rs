@@ -618,8 +618,23 @@ fn walk(root: &FsPath, dir: &FsPath, depth: usize, out: &mut Vec<Value>) {
     }
 }
 
+/// An agent id is a UUID: letters, digits and dashes. Anything else (in particular a percent-encoded
+/// `../`) must never reach a filesystem path.
+pub fn is_plain_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The workspace of an agent named in the URL: the id must be well-formed and the agent must exist.
+fn agent_workspace(state: &AppState, id: &str) -> Result<std::path::PathBuf, ApiError> {
+    if !is_plain_id(id) {
+        return Err(not_found());
+    }
+    state.db.get_agent(id)?.ok_or_else(not_found)?;
+    Ok(workspace(state, id))
+}
+
 pub async fn list_files(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let root = workspace(&state, &id);
+    let root = agent_workspace(&state, &id)?;
     let mut out = vec![];
     walk(&root, &root, 0, &mut out);
     Ok(Json(json!(out)))
@@ -712,8 +727,7 @@ pub async fn open_editor(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    let dir = workspace(&state, &id);
+    let dir = agent_workspace(&state, &id)?;
     std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
 
     // Requests from another machine arrive through a local reverse proxy (e.g. `tailscale serve`), which marks
@@ -758,5 +772,18 @@ pub async fn open_editor(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Couldn't open {} in VS Code: {e}", dir.display()),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plain_id;
+
+    #[test]
+    fn agent_ids_cannot_leave_the_storage_folder() {
+        assert!(is_plain_id("3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b"));
+        for bad in ["", "../../Users", "..%2F..", "a/b", "a\\b", ".", "..", "x\0y"] {
+            assert!(!is_plain_id(bad), "accepted {bad:?}");
+        }
     }
 }
