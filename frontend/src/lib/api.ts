@@ -416,6 +416,10 @@ export const api = {
     return r;
   },
   files: (id: string) => req<FileEntry[]>("GET", `/agents/${id}/files`),
+  /** One folder's entries; `path` starts at the agent's project folder (else its workspace), `../` allowed up to the
+   *  projects folder. `dir` is where it landed, relative to the projects folder. */
+  ls: (id: string, path: string) =>
+    req<{ dir: string; entries: { name: string; dir: boolean }[] }>("GET", `/agents/${id}/ls?path=${encodeURIComponent(path)}`),
   permissions: (agentId?: string) => req<PermissionRequest[]>("GET", `/permissions${agentId ? `?agent_id=${agentId}` : ""}`),
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),

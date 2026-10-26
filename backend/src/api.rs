@@ -420,7 +420,8 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    let all = state.db.list_agents()?;
+    // Only agents in the same project: another project's "Dev" isn't this one's.
+    let all: Vec<_> = state.db.list_agents()?.into_iter().filter(|a| a.project.trim() == agent.project.trim()).collect();
     let (mentioned, leading) = crate::mentions::parse(&text, &all, &id);
     if !mentioned.is_empty() {
         meta["mentions"] = crate::mentions::meta(&mentioned);
@@ -640,6 +641,40 @@ pub async fn list_files(State(state): State<AppState>, Path(id): Path<String>) -
     Ok(Json(json!(out)))
 }
 
+#[derive(Deserialize)]
+pub struct LsQuery {
+    path: Option<String>,
+}
+
+/// One folder's entries, for completing `@path` in the chat box. `path` works like a shell's from the agent's
+/// `@` base (its project's folder, else its workspace), `../` included, and may reach anywhere in the projects
+/// folder or the workspace but not above. `dir` is where it landed, relative to the projects folder.
+pub async fn list_dir(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<LsQuery>) -> ApiResult<Value> {
+    let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let ws = workspace(&state, &id);
+    let _ = std::fs::create_dir_all(&ws);
+    let projects = &state.settings.boot().projects_dir;
+    let (dir, entries) = ls(&agents::at_base(&state, &a), &[&ws, projects], q.path.as_deref().unwrap_or("")).map_err(bad)?;
+    let shown = projects.canonicalize().ok().and_then(|r| dir.strip_prefix(r).ok().map(|d| d.display().to_string())).unwrap_or_else(|| dir.display().to_string());
+    Ok(Json(json!({ "dir": shown, "entries": entries })))
+}
+
+fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBuf, Vec<Value>), String> {
+    // Resolved for real (`..`, symlinks, absolute paths) before checking where it landed.
+    let dir = base.join(path).canonicalize().map_err(|_| format!("No folder {path}"))?;
+    if !roots.iter().any(|root| root.canonicalize().is_ok_and(|r| dir.starts_with(r))) {
+        return Err("That's outside the projects folder".into());
+    }
+    let mut out: Vec<(bool, String)> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().into_owned()))
+        .filter(|(_, n)| n != ".DS_Store")
+        .collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    Ok((dir, out.into_iter().map(|(dir, name)| json!({ "name": name, "dir": dir })).collect()))
+}
+
 // ---- pull requests ----------------------------------------------------
 
 #[derive(Deserialize)]
@@ -785,5 +820,33 @@ mod tests {
         for bad in ["", "../../Users", "..%2F..", "a/b", "a\\b", ".", "..", "x\0y"] {
             assert!(!is_plain_id(bad), "accepted {bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ls_tests {
+    use super::ls;
+
+    #[test]
+    fn lists_up_to_the_projects_folder_and_no_further() {
+        let root = std::env::temp_dir().join(format!("loft-ls-{}", uuid::Uuid::new_v4()));
+        let projects = root.join("projects");
+        let ws = projects.join("loft/agent-local-storage/a1");
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::create_dir_all(projects.join("imole/brand_docs")).unwrap();
+        std::fs::write(projects.join("imole/proposta.md"), "").unwrap();
+        std::fs::write(root.join("secret.txt"), "").unwrap();
+        let base = projects.join("work/isa");
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        let names = |p: &str| ls(&base, &[&ws, &projects], p).map(|(_, v)| v.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>());
+        assert_eq!(names("").unwrap(), vec!["docs"], "starts at the project's folder");
+        assert_eq!(names("../../imole").unwrap(), vec!["brand_docs", "proposta.md"], "folders first");
+        assert!(names("../..").unwrap().contains(&"imole".to_string()));
+        assert_eq!(names("../../loft/agent-local-storage/a1").unwrap(), vec!["notes"], "the workspace is reachable too");
+        assert!(names("../../..").is_err(), "above the projects folder");
+        assert!(names(root.to_str().unwrap()).is_err(), "an absolute path out of bounds");
+        std::os::unix::fs::symlink(&root, base.join("escape")).unwrap();
+        assert!(names("escape").is_err(), "a symlink out of bounds");
+        assert!(names("nope").is_err());
     }
 }

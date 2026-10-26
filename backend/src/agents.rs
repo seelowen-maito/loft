@@ -35,6 +35,17 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
     state.cfg.storage_dir.join(agent_id)
 }
 
+/// Where `@path` in this agent's chat starts: its project's folder when the project names one inside the
+/// projects folder (`work/isa`), else its workspace (no project, or a project that's just a tag).
+pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
+    let projects = &state.settings.boot().projects_dir;
+    let project = projects.join(a.project.trim());
+    match (a.project.trim().is_empty(), project.canonicalize(), projects.canonicalize()) {
+        (false, Ok(p), Ok(root)) if p.starts_with(&root) && p.is_dir() => p,
+        _ => workspace(state, &a.id),
+    }
+}
+
 pub fn emit_agent(state: &AppState, a: &Agent) {
     let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
     run_fields(state, &a.id, &mut v);
@@ -330,6 +341,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
+- `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
 Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. To check on it later, say so in the reply; your next message or wake-up is the next turn.
@@ -369,6 +381,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
         ws = ws.display(),
+        at = at_base(state, a).display(),
         projects = state.settings.boot().projects_dir.display(),
         axe = crate::simulator::axe()
             .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
@@ -1330,6 +1343,30 @@ esac
         // A mention mid-message reaches both.
         let _ = send("Please plan it, and @Web Dev take a look too").await.ok().unwrap();
         until("both runs", 10, || !is_running(&st, &dev.id) && !is_running(&st, &orch.id) && workspace(&st, &orch.id).join("prompts.log").exists()).await;
+
+        // Another project's agent isn't reachable, even by name, and doesn't shadow this one's.
+        let mut far = crate::tasks::tests::agent(&st, "Web Dev");
+        far.project = "imole".into();
+        st.db.save_agent(&far).unwrap();
+        let r = send("@Web Dev again").await.ok().unwrap().0;
+        assert_eq!(r["mentioned"], json!([{ "id": dev.id, "name": "Web Dev" }]));
+    }
+
+    #[test]
+    fn at_paths_start_at_the_projects_folder_when_there_is_one() {
+        let st = crate::tasks::tests::state();
+        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(projects.join("work/isa")).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
+        let st = AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st };
+        let mut a = crate::tasks::tests::agent(&st, "Dev");
+        a.project = "work/isa".into();
+        assert_eq!(at_base(&st, &a), projects.join("work/isa").canonicalize().unwrap());
+        for tag in ["Marketing", "../..", ""] {
+            a.project = tag.into();
+            assert_eq!(at_base(&st, &a), workspace(&st, &a.id), "{tag:?} falls back to the workspace");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
