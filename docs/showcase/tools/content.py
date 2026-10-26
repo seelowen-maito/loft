@@ -36,7 +36,7 @@ SECTIONS = [
      ["Allow once, always allow, or deny, with the exact command shown.",
       "Risk labels and a plain-language “What does this do?” explanation.",
       "Pull requests grouped by project, with a merge button.",
-      "Get a heads-up on your iPhone, or a text by iMessage."],
+      "Get a heads-up on your iPhone."],
      ["web-chat-approval"], ["needs-you"]),
     ("voice", "Voice", "Talk to your crew, hands-free",
      "Tap Talk and just speak. Loft keeps listening, sends when you're done and reads the answer back to you.",

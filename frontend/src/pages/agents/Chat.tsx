@@ -727,7 +727,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
     );
   }
   if (m.kind === "run_start") {
-    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "imessage" ? "iMessage" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
+    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
     return (
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />

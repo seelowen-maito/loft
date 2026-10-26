@@ -193,7 +193,7 @@ UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only)
 
 ## Limitations and what needs outside setup
 
-- **Push notifications (APNs)** need outside setup: the Push Notifications capability on the app id, and an APNs auth key (`.p8`) added in Loft → Settings → Push notifications. The backend side (device registration at `/api/devices`, the APNs sender, a test push) is in place; see `docs/push.md` for the steps and the payload. Until the app registers for push, alerts only arrive while it's running. Loft's **iMessage notifications** also reach your phone when the app is closed.
+- **Push notifications (APNs)** need outside setup: the Push Notifications capability on the app id, and an APNs auth key (`.p8`) added in Loft → Settings → Push notifications. The backend side (device registration at `/api/devices`, the APNs sender, a test push) is in place; see `docs/push.md` for the steps and the payload. Until the app registers for push, alerts only arrive while it's running.
 - **No pause or resume.** Claude Code runs can't be paused, so the app doesn't offer it. "Stop current run" ends the process.
 - **One conversation per agent.** Loft keeps a single history per agent, so there are no separate threads.
 - **There's no separate plan-approval step.** The agent's permission mode, shown on its screen, decides what needs your approval. Those requests show up in the app like any other, and the app adds no approval rules of its own.

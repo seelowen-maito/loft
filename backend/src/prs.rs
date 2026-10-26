@@ -70,7 +70,6 @@ pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
 
 async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
     let Some(mut pr) = state.db.get_pull_request(id)? else { bail!("no such pull request") };
-    let was = pr.state.clone();
     match github::get(state, &format!("/repos/{}/pulls/{}", pr.slug, pr.number)).await {
         Ok(v) => {
             apply(&mut pr, &v);
@@ -84,10 +83,6 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
     pr.checked_at = Some(now());
     state.db.save_pull_request(&pr)?;
     emit(state, &pr);
-    // `was` is empty on the first fetch after registering; only report a change we watched happen.
-    if pr.state == "merged" && !was.is_empty() && was != "merged" {
-        crate::notify::send(state, crate::notify::Notice::PrMerged, format!("Merged {}#{}: {}\n{}", pr.slug, pr.number, pr.title, pr.url));
-    }
     Ok(pr)
 }
 

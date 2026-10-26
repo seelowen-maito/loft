@@ -20,7 +20,6 @@ pub struct Settings {
     pub github_token: String,
     /// Pull, rebuild and restart when the upstream branch moves (see updater.rs).
     pub auto_update: bool,
-    pub imessage: Imessage,
     pub push: Push,
 }
 
@@ -44,22 +43,6 @@ impl Default for Push {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Imessage {
-    pub enabled: bool,
-    /// Phone number or Apple ID email to text. Texts from it go to `agent_id`.
-    pub to: String,
-    /// Agent that receives replies and answers by iMessage. Empty = replies are ignored.
-    pub agent_id: String,
-    pub permission: bool,
-    pub scheduled_run: bool,
-    pub manual_run: bool,
-    pub pr_opened: bool,
-    pub pr_merged: bool,
-    pub update: bool,
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -68,16 +51,8 @@ impl Default for Settings {
             ssh_host: String::new(),
             github_token: String::new(),
             auto_update: false,
-            imessage: Imessage::default(),
             push: Push::default(),
         }
-    }
-}
-
-impl Default for Imessage {
-    fn default() -> Self {
-        // Only what needs the user: permission prompts and the results of autonomous runs.
-        Self { enabled: false, to: String::new(), agent_id: String::new(), permission: true, scheduled_run: true, manual_run: false, pr_opened: false, pr_merged: false, update: false }
     }
 }
 
@@ -117,9 +92,6 @@ impl Store {
         }
         if s.claude_bin.trim().is_empty() {
             bail!("Claude command can't be empty");
-        }
-        if s.imessage.enabled && s.imessage.to.trim().is_empty() {
-            bail!("Enter a phone number or Apple ID email for iMessage");
         }
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&s)?)?;

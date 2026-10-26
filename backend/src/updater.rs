@@ -169,12 +169,10 @@ pub async fn updater(state: AppState, root: PathBuf) {
                         while running_agents(&state) > 0 {
                             tokio::time::sleep(IDLE_POLL).await;
                         }
-                        crate::notify::send_now(&state, crate::notify::Notice::Update, &format!("loft updated to {}", short(&up))).await;
                         restart();
                     }
                     Err(e) => {
                         tracing::error!("update failed: {e:#}");
-                        crate::notify::send(&state, crate::notify::Notice::Update, format!("loft update to {} failed: {}", short(&up), crate::notify::clip(&e.to_string(), 300)));
                         failed = Some(up);
                         set(&state, |s| {
                             s.phase = Phase::Error;

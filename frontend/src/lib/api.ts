@@ -288,18 +288,6 @@ export type Settings = {
   /** Always "" from the server; see SettingsView.github_token_set. */
   github_token: string;
   auto_update: boolean;
-  imessage: {
-    enabled: boolean;
-    to: string;
-    /** Agent that receives iMessage replies; "" ignores them. */
-    agent_id: string;
-    permission: boolean;
-    scheduled_run: boolean;
-    manual_run: boolean;
-    pr_opened: boolean;
-    pr_merged: boolean;
-    update: boolean;
-  };
 };
 
 export type SettingsView = {
@@ -310,8 +298,6 @@ export type SettingsView = {
   /** Restart-only fields saved but not yet in effect. */
   pending_restart: string[];
   running_agents: number;
-  /** Why iMessage replies can't be read, e.g. missing Full Disk Access. */
-  imessage_inbox_error: string | null;
 };
 
 /** Claude plan limits, as in Claude Code's /usage. percent is 0–100. */
@@ -353,7 +339,6 @@ export const api = {
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
-  testImessage: (to: string) => req<{ ok: boolean }>("POST", "/settings/imessage-test", { to }),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),

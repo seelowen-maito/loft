@@ -141,7 +141,7 @@ struct SettingsView: View {
             } footer: {
                 Text(store.info?.supports(.push) == true
                      ? "These three come from this iPhone while Loft is open or was just in use. With Loft closed, the Push kinds below decide what reaches you; the same item never alerts twice."
-                     : "Shown while Loft is open or was just in use. This Loft can't send push notifications yet. Loft's iMessage notifications on the Mac work any time.")
+                     : "Shown while Loft is open or was just in use. This Loft can't send push notifications yet.")
             }
 
             if store.info?.supports(.push) == true, notificationStatus != .denied {

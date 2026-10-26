@@ -158,13 +158,9 @@ EOF
     tip "The first start asks to let codesign use the key: click Always Allow."
   else
     warn "no \"loft\" signing certificate"
-    tip "Without it, permissions below reset on every rebuild. To create it:"
+    tip "Without it, macOS privacy permissions granted to loft reset on every rebuild. To create it:"
     tip "Keychain Access → Certificate Assistant → Create a Certificate… → Name: loft, Certificate Type: Code Signing → Create"
   fi
-  tip "iMessage notifications: sign in to Messages with the Apple ID loft sends from (a separate one works best),"
-  tip "then use Settings → Send test and allow loft to control Messages."
-  tip "iMessage replies also need Full Disk Access: System Settings → Privacy & Security → Full Disk Access → + → ⌘⇧G:"
-  tip "$BIN"
 
   if xcrun simctl help >/dev/null 2>&1; then
     section "iOS Simulator"

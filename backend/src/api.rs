@@ -91,7 +91,6 @@ fn settings_view(state: &AppState) -> Value {
         "restart_fields": crate::settings::RESTART_FIELDS,
         "pending_restart": state.settings.pending_restart(),
         "running_agents": running_count(state),
-        "imessage_inbox_error": *state.inbox_error.lock().unwrap(),
     })
 }
 
@@ -114,21 +113,6 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     };
     state.settings.save(s).map_err(|e| bad(e.to_string()))?;
     Ok(Json(settings_view(&state)))
-}
-
-#[derive(Deserialize)]
-pub struct TestMessage {
-    to: String,
-}
-
-pub async fn test_imessage(Json(m): Json<TestMessage>) -> ApiResult<Value> {
-    if m.to.trim().is_empty() {
-        return Err(bad("Enter a phone number or Apple ID email first"));
-    }
-    crate::notify::deliver(m.to.trim(), "loft: test message. Notifications will arrive here.")
-        .await
-        .map_err(|e| bad(e.to_string()))?;
-    Ok(Json(json!({ "ok": true })))
 }
 
 /// Restart into the binary on disk, applying restart-only settings. Refused while agents run.

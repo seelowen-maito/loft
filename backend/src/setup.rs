@@ -14,6 +14,15 @@ use crate::state::AppState;
 /// The id of Loft's own agent. Fixed, so it is found the same way on every install.
 pub const LOFT_ID: &str = "loft";
 
+/// One line of at most `max` chars.
+fn clip(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(max - 1).collect::<String>())
+}
+
 /// The permission rule that lets an agent create agents without asking each time.
 pub const CREATE_RULE: &str = "mcp__loft__create_agent";
 
@@ -489,7 +498,7 @@ async fn list_projects(state: &AppState, limit: usize) -> String {
         .map(|r| {
             let last = r.last_commit.as_ref().map_or("no commits".into(), |c| {
                 let when = chrono::DateTime::from_timestamp(c.timestamp, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-                format!("last commit {when} \"{}\"", crate::notify::clip(&c.subject, 60))
+                format!("last commit {when} \"{}\"", clip(&c.subject, 60))
             });
             let langs = r.languages.iter().take(3).map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", ");
             let on: Vec<String> = agents.iter().filter(|a| a.project.trim() == r.name).map(|a| a.name.clone()).collect();

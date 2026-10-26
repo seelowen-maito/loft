@@ -9,10 +9,8 @@ mod github_inbox;
 mod grill;
 mod needs_you;
 mod guard;
-mod inbox;
 mod mcp;
 mod mentions;
-mod notify;
 mod prs;
 mod push;
 mod repos;
@@ -69,7 +67,6 @@ async fn main() -> anyhow::Result<()> {
         gh_token: Arc::new(github::TokenCache::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
         settings: Arc::new(settings::Store::load(&data_dir)?),
-        inbox_error: Arc::new(Mutex::new(None)),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
     };
@@ -80,7 +77,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(prs::backfill(state.clone()));
     tokio::spawn(agents::backfill_context(state.clone()));
     tokio::spawn(updater::updater(state.clone(), root.clone()));
-    tokio::spawn(inbox::inbox(state.clone(), data_dir.clone()));
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
@@ -91,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
         .route("/settings", get(api::get_settings).put(api::put_settings))
-        .route("/settings/imessage-test", post(api::test_imessage))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
         .route("/repos", get(api::list_repos))

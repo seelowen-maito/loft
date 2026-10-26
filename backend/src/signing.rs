@@ -1,4 +1,4 @@
-//! macOS keys privacy permissions (Full Disk Access, controlling Messages) to a binary's code signature.
+//! macOS keys privacy permissions (e.g. Full Disk Access) to a binary's code signature.
 //! Cargo builds are ad-hoc signed, so every rebuild would lose them. When the keychain has a code-signing
 //! identity named "loft", sign our own executable with it at startup, so permissions survive updates.
 

@@ -220,9 +220,6 @@ pub async fn ask_permission(
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
-    let name = state.db.get_agent(agent_id).ok().flatten().map(|a| a.name).unwrap_or_default();
-    let why = if reason.is_empty() { String::new() } else { format!(": {}", crate::notify::clip(reason, 200)) };
-    crate::notify::send(state, crate::notify::Notice::Permission, format!("{name} needs permission to use {tool_name}{why}"));
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
     set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
 
@@ -776,7 +773,7 @@ async fn run_process(
 
     let mut got_result = false;
     let mut got_any = false;
-    // Last top-level reply and any error, for the end-of-run iMessage.
+    // Last top-level reply and any error, for mirroring the answer to chats that @-mentioned the agent.
     let mut last_text = String::new();
     let mut run_error: Option<String> = None;
     // tool_use id -> (name, input), to recognise PR-opening calls when their results arrive
@@ -941,12 +938,9 @@ async fn run_process(
                         if let Some((name, input)) = tool_calls.get(&use_id) {
                             if ok && crate::prs::creates_pr(name, input) {
                                 for (slug, n) in crate::github::extract_pr_links(&full) {
-                                    let (state, agent_id, use_id, name) = (state.clone(), agent_id.to_string(), use_id.clone(), agent.name.clone());
+                                    let (state, agent_id, use_id) = (state.clone(), agent_id.to_string(), use_id.clone());
                                     tokio::spawn(async move {
-                                        if let Ok(pr) = crate::prs::register(&state, &agent_id, &slug, n, Some(use_id)).await {
-                                            let title = if pr.title.is_empty() { String::new() } else { format!(": {}", pr.title) };
-                                            crate::notify::send(&state, crate::notify::Notice::PrOpened, format!("{name} opened {slug}#{n}{title}\n{}", pr.url));
-                                        }
+                                        let _ = crate::prs::register(&state, &agent_id, &slug, n, Some(use_id)).await;
                                     });
                                 }
                             }
@@ -1063,29 +1057,6 @@ async fn run_process(
     set_status(state, agent_id, st, text);
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
-    }
-    // Work that came in by iMessage is answered there; the agent may have more queued, so only once idle.
-    let reply_by_imessage = {
-        let mut rt = state.rt.lock().unwrap();
-        let more = rt.queued.get(agent_id).is_some_and(|q| !q.is_empty());
-        !more && rt.imessage_reply.remove(agent_id)
-    };
-    if reply_by_imessage {
-        crate::notify::send_reply(state, match &run_error {
-            _ if killed => format!("{} was stopped.", agent.name),
-            Some(e) => format!("{}'s run failed: {}", agent.name, crate::notify::clip(e, 300)),
-            None if last_text.trim().is_empty() => format!("{} finished without a reply.", agent.name),
-            None => format!("{}: {}", agent.name, last_text.trim()),
-        });
-    } else if !killed && trigger != "compact" && !quiet {
-        // Stopped runs and compactions stay quiet; scheduled and user-started runs are separate notices.
-        let name = &agent.name;
-        let notice = if trigger == "schedule" { crate::notify::Notice::ScheduledRun } else { crate::notify::Notice::ManualRun };
-        crate::notify::send(state, notice, match run_error {
-            Some(e) => format!("{name}'s run failed: {}", crate::notify::clip(&e, 300)),
-            None if last_text.trim().is_empty() => format!("{name} finished."),
-            None => format!("{name}: {}", crate::notify::clip(&last_text, 300)),
-        });
     }
     Ok(RunOutcome::Done)
 }

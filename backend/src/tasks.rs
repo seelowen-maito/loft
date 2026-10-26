@@ -661,7 +661,6 @@ pub async fn activity(State(state): State<AppState>, Query(q): Query<ActivityQue
                 let why = match m.content.as_str() {
                     "schedule" => " (scheduled)",
                     "agent" => " (asked by another agent)",
-                    "imessage" => " (iMessage)",
                     _ => "",
                 };
                 if m.content == "compact" { continue }
@@ -958,7 +957,6 @@ pub(crate) mod tests {
             gh_token: Arc::new(Default::default()),
             update: Arc::new(Mutex::new(Default::default())),
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
-            inbox_error: Arc::new(Mutex::new(None)),
             usage: Arc::new(Default::default()),
             system: Arc::new(Default::default()),
         }

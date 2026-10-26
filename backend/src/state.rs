@@ -70,8 +70,6 @@ pub struct Runtime {
     pub github_inbox: Vec<crate::github_inbox::GhPr>,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
-    /// agents whose current or queued work came in by iMessage; their next reply is texted back
-    pub imessage_reply: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -85,8 +83,6 @@ pub struct AppState {
     pub gh_token: Arc<crate::github::TokenCache>,
     pub update: Arc<Mutex<crate::updater::UpdateStatus>>,
     pub settings: Arc<crate::settings::Store>,
-    /// Why iMessage replies can't be read right now (e.g. no Full Disk Access).
-    pub inbox_error: Arc<Mutex<Option<String>>>,
     /// Last Claude plan usage reading.
     pub usage: Arc<crate::usage::Cache>,
     /// Latest CPU temperature reading.
