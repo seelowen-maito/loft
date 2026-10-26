@@ -23,6 +23,8 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
+  /** Planning: it can grill the user (guided interviews). Off by default. */
+  planning: boolean;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;

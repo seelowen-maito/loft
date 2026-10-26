@@ -99,8 +99,8 @@ pub struct Template {
     pub model: &'static str,
     /// Default schedule, in minutes. 0: it only runs when messaged until it sets its own (`set_schedule`).
     pub interval_minutes: i64,
-    /// Guided interviews (the `grill_*` tools) on, for agents that start by asking the user questions.
-    pub grill: bool,
+    /// Planning on (the grill and its `grill_*` tools), for agents that start by asking the user questions.
+    pub planning: bool,
     /// Its first run, right after it is created: `{creator}` is filled in. Empty: it waits to be messaged.
     pub kickoff: &'static str,
     /// Posted in its chat as its first message when it is created, so the user knows who it is before the
@@ -142,7 +142,7 @@ On each check-in, and whenever the user asks:
 - When the user changes direction, update the roadmap first, then follow it."#,
         model: "sonnet",
         interval_minutes: 0,
-        grill: true,
+        planning: true,
         kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with `mcp__loft__grill_start` in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
         greeting: "Hey! I'm {name}, and I'll be building new features for **{project}**. Before I write any code, I want to know where you want to take it, so I have a few quick questions. Once we agree on a roadmap and how often I should work, I'll start shipping it one pull request at a time.",
     },
@@ -165,7 +165,7 @@ On each check-in:
 If nothing changed, say so in one line."#,
         model: "sonnet",
         interval_minutes: 240,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -189,7 +189,7 @@ On each check-in:
 If you found nothing new, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -212,7 +212,7 @@ On each check-in:
 If everything passes and nothing new needs tests, say so in one line."#,
         model: "sonnet",
         interval_minutes: 720,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -235,7 +235,7 @@ On each check-in:
 If everything is current, say so in one line."#,
         model: "sonnet",
         interval_minutes: 10080,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -257,7 +257,7 @@ On each check-in:
 If the docs are already accurate, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -280,7 +280,7 @@ On each check-in:
 If there is nothing new, say so in one line."#,
         model: "haiku",
         interval_minutes: 180,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -302,7 +302,7 @@ On each check-in:
 If CI is green, say so in one line."#,
         model: "haiku",
         interval_minutes: 120,
-        grill: false,
+        planning: false,
         kickoff: "",
         greeting: "",
     },
@@ -578,7 +578,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "interval_minutes": interval,
         "quiet_hours": quiet,
         "avatar_brief": s("avatar_brief"),
-        "grill": tpl.is_some_and(|t| t.grill),
+        "planning": tpl.is_some_and(|t| t.planning),
     });
 
     let allowed = me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, CREATE_RULE, &patch));
@@ -604,7 +604,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         crate::agents::add_msg(state, &a.id, None, "assistant", "text", &g.replace("{name}", &a.name).replace("{project}", project), json!({ "greeting": true }));
     }
     let starts = match tpl.filter(|t| !t.kickoff.is_empty()) {
-        Some(t) if t.grill => {
+        Some(t) if t.planning => {
             open_interview(state, &a.id, t.kickoff.replace("{creator}", &me.name));
             " It greeted the user and is opening an interview with them now."
         }
@@ -810,7 +810,7 @@ mod tests {
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
-        assert_eq!((a.interval_minutes, a.grill), (0, Some(true)));
+        assert_eq!((a.interval_minutes, a.planning), (0, true));
         assert!(crate::grill::enabled(&a));
         // The avatar run started; the interview is queued right behind it, as a quiet grill run.
         let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
@@ -821,7 +821,7 @@ mod tests {
         // Other templates don't interview and wait to be woken.
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
-        assert_eq!(r.grill, Some(false));
+        assert!(!r.planning);
         assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
     }
 

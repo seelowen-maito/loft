@@ -48,7 +48,6 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     let mut v = serde_json::to_value(a).unwrap();
     agents::run_fields(state, &a.id, &mut v);
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
-    v["grill_enabled"] = json!(crate::grill::enabled(a));
     v
 }
 
@@ -204,11 +203,8 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
             v => Some(v.as_u64().filter(|n| *n <= 20).ok_or_else(|| bad("max_subagents must be null or 0-20"))? as u32),
         };
     }
-    if let Some(v) = p.get("grill") {
-        a.grill = match v {
-            Value::Null => None,
-            v => Some(v.as_bool().ok_or_else(|| bad("grill must be true, false or null"))?),
-        };
+    if let Some(v) = p.get("planning") {
+        a.planning = v.as_bool().ok_or_else(|| bad("planning must be true or false"))?;
     }
     if let Some(v) = str_field("permission_mode") {
         const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan", "manual"];
@@ -285,7 +281,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         permission_mode: "auto".into(),
         subagent_model: String::new(),
         max_subagents: None,
-        grill: None,
+        planning: false,
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -811,7 +807,21 @@ pub async fn open_editor(
 
 #[cfg(test)]
 mod tests {
-    use super::is_plain_id;
+    use super::{apply_patch, is_plain_id};
+
+    #[test]
+    fn planning_is_off_by_default_and_set_through_the_patch() {
+        let st = crate::tasks::tests::state();
+        let mut a = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Orchestrator" }), None).unwrap();
+        assert!(!a.planning, "no name rule");
+        apply_patch(&mut a, &serde_json::json!({ "planning": true })).unwrap();
+        assert!(a.planning);
+        apply_patch(&mut a, &serde_json::json!({ "name": "Planner" })).unwrap();
+        assert!(a.planning, "untouched when not in the patch");
+        assert!(apply_patch(&mut a, &serde_json::json!({ "planning": null })).is_err());
+        apply_patch(&mut a, &serde_json::json!({ "planning": false })).unwrap();
+        assert!(!a.planning);
+    }
 
     #[test]
     fn agent_ids_cannot_leave_the_storage_folder() {

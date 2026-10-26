@@ -199,6 +199,7 @@ pub(crate) mod tests {
             "authorization": "Bearer test-token", "accept": "application/vnd.github+json",
             "user-agent": "loft", "x-github-api-version": "2022-11-28",
         }));
+        assert_eq!(seen[0].body, Value::Null, "a GET sends no body");
 
         let err = get(&st, "/repos/octo/issues-demo/nope").await.unwrap_err();
         assert_eq!(err.to_string(), "GitHub 404: Not Found");

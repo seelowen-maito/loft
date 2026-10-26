@@ -109,9 +109,9 @@ pub struct Question {
     pub answered_at: Option<String>,
 }
 
-/// Grill mode is on per agent. Unset means on for the Orchestrator only, for now.
+/// Grill mode is part of Planning, which is switched on per agent.
 pub fn enabled(a: &Agent) -> bool {
-    a.grill.unwrap_or(a.name == "Orchestrator")
+    a.planning
 }
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
@@ -888,7 +888,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
         return None;
     }
     if !enabled(me) {
-        return Some(Err("Grill mode isn't enabled for you.".into()));
+        return Some(Err("Planning isn't on for you.".into()));
     }
     Some((|| match name {
         "grill_start" => {
@@ -1054,7 +1054,7 @@ When the user asks to be grilled, interviewed or quizzed on something ("grill me
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tasks::tests::{agent, state};
 
@@ -1062,17 +1062,37 @@ mod tests {
         json!({ "text": text, "speak": text })
     }
 
-    #[test]
-    fn enabled_for_the_orchestrator_by_default() {
+    /// A saved agent with Planning on.
+    pub(crate) fn planner(st: &AppState, name: &str) -> Agent {
+        let mut a = agent(st, name);
+        a.planning = true;
+        st.db.save_agent(&a).unwrap();
+        a
+    }
+
+    #[tokio::test]
+    async fn only_agents_with_planning_can_grill() {
         let st = state();
+        // The old name rule is gone: an "Orchestrator" without Planning is an ordinary agent.
         let mut o = agent(&st, "Orchestrator");
-        let mut x = agent(&st, "Helper");
-        assert!(enabled(&o) && !enabled(&x));
-        o.grill = Some(false);
-        x.grill = Some(true);
-        assert!(!enabled(&o) && enabled(&x));
-        assert_eq!(mcp_call(&st, &agent(&st, "Other"), "grill_state", &json!({})), Some(Err("Grill mode isn't enabled for you.".into())));
+        assert!(!enabled(&o) && prompt_section(&o).is_empty());
+        assert_eq!(mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing", "questions": [q("Who pays?")] })), Some(Err("Planning isn't on for you.".into())));
+        assert_eq!(mcp_call(&st, &o, "grill_state", &json!({})), Some(Err("Planning isn't on for you.".into())));
         assert_eq!(mcp_call(&st, &o, "remember", &json!({})), None);
+        // A start request, tagged or typed, is delivered as a normal message and opens nothing.
+        for grill in [Some(json!({ "role": "start_request" })), None] {
+            let r = on_user_message(&st, &o, "grill me on pricing", grill.as_ref(), json!({})).unwrap();
+            assert!(matches!(r, Routed::Normal(_)));
+        }
+        assert!(active(&st, &o.id).is_none());
+
+        o.planning = true;
+        st.db.save_agent(&o).unwrap();
+        assert!(enabled(&o) && prompt_section(&o).contains("# Grill mode"));
+        let r = on_user_message(&st, &o, "grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).unwrap();
+        assert!(matches!(r, Routed::Handled { .. }));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        assert!(mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing", "questions": [q("Who pays?")] })).unwrap().is_ok());
     }
 
     #[test]
@@ -1089,7 +1109,7 @@ mod tests {
     #[test]
     fn answers_post_the_next_question_and_wake_the_agent_when_the_queue_runs_out() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         let r = mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing", "questions": [q("Monthly or yearly?"), q("Free trial?")] }));
         assert!(r.unwrap().is_ok());
         let s = active(&st, &o.id).unwrap();
@@ -1130,7 +1150,7 @@ mod tests {
     #[test]
     fn repeated_follow_ups_are_dropped() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("Monthly or yearly?"), q("B?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "yearly", None, json!({})).ok().unwrap();
         assert!(mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("**Monthly or yearly?**")] })).unwrap().is_err());
@@ -1141,7 +1161,7 @@ mod tests {
     #[test]
     fn follow_ups_can_jump_the_queue_and_restart_an_empty_one() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
         mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("A2?")], "position": "next" })).unwrap().unwrap();
         on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
@@ -1157,7 +1177,7 @@ mod tests {
     #[test]
     fn start_request_prepares_a_session_and_a_new_start_supersedes_the_old_one() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         let start = json!({ "role": "start_request" });
         let Routed::Handled { wake, .. } = on_user_message(&st, &o, "Grill me on pricing", Some(&start), json!({})).unwrap() else { panic!() };
         assert!(wake.unwrap().prompt.contains("grill_start"));
@@ -1176,7 +1196,7 @@ mod tests {
     fn a_typed_start_request_replaces_the_open_grill_instead_of_answering_it() {
         for paused in [false, true] {
             let st = state();
-            let o = agent(&st, "Orchestrator");
+            let o = planner(&st, "Orchestrator");
             mcp_call(&st, &o, "grill_start", &json!({ "topic": "Settings screen", "questions": [q("Who uses it?"), q("B?")] })).unwrap().unwrap();
             let old = active(&st, &o.id).unwrap().id;
             if paused {
@@ -1199,7 +1219,7 @@ mod tests {
     #[test]
     fn typed_commands_skip_decide_and_go_back() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?"), q("C?"), q("D?")] })).unwrap().unwrap();
         let qs = |st: &AppState| active(st, &o.id).unwrap();
 
@@ -1238,7 +1258,7 @@ mod tests {
     #[test]
     fn pause_resume_and_long_text_is_an_answer() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "hold on", None, json!({})).ok().unwrap();
         assert_eq!(active(&st, &o.id).unwrap().status, "paused");
@@ -1255,7 +1275,7 @@ mod tests {
     #[test]
     fn stop_ends_at_once_and_the_agent_still_writes_the_summary() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
         let id = active(&st, &o.id).unwrap().id;
         let Routed::Handled { wake, .. } = on_user_message(&st, &o, "That's enough", None, json!({})).unwrap() else { panic!() };
@@ -1272,7 +1292,7 @@ mod tests {
     fn natural_stop_wordings_end_the_grill_instead_of_answering() {
         for text in ["stop grill session", "Can we end the interview now?", "encerra a sessão do grill"] {
             let st = state();
-            let o = agent(&st, "Orchestrator");
+            let o = planner(&st, "Orchestrator");
             mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
             let id = active(&st, &o.id).unwrap().id;
             on_user_message(&st, &o, text, None, json!({})).unwrap();
@@ -1285,7 +1305,7 @@ mod tests {
     #[test]
     fn undo_turns_a_misread_command_back_into_the_answer() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("What comes after design?"), q("B?")] })).unwrap().unwrap();
         let Routed::Handled { message, .. } = on_user_message(&st, &o, "next", None, json!({})).unwrap() else { panic!() };
         let mid = message.unwrap().id;
@@ -1307,7 +1327,7 @@ mod tests {
         assert_eq!(guess_lang("Me sabatina sobre o nome do próximo recurso. O que é o recurso? Quem vai usar?"), "pt");
         assert_eq!(guess_lang("Grill me on pricing. Who is the main buyer? What should it cost?"), "en");
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "Nome do recurso", "questions": [q("Qual é o nome que você prefere?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "pausa", None, json!({})).ok().unwrap();
         let rows: Vec<String> = st.db.list_messages(&o.id, 20, None).unwrap().into_iter().filter(|m| m.kind == "notice").map(|m| m.content).collect();
@@ -1317,7 +1337,7 @@ mod tests {
     #[test]
     fn commands_need_a_question_on_screen() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?")] })).unwrap().unwrap();
         let mut s = active(&st, &o.id).unwrap();
         assert_eq!(apply_command(&st, &mut s, "back", None).err().map(|e| e.1), Some("no_previous_question".into()));
@@ -1329,7 +1349,7 @@ mod tests {
     #[test]
     fn idle_grills_pause_then_end_and_still_get_a_summary() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
         let now = chrono::Utc::now();
@@ -1351,7 +1371,7 @@ mod tests {
     #[test]
     fn the_agent_cannot_end_while_a_question_waits() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
         // A revision run adds a follow-up, which goes on screen right away...
@@ -1365,7 +1385,7 @@ mod tests {
     #[test]
     fn the_end_writes_a_notes_file_in_the_workspace() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Orchestrator");
         mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing / ../../etc", "questions": [q("Monthly or yearly?"), q("Trial?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "Yearly", None, json!({})).ok().unwrap();
         on_user_message(&st, &o, "skip", None, json!({})).ok().unwrap();

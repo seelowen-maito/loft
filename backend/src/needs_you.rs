@@ -624,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn gathers_everything_waiting_on_the_user_in_order() {
         let st = state();
-        let (dev, qa, orch) = (agent(&st, "Dev"), agent(&st, "QA"), agent(&st, "Orchestrator"));
+        let (dev, qa, orch) = (agent(&st, "Dev"), agent(&st, "QA"), crate::grill::tests::planner(&st, "Orchestrator"));
         assert_eq!(snapshot(&st).unwrap()["count"], json!(0), "nothing waits on a fresh install");
 
         // A permission prompt (with a secret in the command).
