@@ -27,6 +27,17 @@ final class MentionQueryTests: XCTestCase {
         XCTAssertEqual(MentionQuery.matches("agent", in: many, excluding: "Orchestrator").map(\.name).last, "Agent 12")
     }
 
+    /// The backend only delivers a mention within the chat agent's project, so the picker offers no one else.
+    func testOnlyAgentsInTheChatsProjectAreOffered() {
+        let team = [Agent(id: "orch", name: "Orchestrator", project: "loft ", status: "idle"),
+                    Agent(id: "qa", name: "QA Agent", project: "loft", status: "idle"),
+                    Agent(id: "web", name: "Web Dev", project: "imole", status: "idle"),
+                    Agent(id: "free", name: "Helper", status: "idle")]
+        XCTAssertEqual(MentionQuery.matches("", in: team, excluding: "Orchestrator").map(\.name), ["QA Agent"])
+        XCTAssertEqual(MentionQuery.matches("", in: team, excluding: "Helper").map(\.name), [], "no project: only others without one")
+        XCTAssertEqual(MentionQuery.matches("", in: team, excluding: "Unknown").count, 4, "chat's agent not loaded: no filter")
+    }
+
     func testPickingPutsTheExactNameTheBackendMatches() {
         XCTAssertEqual(MentionQuery.insert(agents[2], into: "can you check this @ho"), "can you check this @Hosting Dev ")
         XCTAssertEqual(MentionQuery.start(""), "@")

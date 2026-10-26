@@ -130,6 +130,7 @@ final class LoftUITests: XCTestCase {
         let qa = app.buttons["mention-QA Agent"]
         XCTAssertTrue(qa.appears(timeout: 5), "the agents show without typing")
         XCTAssertFalse(app.buttons["mention-Orchestrator"].exists, "not this chat's own agent")
+        XCTAssertFalse(app.buttons["mention-Docs Agent"].exists, "another project: the backend would not deliver it")
         qa.tap()
         XCTAssertEqual(composerValue(app), "@QA Agent ")
         XCTAssertFalse(qa.exists, "the list goes once one is picked")

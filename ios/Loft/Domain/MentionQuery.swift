@@ -14,13 +14,19 @@ enum MentionQuery {
     }
 
     /// Agents whose name starts with the query (any word of it, so "dev" finds "Web Dev"), not the chat's own.
-    /// All of them: the picker scrolls, so no agent is left out however many there are.
+    /// All of them: the picker scrolls, so no agent is left out however many there are. Only agents in the chat
+    /// agent's project: the backend delivers a mention to no one else (as the web composer, Chat.tsx).
     static func matches(_ q: String, in agents: [Agent], excluding name: String) -> [Agent] {
-        agents.filter { a in
-            a.name != name && (q.isEmpty || a.name.lowercased().hasPrefix(q)
+        let project = agents.first { $0.name == name }.map(projectKey)
+        return agents.filter { a in
+            a.name != name && (project == nil || projectKey(a) == project) && (q.isEmpty || a.name.lowercased().hasPrefix(q)
                                || a.name.lowercased().split(separator: " ").contains { $0.hasPrefix(q) })
         }
         .sorted { ($0.name.lowercased().hasPrefix(q) ? 0 : 1, $0.name) < ($1.name.lowercased().hasPrefix(q) ? 0 : 1, $1.name) }
+    }
+
+    private static func projectKey(_ a: Agent) -> String {
+        (a.project ?? "").trimmingCharacters(in: .whitespaces)
     }
 
     /// `text` with the `@…` being typed replaced by the agent's exact name and a space.
