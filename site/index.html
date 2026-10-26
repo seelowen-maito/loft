@@ -260,6 +260,67 @@
   footer .wrap { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
   footer a:hover { color: var(--fg); }
 
+  /* iPhone app */
+  .exp { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid rgba(242, 196, 109, .35); background: rgba(242, 196, 109, .08); color: var(--warn); font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .12em; }
+  .exp i { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+  .phone-wrap { display: flex; justify-content: center; }
+  .phone {
+    position: relative; width: 292px; height: 596px; padding: 12px; border-radius: 48px;
+    background: var(--ink-800); border: 1px solid var(--line-strong);
+    box-shadow: 0 50px 120px -50px rgba(200, 242, 109, .25), inset 0 0 0 2px rgba(255, 255, 255, .03);
+  }
+  .screen { position: relative; height: 100%; border-radius: 38px; background: var(--ink-950); overflow: hidden; padding: 52px 16px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .island { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: 90px; height: 26px; border-radius: 999px; background: #000; }
+  .p-time { position: absolute; top: 15px; left: 30px; font: 600 13px/1 var(--sans); }
+  .p-title { font-size: 26px; font-weight: 600; letter-spacing: -.02em; margin: 4px 2px 2px; }
+  .p-sub { margin: 0 2px 6px; font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); }
+  .p-item { display: flex; gap: 10px; align-items: flex-start; padding: 11px 12px; border-radius: 16px; border: 1px solid var(--line); background: var(--ink-900); }
+  .p-item img { width: 30px; height: 30px; flex: none; }
+  .p-item b { display: block; font-weight: 500; font-size: 13px; }
+  .p-item span { display: block; color: var(--fg-3); font-size: 12px; }
+  .p-item.warn { border-color: rgba(242, 196, 109, .3); background: rgba(242, 196, 109, .05); }
+  .p-acts { display: flex; gap: 6px; margin-top: 8px; }
+  .p-acts .btn, .p-acts .btn-primary { padding: 6px 10px; font-size: 11.5px; }
+  .p-tabs { margin-top: auto; display: flex; justify-content: space-around; padding: 10px 4px 2px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: 10px; text-align: center; }
+  .p-tabs .ico { display: block; margin: 0 auto 3px; width: 18px; height: 18px; }
+  .p-tabs .on { color: var(--accent); }
+  .push {
+    position: absolute; left: 10px; right: 10px; top: 46px; z-index: 2; display: flex; gap: 10px; align-items: center;
+    padding: 10px 12px; border-radius: 18px; background: rgba(33, 35, 40, .92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--line-strong); box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+    animation: push 7s ease-in-out 1.2s infinite both;
+  }
+  .push .appicon { width: 30px; height: 30px; flex: none; border-radius: 8px; background: #000; display: grid; place-items: center; border: 1px solid var(--line-strong); }
+  .push .appicon svg { width: 16px; height: 16px; fill: var(--accent); }
+  .push b { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; }
+  .push b time { font-weight: 400; color: var(--fg-3); font-size: 11px; }
+  .push span { display: block; font-size: 12px; color: var(--fg-2); }
+  @keyframes push { 0% { transform: translateY(-140%); opacity: 0; } 8%, 52% { transform: none; opacity: 1; } 60%, 100% { transform: translateY(-140%); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .push { animation: none; } }
+
+  .guide { max-width: 860px; margin: 96px auto 0; }
+  .guide > .center { margin-bottom: 40px; }
+  .guide ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+  .g-step { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 6px 18px; text-align: left; }
+  .g-step > * { min-width: 0; }
+  .g-step .n { font-family: var(--mono); font-size: 12px; color: var(--accent); padding-top: 4px; }
+  .g-step h4 { margin: 0 0 8px; font-size: 19px; font-weight: 500; letter-spacing: -.01em; }
+  .g-step p, .g-step li { color: var(--fg-2); font-size: 15px; }
+  .g-step p { margin: 0 0 12px; }
+  .g-step p:last-child { margin-bottom: 0; }
+  .g-step ol.sub-steps { list-style: decimal; padding-left: 20px; display: block; margin: 0 0 12px; }
+  .g-step ol.sub-steps li { margin: 4px 0; padding-left: 4px; }
+  .g-step code, .guide-note code { padding: 1px 5px; border-radius: 5px; background: rgba(255, 255, 255, .06); font-family: var(--mono); font-size: 13px; color: var(--fg); }
+  .g-step b { color: var(--fg); font-weight: 500; }
+  .code { margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: var(--ink-950); border: 1px solid var(--line); font: 13px/1.7 var(--mono); color: var(--fg-2); overflow-x: auto; white-space: pre; }
+  .code .c { color: var(--fg-3); } .code .p { color: var(--fg-3); user-select: none; } .code .a { color: var(--accent); }
+  .plans { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 0 12px; }
+  .plans > div { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--ink-850); font-size: 14px; color: var(--fg-2); }
+  .plans b { display: block; margin-bottom: 4px; }
+  .plans .yes { color: var(--good); } .plans .no { color: var(--fg-3); }
+  .g-step a, .guide-note a { color: var(--accent); }
+  .guide-note { margin-top: 22px; text-align: center; font-size: 14px; color: var(--fg-3); }
+
   @media (max-width: 880px) {
     .app-body { grid-template-columns: 1fr; height: auto; }
     .roster { display: none; }
@@ -269,6 +330,7 @@
     .feature + .feature { margin-top: 96px; }
     .any, .steps { grid-template-columns: 1fr; }
     .nav-links .hide-sm { display: none; }
+    .guide { margin-top: 72px; }
   }
   @media (max-width: 560px) {
     .wrap { padding: 0 16px; }
@@ -284,6 +346,9 @@
     .team { height: 380px; }
     .team .node:nth-of-type(2) { left: 62% !important; }
     .week { grid-template-columns: 28px repeat(24, 1fr); gap: 2px; }
+    .plans { grid-template-columns: 1fr; }
+    .g-step { grid-template-columns: minmax(0, 1fr); }
+    .phone { width: 272px; height: 560px; }
   }
 </style>
 </head>
@@ -312,6 +377,7 @@
     <div class="nav-links">
       <a class="hide-sm" href="#features">Features</a>
       <a class="hide-sm" href="#install">Install</a>
+      <a class="hide-sm" href="#iphone">iPhone</a>
       <a class="btn" href="https://github.com/seelowen-maito/loft">
         <svg class="ico" viewBox="0 0 16 16" style="fill:currentColor;stroke:none"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         GitHub
@@ -543,6 +609,138 @@
     </div>
     <div class="reqs"><span>Rust</span><span>Node 22+</span><span>git</span><span>a coding agent, logged in</span><span>gh (optional)</span></div>
     <p style="margin-top:28px;color:var(--fg-3);font-size:14px">Full instructions are in the <a href="https://github.com/seelowen-maito/loft#install" style="color:var(--accent)">README</a>.</p>
+  </div>
+</section>
+
+<section id="iphone">
+  <div class="wrap">
+    <div class="feature">
+      <div class="copytext">
+        <span class="exp"><i></i>Experimental</span>
+        <h2 style="margin-top:18px">loft in your <span class="serif">pocket.</span></h2>
+        <p>A native iPhone app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's not on the App Store yet, so you build it yourself from the repo with Xcode.</p>
+        <ul>
+          <li>Every agent's status, and a chat with each of them</li>
+          <li>Approve or deny permission requests in one tap</li>
+          <li>Hand off and track tasks, and see what needs you</li>
+          <li>Push notifications when an agent is waiting on you</li>
+          <li>Talk to your agents, and hear the replies read aloud</li>
+        </ul>
+      </div>
+      <div class="phone-wrap" aria-hidden="true">
+        <div class="phone">
+          <div class="screen">
+            <span class="p-time">9:41</span><span class="island"></span>
+            <div class="push">
+              <div class="appicon"><svg viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg></div>
+              <div style="min-width:0;flex:1"><b>Builder needs your approval<time>now</time></b><span>Wants to use Bash</span></div>
+            </div>
+            <div class="p-title">Needs you</div>
+            <div class="p-sub">2 waiting · live</div>
+            <div class="p-item warn">
+              <img src="avatars/builder.svg" alt="">
+              <div style="min-width:0"><b>Builder needs your approval</b><span>Wants to run <code style="font-size:11px">npm test -- sync</code></span>
+                <div class="p-acts"><span class="btn-primary">Allow</span><span class="btn">Deny</span></div>
+              </div>
+            </div>
+            <div class="p-item">
+              <img src="avatars/reviewer.svg" alt="">
+              <div style="min-width:0"><b>Reviewer asked you something</b><span>Merge #42 now, or wait for CI?</span></div>
+            </div>
+            <div class="p-item">
+              <img src="avatars/triage.svg" alt="">
+              <div style="min-width:0"><b>Triage finished a task</b><span>Label last week's issues</span></div>
+            </div>
+            <div class="p-tabs">
+              <span><svg class="ico"><use href="#i-house"/></svg>Overview</span>
+              <span><svg class="ico"><use href="#i-bot"/></svg>Agents</span>
+              <span class="on"><svg class="ico"><use href="#i-shield"/></svg>Needs you</span>
+              <span><svg class="ico"><use href="#i-todo"/></svg>Tasks</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide">
+      <div class="center">
+        <div class="eyebrow">Set up the iPhone app</div>
+        <h2>Build it, sign it, <span class="serif">get pinged.</span></h2>
+        <p class="sub">About half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
+      </div>
+      <ol>
+        <li class="card g-step">
+          <div class="n">01</div>
+          <div>
+            <h4>Get an Apple developer account</h4>
+            <p>Any Apple ID can sign the app for your own phone. Push notifications and TestFlight need a paid membership.</p>
+            <div class="plans">
+              <div><b>Free Apple ID</b><span class="yes">Runs on your own iPhone</span><br><span class="no">Reinstall every 7 days · no push · no TestFlight</span></div>
+              <div><b>Apple Developer Program</b><span class="yes">Push notifications · TestFlight · builds last a year</span><br><span class="no">US$99 a year</span></div>
+            </div>
+            <ol class="sub-steps">
+              <li>For the paid plan, enroll at <a href="https://developer.apple.com/programs/enroll/">developer.apple.com/programs</a>. Approval can take a day or two.</li>
+              <li>In Xcode, open <b>Settings → Accounts</b>, press <b>+</b> and sign in with that Apple ID.</li>
+              <li>Find your <b>Team ID</b>, 10 characters like <code>ABCDE12345</code>: on <a href="https://developer.apple.com/account">developer.apple.com/account</a> under <b>Membership details</b>. With a free Apple ID, it's the team Xcode shows in <b>Signing &amp; Capabilities</b> once you pick your Personal Team.</li>
+            </ol>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">02</div>
+          <div>
+            <h4>Set up Xcode with your team and app id</h4>
+            <p>Your team and bundle id stay out of the repo, in a local file that git ignores. The bundle id has to be unique on Apple's side, so use a reverse domain of your own.</p>
+<div class="code"><span class="p">$ </span>cd ~/loft/ios
+<span class="p">$ </span>cp Config/Local.xcconfig.example Config/Local.xcconfig</div>
+            <p>Then edit <code>ios/Config/Local.xcconfig</code>:</p>
+<div class="code">LOFT_TEAM_ID = <span class="a">ABCDE12345</span>        <span class="c">// your Team ID from step 1</span>
+LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// your app id</span></div>
+            <ol class="sub-steps">
+              <li>Open <code>ios/Loft.xcodeproj</code> in Xcode (16 or newer). Signing is automatic, so Xcode registers the app id and makes the profiles for you.</li>
+              <li>Plug in your iPhone, choose it as the run destination and press <b>Run</b>.</li>
+              <li>The first time, turn on <b>Settings → Privacy &amp; Security → Developer Mode</b> on the phone. With a free Apple ID, also trust yourself under <b>Settings → General → VPN &amp; Device Management</b>.</li>
+            </ol>
+            <p>Free Apple ID: personal teams can't sign push, so remove <b>Push Notifications</b> and <b>Time Sensitive Notifications</b> under <b>Signing &amp; Capabilities</b> before you build.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">03</div>
+          <div>
+            <h4>Let the phone reach loft</h4>
+            <p>The app talks to loft on your Mac. The easiest way is <a href="https://tailscale.com">Tailscale</a>, which keeps it private to your own devices. Turn on HTTPS certificates in the Tailscale admin console, then on the Mac:</p>
+<div class="code"><span class="p">$ </span>tailscale serve --bg 7420
+<span class="p">$ </span>tailscale serve status   <span class="c"># shows https://your-mac.your-tailnet.ts.net</span></div>
+            <p>Install Tailscale on the iPhone and sign in to the same tailnet. Open loft, enter the <code>https://….ts.net</code> address, tap <b>Test connection</b>, then <b>Save and connect</b>. Don't use <code>tailscale funnel</code>, which makes loft public.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">04</div>
+          <div>
+            <h4>Turn on push notifications</h4>
+            <p>Needs the paid membership. loft sends pushes straight to Apple with your own key, with names and titles only, never message text or tool input.</p>
+            <ol class="sub-steps">
+              <li>On <a href="https://developer.apple.com/account/resources/identifiers/list">developer.apple.com → Identifiers</a>, open your app id (<code>com.yourname.loft</code>), tick <b>Push Notifications</b> and save.</li>
+              <li>Under <b>Keys</b>, press <b>+</b>, name it “loft push”, tick <b>Apple Push Notifications service (APNs)</b>, then register.</li>
+              <li>Download <code>AuthKey_XXXXXXXXXX.p8</code>. Apple lets you download it <b>only once</b>, so keep a copy in your password manager.</li>
+              <li>In loft on the Mac, open <b>Settings → Push notifications</b>, choose the <code>.p8</code> file (the key id is read from its name), enter your Team ID and save. The phone tells loft its bundle id when it signs up for pushes.</li>
+              <li>Run the app on the phone again, allow notifications when it asks, then press <b>Send test push</b> next to your phone in Settings.</li>
+            </ol>
+            <p>The key is stored outside the repo with owner-only access and is never shown to agents. Builds run from Xcode use Apple's sandbox, and TestFlight builds use production. The same key works for both.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">05</div>
+          <div>
+            <h4>Optional: install with TestFlight</h4>
+            <p>Skip the cable and the weekly reinstall. Create the app in <a href="https://appstoreconnect.apple.com">App Store Connect</a> (Apps → + → New App, with your bundle id), then from the repo:</p>
+<div class="code"><span class="p">$ </span>./testflight.sh          <span class="c"># tests, archive, upload</span>
+<span class="p">$ </span>./testflight.sh --fast   <span class="c"># skip the tests</span></div>
+            <p>When the build finishes processing, add yourself under <b>TestFlight → Internal Testing</b>. Stick to internal testers: Apple's review for external testers can't reach a loft on your tailnet.</p>
+          </div>
+        </li>
+      </ol>
+      <p class="guide-note">The app is experimental: expect rough edges. Details are in <a href="https://github.com/seelowen-maito/loft/blob/main/ios/README.md">ios/README.md</a> and <a href="https://github.com/seelowen-maito/loft/blob/main/docs/push.md">docs/push.md</a>.</p>
+    </div>
   </div>
 </section>
 
