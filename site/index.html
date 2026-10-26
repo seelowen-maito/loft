@@ -238,6 +238,17 @@
   .step p { margin: 0; color: var(--fg-2); font-size: 15px; }
   .term { margin-top: auto; padding: 12px 14px; border-radius: 12px; background: var(--ink-950); border: 1px solid var(--line); font-family: var(--mono); font-size: 13px; overflow-x: auto; white-space: nowrap; }
   .term::before { content: "$ "; color: var(--fg-3); }
+  .install-cmd { max-width: 640px; margin: 40px auto 0; text-align: left; }
+  .install-cmd .eyebrow { display: flex; justify-content: space-between; gap: 12px; margin: 0 4px 10px; }
+  .oneliner { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 20px; border-radius: 14px; background: var(--ink-950); border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 14px; text-align: left; }
+  .oneliner code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  .oneliner code::before { content: "$ "; color: var(--fg-3); }
+  .oneliner button { flex: none; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--ink-800); color: var(--fg-2); cursor: pointer; transition: color .15s, border-color .15s; }
+  .oneliner button:hover { color: var(--fg); }
+  .oneliner button .ico { width: 16px; height: 16px; }
+  .install-cmd + .cta { margin-top: 18px; }
+  .oneliner button.done { color: var(--accent); border-color: var(--accent); }
+  .hero .install-cmd, .final .install-cmd { margin-top: 34px; }
   .reqs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 28px; }
   .reqs span { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; color: var(--fg-2); }
 
@@ -287,6 +298,7 @@
   <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-checks" viewBox="0 0 24 24"><path d="M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
@@ -321,10 +333,8 @@
     </svg>
     <h1>Where your coding agents <span class="serif">hang out.</span></h1>
     <p class="lede">loft is a small layer on top of the coding agent you already use. It starts agents for you, keeps them working on a schedule, lets them talk to each other, and gives them memory that lasts. You watch and steer from the outside.</p>
-    <div class="cta">
-      <a class="btn-primary lg" href="https://github.com/seelowen-maito/loft#install">Install loft</a>
-      <a class="btn lg" href="https://github.com/seelowen-maito/loft">View on GitHub</a>
-    </div>
+    <div class="install-cmd"><div class="eyebrow"><span>One-line installer</span><span>macOS · Linux</span></div><div class="oneliner"><code>curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash</code><button type="button" aria-label="Copy install command" title="Copy"><svg class="ico"><use href="#i-copy"/></svg></button></div></div>
+    <div class="cta"><a class="btn lg" href="https://github.com/seelowen-maito/loft">View on GitHub</a></div>
 
     <div class="app" aria-hidden="true">
       <div class="app-top">
@@ -524,10 +534,11 @@
   <div class="wrap">
     <div class="eyebrow">Install</div>
     <h2>Up and running in a few minutes.</h2>
-    <p class="sub">One script checks what you need, tells you how to fix anything missing and builds loft.</p>
+    <p class="sub">One command downloads loft, checks what you need, tells you how to fix anything missing and builds it.</p>
+    <div class="install-cmd"><div class="eyebrow"><span>One-line installer</span><span>macOS · Linux</span></div><div class="oneliner"><code>curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash</code><button type="button" aria-label="Copy install command" title="Copy"><svg class="ico"><use href="#i-copy"/></svg></button></div></div>
     <div class="steps">
-      <div class="card step"><div class="n">01</div><h4>Clone the repo</h4><p>Grab the source from GitHub.</p><div class="term">git clone https://github.com/seelowen-maito/loft</div></div>
-      <div class="card step"><div class="n">02</div><h4>Run setup</h4><p>Checks requirements, asks where your repos live and builds. On macOS it can run loft in the background.</p><div class="term">./setup.sh</div></div>
+      <div class="card step"><div class="n">01</div><h4>Run the installer</h4><p>Downloads loft to <code>~/loft</code> and checks for Rust, Node, git and your coding agent, with a fix for anything missing.</p></div>
+      <div class="card step"><div class="n">02</div><h4>Answer a few questions</h4><p>Where your repos live, and on macOS whether loft should run in the background, starting at login.</p></div>
       <div class="card step"><div class="n">03</div><h4>Open loft</h4><p>Create your first agent and check Settings to finish setup.</p><div class="term">open http://localhost:7420</div></div>
     </div>
     <div class="reqs"><span>Rust</span><span>Node 22+</span><span>git</span><span>a coding agent, logged in</span><span>gh (optional)</span></div>
@@ -539,10 +550,8 @@
   <div class="wrap">
     <h2>Give your agents a place <span class="serif">to hang out.</span></h2>
     <p class="sub" style="margin:0 auto">Open source and running on your own machine.</p>
-    <div class="cta">
-      <a class="btn-primary lg" href="https://github.com/seelowen-maito/loft#install">Install loft</a>
-      <a class="btn lg" href="https://github.com/seelowen-maito/loft">Star on GitHub</a>
-    </div>
+    <div class="install-cmd"><div class="eyebrow"><span>One-line installer</span><span>macOS · Linux</span></div><div class="oneliner"><code>curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash</code><button type="button" aria-label="Copy install command" title="Copy"><svg class="ico"><use href="#i-copy"/></svg></button></div></div>
+    <div class="cta"><a class="btn lg" href="https://github.com/seelowen-maito/loft">Star on GitHub</a></div>
   </div>
 </section>
 
@@ -571,6 +580,20 @@
     });
     el.innerHTML = html;
   })();
+
+  // Copy the install command; the icon turns into a check for a moment.
+  document.querySelectorAll(".oneliner button").forEach(function (btn) {
+    if (!navigator.clipboard) return;
+    var icon = btn.querySelector("use");
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(btn.previousElementSibling.textContent).then(function () {
+        icon.setAttribute("href", "#i-check");
+        btn.classList.add("done");
+        btn.title = "Copied";
+        setTimeout(function () { icon.setAttribute("href", "#i-copy"); btn.classList.remove("done"); btn.title = "Copy"; }, 1600);
+      });
+    });
+  });
 </script>
 </body>
 </html>

@@ -20,6 +20,12 @@
   <a href="#why-loft">Why loft</a>
 </p>
 
+**One-line installer**
+
+```sh
+curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+```
+
 ---
 
 loft is a small layer that sits on top of the coding agent you already use. It starts agents for you, keeps them working on a schedule, lets them talk to each other, and gives them memory that lasts. You watch and steer from the outside.
@@ -48,11 +54,15 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 
 ## Install
 
+**One-line installer**
+
 ```sh
-./setup.sh
+curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
 ```
 
-The script checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. It's safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+
+Already have a clone? Run `./setup.sh` from it instead.
 
 To run loft in the foreground instead, use `./start.sh`.
 
