@@ -156,18 +156,29 @@ On each check-in, and whenever the user asks:
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets and hand them to the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
-        prompt: r#"You lead the team of agents working on **{project}** (`{path}`): you plan with the user and hand ready work to the team.
+        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate, plan with the user and coordinate the team. You never write or edit product code, approve, or merge.
 
-## Plan
-When the user brings an idea, or asks to be grilled on one, plan it with them using your Planning tools: look up what you can in the code yourself, ask only for decisions, and give a recommendation with every question. When the plan is settled, turn it into a spec and tickets.
+Work only in your clone in your workspace; pull the default branch before you investigate.
 
-## Hand out the work
-When there are tickets ready for agents, give each one to the team member whose job it fits (`mcp__loft__create_task`), one ticket per task, blockers first. Follow the tasks through, answer the team's questions, and tell the user what landed and what is waiting on them.
+## Questions and investigations
+- Answer from the code, not memory: read the files in your clone and cite them as `path:line`. For broad searches use an Explore subagent.
+- If the answer leads to work, offer to turn it into a ticket. Don't create one unasked.
 
-## Rules
-- Never write the feature code yourself: the team builds, you plan and coordinate.
-- Never create or delete agents. If the team is missing a role, tell the user and suggest asking `loft` to set it up.
-- When a decision belongs to the user, ask instead of guessing."#,
+## Planning
+Plan with your Planning tools: a grill when the user asks for one, a spec and tickets once the plan is settled, or a single ticket for a small change.
+
+## Handing out work (only when the user asks)
+- Give one ticket at a time to the team member whose job fits (`mcp__loft__create_task`): the next one whose blockers are all closed on GitHub. Label it `in-progress`.
+- On a shared feature branch, a ticket is done when the team's reviewers have passed its commits. When every ticket is done, have the developer open one PR from the branch to the default branch.
+
+## Tracking
+- A PR is ready when every reviewer on the team (code review, QA, security: whoever this project has) has passed it and nothing asks for changes. Then tell the user, with the link.
+- Count changes-requested rounds per PR. At 3 rounds, or when anyone says they're blocked, label the ticket `needs-human` and tell the user why.
+- When someone reports a bug found along the way, tell the user and suggest where it fits; don't assign it unasked.
+- If the team is missing a role, tell the user and suggest asking `loft` to set it up. Never create or delete agents.
+
+## Memory
+One entry per spec (number, status, changes-requested rounds per PR) plus decisions the user made. Remove it when the spec closes. Ticket order lives in GitHub's blocking links, not in memory."#,
         model: "opus",
         interval_minutes: 0,
         planning: true,
@@ -972,5 +983,32 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         assert!(!st.db.get_agent(&first.id).unwrap().unwrap().lead);
         let err = create_agent(&st, &me, &json!({ "template": "lead", "name": "Loner" })).await.unwrap_err();
         assert!(err.starts_with("Only an agent with a project can be Lead"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_lead_gets_the_standard_instructions_and_planning_takes_precedence() {
+        let st = crate::planning::tests::state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "lead-std" })).await.unwrap();
+        let lead = st.db.list_agents().unwrap().into_iter().find(|a| a.project == "lead-std").unwrap();
+        let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
+        assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");
+        assert!(lead.prompt.starts_with(&format!(
+            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate, plan with the user and coordinate the team. You never write or edit product code, approve, or merge.\n\nWork only in your clone in your workspace;"
+        )), "{}", lead.prompt);
+        for want in ["## Handing out work (only when the user asks)", "Label it `in-progress`.", "At 3 rounds, or when anyone says they're blocked, label the ticket `needs-human`", "Ticket order lives in GitHub's blocking links, not in memory."] {
+            assert!(lead.prompt.contains(want), "missing {want}");
+        }
+        assert!(!lead.prompt.contains("{project}") && !lead.prompt.contains("{path}"));
+        let t = template("lead").unwrap();
+        assert_eq!((t.name, t.title, t.model, t.planning, t.lead), ("Lead", "Team lead", "opus", true, true));
+
+        // Planning's rules win over standing instructions on specs and tickets; agents without it don't get them.
+        let sys = crate::agents::system_prompt(&st, &lead);
+        assert!(sys.contains(&lead.prompt));
+        assert!(sys.contains("# Planning: precedence\nThe Planning sections below override your standing instructions on how specs and tickets are written, labelled, linked and published"), "{sys}");
+        let plain = agent(&st, "lead-plain");
+        assert!(!crate::agents::system_prompt(&st, &plain).contains("# Planning: precedence"));
     }
 }

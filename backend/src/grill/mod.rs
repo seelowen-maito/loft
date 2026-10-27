@@ -981,6 +981,9 @@ pub fn prompt_section(a: &Agent) -> &'static str {
     }
     r#"
 
+# Planning: precedence
+The Planning sections below override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). Your standing instructions still set your role, your team and how work is implemented.
+
 # Planning: grilling
 When the user asks to be grilled, interviewed or quizzed on an idea ("grill me on this", "/grill", "me sabatina", "me entrevista sobre isso"), interview them relentlessly until you share an understanding of what to build, instead of replying normally.
 - Design tree: lay out the decisions the idea needs as a tree, where a decision depends on the ones above it. Walk every branch until each decision is resolved.
