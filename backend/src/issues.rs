@@ -1,5 +1,6 @@
 //! The Issues tab: each project's GitHub issues, read-only and fetched live through the GitHub client.
 //! A project is one the agents belong to; its repo comes from the project folder's `origin`.
+//! An issue can be sent to an agent on its repo as a chat message; GitHub itself is never written.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -205,6 +206,40 @@ pub async fn get(State(state): State<AppState>, Path(number): Path<i64>, Query(q
     v["blocked_by_list"] = json!(links(blocked_by));
     v["blocking_list"] = json!(links(blocking));
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+pub struct SendTo {
+    project: String,
+    agent: String,
+}
+
+/// Sends an agent a chat message with the issue's number and link, which wakes it. Only an agent whose
+/// project is on the issue's repo (any project folder of it); no labels or assignees change.
+pub async fn send(State(state): State<AppState>, Path(number): Path<i64>, Json(s): Json<SendTo>) -> ApiResult<Value> {
+    let project = s.project.trim();
+    if !projects(&state)?.iter().any(|p| p == project) {
+        return Err(not_found());
+    }
+    let agent = state.db.get_agent(s.agent.trim())?.ok_or_else(not_found)?;
+    if crate::github::token(&state).is_none() {
+        return Err(bad("GitHub isn't connected"));
+    }
+    let repo = crate::repos::github_repo(&state, project).await.map_err(bad)?;
+    match crate::repos::github_repo(&state, &agent.project).await {
+        Ok(r) if r == repo => {}
+        Ok(r) => return Err(bad(format!("{} works on {r}, not {repo}.", agent.name))),
+        Err(e) => return Err(bad(format!("{} isn't on {repo}: {e}.", agent.name))),
+    }
+    let issue = crate::github::get(&state, &format!("/repos/{repo}/issues/{number}")).await.map_err(|e| bad(e.to_string()))?;
+    if issue.get("pull_request").is_some() {
+        return Err(not_found());
+    }
+    let url = issue["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{repo}/issues/{number}"));
+    let text = format!("Issue #{number} in {repo}: {}\n{url}", issue["title"].as_str().unwrap_or("").trim());
+    let queued = crate::agents::is_running(&state, &agent.id);
+    let msg = crate::agents::enqueue_with(&state, &agent.id, Some(text), json!({}), "user");
+    Ok(Json(json!({ "ok": true, "queued": queued, "message": msg })))
 }
 
 #[cfg(test)]
@@ -437,5 +472,37 @@ mod tests {
         assert_eq!(err.1, "not found");
         fake.route("GET", "/repos/octo/issues-one/issues/7", 200, json!({ "number": 7, "title": "A PR", "pull_request": {} }));
         assert_eq!(get(State(st), Path(7), Query(One { project: "issues-one".into() })).await.unwrap_err().1, "not found");
+    }
+
+    #[tokio::test]
+    async fn sends_an_issue_only_to_an_agent_on_its_repo() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "issues-send", Some("git@github.com:octo/issues-send.git"));
+        project(&st, "issues-send-copy", Some("https://github.com/octo/issues-send"));
+        project(&st, "issues-send-other", Some("https://github.com/octo/elsewhere"));
+        project(&st, "issues-send-folderless", None);
+        let mut i = issue(51, "Send to agent");
+        i["html_url"] = json!("https://github.com/octo/issues-send/issues/51");
+        fake.route("GET", "/repos/octo/issues-send/issues/51", 200, i);
+        let id = |p: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.project == p).unwrap().id;
+        let to = |agent: String| send(State(st.clone()), Path(51), Json(SendTo { project: "issues-send".into(), agent }));
+
+        // Another folder of the same repo counts. Busy, so the message is queued instead of starting a real claude run.
+        let dev = id("issues-send-copy");
+        st.rt.lock().unwrap().running.insert(dev.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        let Json(v) = to(dev.clone()).await.unwrap();
+        let text = "Issue #51 in octo/issues-send: Send to agent\nhttps://github.com/octo/issues-send/issues/51";
+        assert_eq!((&v["queued"], &v["message"]["role"], &v["message"]["content"]), (&json!(true), &json!("user"), &json!(text)));
+        assert_eq!(st.db.list_messages(&dev, 10, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), [text]);
+        assert_eq!(st.rt.lock().unwrap().queued[&dev], [text], "it wakes on it");
+
+        let err = to(id("issues-send-other")).await.unwrap_err();
+        assert_eq!(err.1, "issues-send-other-dev works on octo/elsewhere, not octo/issues-send.");
+        let err = to(id("issues-send-folderless")).await.unwrap_err();
+        assert!(err.1.starts_with("issues-send-folderless-dev isn't on octo/issues-send: The project folder "), "{}", err.1);
+        assert!(st.db.list_messages(&id("issues-send-other"), 10, None).unwrap().is_empty());
+        assert_eq!(to("nobody".into()).await.unwrap_err().1, "not found");
+        assert!(fake.seen("/").iter().all(|s| s.method == "GET"), "no labels or assignees change");
     }
 }

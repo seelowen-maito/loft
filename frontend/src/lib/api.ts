@@ -430,6 +430,8 @@ export const api = {
   /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
   issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/issues?project=${encodeURIComponent(project)}` : "/issues"),
   issue: (project: string, n: number) => req<IssueDetail>("GET", `/issues/${n}?project=${encodeURIComponent(project)}`),
+  /** Sends `agent` a chat message with the issue's number and link, which wakes it; it must be on the issue's repo. */
+  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/issues/${n}/send`, { project, agent }),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),

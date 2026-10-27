@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/{name}/commits", get(api::repo_commits))
         .route("/issues", get(issues::list))
         .route("/issues/{number}", get(issues::get))
+        .route("/issues/{number}/send", post(issues::send))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

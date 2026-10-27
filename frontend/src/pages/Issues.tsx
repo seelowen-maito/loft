@@ -2,8 +2,10 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { Link, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertTriangle, ArrowLeft, CircleCheck, CircleDot, ExternalLink, FolderGit2, KeyRound, MessageSquare, RefreshCw, Search } from "lucide-react";
-import { api, type Issue, type IssueDetail, type IssueLink, type ProjectIssues } from "../lib/api";
+import { AlertTriangle, ArrowLeft, Check, CircleCheck, CircleDot, ExternalLink, FolderGit2, KeyRound, MessageSquare, RefreshCw, Search, Send } from "lucide-react";
+import { api, type Agent, type Issue, type IssueDetail, type IssueLink, type ProjectIssues } from "../lib/api";
+import { agentsOnRepo } from "../lib/issueAgents";
+import { Sticker } from "../components/Sticker";
 import { ProjectHeader, useCollapsed } from "../components/ProjectGroup";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
@@ -159,7 +161,7 @@ export default function IssuesPage() {
       </aside>
       <section className={cx("min-h-0 overflow-y-auto", !selected && "max-lg:hidden")}>
         {selected ? (
-          <IssueView key={`${selected.project}#${selected.number}`} project={selected.project} number={selected.number} published={published} />
+          <IssueView key={`${selected.project}#${selected.number}`} project={selected.project} number={selected.number} published={published} projects={data?.projects ?? []} />
         ) : (
           <div className="flex h-full items-center justify-center text-[13px] text-fg-3">Pick an issue to read it.</div>
         )}
@@ -201,7 +203,7 @@ const IssueRow = memo(function IssueRow({ project, i, active }: { project: strin
   );
 });
 
-function IssueView({ project, number, published }: { project: string; number: number; published: number }) {
+function IssueView({ project, number, published, projects }: { project: string; number: number; published: number; projects: ProjectIssues[] }) {
   const [issue, setIssue] = useState<IssueDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -223,7 +225,10 @@ function IssueView({ project, number, published }: { project: string; number: nu
             <StateIcon state={issue.state} className="size-3.5 !text-ink-950" /> {issue.state === "open" ? "Open" : issue.state_reason === "not_planned" ? "Closed as not planned" : "Closed"}
           </span>
           <span>{issue.author} opened {timeAgo(issue.created_at)}</span>
-          <a href={issue.url} target="_blank" rel="noreferrer" className="btn ml-auto"><ExternalLink className="size-3.5" /> Open on GitHub</a>
+          <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            <a href={issue.url} target="_blank" rel="noreferrer" className="btn"><ExternalLink className="size-3.5" /> Open on GitHub</a>
+            <SendToAgent issue={issue} projects={projects} />
+          </span>
         </div>
       </header>
       {(issue.labels.length > 0 || issue.assignees.length > 0) && (
@@ -261,6 +266,64 @@ function IssueView({ project, number, published }: { project: string; number: nu
       <Links title="Blocked by" items={issue.blocked_by_list} issue={issue} />
       <Links title="Blocking" items={issue.blocking_list} issue={issue} />
     </article>
+  );
+}
+
+/** "Send to agent": a picker of the agents on the issue's repo; picking one messages it the issue's number and link. */
+function SendToAgent({ issue, projects }: { issue: IssueDetail; projects: ProjectIssues[] }) {
+  const [agents, setAgents] = useState<Agent[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [sending, setSending] = useState<string | null>(null);
+  const [sent, setSent] = useState<Agent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    api.agents().then(setAgents).catch((e) => setError(String(e.message ?? e)));
+    const away = (e: MouseEvent) => box.current && !box.current.contains(e.target as Node) && setOpen(false);
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+  const on = agents && agentsOnRepo(agents, projects, issue.repo);
+
+  const pick = (a: Agent) => {
+    setSending(a.id);
+    setError(null);
+    api.sendIssue(issue.project, issue.number, a.id)
+      .then(() => (setSent(a), setOpen(false)))
+      .catch((e) => setError(String(e.message ?? e)))
+      .finally(() => setSending(null));
+  };
+
+  return (
+    <div ref={box} className="relative flex items-center gap-2">
+      {sent && <Link to={`/agents/${sent.id}`} className="flex items-center gap-1 text-[12.5px] text-good hover:underline"><Check className="size-3.5" /> Sent to {sent.name}</Link>}
+      <button className="btn" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-haspopup="menu"><Send className="size-3.5" /> Send to agent</button>
+      {open && (
+        <div className="absolute right-0 top-full z-30 mt-1.5 w-64 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="menu" aria-label="Send to agent">
+          <div className="border-b border-line px-3 py-2 font-mono text-[10.5px] text-fg-3">Agents on {issue.repo}</div>
+          {!on ? (
+            <div className="px-3 py-2.5 text-[12.5px] text-fg-3">{error ? null : "Loading…"}</div>
+          ) : !on.length ? (
+            <div className="px-3 py-2.5 text-[12.5px] text-fg-3">No agent works on this repo. Set one's project in its Config tab.</div>
+          ) : (
+            <div className="max-h-72 overflow-y-auto py-1">
+              {on.map((a) => (
+                <button key={a.id} role="menuitem" disabled={!!sending} onClick={() => pick(a)} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition hover:bg-white/[0.05] disabled:opacity-50">
+                  <Sticker avatar={a.avatar} lead={a.lead} size={26} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] text-fg">{a.name}</span>
+                    {a.title && <span className="block truncate text-[11px] text-fg-3">{a.title}</span>}
+                  </span>
+                  {sending === a.id && <RefreshCw className="size-3.5 animate-spin text-fg-3" />}
+                </button>
+              ))}
+            </div>
+          )}
+          {error && <div className="border-t border-line px-3 py-2 text-[12px] text-bad">{error}</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
