@@ -122,7 +122,7 @@ pub struct GithubItem {
     pub updated_at: String,
 }
 
-async fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)

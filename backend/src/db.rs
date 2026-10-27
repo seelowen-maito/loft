@@ -282,6 +282,14 @@ CREATE TABLE IF NOT EXISTS needs_you_dismissed (
     item_id TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS published_issues (
+    slug TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(slug, kind, key)
+);
 "#;
 
 fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
@@ -451,6 +459,21 @@ impl Db {
             "INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET data = excluded.data",
             params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// The issue Loft already published on `slug` for this kind (`spec`, …) and key, if any.
+    pub fn published_issue(&self, slug: &str, kind: &str, key: &str) -> Result<Option<i64>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT number FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn record_published_issue(&self, slug: &str, kind: &str, key: &str, number: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO published_issues (slug, kind, key, number, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![slug, kind, key, number, now()],
         )?;
         Ok(())
     }

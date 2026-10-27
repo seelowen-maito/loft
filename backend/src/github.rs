@@ -16,6 +16,10 @@ pub struct TokenCache(Mutex<Option<(Instant, Option<String>)>>);
 const TOKEN_TTL: Duration = Duration::from_secs(300);
 
 fn gh_auth_token() -> Option<String> {
+    // Tests never pick up the machine's own `gh` login.
+    if cfg!(test) {
+        return None;
+    }
     let out = std::process::Command::new("gh").args(["auth", "token"]).output().ok()?;
     let t = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (out.status.success() && !t.is_empty()).then_some(t)
@@ -60,7 +64,15 @@ pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body
     let body: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
         let msg = body["message"].as_str().unwrap_or("request failed");
-        bail!("GitHub {}: {msg}", status.as_u16());
+        // 422s say what was wrong in `errors`, e.g. an assignee that can't be assigned.
+        let detail: Vec<String> = body["errors"]
+            .as_array()
+            .map(|es| es.iter().filter_map(|e| e["message"].as_str().map(String::from).or_else(|| e["field"].as_str().map(|f| format!("{f} {}", e["code"].as_str().unwrap_or("invalid"))))).collect())
+            .unwrap_or_default();
+        if detail.is_empty() {
+            bail!("GitHub {}: {msg}", status.as_u16());
+        }
+        bail!("GitHub {}: {msg} ({})", status.as_u16(), detail.join("; "));
     }
     Ok(body)
 }

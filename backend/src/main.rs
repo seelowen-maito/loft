@@ -8,6 +8,7 @@ mod github;
 mod github_inbox;
 mod grill;
 mod needs_you;
+mod planning;
 mod guard;
 mod mcp;
 mod mentions;

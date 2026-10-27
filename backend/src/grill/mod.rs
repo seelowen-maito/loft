@@ -339,7 +339,7 @@ fn transcript(s: &Session) -> String {
 /// The run after the user sends a round.
 fn round_prompt(s: &Session, r: &Round) -> String {
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -894,7 +894,7 @@ When the user asks to be grilled, interviewed or quizzed on an idea ("grill me o
 - Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
-- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered.
+- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
 - What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
 - Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
 - The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`).
@@ -935,7 +935,40 @@ While you grill, build the project's language and record its hard decisions.
 
 - Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
 - If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
-- One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR."#
+- One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
+
+# Planning: spec
+At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns.
+- Offer it: when your project has a repo and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
+- Test seams: before writing the spec, put how it will be tested to the user as a round question with your recommendation: the seams the tests drive (an API, the tools, the UI) and what they assert on, following the prior art in the repo's tests ("Test it through the tools and the API, with a fake GitHub, like the existing grill tests?").
+- Write it in the glossary's terms, respecting the existing ADRs, in the user's language, with this template:
+
+  ```md
+  ## Problem Statement
+  <The problem, from the user's side.>
+
+  ## Solution
+  <What gets built, from the user's side.>
+
+  ## User Stories
+  1. As a <actor>, I want <feature>, so that <benefit>.
+
+  ## Implementation Decisions
+  - <The modules built or changed, their interfaces, schema and API changes, architectural decisions. No file paths or code: they go stale.>
+
+  ## Testing Decisions
+  - <What makes a good test here (behaviour from outside, not internals), the seams agreed in the round, prior art.>
+
+  ## Out of Scope
+  - <What this spec doesn't cover.>
+
+  ## Further Notes
+  - <Anything else: the glossary terms and ADRs it relies on.>
+  ```
+
+- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
+- When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
+- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#
 }
 
 #[cfg(test)]
