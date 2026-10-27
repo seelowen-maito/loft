@@ -243,6 +243,80 @@ final class GrillStoreTests: XCTestCase {
         store.deactivate()
     }
 
+    func testACardAnswerToTheVoiceQuestionMovesTheVoiceOnWithoutSending() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.answerCurrentGrill("Monthly only", agentId: "orch")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q4")
+        // Accept tapped on the card the voice is on: on to the next question.
+        try await store.answerGrill("Yes", questionId: "q4", agentId: "orch")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q5")
+        // "Back" still lands on an answered question on purpose, so its answer can be changed.
+        try await store.sendGrillCommand(.back, agentId: "orch")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q4")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.state, .answered)
+        try await store.sendGrillCommand(.skip, agentId: "orch")
+        // Decide for me on the last card: the voice lets go, and a tap never sends the round.
+        try await store.sendGrillCommand(.decide, agentId: "orch", questionId: "q5")
+        XCTAssertNil(store.grillVoiceAt["orch"])
+        XCTAssertNil(store.currentGrillQuestion(for: "orch"), "every question has an answer")
+        XCTAssertEqual(store.openGrill(for: "orch")?.round, 2)
+        XCTAssertEqual(api.grillCommandsSent, [.decide])
+        store.deactivate()
+    }
+
+    func testARoundSentElsewhereTurnsTheVoiceAnswerAway() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.answerCurrentGrill("Monthly only", agentId: "orch")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q4")
+        api.sendGrillRoundElsewhere()
+        do {
+            try await store.answerCurrentGrill("No", agentId: "orch")
+            XCTFail("the round was already sent")
+        } catch {
+            XCTAssertEqual(APIError.from(error), .server(status: 409, message: "This round was already sent."))
+        }
+        XCTAssertEqual(store.grillVoiceAt["orch"], "q4", "the voice didn't move")
+        XCTAssertEqual(store.openGrill(for: "orch")?.waiting, true, "caught up with the server")
+        XCTAssertNil(store.currentGrillQuestion(for: "orch"))
+        XCTAssertNotNil(store.conversation("orch").last { $0.grill?.role == .answers }, "the sent answers are in the chat")
+        do {
+            try await store.sendGrillCommand(.send, agentId: "orch")
+            XCTFail("the round was already sent")
+        } catch {
+            XCTAssertEqual(APIError.from(error), .server(status: 409, message: "This round was already sent."))
+        }
+        store.deactivate()
+    }
+
+    func testTheLastAnswerIsKeptWhenSendingTheRoundFails() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.answerGrill("Both", questionId: "q3", agentId: "orch")
+        try await store.answerGrill("Yes", questionId: "q4", agentId: "orch")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q5")
+        api.failNextGrillCommand = .timeout
+        do {
+            try await store.answerCurrentGrill("yes", agentId: "orch")
+            XCTFail("the send failed")
+        } catch {
+            let e = APIError.from(error)
+            XCTAssertEqual(e, .roundNotSent("Loft didn't answer in time"))
+            XCTAssertEqual(e.title, "Answer saved, but the round wasn't sent")
+        }
+        let s = try XCTUnwrap(store.openGrill(for: "orch"))
+        XCTAssertEqual(s.round, 2, "not sent")
+        XCTAssertTrue(s.hasOpenRound)
+        XCTAssertEqual(s.questions?.last?.accepted, true, "the answer was saved")
+        XCTAssertNil(store.currentGrillQuestion(for: "orch"))
+        // Send round again: it goes this time.
+        try await store.sendGrillCommand(.send, agentId: "orch")
+        XCTAssertEqual(store.openGrill(for: "orch")?.round, 3)
+        XCTAssertEqual(api.grillCommandsSent, [.send, .send])
+        store.deactivate()
+    }
+
     func testPauseAndEnd() async throws {
         let api = FixtureAPI(grill: true)
         let store = try await store(api)

@@ -635,17 +635,50 @@ final class LoftStore {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let s = openGrill(for: agentId) else { throw APIError.unsupported("No interview in progress") }
-        _ = try await api.sendMessage(agentId: agentId, text: text, clientId: UUID().uuidString,
-                                      meta: GrillMeta.answer(sessionId: s.sessionId, questionId: questionId, discuss: discuss))
+        do {
+            _ = try await api.sendMessage(agentId: agentId, text: text, clientId: UUID().uuidString,
+                                          meta: GrillMeta.answer(sessionId: s.sessionId, questionId: questionId, discuss: discuss))
+        } catch {
+            throw await grillFailure(error, agentId: agentId)
+        }
         await refreshGrill(agentId)
+        moveVoiceOff(questionId, agentId: agentId)
     }
 
     /// A spoken or typed answer to the question the voice is on; then on to the next one, and after the last
-    /// the round is sent.
+    /// the round is sent. If only the send fails, the answer is kept and the error says so.
     func answerCurrentGrill(_ text: String, agentId: String) async throws {
         guard let q = currentGrillQuestion(for: agentId) else { return await send(text, to: agentId) }
         try await answerGrill(text, questionId: q.id, agentId: agentId)
-        try await stepGrill(from: q.id, agentId: agentId)
+        do {
+            try await stepGrill(from: q.id, agentId: agentId)
+        } catch {
+            throw APIError.roundNotSent(APIError.from(error).title)
+        }
+    }
+
+    /// An answer or decision given on a card for the question the voice is on: the voice moves to the next open
+    /// question, never sending the round from a tap (after the last it lets go, and starts again at the first
+    /// open one, if any).
+    private func moveVoiceOff(_ questionId: String, agentId: String) {
+        guard grillVoiceAt[agentId] == questionId else { return }
+        if let qs = openGrill(for: agentId)?.questions, case .ask(let next) = GrillWalk.next(after: questionId, in: qs) {
+            grillVoiceAt[agentId] = next
+        } else {
+            grillVoiceAt[agentId] = nil
+        }
+    }
+
+    /// The round was sent or the interview ended elsewhere (the web, a timeout): catch up, and say so plainly.
+    private func grillFailure(_ error: Error, agentId: String) async -> APIError {
+        let e = APIError.from(error)
+        guard case .server(409, let m) = e else { return e }
+        await catchUpGrill(agentId)
+        switch m {
+        case "grill_closed": return .server(status: 409, message: "This interview has already ended.")
+        case "round_closed", "question_closed": return .server(status: 409, message: "This round was already sent.")
+        default: return e
+        }
     }
 
     /// Send the round, pause, resume, end, summarize or decide (`questionId`, else the question the voice is on,
@@ -665,9 +698,15 @@ final class LoftStore {
             break
         }
         let target = command == .decide ? (questionId ?? current?.id) : nil
-        let updated = try await api.grillCommand(sessionId: s.sessionId, command: command, questionId: target, clientId: UUID().uuidString)
+        let updated: GrillSession?
+        do {
+            updated = try await api.grillCommand(sessionId: s.sessionId, command: command, questionId: target, clientId: UUID().uuidString)
+        } catch {
+            throw await grillFailure(error, agentId: agentId)
+        }
         if let updated { grillSessions[agentId] = updated }
         if command == .send { grillVoiceAt[agentId] = nil }
+        if command == .decide, let questionId { moveVoiceOff(questionId, agentId: agentId) }
         // "I don't know" by voice: on to the next question, as after an answer.
         if command == .decide, questionId == nil, let q = current { try await stepGrill(from: q.id, agentId: agentId) }
         await catchUpGrill(agentId)

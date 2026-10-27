@@ -459,7 +459,8 @@ final class VoiceSession {
             do {
                 try await store.answerCurrentGrill(text, agentId: agentId)
             } catch {
-                phase = .failed("Not sent: \(APIError.from(error).title). Say it again or answer on the card.")
+                let e = APIError.from(error)
+                phase = .failed(e.isRoundNotSent ? "\(e.title). \(e.suggestion)" : "Not sent: \(e.title). Say it again or answer on the card.")
                 return
             }
             if let next = store.currentGrillQuestion(for: agentId), next.id != q.id {

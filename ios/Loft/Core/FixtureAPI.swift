@@ -19,6 +19,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private var grillState: GrillSession?
     /// Commands the app sent, for UI tests to check.
     private(set) var grillCommandsSent: [GrillCommand] = []
+    /// The next grill command fails with this, as when the network drops (tests).
+    var failNextGrillCommand: APIError?
 
     /// The text after `-<name>` on the command line. A value starting with `base64:` is decoded first: free text
     /// with an apostrophe reached the app mangled ("isn't hidden" as "isnt\ hidden") on its way through
@@ -200,14 +202,26 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         grillState = s
     }
 
+    /// The open round sent from another client (the web) while the phone was on it: the agent is now writing
+    /// the next round (tests).
+    func sendGrillRoundElsewhere() {
+        locked { sendGrillRound(next: false) }
+    }
+
     /// The round was sent: the answers go in the chat and the next round follows at once, with what was
-    /// left open carried first (lock held).
-    private func sendGrillRound() {
+    /// left open carried first (lock held). Without `next`, the agent is still working on it.
+    private func sendGrillRound(next postNext: Bool = true) {
         guard var s = grillState, let qs = s.questions, let n = s.round else { return }
         let lines = qs.enumerated().map { i, q in
             "\(i + 1). " + (q.accepted ? "Yes (\(q.recommendation))" : q.state == .open ? "(no answer)" : (q.answer ?? ""))
         }
         grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n"), GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
+        guard postNext else {
+            s.questions = qs.map { var q = $0; if q.state == .open { q.state = .carried }; return q }
+            s.waiting = true
+            grillState = s
+            return
+        }
         let carried = qs.filter { $0.state == .open }.enumerated().map { i, q in
             GrillQuestion(id: "r\(n + 1)c\(i)", text: q.text, speak: q.speak, kind: q.kind, options: q.options,
                           recommendation: q.recommendation, fromRound: q.fromRound ?? n)
@@ -291,6 +305,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             // An answer to a question of the open round is held, not shown in the chat, as the backend does.
             if grill, m.grill?.role == .answer, let qid = m.grill?.questionId {
                 msgs[agentId]?.removeLast()
+                // Like the backend: only a question of the round still waiting for answers takes one.
+                guard let s = grillState, s.state != .ended else { throw APIError.server(status: 409, message: "grill_closed") }
+                guard s.waiting != true, s.questions?.contains(where: { $0.id == qid }) == true else {
+                    throw APIError.server(status: 409, message: "question_closed")
+                }
                 recordGrillAnswer(text, questionId: qid, discuss: meta?["grill"]?["discuss"] == .bool(true))
                 return SendMessageResponse(ok: true, queued: false, duplicate: false, message: nil)
             }
@@ -321,9 +340,15 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession? {
         try check()
         guard grill else { throw APIError.server(status: 404, message: "Not Found") }
-        return locked { () -> GrillSession? in
+        return try locked { () -> GrillSession? in
             grillCommandsSent.append(command)
+            if let e = failNextGrillCommand {
+                failNextGrillCommand = nil
+                throw e
+            }
             guard var s = grillState, s.sessionId == sessionId else { return nil }
+            if s.state == .ended { throw APIError.server(status: 409, message: "grill_closed") }
+            if [.send, .decide].contains(command), s.waiting == true { throw APIError.server(status: 409, message: "round_closed") }
             switch command {
             case .send:
                 sendGrillRound(); s = grillState!
