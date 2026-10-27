@@ -339,6 +339,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
+- Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
@@ -1126,6 +1127,13 @@ mod tests {
         assert!(!a.planning);
         let p = system_prompt(&st, &a);
         assert!(p.contains("`GLOSSARY.md`") && p.contains("`docs/adr/`"), "{p}");
+    }
+
+    #[test]
+    fn every_agent_assigns_the_issues_it_creates_to_the_user() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("Assign every GitHub issue you create to the user") && p.contains("unless the user explicitly says to assign no one or someone else"), "{p}");
     }
 
     #[test]
