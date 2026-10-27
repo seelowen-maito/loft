@@ -619,11 +619,14 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
         "decide" => {
             let r = open_round_mut(s).ok_or_else(closed)?;
             let (n, q) = match question_id {
-                // A question already left to the agent stays decided: deciding it again would post a second row.
-                Some(id) => r.questions.iter_mut().enumerate().find(|(_, q)| q.id == id && q.state != "decided"),
+                Some(id) => r.questions.iter_mut().enumerate().find(|(_, q)| q.id == id),
                 None => r.questions.iter_mut().enumerate().find(|(_, q)| q.state == "open"),
             }
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, "question_closed".into()))?;
+            // Already left to the agent (the voice went back to it): nothing to do, and no second row.
+            if q.state == "decided" {
+                return Ok(None);
+            }
             q.state = "decided".into();
             q.answer = Some(q.recommendation.clone());
             q.accepted = false;
@@ -1480,11 +1483,12 @@ pub(crate) mod tests {
         let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").last().unwrap();
         assert_eq!(row.content, "Pergunta 2 decidida pelo agente: rec for Oferecer teste grátis?");
         assert_eq!((row.meta["grill"]["state"].clone(), row.meta["grill"]["question_id"].clone()), (json!("decided"), json!(ids[1])));
-        // Deciding it again is refused and leaves it as it was.
+        // Deciding it again (the voice went back to it) succeeds and leaves it as it was.
         let notices = |st: &AppState| st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").count();
         let (before, at) = (notices(&st), q.answered_at.clone());
-        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some(&ids[1]), None).err().map(|e| (e.0, e.1)), Some((StatusCode::CONFLICT, "question_closed".into())));
+        assert!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some(&ids[1]), None).unwrap().is_none());
         assert_eq!((notices(&st), active(&st, &o.id).unwrap().rounds[0].questions[1].answered_at.clone()), (before, at));
+        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some("no-such-question"), None).err().map(|e| (e.0, e.1)), Some((StatusCode::CONFLICT, "question_closed".into())));
         let wake = send(&st, &o).unwrap();
         assert!(wake.contains("left it to you: your recommendation is the decision"), "{wake}");
         let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
