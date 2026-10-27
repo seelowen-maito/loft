@@ -617,7 +617,7 @@ private struct ChatItemView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.accent)
                 MessageBubble(message: m, agent: agent)
-                if let card = m.grill?.endCard { EndCardView(card: card, clearWith: clearWith) }
+                if let card = m.grill?.endCard { EndCardView(message: m, card: card, clearWith: clearWith) }
             }
         case .message(let m): MessageBubble(message: m, agent: agent)
         case .tools(_, let calls): ToolGroup(calls: calls)

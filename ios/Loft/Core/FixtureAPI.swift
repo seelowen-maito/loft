@@ -21,6 +21,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private(set) var grillCommandsSent: [GrillCommand] = []
     /// The next grill command fails with this, as when the network drops (tests).
     var failNextGrillCommand: APIError?
+    /// Team setup messages the server sent to `loft`, for tests to check it happens once.
+    private(set) var teamSetupsSent = 0
 
     /// The text after `-<name>` on the command line. A value starting with `base64:` is decoded first: free text
     /// with an apostrophe reached the app mangled ("isn't hidden" as "isnt\ hidden") on its way through
@@ -44,7 +46,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// The agent answers each message two seconds later, with no live event (like one missed in a reconnect).
     private let replies: Bool
 
-    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false) {
+    /// `grillEnded` and `setupSent` are `-fixture-grill-ended` and `-fixture-setup-sent` for unit tests.
+    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, grillEnded: Bool = false, setupSent: Bool = false) {
         self.mode = mode
         self.replies = replies
         self.grill = grill && mode != .empty
@@ -139,9 +142,10 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                               reason: nil, rule: "Bash(xcodebuild *)", status: "pending", createdAt: ago(4)),
         ]
         if self.grill { addGrill(now: now) }
-        // `-fixture-grill-ended`: the interview is over and its end-of-planning card is in the chat.
-        if self.grill, args.contains("-fixture-grill-ended"), var s = grillState {
-            endGrill(&s)
+        // `-fixture-grill-ended`: the interview is over and its end-of-planning card is in the chat
+        // (`-fixture-setup-sent`: the web already sent its team setup message).
+        if self.grill, grillEnded || args.contains("-fixture-grill-ended"), var s = grillState {
+            endGrill(&s, setupSent: setupSent || args.contains("-fixture-setup-sent"))
             grillState = s
         }
         if args.contains("-fixture-risky-permission") {
@@ -243,13 +247,15 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     /// Ends the interview with a summary and the end-of-planning card: a spec, two tickets, no reviewer on the team.
-    private func endGrill(_ s: inout GrillSession) {
+    /// `setupSent`: the web already sent the team setup message.
+    private func endGrill(_ s: inout GrillSession, setupSent: Bool = false) {
         s.state = .ended
         grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
         let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/octo/site/issues/\(n)")!) }
         let card = EndCard(repo: "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
                            nextMessage: "Implement spec #40: hand the ready tickets to the team", missingRoles: ["reviewer"],
-                           setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet."))
+                           setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet.",
+                                        sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil))
         grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
                      GrillMeta(sessionId: s.sessionId, role: .summary, final: true, endCard: card), role: "assistant")
     }
@@ -260,9 +266,33 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     private func appendGrill(id: Int64, role: String, text: String, _ g: GrillMeta, at date: Date) {
-        let tag = (try? JSONEncoder().encode(GrillMetaWire(g))).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) } ?? .null
         msgs["orch", default: []].append(ChatMessage(id: id, agentId: "orch", runId: nil, role: role, kind: "text", content: text,
-                                                    meta: ["grill": tag], createdAt: date))
+                                                    meta: ["grill": Self.wire(g)], createdAt: date))
+    }
+
+    private static func wire(_ g: GrillMeta) -> JSONValue {
+        (try? JSONEncoder().encode(GrillMetaWire(g))).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) } ?? .null
+    }
+
+    /// Like the backend: marks the card's setup sent once and only then sends it to `loft`; a repeat is a duplicate.
+    func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
+        try check()
+        return try locked {
+            guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
+                throw APIError.server(status: 404, message: "not found")
+            }
+            guard var g = m.grill, var setup = g.endCard?.setup else { throw APIError.server(status: 400, message: "This card has no team setup.") }
+            if setup.sentAt != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+            setup.sentAt = JSONCoding.formatDate(Date())
+            g.endCard?.setup = setup
+            m.meta = ["grill": Self.wire(g)]
+            msgs[agentId]?[i] = m
+            nextId += 1
+            msgs[setup.agentId, default: []].append(ChatMessage(id: nextId, agentId: setup.agentId, runId: nil, role: "user", kind: "text",
+                                                                content: setup.message, meta: nil, createdAt: Date()))
+            teamSetupsSent += 1
+            return SendMessageResponse(ok: true, queued: nil, duplicate: false, message: m)
+        }
     }
 
     private func locked<T>(_ f: () throws -> T) rethrows -> T {

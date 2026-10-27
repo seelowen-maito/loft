@@ -68,6 +68,7 @@ final class GrillDecodingTests: XCTestCase {
         XCTAssertEqual(card.tickets.map(\.url.absoluteString), ["https://github.com/octo/x/issues/41"])
         XCTAssertEqual(card.nextMessage, "Implement spec #40: hand the ready tickets to the team")
         XCTAssertEqual(card.setup?.agentId, "loft")
+        XCTAssertNil(card.setup?.sentAt, "not sent yet")
         XCTAssertEqual(card.missingText, "Dev or reviewer")
         // A full team: no setup button.
         let full = try message(#"{"id": 13, "agent_id": "a", "role": "assistant", "kind": "text", "content": "x", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"role": "summary", "final": true, "end_card": {"repo": "octo/x", "spec": null, "tickets": [], "next_message": "Implement ticket #5", "missing_roles": [], "setup": null}}}}"#)
@@ -208,6 +209,58 @@ final class GrillStoreTests: XCTestCase {
         }
         XCTAssertEqual(store.connection, .connected)
         return store
+    }
+
+    private func endCard(_ store: LoftStore) throws -> ChatMessage {
+        try XCTUnwrap(store.conversation("orch").last { $0.grill?.endCard != nil })
+    }
+
+    /// "Set up the team with loft" goes through the server, which sends it once: the card shows as sent, a second
+    /// tap sends nothing, and a restarted app (a new store) still shows it sent.
+    func testTheTeamSetupIsSentOnceAndStaysSent() async throws {
+        let api = FixtureAPI(grill: true, grillEnded: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        let card = try endCard(store)
+        XCTAssertNil(card.grill?.endCard?.setup?.sentAt)
+
+        try await store.sendTeamSetup(agentId: "orch", messageId: card.id)
+        XCTAssertNotNil(try endCard(store).grill?.endCard?.setup?.sentAt, "the card shows as sent")
+        XCTAssertEqual(store.conversation("orch").filter { $0.id == card.id }.count, 1, "updated in place, not added again")
+        try await store.sendTeamSetup(agentId: "orch", messageId: card.id)
+        XCTAssertEqual(api.teamSetupsSent, 1, "a second tap sends nothing")
+        store.deactivate()
+
+        let restarted = try await self.store(api)
+        try await restarted.loadConversation("orch")
+        XCTAssertNotNil(try endCard(restarted).grill?.endCard?.setup?.sentAt)
+        restarted.deactivate()
+    }
+
+    /// A card the web already sent shows as sent, and a tap on the phone sends nothing more.
+    func testATeamSetupSentFromTheWebShowsAsSent() async throws {
+        let api = FixtureAPI(grill: true, grillEnded: true, setupSent: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        let card = try endCard(store)
+        XCTAssertNotNil(card.grill?.endCard?.setup?.sentAt)
+        try await store.sendTeamSetup(agentId: "orch", messageId: card.id)
+        XCTAssertEqual(api.teamSetupsSent, 0)
+        store.deactivate()
+    }
+
+    /// The server re-sends the card when it is marked sent (from another device): the chat takes the new version.
+    func testAnUpdatedCardFromTheServerReplacesTheOldOne() async throws {
+        let store = try await store(FixtureAPI(grill: true, grillEnded: true))
+        try await store.loadConversation("orch")
+        var card = try endCard(store)
+        var g = try XCTUnwrap(card.grill)
+        g.endCard?.setup?.sentAt = "2026-10-27T10:00:00Z"
+        let tag = try JSONDecoder().decode(JSONValue.self, from: try { let e = JSONEncoder(); e.keyEncodingStrategy = .convertToSnakeCase; return try e.encode(g) }())
+        card.meta = ["grill": tag]
+        store.apply(.message(card))
+        XCTAssertEqual(try endCard(store).grill?.endCard?.setup?.sentAt, "2026-10-27T10:00:00Z")
+        store.deactivate()
     }
 
     func testRestoresTheOpenRoundAndStartsAtItsFirstQuestion() async throws {

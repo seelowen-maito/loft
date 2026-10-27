@@ -224,6 +224,29 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
     }
 
+    /// "Set up the team with loft" sends once: after the tap the card reads "Sent to loft" and can't be tapped again.
+    func testEndOfPlanningCardSendsTheTeamSetupOnce() {
+        let app = openGrillChat(["-fixture-grill-ended"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        app.swipeUp()
+        XCTAssertEqual(setup.label, "Set up the team with loft")
+        setup.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(setup.label, "Sent to loft")
+        XCTAssertFalse(setup.isEnabled)
+    }
+
+    /// A card the web already sent shows as sent on the phone, with nothing left to tap.
+    func testEndOfPlanningCardSentFromTheWeb() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-setup-sent"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        XCTAssertEqual(setup.label, "Sent to loft")
+        XCTAssertFalse(setup.isEnabled)
+    }
+
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
     /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
     func testGrillRoundCardsAnswersAndSend() {

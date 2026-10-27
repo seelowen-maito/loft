@@ -101,6 +101,8 @@ struct EndCard: Codable, Hashable {
     struct Setup: Codable, Hashable {
         var agentId: String
         var message: String
+        /// When the server sent it to `loft` (RFC 3339), from this phone, another one or the web; nil until then.
+        var sentAt: String?
     }
     var repo: String
     var spec: Issue?

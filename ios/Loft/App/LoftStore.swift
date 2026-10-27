@@ -445,12 +445,16 @@ final class LoftStore {
         }
     }
 
-    /// Add a message once, in order. Clears the pending copy it confirms.
+    /// Add a message once, in order. Clears the pending copy it confirms. A message already there is replaced:
+    /// the server re-sends one when it changes (an end-of-planning card marked sent).
     private func insert(_ m: ChatMessage) {
         if let cid = m.clientId { pending.removeAll { $0.id == cid } }
         // Only track history for conversations that were opened; others load fresh when opened.
         guard var list = messages[m.agentId] else { return }
-        guard !list.contains(where: { $0.id == m.id }) else { return }
+        if let i = list.firstIndex(where: { $0.id == m.id }) {
+            if list[i] != m { list[i] = m; messages[m.agentId] = list }
+            return
+        }
         if let last = list.last, last.id > m.id {
             list.append(m)
             list.sort { $0.id < $1.id }
@@ -781,6 +785,14 @@ final class LoftStore {
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
     func resetSession(_ agentId: String) async throws { try await requireWrite().resetSession(agentId: agentId) }
+
+    /// "Set up the team with loft" on an end-of-planning card. The server sends the setup message once and marks
+    /// the card sent, so a second tap, an app restart or the web having sent it already sends nothing more.
+    func sendTeamSetup(agentId: String, messageId: Int64) async throws {
+        let r = try await requireWrite().sendTeamSetup(agentId: agentId, messageId: messageId)
+        if let m = r.message { insert(m) }
+        scheduleSave()
+    }
 
     @discardableResult
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {

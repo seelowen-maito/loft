@@ -454,12 +454,16 @@ struct GrillSuggestionBar: View {
 }
 
 /// The end of a planning grill: links to the spec and tickets (they open GitHub), Clear context with the next
-/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`.
+/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`. The
+/// server sends that once and marks the card (`setup.sent_at`), so it shows as sent everywhere and after a restart.
 struct EndCardView: View {
     @Environment(LoftStore.self) private var store
+    /// The final summary the card is on.
+    let message: ChatMessage
     let card: EndCard
     var clearWith: (String) -> Void
-    @State private var sentSetup = false
+    @State private var sendingSetup = false
+    @State private var setupError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -478,18 +482,27 @@ struct EndCardView: View {
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("endCardClear")
                 if let setup = card.setup {
+                    let sent = setup.sentAt != nil
                     Button {
-                        sentSetup = true
-                        Task { await store.send(setup.message, to: setup.agentId) }
+                        sendingSetup = true
+                        setupError = nil
+                        Task {
+                            do { try await store.sendTeamSetup(agentId: message.agentId, messageId: message.id) }
+                            catch { setupError = error.localizedDescription }
+                            sendingSetup = false
+                        }
                     } label: {
-                        Label(sentSetup ? "Sent to loft" : "Set up the team with loft", systemImage: sentSetup ? "checkmark" : "person.2")
+                        Label(sent ? "Sent to loft" : "Set up the team with loft", systemImage: sent ? "checkmark" : "person.2")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(sentSetup)
+                    .disabled(sent || sendingSetup)
                     .accessibilityIdentifier("endCardSetup")
                 }
             }
             .font(.footnote)
+            if let setupError {
+                Text("Not sent: \(setupError)").font(.caption2).foregroundStyle(.red)
+            }
             Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(12)
