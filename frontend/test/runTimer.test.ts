@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fmtDone, fmtElapsed, runElapsed } from "../src/lib/runTimer.ts";
+import { fmtDone, fmtElapsed, lastFinishedRun, runElapsed } from "../src/lib/runTimer.ts";
 
 test("the timer shows seconds, then minutes, then hours", () => {
   assert.equal(fmtElapsed(0), "0s");
@@ -35,4 +35,38 @@ test("the day and time follow the locale", () => {
   const time = end.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
   assert.equal(fmtDone(5_000, end, "de-DE"), `Done in 5s · ${day} ${time}`);
   assert.notEqual(day, "Thu");
+});
+
+const msg = (kind: string, run_id: string | null, at: string, meta: Record<string, any> = {}) => ({ kind, run_id, created_at: `2026-10-29T16:${at}Z`, meta }) as any;
+
+test("a finished run is measured from its run_start to its run_end, like the live timer", () => {
+  const run = [msg("text", null, "20:00"), msg("run_start", "r1", "20:00"), msg("text", "r1", "21:00"), msg("run_end", "r1", "22:23", { duration_ms: 141_000 })];
+  assert.deepEqual(lastFinishedRun(run), { durationMs: 143_000, endedAt: "2026-10-29T16:22:23Z" });
+});
+
+test("a stopped run has no duration of its own: it counts from run_start to run_end", () => {
+  const run = [msg("run_start", "r1", "20:00"), msg("run_end", "r1", "20:30", { stopped: true })];
+  assert.deepEqual(lastFinishedRun(run), { durationMs: 30_000, endedAt: "2026-10-29T16:20:30Z" });
+});
+
+test("the run_end's duration_ms is used when its run_start is not loaded", () => {
+  assert.deepEqual(lastFinishedRun([msg("run_end", "r1", "22:23", { duration_ms: 5_000 })]), { durationMs: 5_000, endedAt: "2026-10-29T16:22:23Z" });
+});
+
+test("a /clear after the run hides the line", () => {
+  const run = [msg("run_start", "r1", "20:00"), msg("run_end", "r1", "20:30", { duration_ms: 30_000 }), msg("clear", null, "21:00")];
+  assert.equal(lastFinishedRun(run), null);
+});
+
+test("a run that failed without a run_end shows no line, not the previous run's", () => {
+  const run = [
+    msg("run_start", "r1", "20:00"), msg("run_end", "r1", "20:13", { duration_ms: 13_000 }),
+    msg("text", null, "21:00"), msg("run_start", "r2", "21:00"), msg("error", "r2", "21:01"),
+  ];
+  assert.equal(lastFinishedRun(run), null);
+});
+
+test("no runs yet, no line", () => {
+  assert.equal(lastFinishedRun([]), null);
+  assert.equal(lastFinishedRun([msg("text", null, "20:00")]), null);
 });

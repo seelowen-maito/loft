@@ -17,6 +17,7 @@ import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
+import { lastFinishedRun } from "../../lib/runTimer";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -124,19 +125,7 @@ export function Chat({
   const visible = showEarlier || lastClear < 0 ? items : items.slice(lastClear);
   const hiddenCount = showEarlier || lastClear < 0 ? 0 : lastClear;
   const fresh = visible.every((it) => it.t === "msg" && it.m.kind === "clear");
-  // The run that ended last, since the latest /clear, for the "Done in" line.
-  const lastRun = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.kind === "clear") return null;
-      if (m.kind !== "run_end") continue;
-      // A stopped run has no duration of its own: measure it from its run_start.
-      const start = messages.find((s) => s.kind === "run_start" && s.run_id === m.run_id);
-      const durationMs = m.meta?.duration_ms ?? (start ? new Date(m.created_at).getTime() - new Date(start.created_at).getTime() : null);
-      return durationMs == null ? null : { durationMs: Number(durationMs), endedAt: m.created_at };
-    }
-    return null;
-  }, [messages]);
+  const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
