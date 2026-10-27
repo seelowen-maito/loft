@@ -42,6 +42,7 @@
 
   --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
   --animate-rise: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-star: star 2.4s ease-in-out infinite;
 }
 
 @keyframes pulse-soft {
@@ -51,6 +52,11 @@
 @keyframes rise {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
+}
+@keyframes star {
+  0% { transform: rotate(0deg) scale(1); opacity: 1; }
+  50% { transform: rotate(90deg) scale(0.8); opacity: 0.55; }
+  100% { transform: rotate(180deg) scale(1); opacity: 1; }
 }
 @keyframes shimmer {
   0% { background-position: -200% 0; }

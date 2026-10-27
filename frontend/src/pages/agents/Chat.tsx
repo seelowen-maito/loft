@@ -16,6 +16,7 @@ import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
+import { RunIndicator } from "../../components/RunTimer";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -123,6 +124,19 @@ export function Chat({
   const visible = showEarlier || lastClear < 0 ? items : items.slice(lastClear);
   const hiddenCount = showEarlier || lastClear < 0 ? 0 : lastClear;
   const fresh = visible.every((it) => it.t === "msg" && it.m.kind === "clear");
+  // The run that ended last, since the latest /clear, for the "Done in" line.
+  const lastRun = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.kind === "clear") return null;
+      if (m.kind !== "run_end") continue;
+      // A stopped run has no duration of its own: measure it from its run_start.
+      const start = messages.find((s) => s.kind === "run_start" && s.run_id === m.run_id);
+      const durationMs = m.meta?.duration_ms ?? (start ? new Date(m.created_at).getTime() - new Date(start.created_at).getTime() : null);
+      return durationMs == null ? null : { durationMs: Number(durationMs), endedAt: m.created_at };
+    }
+    return null;
+  }, [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
@@ -487,15 +501,10 @@ export function Chat({
               </div>
             </div>
           )}
-          {running && (
-            <div className="flex items-center gap-3 py-2 pl-1">
-              <span className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span key={i} className="size-1.5 animate-pulse-soft rounded-full bg-accent" style={{ animationDelay: `${i * 0.18}s` }} />
-                ))}
-              </span>
-              <span className="font-mono text-[12px] text-fg-2">{agent.status_text || "Working…"}</span>
-            </div>
+          {running ? (
+            <RunIndicator running startedAt={agent.last_run_at} status={agent.status_text} />
+          ) : (
+            lastRun && <RunIndicator running={false} durationMs={lastRun.durationMs} endedAt={lastRun.endedAt} />
           )}
         </div>
       </div>
