@@ -262,13 +262,18 @@ fn owners_named<'a>(text: &str, owners: &'a [String]) -> Vec<&'a String> {
     owners.iter().filter(|o| words.contains(&o.to_lowercase().as_str())).collect()
 }
 
-/// True when the user's own answer asks for a public repo ("public", "público", "pública") and says
-/// nothing private or negative next to it ("not public", "privado"), which would make it unclear.
+/// True when the user's own answer asks for a public repo ("public", "público", "públicos") and says
+/// nothing private or negative next to it ("not public", "shouldn't", "privado"), which would make it
+/// unclear. Whole words only: "publicar" and "publica" mean publish, which every yes to the question does.
 fn asks_public(answer: &str) -> bool {
-    const NOT: &[&str] = &["not", "no", "dont", "never", "nao", "nem", "nunca", "sem"];
+    const PUBLIC: &[&str] = &["public", "publicly", "publico", "publicos"];
+    const NOT: &[&str] = &["not", "no", "never", "nao", "nem", "nunca", "jamais", "nenhum", "sem"];
     let a = crate::grill::commands::normalize(answer);
     let words: Vec<&str> = a.split_whitespace().collect();
-    words.iter().any(|w| w.starts_with("public")) && !words.iter().any(|w| w.starts_with("privat") || w.starts_with("privad") || NOT.contains(w))
+    // Apostrophes are dropped, so "shouldn't" arrives as "shouldnt"; "want" and "different" aren't negations.
+    const NT: &[&str] = &["dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent", "shouldnt", "wouldnt", "couldnt", "cant", "cannot", "wont", "mustnt", "neednt", "aint"];
+    let negative = |w: &str| NOT.contains(&w) || NT.contains(&w);
+    words.iter().any(|w| PUBLIC.contains(w)) && !words.iter().any(|w| w.starts_with("privat") || w.starts_with("privad") || negative(w))
 }
 
 /// The yes has to be to this repo: the question names `<owner>/<name>`. The owner is the one the answer
@@ -671,9 +676,8 @@ mod tests {
     async fn a_free_text_yes_stays_private_and_a_translated_option_fixes_the_owner_it_names() {
         let (fake, st) = (fake_github(), state());
         owners_on(&fake);
+        // No creation is routed: fake GitHub is shared by every test, and each create path belongs to one of them.
         let (a, dir) = new_project(&st, "gf-odd", &[("app.js", "1")]);
-        let r = remote(&st, "gf-odd");
-        fake.route("POST", "/orgs/acme/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/acme/gf-odd", "private": true }));
         let create = |qid: &str, args: Value| {
             let (st, a) = (st.clone(), a.clone());
             let mut args = args;
@@ -682,7 +686,10 @@ mod tests {
         };
 
         // A yes in the user's own words that doesn't say public is a private repo under the question's owner.
-        for answer in ["bora", "yes go ahead", "pode", "pode, mas não público", "yes, public? no, keep it private", "sim, publique sem pressa"] {
+        for answer in [
+            "bora", "yes go ahead", "pode", "pode, mas não público", "yes, public? no, keep it private", "sim, publique sem pressa",
+            "sim, pode publicar", "sim, publica", "yes, but it shouldn't be public", "yes, it can't be public", "sim, público jamais", "sim, nenhum público",
+        ] {
             let qid = ask(&st, &a, Some(answer), true);
             let err = create(&qid, json!({ "private": false })).await.unwrap_err();
             assert!(err.contains("which doesn't ask for a public repo"), "{answer}: {err}");
@@ -715,10 +722,26 @@ mod tests {
         for path in ["/user/repos", "/orgs/acme/repos", "/orgs/open-org/repos"] {
             assert!(creations(&fake, path, "gf-odd").is_empty(), "nothing created on {path}");
         }
+    }
 
-        let out = create(&acme, json!({ "owner": "acme" })).await.unwrap();
-        assert!(out.starts_with("Created the private GitHub repo acme/gf-odd"), "{out}");
-        assert_eq!(creations(&fake, "/orgs/acme/repos", "gf-odd"), [json!({ "name": "gf-odd", "private": true })]);
+    #[test]
+    fn only_the_users_own_words_saying_public_make_a_public_repo() {
+        let owners: Vec<String> = ["octo-me", "acme"].map(String::from).to_vec();
+        let q = |answer: &str| -> Question {
+            serde_json::from_value(json!({
+                "id": "q1", "text": "Criar o repositório `octo-me/gf` no GitHub e publicar esta pasta?", "kind": "single_choice",
+                "options": ["Sim, octo-me, privado", "Sim, acme, privado"], "recommendation": "Sim, octo-me, privado",
+                "state": "answered", "answer": answer,
+            }))
+            .unwrap()
+        };
+        for answer in ["sim, público", "yes, make it public", "sim, públicos na acme não... ok, pode", "yes, I want it public"] {
+            let owner = if answer.contains("acme") { "acme" } else { "octo-me" };
+            assert_eq!(check_choice(&q(answer), &owners, owner, "gf", false), if answer.contains("não") { Err(format!("The user answered \"{answer}\", which doesn't ask for a public repo: call create_repo without `private: false`, or ask them again if they want it public.")) } else { Ok(()) }, "{answer}");
+        }
+        assert!(check_choice(&q("Sim, acme, privado"), &owners, "acme", "gf", false).is_err(), "an option is private even when picked");
+        assert_eq!(check_choice(&q("Sim, acme, privado"), &owners, "acme", "gf", true), Ok(()), "the translated option's owner, private");
+        assert!(!asks_public("sim, pode publicar") && !asks_public("publica sim") && !asks_public("yes, public? it isnt"));
     }
 
     #[tokio::test]
