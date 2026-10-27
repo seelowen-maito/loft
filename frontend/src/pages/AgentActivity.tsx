@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
-import { AlertCircle, ArrowRight, Brain, GitMerge, GitPullRequest, Plus, ShieldAlert, Wrench } from "lucide-react";
+import { AlertCircle, ArrowRight, Brain, ChevronDown, ChevronUp, GitMerge, GitPullRequest, Plus, ShieldAlert, Wrench } from "lucide-react";
 import { api, type AgentSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
+import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
@@ -10,6 +11,11 @@ import { StatusPill } from "./agents/Status";
 
 const USER = "var(--color-series-user)";
 const AUTO = "var(--color-series-auto)";
+
+function onResize(cb: () => void) {
+  window.addEventListener("resize", cb);
+  return () => window.removeEventListener("resize", cb);
+}
 
 function sum(a: number[]) {
   return a.reduce((x, y) => x + y, 0);
@@ -161,6 +167,8 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
 
 export function AgentActivity() {
   const [data, setData] = useState<AgentSummary[] | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const perRow = useSyncExternalStore(onResize, () => cardsPerRow(window.innerWidth));
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(() => {
@@ -198,6 +206,10 @@ export function AgentActivity() {
     };
   }, [data]);
 
+  const ordered = useMemo(() => (data ? byActivity(data) : null), [data]);
+  const hidden = ordered ? Math.max(0, ordered.length - perRow) : 0;
+  const shown = ordered && !expanded ? ordered.slice(0, perRow) : ordered;
+
   return (
     <section>
       <div className="mb-4 flex flex-wrap items-end gap-x-6 gap-y-2">
@@ -228,8 +240,8 @@ export function AgentActivity() {
         </div>
       </div>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {data === null && [0, 1, 2].map((i) => <div key={i} className="skeleton h-[300px] rounded-2xl" />)}
-        {data?.map((s, i) => <AgentCard key={s.agent.id} s={s} index={i} />)}
+        {data === null && Array.from({ length: perRow }, (_, i) => <div key={i} className="skeleton h-[300px] rounded-2xl" />)}
+        {shown?.map((s, i) => <AgentCard key={s.agent.id} s={s} index={i} />)}
         {data?.length === 0 && (
           <Link to="/agents" className="panel flex flex-col items-center justify-center gap-2 border-dashed p-8 text-center text-fg-2 transition hover:border-accent/40 hover:text-fg sm:col-span-2 xl:col-span-3">
             <Plus className="size-5 text-accent" />
@@ -237,6 +249,21 @@ export function AgentActivity() {
           </Link>
         )}
       </div>
+      {hidden > 0 && (
+        <div className="mt-4 flex justify-center">
+          <button className="btn" onClick={() => setExpanded((x) => !x)} aria-expanded={expanded}>
+            {expanded ? (
+              <>
+                See less <ChevronUp className="size-3.5" />
+              </>
+            ) : (
+              <>
+                See more ({hidden}) <ChevronDown className="size-3.5" />
+              </>
+            )}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
