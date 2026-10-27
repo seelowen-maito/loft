@@ -218,7 +218,7 @@ struct GrillSession: Codable, Hashable {
     var questions: [GrillQuestion]?
     /// done | stopped | timeout | superseded, once ended.
     var endReason: String?
-    /// en | pt: the language the user started in, for the phrases read aloud; nil until the first round.
+    /// en | pt: the language the user started in, for the phrases read aloud; en until the first round sets it, nil when the server sends none.
     var language: String?
 
     init(sessionId: String, agentId: String?, state: State, topic: String? = nil, startedAt: Date? = nil, round: Int? = nil,

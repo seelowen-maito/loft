@@ -224,7 +224,7 @@ pub fn view(s: &Session) -> Value {
         "started_at": s.started_at,
         "updated_at": s.updated_at,
         "notes_path": s.notes_path,
-        // en | pt, for the phrases the app reads aloud; null until the first round sets it.
+        // en | pt, for the phrases the app reads aloud: en until the first round sets it, null only for sessions saved before it was kept.
         "language": (!s.lang.is_empty()).then_some(&s.lang),
     })
 }
