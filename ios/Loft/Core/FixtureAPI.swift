@@ -73,6 +73,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         ]
         // `-fixture-run-waiting`: the Orchestrator replied and waits on a background task; `-fixture-run-silent`: no output for a while.
         let args = ProcessInfo.processInfo.arguments
+        // `-fixture-lead`: QA leads loft (initials, no sticker) and the Docs Agent leads website (with its sticker).
+        if args.contains("-fixture-lead") {
+            agentList[3].lead = true
+            agentList[4].lead = true
+        }
         // `-fixture-many-agents`: six more idle agents, more than fit in the @ picker without scrolling.
         if args.contains("-fixture-many-agents") {
             for name in ["Android Agent", "Data Agent", "Design Agent", "Infra Agent", "Security Agent", "Web Agent"] {

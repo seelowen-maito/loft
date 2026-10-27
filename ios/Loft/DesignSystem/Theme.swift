@@ -149,6 +149,14 @@ struct AgentAvatar: View {
                         .font(.system(size: size * 0.38, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                 }
+                .overlay {
+                    // A Lead without a drawable sticker still wears its hat, tipped onto the circle's top.
+                    if lead {
+                        StickerImage(svg: StickerRenderer.hatOnly, size: size * 1.25)
+                            .frame(width: size, height: size)
+                            .offset(y: -size * 0.16)
+                    }
+                }
         }
     }
 

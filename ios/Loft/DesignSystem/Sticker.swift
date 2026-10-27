@@ -9,7 +9,7 @@ enum StickerRenderer {
     private static let cache = NSCache<NSString, UIImage>()
 
     /// Drawn over a Lead's art, inside the sticker's border; the same shapes as the web's `CAPTAIN_HAT`.
-    static let captainHat = #"<g transform="rotate(-9 50 6)"><path d="M17 3 C15 -11 85 -11 83 3 L75 12 H25 Z" fill="#ffffff"/><path d="M20 6 L25 12 H75 L80 6 Z" fill="#dfe3ec"/><rect x="24" y="10" width="52" height="8" rx="2" fill="#1f2b5e"/><rect x="24" y="12.5" width="52" height="2" fill="#f2b632"/><path d="M24 17 H76 C73 26 27 26 24 17 Z" fill="#17171c"/><circle cx="50" cy="3" r="5.5" fill="#f2b632"/><circle cx="50" cy="3" r="2.4" fill="#1f2b5e"/></g>"#
+    static let captainHat = ##"<g transform="rotate(-9 50 6)"><path d="M17 3 C15 -11 85 -11 83 3 L75 12 H25 Z" fill="#ffffff"/><path d="M20 6 L25 12 H75 L80 6 Z" fill="#dfe3ec"/><rect x="24" y="10" width="52" height="8" rx="2" fill="#1f2b5e"/><rect x="24" y="12.5" width="52" height="2" fill="#f2b632"/><path d="M24 17 H76 C73 26 27 26 24 17 Z" fill="#17171c"/><circle cx="50" cy="3" r="5.5" fill="#f2b632"/><circle cx="50" cy="3" r="2.4" fill="#1f2b5e"/></g>"##
 
     /// The sticker at `points` wide, or nil if the SVG can't be read (callers fall back to initials).
     /// A Lead's sticker wears the captain hat; the agent's own SVG is never changed.
@@ -21,6 +21,9 @@ enum StickerRenderer {
         cache.setObject(image, forKey: key)
         return image
     }
+
+    /// The hat on its own, as an avatar SVG: worn over the initials fallback.
+    static let hatOnly = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">"# + captainHat + "</svg>"
 
     private static func withHat(_ svg: String) -> String {
         guard let end = svg.range(of: "</svg>", options: .backwards) else { return svg }
