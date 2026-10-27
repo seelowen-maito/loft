@@ -946,7 +946,10 @@ pub(crate) mod tests {
 
     pub(crate) fn state() -> AppState {
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Boot with a temp projects folder so no test writes into the real ~/projects.
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         AppState {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
             cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents") }),

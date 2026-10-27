@@ -1519,7 +1519,9 @@ pub(crate) mod tests {
         let mut o = planner(&st, "Lead");
         o.project = "homebase".into();
         st.db.save_agent(&o).unwrap();
-        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase").join(".git")).unwrap();
+        let repo = st.settings.boot().projects_dir.join("homebase");
+        assert!(repo.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
         round(&st, &o, &["A?"]).unwrap();
         send(&st, &o);
         let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
@@ -1577,7 +1579,9 @@ pub(crate) mod tests {
 
         o.project = "homebase".into();
         st.db.save_agent(&o).unwrap();
-        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase").join(".git")).unwrap();
+        let repo = st.settings.boot().projects_dir.join("homebase");
+        assert!(repo.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
         let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "not a pr" })).unwrap();
         assert!(r.unwrap_err().contains("docs_pr must look like"));
         mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "https://github.com/me/homebase/pull/7" })).unwrap().unwrap();
