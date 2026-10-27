@@ -91,13 +91,13 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "planning" | "lead" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "planning" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, planning: agent.planning ?? false, lead: agent.lead ?? false, interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, planning: agent.planning ?? false, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
@@ -209,6 +209,14 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
           />
           Leads its team
         </label>
+      </Field>
+
+      <Field label="Team role" hint="What it does in its project's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
+        <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
+          <option value="">None</option>
+          <option value="dev">Dev: builds the tickets</option>
+          <option value="reviewer">Reviewer: code review, QA or security</option>
+        </select>
       </Field>
 
       <Field label="Autonomy" hint="How often it wakes up on its own to work on its standing instructions.">

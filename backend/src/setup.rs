@@ -103,6 +103,8 @@ pub struct Template {
     pub planning: bool,
     /// Created as its project's Lead (taking the mark from any other agent there).
     pub lead: bool,
+    /// Its role in the end-of-planning team check: "dev", "reviewer" (code review, QA, security) or "".
+    pub role: &'static str,
     /// Its first run, right after it is created: `{creator}` is filled in. Empty: it waits to be messaged.
     pub kickoff: &'static str,
     /// Posted in its chat as its first message when it is created, so the user knows who it is before the
@@ -146,6 +148,7 @@ On each check-in, and whenever the user asks:
         interval_minutes: 0,
         planning: true,
         lead: false,
+        role: "dev",
         kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with a first round (`mcp__loft__grill_round`) in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
         greeting: "Hey! I'm {name}, and I'll be building new features for **{project}**. Before I write any code, I want to know where you want to take it, so I have a few quick questions. Once we agree on a roadmap and how often I should work, I'll start shipping it one pull request at a time.",
     },
@@ -183,6 +186,7 @@ One entry per spec (number, status, changes-requested rounds per PR) plus decisi
         interval_minutes: 0,
         planning: true,
         lead: true,
+        role: "",
         kickoff: "",
         greeting: "Hi! I'm {name}, the Lead for **{project}**. Bring me an idea and I'll plan it with you: a few rounds of questions, each with my recommendation, then a spec and tickets the team can pick up.",
     },
@@ -207,6 +211,7 @@ If nothing changed, say so in one line."#,
         interval_minutes: 240,
         planning: false,
         lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -232,6 +237,7 @@ If you found nothing new, say so in one line."#,
         interval_minutes: 1440,
         planning: false,
         lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -256,6 +262,7 @@ If everything passes and nothing new needs tests, say so in one line."#,
         interval_minutes: 720,
         planning: false,
         lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -280,6 +287,7 @@ If everything is current, say so in one line."#,
         interval_minutes: 10080,
         planning: false,
         lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -303,6 +311,7 @@ If the docs are already accurate, say so in one line."#,
         interval_minutes: 1440,
         planning: false,
         lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -327,6 +336,7 @@ If there is nothing new, say so in one line."#,
         interval_minutes: 180,
         planning: false,
         lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -350,6 +360,7 @@ If CI is green, say so in one line."#,
         interval_minutes: 120,
         planning: false,
         lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -445,6 +456,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "name": { "type": "string", "description": "Short name, unique within the project. Defaults to the template's." },
                 "title": { "type": "string" },
+                "role": { "type": "string", "enum": ["dev", "reviewer", ""], "description": "Its role in the end-of-planning team check: \"dev\" builds the tickets, \"reviewer\" reviews them (code review, QA, security). Defaults to the template's; set it when writing an agent from scratch." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
                 "personality": { "type": "string" },
@@ -631,6 +643,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "avatar_brief": s("avatar_brief"),
         "planning": tpl.is_some_and(|t| t.planning),
         "lead": tpl.is_some_and(|t| t.lead),
+        "role": Some(s("role")).filter(|r| !r.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.role.to_string())),
     });
 
     let allowed = me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, CREATE_RULE, &patch));
@@ -879,7 +892,7 @@ mod tests {
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
-        assert_eq!((a.interval_minutes, a.planning), (0, true));
+        assert_eq!((a.interval_minutes, a.planning, a.role.as_str()), (0, true, "dev"));
         assert!(crate::grill::enabled(&a));
         // The avatar run started; the interview is queued right behind it, as a quiet grill run.
         let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
@@ -890,6 +903,7 @@ mod tests {
         // Other templates don't interview and wait to be woken.
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
+        assert_eq!(r.role, "reviewer");
         assert!(!r.planning);
         assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
     }

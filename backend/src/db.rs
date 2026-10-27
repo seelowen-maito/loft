@@ -47,6 +47,10 @@ pub struct Agent {
     /// Leads its team (the agents sharing its project): at most one per project, always with Planning.
     #[serde(default)]
     pub lead: bool,
+    /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
+    /// the template it came from; agents saved before roles existed get one inferred once at startup.
+    #[serde(default)]
+    pub role: String,
     pub avatar: Avatar,
     pub status: String,
     pub status_text: String,
@@ -326,8 +330,20 @@ impl Db {
         if !has_position {
             conn.execute("ALTER TABLE agents ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
         }
+        // Agents saved before roles existed get one from their name and title, once; the user can change it.
+        let unroled: Vec<String> = {
+            let mut st = conn.prepare("SELECT data FROM agents")?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().filter(|d| serde_json::from_str::<Value>(d).is_ok_and(|v| v.get("role").is_none())).collect()
+        };
         // Anything left "running" from a previous backend process is stale.
         let db = Db(Arc::new(Mutex::new(conn)));
+        for d in unroled {
+            if let Ok(mut a) = serde_json::from_str::<Agent>(&d) {
+                a.role = crate::planning::infer_role(&a.name, &a.title).into();
+                db.save_agent(&a)?;
+            }
+        }
         for mut a in db.list_agents()? {
             if a.status != "idle" {
                 a.status = "idle".into();

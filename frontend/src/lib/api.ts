@@ -27,6 +27,8 @@ export type Agent = {
   planning: boolean;
   /** Leads its project's team (one per project); implies Planning. Wears a captain hat. */
   lead?: boolean;
+  /** Its part in the end-of-planning team check: "dev", "reviewer" or "" (neither). */
+  role?: string;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;

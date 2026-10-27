@@ -209,6 +209,9 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     if let Some(v) = p.get("lead") {
         a.lead = v.as_bool().ok_or_else(|| bad("lead must be true or false"))?;
     }
+    if let Some(v) = p.get("role") {
+        a.role = v.as_str().filter(|r| crate::planning::ROLES.contains(r) || r.is_empty()).ok_or_else(|| bad("role must be \"dev\", \"reviewer\" or \"\""))?.into();
+    }
     if let Some(v) = str_field("permission_mode") {
         const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan", "manual"];
         if !MODES.contains(&v.as_str()) {
@@ -320,6 +323,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         max_subagents: None,
         planning: false,
         lead: false,
+        role: String::new(),
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -859,6 +863,9 @@ mod tests {
         apply_patch(&mut a, &serde_json::json!({ "name": "Planner" })).unwrap();
         assert!(a.planning, "untouched when not in the patch");
         assert!(apply_patch(&mut a, &serde_json::json!({ "planning": null })).is_err());
+        apply_patch(&mut a, &serde_json::json!({ "role": "reviewer" })).unwrap();
+        assert_eq!(a.role, "reviewer");
+        assert!(apply_patch(&mut a, &serde_json::json!({ "role": "qa" })).is_err());
         apply_patch(&mut a, &serde_json::json!({ "planning": false })).unwrap();
         assert!(!a.planning);
     }

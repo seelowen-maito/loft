@@ -7,11 +7,8 @@ use crate::db::Agent;
 use crate::grill::IssueLink;
 use crate::state::AppState;
 
-/// The roles a team needs to implement a plan, and the words in an agent's name or title that mark one.
-const ROLES: &[(&str, &[&str])] = &[
-    ("dev", &["dev", "developer", "engineer", "programmer", "coder", "desenvolvedor", "desenvolvedora"]),
-    ("reviewer", &["reviewer", "review", "revisor", "revisora"]),
-];
+/// The roles a team needs to implement a plan, as stored in `Agent::role`.
+pub const ROLES: &[&str] = &["dev", "reviewer"];
 
 /// Labels publishing relies on: name, color, description. Created when the repo lacks them.
 const LABELS: &[(&str, &str, &str)] = &[
@@ -68,19 +65,26 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     Some(out)
 }
 
-/// The team check: the roles no agent in `project` fills, going by their names and titles ("Dev",
-/// "Feature developer", "Code reviewer").
+/// The team check: the roles no agent in `project` fills, going by their stored roles.
 pub fn missing_roles(state: &AppState, project: &str) -> Vec<&'static str> {
     let project = project.trim();
-    let team: Vec<Vec<String>> = state
-        .db
-        .list_agents()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|a| !project.is_empty() && a.project.trim() == project)
-        .map(|a| format!("{} {}", a.name, a.title).to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect())
-        .collect();
-    ROLES.iter().filter(|(_, words)| !team.iter().any(|ws| ws.iter().any(|w| words.contains(&w.as_str())))).map(|(role, _)| *role).collect()
+    let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !project.is_empty() && a.project.trim() == project).map(|a| a.role).collect();
+    ROLES.iter().copied().filter(|r| !team.iter().any(|t| t == r)).collect()
+}
+
+/// A role for an agent saved before roles existed, from the words in its name and title. Reviewing
+/// words win, so a "QA engineer" reviews.
+pub fn infer_role(name: &str, title: &str) -> &'static str {
+    let text = format!("{name} {title}").to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(w));
+    if has(&["reviewer", "review", "revisor", "revisora", "qa", "tester", "auditor", "security"]) {
+        "reviewer"
+    } else if has(&["dev", "developer", "engineer", "programmer", "coder", "desenvolvedor", "desenvolvedora"]) {
+        "dev"
+    } else {
+        ""
+    }
 }
 
 /// Same spec, same key: case and spacing don't make a new one.
@@ -740,7 +744,7 @@ pub(crate) mod tests {
         tickets_repo(&fake, slug, 40, &[40, 41, 42]);
         // The team has a reviewer but no developer.
         let mut rev = crate::tasks::tests::agent(&st, "Checker");
-        (rev.project, rev.title) = ("card-team".into(), "Code reviewer".into());
+        (rev.project, rev.role) = ("card-team".into(), "reviewer".into());
         st.db.save_agent(&rev).unwrap();
 
         crate::grill::tests::round(&st, &a, &["Turn this into a spec and tickets?"]).unwrap();
@@ -776,10 +780,10 @@ pub(crate) mod tests {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "card-full", Some("git@github.com:octo/card-full.git"));
         tickets_repo(&fake, "octo/card-full", 7, &[7]);
-        for (name, title) in [("Dev", "Feature developer"), ("Reviewer", "")] {
+        for (name, role) in [("Builder", "dev"), ("Checker", "reviewer")] {
             let mut x = crate::tasks::tests::agent(&st, name);
             x.project = " card-full ".into();
-            x.title = title.into();
+            x.role = role.into();
             st.db.save_agent(&x).unwrap();
         }
         crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
@@ -798,21 +802,59 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_team_check_goes_by_the_project_names_and_titles() {
+    async fn the_team_check_goes_by_stored_roles_not_names() {
         let st = state();
-        let add = |name: &str, title: &str, project: &str| {
+        let add = |name: &str, title: &str, role: &str, project: &str| {
             let mut x = crate::tasks::tests::agent(&st, name);
-            (x.title, x.project) = (title.into(), project.into());
+            (x.title, x.role, x.project) = (title.into(), role.into(), project.into());
             st.db.save_agent(&x).unwrap();
+            x
         };
         assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"]);
-        add("Lead", "Team lead", "team-a");
-        add("Dev", "", "team-b");
-        add("Devious", "Docs writer", "team-a");
-        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"], "other projects and partial words don't count");
-        add("Ana", "Desenvolvedora", "team-a");
-        add("Loft Reviewer", "", "team-a");
-        assert!(missing_roles(&st, "team-a").is_empty());
+        add("Lead", "Team lead", "", "team-a");
+        add("Dev", "Feature developer", "", "team-a");
+        add("Builder", "", "dev", "team-b");
+        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"], "names, titles and other projects don't count");
+        // A QA engineer reviews: it doesn't make the team's Dev.
+        add("QA", "QA engineer", "reviewer", "team-a");
+        assert_eq!(missing_roles(&st, "team-a"), ["dev"]);
+        // A renamed Dev still counts.
+        let mut dev = add("Dev", "Feature developer", "dev", "team-a");
+        (dev.name, dev.title) = ("Ana".into(), "Frontend".into());
+        st.db.save_agent(&dev).unwrap();
+        assert!(missing_roles(&st, "team-a").is_empty(), "a full team");
         assert_eq!(missing_roles(&st, " "), ["dev", "reviewer"], "no project, no team");
+    }
+
+    #[test]
+    fn agents_saved_before_roles_get_one_inferred_once() {
+        assert_eq!(infer_role("QA", "QA engineer"), "reviewer");
+        assert_eq!(infer_role("Security", "Security auditor"), "reviewer");
+        assert_eq!(infer_role("Loft Reviewer", ""), "reviewer");
+        assert_eq!(infer_role("Ana", "Desenvolvedora"), "dev");
+        assert_eq!(infer_role("Dev", "Feature developer"), "dev");
+        assert_eq!(infer_role("Devious", "Docs writer"), "");
+        assert_eq!(infer_role("Lead", "Team lead"), "");
+
+        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loft.db");
+        let db = crate::db::Db::open(&path).unwrap();
+        let st = AppState { db, ..state() };
+        let mut old = crate::tasks::tests::agent(&st, "QA");
+        old.title = "QA engineer".into();
+        st.db.save_agent(&old).unwrap();
+        let mut set = crate::tasks::tests::agent(&st, "Dev");
+        set.role = "reviewer".into();
+        st.db.save_agent(&set).unwrap();
+        // Strip `role` from the first, as a database from before roles has it.
+        let mut raw = serde_json::to_value(&old).unwrap();
+        raw.as_object_mut().unwrap().remove("role");
+        rusqlite::Connection::open(&path).unwrap().execute("UPDATE agents SET data = ?1 WHERE id = ?2", rusqlite::params![raw.to_string(), old.id]).unwrap();
+        drop(st);
+
+        let db = crate::db::Db::open(&path).unwrap();
+        assert_eq!(db.get_agent(&old.id).unwrap().unwrap().role, "reviewer");
+        assert_eq!(db.get_agent(&set.id).unwrap().unwrap().role, "reviewer", "a stored role is kept, even one its name doesn't suggest");
     }
 }
