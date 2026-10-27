@@ -19,10 +19,7 @@ use crate::state::AppState;
 
 const MAX_CHARS: usize = 60_000;
 const TIMEOUT: Duration = Duration::from_secs(45);
-#[cfg(not(test))]
 const BRIEF_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const BRIEF_TIMEOUT: Duration = Duration::from_secs(2);
 /// Shorter dictations are already brief: they come back unchanged, without a Claude call.
 const BRIEF_MIN_WORDS: usize = 80;
 
@@ -75,7 +72,11 @@ pub async fn clean(State(state): State<AppState>, Json(b): Json<CleanBody>) -> R
 /// Short dictations, and any brief that fails a check or any failure, return the original with
 /// `briefed: false`, so the user's words are never lost or replaced by something they didn't say.
 pub async fn brief(State(state): State<AppState>, Json(b): Json<CleanBody>) -> Result<Json<Value>, ApiError> {
-    let text = b.text.trim();
+    brief_within(&state, &b.text, BRIEF_TIMEOUT).await
+}
+
+async fn brief_within(state: &AppState, text: &str, timeout: Duration) -> Result<Json<Value>, ApiError> {
+    let text = text.trim();
     if text.is_empty() {
         return Err(bad("empty text"));
     }
@@ -86,7 +87,7 @@ pub async fn brief(State(state): State<AppState>, Json(b): Json<CleanBody>) -> R
     if text.split_whitespace().count() < BRIEF_MIN_WORDS {
         return Ok(original("already short"));
     }
-    match run(&state, text, BRIEF_PROMPT, Some("low"), BRIEF_TIMEOUT).await {
+    match run(state, text, BRIEF_PROMPT, Some("low"), timeout).await {
         Ok(out) if out.is_empty() || out.chars().count() >= text.chars().count() => Ok(original("the brief wasn't shorter")),
         Ok(out) => match added(text, &out) {
             Some(word) => {
@@ -225,7 +226,7 @@ mod tests {
 input=$(cat)
 case "$input" in
   *FAIL*) exit 1;;
-  *SLOW*) sleep 5;;
+  *SLOW*) exec sleep 60;;
   *INVENT*) echo "Goal: fix table 99.";;
   *LONGER*) printf '%s\n%s' "$input" "$input";;
   *) echo "Goal: fix the cart total after a split payment.";;
@@ -267,7 +268,8 @@ esac
             assert_eq!((r["briefed"].clone(), r["text"].clone()), (json!(false), json!(input.trim())), "{tag}");
             assert!(r["reason"].as_str().unwrap().starts_with(reason), "{tag}: {r}");
         }
-        let r = call(&st, &long("SLOW")).await;
+        // The timeout case gets its own short limit against a fake that never answers, so neither side races the clock.
+        let r = brief_within(&st, &long("SLOW"), Duration::from_millis(100)).await.ok().unwrap().0;
         assert_eq!((r["briefed"].clone(), r["reason"].clone()), (json!(false), json!("cleanup timed out")));
         assert!(brief(State(st.clone()), Json(CleanBody { text: "  ".into() })).await.is_err());
     }
