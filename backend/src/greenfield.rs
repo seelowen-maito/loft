@@ -28,7 +28,7 @@ pub fn mcp_tools() -> Vec<Value> {
         "inputSchema": { "type": "object", "properties": {} }
     }), json!({
         "name": "create_repo",
-        "description": "Only after the user said yes to the round question from preview_new_repo, in a round they sent: Loft writes the `.gitignore`, runs `git init`, commits everything else in the project folder, creates the GitHub repo and pushes. Calling it again after a failure reuses the repo already created.",
+        "description": "Only after the user said yes to the round question from preview_new_repo (it names `<owner>/<name>`), in a round they sent. A picked option or the accepted recommendation fixes the owner it names and a private repo; only an answer the user wrote can ask for a public one. Loft writes the `.gitignore`, runs `git init`, commits everything else in the project folder, creates the GitHub repo and pushes. Calling it again after a failure reuses the repo already created.",
         "inputSchema": { "type": "object", "properties": {
             "question_id": { "type": "string", "description": "The id of the round question the user said yes to, from the round's answers." },
             "owner": { "type": "string", "description": "The account or organization the user chose, one of the owners from preview_new_repo. Default: the user's account." },
@@ -164,6 +164,15 @@ async fn owners(state: &AppState, login: &str) -> Vec<String> {
     out
 }
 
+/// Files that usually hold secrets: env files, keys, certificates.
+fn secret_like(path: &str) -> bool {
+    let f = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    (f == ".env" || f.starts_with(".env.")) && !f.ends_with(".example") && !f.ends_with(".sample")
+        || f.starts_with("id_rsa")
+        || f.starts_with("id_ed25519")
+        || [".pem", ".key", ".p12", ".pfx"].iter().any(|e| f.ends_with(e))
+}
+
 /// GitHub's own rule for repo names, applied to the folder's name.
 fn repo_name(project: &str) -> String {
     let n: String = project.trim().chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' }).collect();
@@ -179,8 +188,10 @@ async fn preview(state: &AppState, me: &Agent) -> Result<String, String> {
     let name = repo_name(&me.project);
     let (n, s) = (fs.len(), if fs.len() == 1 { "" } else { "s" });
 
-    // The question lists as many files as fit; the tool result lists them all.
-    let head = format!("Create the GitHub repo `{login}/{name}` and publish this folder? The first commit holds {n} file{s} ({total}): ");
+    // Secrets first, so the user sees them before saying yes; then as many files as fit. The tool result lists them all.
+    let secrets: Vec<String> = fs.iter().map(|(p, _)| p).filter(|p| secret_like(p)).take(3).map(|p| format!("`{p}`")).collect();
+    let warn = if secrets.is_empty() { String::new() } else { format!("Careful: it includes {}, which may hold secrets. ", secrets.join(", ")) };
+    let head = format!("Create the GitHub repo `{login}/{name}` and publish this folder? {warn}The first commit holds {n} file{s} ({total}): ");
     let tail = ". Loft adds a `.gitignore` for `.DS_Store` and `.remember/`.";
     let more = |shown: usize| if shown < n { format!(" and {} more", n - shown) } else { String::new() };
     let mut listed: Vec<String> = vec![];
@@ -221,12 +232,12 @@ fn said_yes(q: &Question) -> bool {
     q.state == "answered" && (q.accepted || q.answer.as_deref().map(crate::grill::commands::normalize).is_some_and(|a| a.split(' ').next().is_some_and(|w| YES.contains(&w))))
 }
 
-/// The user's yes to the round question `qid`, in a round they sent.
-fn check_yes(state: &AppState, me: &Agent, qid: &str) -> Result<(), String> {
+/// The user's yes to the round question `qid` of the agent's latest grill, in a round they sent.
+fn check_yes(state: &AppState, me: &Agent, qid: &str) -> Result<Question, String> {
     let grills = state.db.list_grills(&me.id).map_err(|e| e.to_string())?;
-    let found = grills.iter().flat_map(|s| &s.rounds).find_map(|r| r.questions.iter().find(|q| q.id == qid).map(|q| (r, q)));
+    let found = grills.first().into_iter().flat_map(|s| &s.rounds).find_map(|r| r.questions.iter().find(|q| q.id == qid).map(|q| (r, q)));
     let Some((round, q)) = found else {
-        return Err("No question with that id in your grills. Ask the user first, as a round question (see `mcp__loft__preview_new_repo`), and pass its id once they said yes.".into());
+        return Err("No question with that id in your grill. Ask the user first, as a round question (see `mcp__loft__preview_new_repo`), and pass its id once they said yes.".into());
     };
     if round.sent_at.is_none() {
         return Err("The user hasn't sent that round yet: you're woken with their answer when they do. End your turn with no reply text.".into());
@@ -241,7 +252,30 @@ fn check_yes(state: &AppState, me: &Agent, qid: &str) -> Result<(), String> {
             "The user didn't say yes to creating the repo (their answer: {answer}), so nothing was created. Keep grilling without it, and ask again in a round before publishing the spec."
         ));
     }
-    Ok(())
+    Ok(q.clone())
+}
+
+/// The yes has to be to this repo: the question names `<owner>/<name>`. A picked option or the accepted
+/// recommendation ("Yes, private under acme") fixes the owner it names and a private repo; only an answer
+/// the user wrote themselves can ask for something else, such as a public repo.
+fn check_choice(q: &Question, owners: &[String], owner: &str, name: &str, private: bool) -> Result<(), String> {
+    let text = q.text.to_lowercase();
+    if !owners.iter().any(|o| text.contains(&format!("{o}/{name}").to_lowercase())) {
+        return Err(format!(
+            "That question doesn't name the repo `<owner>/{name}`, so it isn't a yes to creating it. Ask the question from `mcp__loft__preview_new_repo` (with the new name, if the user wants another one) and pass its id after their yes."
+        ));
+    }
+    let n = crate::grill::commands::normalize;
+    let picked = if q.accepted { Some(q.recommendation.as_str()) } else { q.answer.as_deref().filter(|a| q.options.iter().any(|o| n(o) == n(a))) };
+    let Some(picked) = picked else { return Ok(()) };
+    if !private {
+        return Err(format!("The user chose \"{picked}\", which is a private repo: call create_repo without `private: false`."));
+    }
+    let named = owners.iter().filter(|o| n(picked).ends_with(&n(o))).max_by_key(|o| o.len());
+    match named {
+        Some(o) if !o.eq_ignore_ascii_case(owner) => Err(format!("The user chose \"{picked}\": create it under {o}, not {owner}.")),
+        _ => Ok(()),
+    }
 }
 
 /// Runs git in the project folder with Loft's token for github.com, passed in the environment so it
@@ -271,7 +305,7 @@ async fn create(state: &AppState, me: &Agent, args: &Value) -> Result<String, St
     if qid.is_empty() {
         return Err("question_id is required: the round question the user said yes to.".into());
     }
-    check_yes(state, me, qid)?;
+    let q = check_yes(state, me, qid)?;
     let (dir, has_git) = greenfield_dir(state, me).await?;
     let (login, id) = me_on_github(state).await?;
     let owner = args["owner"].as_str().map(str::trim).filter(|o| !o.is_empty()).unwrap_or(&login).to_string();
@@ -284,6 +318,7 @@ async fn create(state: &AppState, me: &Agent, args: &Value) -> Result<String, St
         return Err(format!("\"{name}\" isn't a valid repo name: letters, digits, `.`, `_` and `-`, at most 100."));
     }
     let private = args["private"].as_bool().unwrap_or(true);
+    check_choice(&q, &owners, &owner, &name, private)?;
     let slug = format!("{owner}/{name}");
 
     // GitHub first: a refusal (a taken name, a token without the right) leaves the folder untouched. A
@@ -364,6 +399,7 @@ mod tests {
             { "organization": { "login": "acme" }, "role": "admin" },
             { "organization": { "login": "members-only" }, "role": "member" },
             { "organization": { "login": "locked" }, "role": "member" },
+            { "organization": { "login": "open-org" }, "role": "admin" },
         ]));
         fake.route("GET", "/orgs/members-only", 200, json!({ "members_can_create_repositories": true }));
         fake.route("GET", "/orgs/locked", 200, json!({ "members_can_create_repositories": false }));
@@ -406,9 +442,15 @@ mod tests {
         mcp_call(st, a, name, &args).await.unwrap()
     }
 
-    /// Posts the round question, answers it with `answer` if any and, with `send`, sends the round. Returns its id.
+    /// Posts the repo question with the owners as options, answers it with `answer` if any and, with
+    /// `send`, sends the round. Returns its id.
     fn ask(st: &AppState, a: &Agent, answer: Option<&str>, send: bool) -> String {
-        let q = json!({ "text": "Create the GitHub repo and publish this folder?", "speak": "Create the repo?", "recommendation": "Yes, private under octo-me" });
+        let options: Vec<String> = ["octo-me", "acme", "members-only", "open-org"].iter().map(|o| format!("Yes, private under {o}")).chain(["No, not now".to_string()]).collect();
+        let text = format!("Create the GitHub repo `octo-me/{}` and publish this folder?", a.project);
+        ask_q(st, a, json!({ "text": text, "speak": "Create the repo?", "recommendation": "Yes, private under octo-me", "kind": "single_choice", "options": options }), answer, send)
+    }
+
+    fn ask_q(st: &AppState, a: &Agent, q: Value, answer: Option<&str>, send: bool) -> String {
         crate::grill::mcp_call(st, a, "grill_round", &json!({ "topic": "New app", "questions": [q] })).unwrap().unwrap();
         let s = crate::grill::active(st, &a.id).unwrap();
         let qid = s.rounds.last().unwrap().questions[0].id.clone();
@@ -441,14 +483,14 @@ mod tests {
         assert!(wake.contains("read the project's existing documents as facts") && wake.contains("no GitHub repo yet"), "{wake}");
 
         let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
-        assert!(p.contains("has no git repo yet. Owners the user can create the repo under: octo-me, acme, members-only (their account first). Default name: gf-new."), "{p}");
+        assert!(p.contains("has no git repo yet. Owners the user can create the repo under: octo-me, acme, members-only, open-org (their account first). Default name: gf-new."), "{p}");
         assert!(p.contains("The first commit: 3 files, 40 B ("), "{p}");
         for f in ["- .gitignore (21 B)", "- README.md (6 B)", "- src/main.rs (13 B)"] {
             assert!(p.contains(f), "missing {f}: {p}");
         }
         assert!(!p.contains("DS_Store (") && !p.contains("today.md"), "junk is left out: {p}");
         assert!(p.contains(r#""text":"Create the GitHub repo `octo-me/gf-new` and publish this folder? The first commit holds 3 files (40 B): `.gitignore`, `README.md`, `src/main.rs`. Loft adds"#), "{p}");
-        assert!(p.contains(r#""options":["Yes, private under octo-me","Yes, private under acme","Yes, private under members-only","No, not now"],"recommendation":"Yes, private under octo-me""#), "{p}");
+        assert!(p.contains(r#""options":["Yes, private under octo-me","Yes, private under acme","Yes, private under members-only","Yes, private under open-org","No, not now"],"recommendation":"Yes, private under octo-me""#), "{p}");
         assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists(), "the preview writes nothing");
 
         let qid = ask(&st, &a, Some("yes"), true);
@@ -482,7 +524,7 @@ mod tests {
         let qid = ask(&st, &a, Some("Yes, private under acme"), true);
 
         let err = call(&st, &a, "create_repo", json!({ "question_id": qid, "owner": "locked" })).await.unwrap_err();
-        assert_eq!(err, "The user can't create repos under locked. Owners: octo-me, acme, members-only.");
+        assert_eq!(err, "The user can't create repos under locked. Owners: octo-me, acme, members-only, open-org.");
         assert!(creations(&fake, "/orgs/locked/repos", "gf-org").is_empty());
         let err = call(&st, &a, "create_repo", json!({ "question_id": qid, "owner": "acme", "name": "no spaces" })).await.unwrap_err();
         assert!(err.starts_with("\"no spaces\" isn't a valid repo name"), "{err}");
@@ -549,6 +591,55 @@ mod tests {
         assert_eq!(pushed(&r), [".gitignore", "main.py"]);
         assert_eq!(git(&r, &["rev-list", "--count", "HEAD"]), "1", "the retry doesn't commit again");
         assert!(!needs_repo(&st, &a));
+    }
+
+    #[tokio::test]
+    async fn the_yes_is_bound_to_the_repo_its_owner_and_its_visibility() {
+        let (fake, st) = (fake_github(), state());
+        owners_on(&fake);
+        let (a, dir) = new_project(&st, "gf-bind", &[("app.js", "1"), (".env", "KEY=1"), (".env.example", "KEY="), ("certs/server.pem", "pem")]);
+        let r = remote(&st, "gf-bind");
+        fake.route("POST", "/orgs/open-org/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/open-org/gf-bind", "private": false }));
+        let create = |qid: &str, args: Value| {
+            let (st, a) = (st.clone(), a.clone());
+            let mut args = args;
+            args["question_id"] = json!(qid);
+            async move { call(&st, &a, "create_repo", args).await }
+        };
+
+        // Secret-looking files are called out before the yes.
+        let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
+        assert!(p.contains("publish this folder? Careful: it includes `.env`, `certs/server.pem`, which may hold secrets. The first commit holds"), "{p}");
+
+        // A yes to another question isn't a yes to the repo.
+        let other = ask_q(&st, &a, json!({ "text": "Use Postgres?", "speak": "Postgres?", "recommendation": "Yes" }), Some("yes"), true);
+        assert!(create(&other, json!({})).await.unwrap_err().starts_with("That question doesn't name the repo `<owner>/gf-bind`"));
+
+        // A picked option fixes its owner and a private repo.
+        let acme = ask(&st, &a, Some("Yes, private under acme"), true);
+        assert_eq!(create(&acme, json!({})).await.unwrap_err(), "The user chose \"Yes, private under acme\": create it under acme, not octo-me.");
+        assert_eq!(create(&acme, json!({ "owner": "acme", "private": false })).await.unwrap_err(), "The user chose \"Yes, private under acme\", which is a private repo: call create_repo without `private: false`.");
+        let accepted = ask(&st, &a, Some("yes"), true);
+        assert!(create(&accepted, json!({ "private": false })).await.unwrap_err().contains("which is a private repo"));
+        assert!(create(&accepted, json!({ "owner": "open-org" })).await.unwrap_err().ends_with("create it under octo-me, not open-org."));
+
+        // A comment to discuss is no yes either.
+        let discuss = ask(&st, &a, None, false);
+        let s = crate::grill::active(&st, &a.id).unwrap();
+        crate::grill::on_user_message(&st, &a, "yes, but what goes in it?", Some(&json!({ "role": "answer", "session_id": s.id, "question_id": discuss, "discuss": true })), json!({})).unwrap();
+        crate::grill::tests::send(&st, &a);
+        assert!(create(&discuss, json!({})).await.unwrap_err().starts_with("The user didn't say yes to creating the repo (their answer: \"yes, but what goes in it?\")"));
+        assert!(!dir.join(".git").exists(), "nothing was written");
+        for path in ["/user/repos", "/orgs/acme/repos", "/orgs/open-org/repos"] {
+            assert!(creations(&fake, path, "gf-bind").is_empty(), "nothing created on {path}");
+        }
+
+        // Only an answer the user wrote can ask for a public repo.
+        let public = ask(&st, &a, Some("Yes, public under open-org"), true);
+        let out = create(&public, json!({ "owner": "open-org", "private": false })).await.unwrap();
+        assert!(out.starts_with("Created the public GitHub repo open-org/gf-bind and pushed the project folder (5 files"), "{out}");
+        assert_eq!(creations(&fake, "/orgs/open-org/repos", "gf-bind"), [json!({ "name": "gf-bind", "private": false })]);
+        assert_eq!(pushed(&r), [".env", ".env.example", ".gitignore", "app.js", "certs/server.pem"]);
     }
 
     #[tokio::test]
