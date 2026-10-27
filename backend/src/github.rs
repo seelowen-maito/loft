@@ -123,14 +123,19 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     pub(crate) struct Fake {
-        routes: Mutex<HashMap<(String, String), (u16, Value)>>,
+        routes: Mutex<HashMap<(String, String), std::collections::VecDeque<(u16, Value)>>>,
         seen: Mutex<Vec<Seen>>,
     }
 
     impl Fake {
         /// Answer `method path` (path without query) with this status and body; unrouted requests get a 404.
         pub(crate) fn route(&self, method: &str, path: &str, status: u16, body: Value) {
-            self.routes.lock().unwrap().insert((method.into(), path.into()), (status, body));
+            self.in_turn(method, path, vec![(status, body)]);
+        }
+
+        /// Answer `method path` with these replies one request at a time; the last one then repeats.
+        pub(crate) fn in_turn(&self, method: &str, path: &str, replies: Vec<(u16, Value)>) {
+            self.routes.lock().unwrap().insert((method.into(), path.into()), replies.into());
         }
 
         /// Requests received whose path starts with `prefix`, oldest first.
@@ -164,7 +169,7 @@ pub(crate) mod tests {
                                 }),
                                 body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                             });
-                            let hit = fake.routes.lock().unwrap().get(&(method.to_string(), uri.path().to_string())).cloned();
+                            let hit = fake.routes.lock().unwrap().get_mut(&(method.to_string(), uri.path().to_string())).and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() });
                             let (status, body) = hit.unwrap_or((404, json!({ "message": "Not Found" })));
                             (StatusCode::from_u16(status).unwrap(), axum::Json(body))
                         }

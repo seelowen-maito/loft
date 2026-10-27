@@ -339,7 +339,7 @@ fn transcript(s: &Session) -> String {
 /// The run after the user sends a round.
 fn round_prompt(s: &Session, r: &Round) -> String {
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -968,7 +968,39 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
 
 - Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
 - When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
-- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#
+- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool.
+
+# Planning: tickets
+Once the spec is published, split it into tickets the team can pick up.
+- Vertical slices: each ticket is a thin tracer bullet through every layer it touches (data, API, UI, tests), verifiable on its own. Never one ticket per layer; prefer several thin slices to one thick one.
+- Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
+- Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
+- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
+- Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
+
+  ```md
+  ## Parent
+
+  #<spec number>
+
+  ## What to build
+
+  <The slice end to end, from the user's side.>
+
+  ## Acceptance criteria
+
+  - [ ] <A behaviour someone can check.>
+  ```
+
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`.
+
+# Planning: direct requests
+When the user asks for an issue or a plan without a grill ("create an issue for X"):
+- Never start a grill unasked. Ask at most one short question in normal chat when something essential is missing; otherwise go ahead with sensible choices.
+- One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
+- Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
+- When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: want me to grill you on it with /grill?") and do what the user says.
+- Work the user sends you as a task stays a task: don't open issues for it."#
 }
 
 #[cfg(test)]
