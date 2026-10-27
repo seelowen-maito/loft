@@ -353,7 +353,7 @@ extension ChatView {
     /// recommendation), then opens the mic when hands-free is on. With VoiceOver running, VoiceOver announces it instead.
     fileprivate func readAloud(_ q: GrillQuestion) {
         let n = grill?.number(of: q.id) ?? 1
-        let text = q.spoken(number: n, of: grill?.questions?.count ?? 1)
+        let text = q.spoken(number: n, of: grill?.questions?.count ?? 1, language: grill?.language)
         if UIAccessibility.isVoiceOverRunning {
             VoiceLog.shared.add("question \(n): announced by VoiceOver")
             UIAccessibility.post(notification: .announcement, argument: text)

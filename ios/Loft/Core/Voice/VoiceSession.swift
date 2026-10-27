@@ -520,7 +520,7 @@ final class VoiceSession {
         // A question is read in its short spoken form with its recommendation, like in the chat; its card shows it.
         reply = next == nil ? answer : nil
         let s = store.openGrill(for: agentId)
-        let spoken = next.map { $0.spoken(number: s?.number(of: $0.id) ?? 1, of: s?.questions?.count ?? 1) } ?? answer
+        let spoken = next.map { $0.spoken(number: s?.number(of: $0.id) ?? 1, of: s?.questions?.count ?? 1, language: s?.language) } ?? answer
         if readReplies {
             phase = .speaking
             let id = next != nil ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id

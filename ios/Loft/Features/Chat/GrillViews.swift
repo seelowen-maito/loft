@@ -33,8 +33,8 @@ struct GrillRoundCard: View {
             .font(.caption.weight(.semibold))
             if let s = open, let qs = s.questions {
                 ForEach(Array(qs.enumerated()), id: \.element.id) { i, q in
-                    GrillQuestionCard(question: q, number: i + 1, total: qs.count, sessionId: s.sessionId, agent: agent,
-                                      isCurrent: q.id == currentQuestionId, command: command)
+                    GrillQuestionCard(question: q, number: i + 1, total: qs.count, sessionId: s.sessionId, language: s.language,
+                                      agent: agent, isCurrent: q.id == currentQuestionId, command: command)
                 }
                 footer(s, qs)
             } else {
@@ -115,6 +115,8 @@ struct GrillQuestionCard: View {
     let number: Int
     let total: Int
     let sessionId: String
+    /// The session's language, for the counter and "Recommended" read aloud.
+    let language: String?
     let agent: Agent
     let isCurrent: Bool
     let command: (GrillCommand) -> Void
@@ -253,7 +255,7 @@ struct GrillQuestionCard: View {
     private var voiceActions: some View {
         HStack(spacing: 0) {
             action("Repeat", "speaker.wave.2", id: "grillRepeat", enabled: true) {
-                Task { await speaker.speak(q.spoken(number: number, of: total)) }
+                Task { await speaker.speak(q.spoken(number: number, of: total, language: language)) }
             }
             action("Skip", "forward", id: "grillSkip", enabled: store.canWrite) { command(.skip) }
             action("Back", "backward", id: "grillBack", enabled: number > 1) { command(.back) }

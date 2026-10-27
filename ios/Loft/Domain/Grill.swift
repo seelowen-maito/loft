@@ -80,11 +80,13 @@ struct GrillQuestion: Codable, Hashable, Identifiable {
         fromRound = try? c.decode(Int.self, forKey: .fromRound)
     }
 
-    /// What is read aloud: the question in its short form, then the recommendation that "yes" accepts.
-    func spoken(number: Int, of total: Int) -> String {
+    /// What is read aloud: the question in its short form, then the recommendation that "yes" accepts. The
+    /// counter and "Recommended" follow the session's `language` (en | pt), English when it is unknown.
+    func spoken(number: Int, of total: Int, language: String? = nil) -> String {
         let q = speak.flatMap { $0.isEmpty ? nil : $0 } ?? VoiceText.speakable(text).text
-        let head = total > 1 ? "Question \(number) of \(total). " : ""
-        return recommendation.isEmpty ? head + q : "\(head)\(q) Recommended: \(recommendation)."
+        let pt = language?.lowercased().hasPrefix("pt") == true
+        let head = total > 1 ? (pt ? "Pergunta \(number) de \(total). " : "Question \(number) of \(total). ") : ""
+        return recommendation.isEmpty ? head + q : "\(head)\(q) \(pt ? "Recomendação" : "Recommended"): \(recommendation)."
     }
 }
 
@@ -216,9 +218,12 @@ struct GrillSession: Codable, Hashable {
     var questions: [GrillQuestion]?
     /// done | stopped | timeout | superseded, once ended.
     var endReason: String?
+    /// en | pt: the language the user started in, for the phrases read aloud; nil until the first round.
+    var language: String?
 
     init(sessionId: String, agentId: String?, state: State, topic: String? = nil, startedAt: Date? = nil, round: Int? = nil,
-         total: Int? = nil, answered: Int? = nil, waiting: Bool? = nil, questions: [GrillQuestion]? = nil, endReason: String? = nil) {
+         total: Int? = nil, answered: Int? = nil, waiting: Bool? = nil, questions: [GrillQuestion]? = nil, endReason: String? = nil,
+         language: String? = nil) {
         self.sessionId = sessionId
         self.agentId = agentId
         self.state = state
@@ -230,6 +235,7 @@ struct GrillSession: Codable, Hashable {
         self.waiting = waiting
         self.questions = questions
         self.endReason = endReason
+        self.language = language
     }
 
     /// Shown in chat (the round cards, the menu) until it ends.

@@ -177,7 +177,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             GrillQuestion(id: "q5", text: "Should there be a free tier?", recommendation: "No: a 14-day trial instead"),
         ]
         grillState = GrillSession(sessionId: sid, agentId: "orch", state: .active, topic: topic, startedAt: ago(5),
-                                  round: 2, total: round2.count, answered: 0, waiting: false, questions: round2)
+                                  round: 2, total: round2.count, answered: 0, waiting: false, questions: round2, language: "en")
         let script: [(String, String, GrillMeta, Double)] = [
             ("user", "Grill me on the pricing page", GrillMeta(sessionId: nil, role: .startRequest), 5),
             ("assistant", "Grill started: the pricing page", GrillMeta(sessionId: sid, role: .status, state: "started"), 4.9),

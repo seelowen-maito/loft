@@ -224,6 +224,8 @@ pub fn view(s: &Session) -> Value {
         "started_at": s.started_at,
         "updated_at": s.updated_at,
         "notes_path": s.notes_path,
+        // en | pt, for the phrases the app reads aloud; null until the first round sets it.
+        "language": (!s.lang.is_empty()).then_some(&s.lang),
     })
 }
 
@@ -1218,6 +1220,7 @@ pub(crate) mod tests {
         assert_eq!((qs.len(), qs[1]["recommendation"].clone()), (2, json!("rec for Offer a free trial?")));
         let v = view(&active(&st, &o.id).unwrap());
         assert_eq!((v["state"].clone(), v["round"].clone(), v["total"].clone(), v["answered"].clone(), v["waiting"].clone()), (json!("active"), json!(1), json!(2), json!(0), json!(false)));
+        assert_eq!(v["language"], json!("en"));
         let rows: Vec<String> = msgs.iter().filter(|m| m.kind == "notice").map(|m| m.content.clone()).collect();
         assert_eq!(rows, ["Grill started: Pricing"]);
         // A second round can't go up while the user is still answering the first.
@@ -1460,6 +1463,7 @@ pub(crate) mod tests {
         assert_eq!(rows, ["Entrevista iniciada: Nome do recurso", "Pausada"]);
         let posted = st.db.list_messages(&o.id, 20, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "round").unwrap();
         assert!(posted.content.starts_with("**Rodada 1**") && posted.content.contains("_Recomendação:_"), "{}", posted.content);
+        assert_eq!(view(&active(&st, &o.id).unwrap())["language"], json!("pt"), "the app reads its phrases in it");
     }
 
     #[test]

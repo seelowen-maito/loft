@@ -142,6 +142,21 @@ final class GrillDecodingTests: XCTestCase {
         let bare = GrillQuestion(id: "q", text: "Who pays?", recommendation: "")
         XCTAssertEqual(bare.spoken(number: 1, of: 2), "Question 1 of 2. Who pays?")
     }
+
+    func testSpokenPhrasesFollowTheSessionLanguage() throws {
+        let q = GrillQuestion(id: "q", text: "Cobrar por mês?", recommendation: "Sim, e anual com desconto")
+        XCTAssertEqual(q.spoken(number: 2, of: 3, language: "pt"), "Pergunta 2 de 3. Cobrar por mês? Recomendação: Sim, e anual com desconto.")
+        XCTAssertEqual(q.spoken(number: 1, of: 1, language: "pt"), "Cobrar por mês? Recomendação: Sim, e anual com desconto.")
+        XCTAssertEqual(q.spoken(number: 2, of: 3, language: "en"), "Question 2 of 3. Cobrar por mês? Recommended: Sim, e anual com desconto.")
+        // Unknown or missing: English.
+        XCTAssertEqual(q.spoken(number: 2, of: 3, language: "fr"), q.spoken(number: 2, of: 3, language: "en"))
+        XCTAssertEqual(q.spoken(number: 2, of: 3, language: nil), q.spoken(number: 2, of: 3, language: "en"))
+
+        let pt = try XCTUnwrap(LiveLoftAPI.decodeGrillSession(Data(#"{"session_id": "g1", "state": "active", "round": 1, "language": "pt", "questions": []}"#.utf8)))
+        XCTAssertEqual(pt.language, "pt")
+        let none = try XCTUnwrap(LiveLoftAPI.decodeGrillSession(Data(#"{"session_id": "g1", "state": "preparing", "language": null}"#.utf8)))
+        XCTAssertNil(none.language)
+    }
 }
 
 /// The voice walks a round one question at a time and sends it after the last.

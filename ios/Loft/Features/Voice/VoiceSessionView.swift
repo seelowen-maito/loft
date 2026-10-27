@@ -61,7 +61,7 @@ struct VoiceSessionView: View {
     @ViewBuilder private var questionCard: some View {
         if let q = store.currentGrillQuestion(for: agentId), let s = store.openGrill(for: agentId), let agent = store.agent(agentId) {
             let card = GrillQuestionCard(question: q, number: s.number(of: q.id) ?? 1, total: s.questions?.count ?? 1,
-                                         sessionId: s.sessionId, agent: agent, isCurrent: true,
+                                         sessionId: s.sessionId, language: s.language, agent: agent, isCurrent: true,
                                          command: { c in
                                              if c == .end { voice.interviewEnded() }
                                              Task { try? await store.sendGrillCommand(c, agentId: agentId) }
