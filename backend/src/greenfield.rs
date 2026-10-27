@@ -421,13 +421,13 @@ async fn create(state: &AppState, me: &Agent, args: &Value) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::tests::{Fake, fake_github};
+    use crate::github::tests::{Fake, own_fake};
     use crate::grill::Routed;
     use crate::grill::tests::planner;
     use crate::planning::tests::state;
 
-    /// The token's user and organizations, the same for every test on the shared fake: `acme` is
-    /// administered, `members-only` lets members create repos, `locked` doesn't.
+    /// The token's user and organizations: `acme` is administered, `members-only` lets members create
+    /// repos, `locked` doesn't.
     fn owners_on(fake: &Fake) {
         fake.route("GET", "/user", 200, json!({ "login": "octo-me" }));
         fake.route("GET", "/user/memberships/orgs", 200, json!([
@@ -505,7 +505,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_yes_creates_the_private_repo_under_the_users_account_and_pushes_the_folder() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         let files = [("README.md", "# New\n"), ("src/main.rs", "fn main() {}\n"), (".DS_Store", "junk"), (".remember/today.md", "x"), ("sub/.DS_Store", "junk")];
         let (a, dir) = new_project(&st, "gf-new", &files);
@@ -541,7 +542,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_organization_owner_and_a_git_repo_without_a_remote() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         let (a, dir) = new_project(&st, "gf-org", &[("a.txt", "a"), (".gitignore", "target\n/.DS_Store")]);
         git(&dir, &["init", "-q"]);
@@ -574,7 +576,8 @@ mod tests {
 
     #[tokio::test]
     async fn declining_keeps_the_grill_going_and_publishing_the_spec_asks_again() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         let (a, dir) = new_project(&st, "gf-no", &[("README.md", "# No\n")]);
 
@@ -606,7 +609,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_push_is_retried_on_the_repo_already_created() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         let (a, dir) = new_project(&st, "gf-retry", &[("main.py", "print(1)\n")]);
         let gone = st.cfg.storage_dir.parent().unwrap().join("remotes").join("missing.git");
@@ -630,7 +634,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_yes_is_bound_to_the_repo_its_owner_and_its_visibility() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         let (a, dir) = new_project(&st, "gf-bind", &[("app.js", "1"), (".env", "KEY=1"), (".env.example", "KEY="), ("certs/server.pem", "pem")]);
         let r = remote(&st, "gf-bind");
@@ -679,7 +684,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_free_text_yes_stays_private_and_a_translated_option_fixes_the_owner_it_names() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         // No creation is routed: fake GitHub is shared by every test, and each create path belongs to one of them.
         let (a, dir) = new_project(&st, "gf-odd", &[("app.js", "1")]);
@@ -762,7 +768,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_project_with_a_remote_is_left_alone() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         owners_on(&fake);
         for (name, origin, want) in [
             ("gf-done", "git@github.com:octo/gf-done.git", "The project is already on GitHub as octo/gf-done: there is nothing to create, publish there."),

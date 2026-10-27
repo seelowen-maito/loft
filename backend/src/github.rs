@@ -144,8 +144,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// One fake GitHub for the whole test process, on its own thread so it outlives each test's
-    /// runtime; LOFT_GITHUB_API_URL points at it. Tests keep apart by using their own repo slugs.
+    /// Fakes of their own, by the token whose requests they answer.
+    static OWN: Mutex<Option<HashMap<String, Arc<Fake>>>> = Mutex::new(None);
+
+    /// One fake GitHub server for the whole test process, on its own thread so it outlives each test's
+    /// runtime; LOFT_GITHUB_API_URL points at it. A request carrying a token from `own_fake` goes to that
+    /// test's fake; the rest share this one and keep apart by using their own repo slugs.
     pub(crate) fn fake_github() -> Arc<Fake> {
         use axum::http::{HeaderMap, Method, StatusCode, Uri};
         static FAKE: std::sync::OnceLock<Arc<Fake>> = std::sync::OnceLock::new();
@@ -157,7 +161,9 @@ pub(crate) mod tests {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async move {
                     let app = axum::Router::new().fallback(move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
-                        let fake = f2.clone();
+                        let token = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("").to_string();
+                        let own = OWN.lock().unwrap().as_ref().and_then(|m| m.get(&token).cloned());
+                        let fake = own.unwrap_or_else(|| f2.clone());
                         async move {
                             let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
                             fake.seen.lock().unwrap().push(Seen {
@@ -185,6 +191,21 @@ pub(crate) mod tests {
             fake
         })
         .clone()
+    }
+
+    /// A fake GitHub only this state talks to: its own replies and its own recorded requests. The state's
+    /// token becomes one no other test uses, and the server routes by it.
+    pub(crate) fn own_fake(st: &AppState) -> Arc<Fake> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        fake_github();
+        let token = format!("own-token-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let mut s = st.settings.get();
+        s.github_token = token.clone();
+        st.settings.save(s).unwrap();
+        let fake: Arc<Fake> = Default::default();
+        OWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(token, fake.clone());
+        fake
     }
 
     /// A test state with a GitHub token in settings, so `gh auth token` is never consulted.
