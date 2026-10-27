@@ -95,7 +95,7 @@ export default function IssuesPage() {
         <div className="space-y-3 px-4 pb-3 pt-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="eyebrow">Issues</div>
+              <div className="eyebrow">GitHub issues</div>
               <div className="mt-1 font-mono text-[11px] text-fg-3">
                 {data ? `${counts.open} open · ${counts.closed} closed · from GitHub` : "loading…"}
               </div>
@@ -214,7 +214,7 @@ function IssueView({ project, number, published, projects }: { project: string; 
   if (!issue) return <div className="mx-auto max-w-3xl space-y-3 p-8"><div className="skeleton h-7 w-2/3 rounded-lg" /><div className="skeleton h-40 rounded-xl" /></div>;
   return (
     <article className="mx-auto max-w-3xl space-y-6 px-6 py-8 max-md:px-4">
-      <Link to="/issues" className="btn-ghost -ml-2.5 lg:hidden"><ArrowLeft className="size-4" /> Issues</Link>
+      <Link to="/issues" className="btn-ghost -ml-2.5 lg:hidden"><ArrowLeft className="size-4" /> GitHub issues</Link>
       <header className="space-y-3">
         <div className="font-mono text-[11px] text-fg-3">{issue.repo}</div>
         <h1 className="text-[22px] font-medium leading-tight tracking-tight">

@@ -112,19 +112,19 @@ export default function TasksPage() {
         <div className="space-y-3 px-4 pb-3 pt-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="eyebrow">Tasks</div>
+              <div className="eyebrow">Loft issues</div>
               <div className="mt-1 font-mono text-[11px] text-fg-3">
                 {groups[0].tasks.length > 0 && <span className="text-warn">{groups[0].tasks.length} need you · </span>}
                 {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
               </div>
             </div>
-            <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New task" title="New task">
+            <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
               <Plus className="size-4" />
             </button>
           </div>
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search tasks" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
           </label>
           <div className="flex flex-wrap gap-2">
             <select value={project} onChange={(e) => setProject(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Project">
@@ -145,7 +145,7 @@ export default function TasksPage() {
           {tasks?.length === 0 && (
             <div className="flex flex-col items-center px-6 py-16 text-center text-fg-3">
               <ListTodo className="mb-3 size-8" />
-              <div className="text-[13px]">No tasks yet. Agents add them as they work, or add one with +.</div>
+              <div className="text-[13px]">No Loft issues yet. Agents add them as they work, or add one with +.</div>
             </div>
           )}
           {groups.map((g) => {
@@ -177,11 +177,11 @@ export default function TasksPage() {
         {selected ? (
           <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} />
         ) : routeId && tasks ? (
-          <div className="p-10 text-center text-[13px] text-fg-3">This task no longer exists.</div>
+          <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
         ) : (
           <div className="flex h-full flex-col items-center justify-center p-10 text-center text-fg-3">
             <ListTodo className="mb-3 size-8" />
-            <div className="text-[13px]">Pick a task to see its details and thread.</div>
+            <div className="text-[13px]">Pick a Loft issue to see its details and thread.</div>
           </div>
         )}
       </section>
@@ -240,7 +240,7 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
       <Link to="/tasks" className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
-        <ArrowLeft className="size-3" /> All tasks
+        <ArrowLeft className="size-3" /> All issues
       </Link>
       <header className="space-y-2">
         {parent && (

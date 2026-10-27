@@ -1,6 +1,6 @@
 //! Tasks: personal todos and work handed to agents. The user owns a task's
 //! description and assignment; the agent working on it owns its execution
-//! status, which it reports through the `update_task` MCP tool.
+//! status, which it reports through the `update_issue` MCP tool (`update_task` is its old name).
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -278,7 +278,7 @@ fn brief(state: &AppState, t: &Task, note: &str) -> String {
     if !t.depends_on.is_empty() {
         ids += &format!(", depends on {}", t.depends_on.join(", "));
     }
-    s += &format!("\n\n[Report progress on this task with `mcp__loft__update_task` ({ids}): notes as you go, then `done` with a summary or `failed`/`blocked` with the reason.]");
+    s += &format!("\n\n[Report progress on this Loft issue with `mcp__loft__update_issue` ({ids}): notes as you go, then `done` with a summary or `failed`/`blocked` with the reason.]");
     s
 }
 
@@ -343,6 +343,18 @@ fn tell_delegator(state: &AppState, t: &Task, from: &Agent) {
 }
 
 // ---- REST ---------------------------------------------------------------
+
+/// The Loft issue endpoints. Mounted at `/api/issues` and, under the old name, at `/api/tasks`.
+pub fn routes() -> axum::Router<AppState> {
+    use axum::routing::{get as at_get, post};
+    axum::Router::new()
+        .route("/", at_get(list).post(create_task))
+        .route("/{id}", at_get(get).patch(update).delete(delete))
+        .route("/{id}/execute", post(execute_task))
+        .route("/{id}/cancel", post(cancel))
+        .route("/{id}/comments", at_get(list_comments).post(add_comment))
+        .route("/{id}/plan", at_get(plan))
+}
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -482,7 +494,7 @@ pub fn reference_header(state: &AppState, ids: &[String]) -> String {
                     s += &format!(". {}: {}", capitalize(k), clip(v.lines().next().unwrap_or(""), 300));
                 }
             }
-            s + ". `mcp__loft__get_task` shows its details and thread.]"
+            s + ". `mcp__loft__get_issue` shows its details and thread.]"
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -764,33 +776,47 @@ pub async fn activity(State(state): State<AppState>, Query(q): Query<ActivityQue
 
 // ---- MCP tools ------------------------------------------------------------
 
+/// The old task tool names, kept as aliases of the issue tools until every client and agent has moved.
+const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("list_tasks", "list_issues"),
+    ("create_task", "create_issue"),
+    ("update_task", "update_issue"),
+    ("get_task", "get_issue"),
+    ("comment_task", "comment_issue"),
+];
+
+/// The issue tool a name means: itself, or the issue tool an old task name stands for.
+pub fn tool_name(name: &str) -> &str {
+    TOOL_ALIASES.iter().find(|(old, _)| *old == name).map_or(name, |(_, new)| new)
+}
+
 pub fn mcp_tools() -> Vec<Value> {
-    vec![
+    let tools = vec![
         json!({
-            "name": "list_tasks",
-            "description": "List Loft tasks: id, status, title, assignee. By default the open tasks assigned to you or created by you.",
+            "name": "list_issues",
+            "description": "List Loft issues: id, status, title, assignee. By default the open ones assigned to you or created by you.",
             "inputSchema": { "type": "object", "properties": {
-                "all": { "type": "boolean", "description": "Every task, not just yours." },
-                "include_closed": { "type": "boolean", "description": "Include done and cancelled tasks." }
+                "all": { "type": "boolean", "description": "Every Loft issue, not just yours." },
+                "include_closed": { "type": "boolean", "description": "Include done and cancelled ones." }
             } }
         }),
         json!({
-            "name": "create_task",
-            "description": "Create a task on the user's task list, optionally a subtask (`parent_id`) assigned to another agent. With `start: true` the agent gets it right away; you're messaged when it is done, failed or blocked.",
+            "name": "create_issue",
+            "description": "Create a Loft issue on the user's list, optionally a subtask (`parent_id`) assigned to another agent. With `start: true` the agent gets it right away; you're messaged when it is done, failed or blocked.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "description": { "type": "string" },
                 "agent": { "type": "string", "description": "Id or name of the agent to do it (you, or another agent)." },
                 "parent_id": { "type": "string" },
-                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks that must finish first." },
+                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of Loft issues that must finish first." },
                 "priority": { "type": "string", "enum": PRIORITIES },
                 "project": { "type": "string" },
                 "start": { "type": "boolean", "description": "Hand it to the agent now." }
             }, "required": ["title"] }
         }),
         json!({
-            "name": "update_task",
-            "description": "Report progress on a task assigned to you (or that you created). `status`: in_progress | blocked | waiting_approval | done | failed. Add a short `note` for progress, a `summary` when done, an `error` when failed or blocked.",
+            "name": "update_issue",
+            "description": "Report progress on a Loft issue assigned to you (or that you created). `status`: in_progress | blocked | waiting_approval | done | failed. Add a short `note` for progress, a `summary` when done, an `error` when failed or blocked.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" },
                 "status": { "type": "string", "enum": AGENT_STATUSES },
@@ -800,21 +826,32 @@ pub fn mcp_tools() -> Vec<Value> {
             }, "required": ["id"] }
         }),
         json!({
-            "name": "get_task",
-            "description": "One task with its thread: comments from the user and agents, progress notes and status changes, oldest first.",
+            "name": "get_issue",
+            "description": "One Loft issue with its thread: comments from the user and agents, progress notes and status changes, oldest first.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" }
             }, "required": ["id"] }
         }),
         json!({
-            "name": "comment_task",
-            "description": "Comment on a task you're on, created or delegated: answer a comment the user left on it (a message starting with `[Comment on task <id>`), or ask the user something about it. The user sees it on the task (and in this chat).",
+            "name": "comment_issue",
+            "description": "Comment on a Loft issue you're on, created or delegated: answer a comment the user left on it (a message starting with `[Comment on task <id>`), or ask the user something about it. The user sees it on the issue (and in this chat).",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" },
                 "text": { "type": "string" }
             }, "required": ["id", "text"] }
         }),
-    ]
+    ];
+    // The old names stay listed, so a conversation that already used them keeps working.
+    let aliases: Vec<Value> = TOOL_ALIASES
+        .iter()
+        .map(|(old, new)| {
+            let mut t = tools.iter().find(|t| t["name"] == *new).cloned().unwrap();
+            t["name"] = json!(old);
+            t["description"] = json!(format!("Old name for `{new}`, which does the same: use `{new}`. {}", t["description"].as_str().unwrap_or("")));
+            t
+        })
+        .collect();
+    tools.into_iter().chain(aliases).collect()
 }
 
 /// May `me` comment on `t`: assigned to it, created it, or delegated the task it's part of.
@@ -827,7 +864,7 @@ fn involved(state: &AppState, t: &Task, me: &Agent) -> bool {
 /// The prompt an agent gets for a comment on its task.
 fn comment_prompt(t: &Task, text: &str) -> String {
     format!(
-        "[Comment on task {} “{}” (status: {})]\n{}\n\n[Answer on the task with `mcp__loft__comment_task` (id {}); `mcp__loft__get_task` shows its whole thread. If it changes the work, carry on and report with `update_task` as usual.]",
+        "[Comment on task {} “{}” (status: {})]\n{}\n\n[Answer on the Loft issue with `mcp__loft__comment_issue` (id {}); `mcp__loft__get_issue` shows its whole thread. If it changes the work, carry on and report with `update_issue` as usual.]",
         t.id,
         t.title,
         t.status.replace('_', " "),
@@ -846,8 +883,8 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
         let parent = t.parent_id.as_deref().map(|p| format!(" (subtask of {p})")).unwrap_or_default();
         format!("- {} [{}] {}{who}{parent}", t.id, t.status, t.title)
     };
-    Some(match name {
-        "list_tasks" => (|| {
+    Some(match tool_name(name) {
+        "list_issues" => (|| {
             let all = args["all"].as_bool().unwrap_or(false);
             let closed = args["include_closed"].as_bool().unwrap_or(false);
             let tasks = state.db.list_tasks().map_err(|e| e.to_string())?;
@@ -859,7 +896,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 .collect();
             Ok(if lines.is_empty() { "No tasks.".into() } else { lines.join("\n") })
         })(),
-        "create_task" => (|| {
+        "create_issue" => (|| {
             let assignee = match s("agent") {
                 a if a.is_empty() => None,
                 a => Some(find_agent(&a)?),
@@ -892,7 +929,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 _ => Ok(format!("Created task {}.", t.id)),
             }
         })(),
-        "get_task" => (|| {
+        "get_issue" => (|| {
             let t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             let mut out = vec![line(&t)];
             for (k, v) in [("Description", &t.description), ("Latest note", &t.note), ("Summary", &t.summary), ("Problem", &t.error)] {
@@ -910,7 +947,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             Ok(out.join("\n"))
         })(),
-        "comment_task" => (|| {
+        "comment_issue" => (|| {
             let t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             if !involved(state, &t, me) {
                 return Err("You can only comment on tasks you're on, created or delegated.".to_string());
@@ -922,7 +959,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             log(state, &t, &me.id, "comment", text.trim(), json!({})).ok_or("Couldn't save the comment.")?;
             Ok(format!("Commented on task {}.", t.id))
         })(),
-        "update_task" => (|| {
+        "update_issue" => (|| {
             let mut t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             if t.agent_id.as_deref() != Some(&me.id) && t.created_by != me.id {
                 return Err("That task isn't assigned to you or created by you.".to_string());
@@ -1091,7 +1128,7 @@ pub(crate) mod tests {
         assert_eq!((r["queued"].clone(), r["delivered_to"].clone()), (json!(true), json!(a.id)));
         let q = queued(&st, &a);
         assert!(q.starts_with(&format!("[Comment on task {} “Fix login” (status: in progress)]\nAlso check the iPad layout", t.id)), "{q}");
-        assert!(q.contains("mcp__loft__comment_task"));
+        assert!(q.contains("mcp__loft__comment_issue"));
         // In the agent's chat it's a task row with what you wrote, not the instructions for the agent.
         let m = st.db.list_messages(&a.id, 10, None).unwrap().into_iter().last().unwrap();
         assert_eq!((m.meta["task_id"].clone(), m.meta["task_role"].clone()), (json!(t.id), json!("comment")));
@@ -1305,6 +1342,82 @@ pub(crate) mod tests {
         busy(&st, &a);
         let Json(v) = execute_task(State(st.clone()), Path(id.clone()), Some(Json(ExecuteBody { agent_id: Some(a.id.clone()), ..Default::default() }))).await.unwrap();
         assert_eq!((&v["task"]["status"], &v["task"]["labels"], &v["task"]["state"]), (&json!("in_progress"), &json!(["bug"]), &json!("open")));
+    }
+
+    #[tokio::test]
+    async fn issues_and_tasks_are_the_same_endpoints() {
+        let st = state();
+        let app = axum::Router::new().nest("/api/issues", routes()).nest("/api/tasks", routes()).with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let r = http.post(format!("{base}/api/issues")).json(&json!({ "title": "Made as an issue" })).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        let made: Value = r.json().await.unwrap();
+        let id = made["id"].as_str().unwrap();
+        let r = http.post(format!("{base}/api/tasks")).json(&json!({ "title": "Made as a task" })).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+
+        // Both lists and both single views give the same data.
+        let issues: Value = http.get(format!("{base}/api/issues")).send().await.unwrap().json().await.unwrap();
+        let tasks: Value = http.get(format!("{base}/api/tasks")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(issues, tasks);
+        assert_eq!(issues.as_array().unwrap().len(), 2);
+        let one: Value = http.get(format!("{base}/api/issues/{id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(one, http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().json::<Value>().await.unwrap());
+        assert_eq!(one["title"], "Made as an issue");
+
+        // An edit, a comment and a cancel under one name show under the other.
+        let r = http.patch(format!("{base}/api/issues/{id}")).json(&json!({ "priority": "high" })).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = http.post(format!("{base}/api/tasks/{id}/comments")).json(&json!({ "text": "A note", "send": false })).send().await.unwrap();
+        assert!(r.status().is_success(), "{}", r.status());
+        let thread: Value = http.get(format!("{base}/api/issues/{id}/comments")).send().await.unwrap().json().await.unwrap();
+        assert!(thread.as_array().unwrap().iter().any(|c| c["text"] == "A note"), "{thread}");
+        let r = http.post(format!("{base}/api/issues/{id}/cancel")).json(&json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let one: Value = http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((&one["priority"], &one["status"]), (&json!("high"), &json!("cancelled")));
+        assert_eq!(http.get(format!("{base}/api/issues/{id}/plan")).send().await.unwrap().status(), 200);
+        assert_eq!(http.delete(format!("{base}/api/issues/{id}")).send().await.unwrap().status(), 200);
+        assert_eq!(http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().status(), 404);
+    }
+
+    #[tokio::test]
+    async fn issue_tools_and_their_old_task_names_do_the_same() {
+        let st = state();
+        let me = agent(&st, "Builder");
+        let find = |k: &str| if k == "Builder" { Ok(me.clone()) } else { Err(k.to_string()) };
+
+        // Both names are listed, the old ones pointing at the new.
+        let names: Vec<String> = mcp_tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        for (old, new) in TOOL_ALIASES {
+            assert!(names.contains(&new.to_string()) && names.contains(&old.to_string()), "{old} / {new}");
+            let alias = mcp_tools().into_iter().find(|t| t["name"] == *old).unwrap();
+            let tool = mcp_tools().into_iter().find(|t| t["name"] == *new).unwrap();
+            assert_eq!(alias["inputSchema"], tool["inputSchema"]);
+            assert!(alias["description"].as_str().unwrap().contains(&format!("`{new}`")));
+        }
+
+        let a = mcp_call(&st, &me, "create_issue", &json!({ "title": "New name" }), find).unwrap().unwrap();
+        let b = mcp_call(&st, &me, "create_task", &json!({ "title": "Old name" }), find).unwrap().unwrap();
+        let ids: Vec<String> = st.db.list_tasks().unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 2, "{a}\n{b}");
+        assert_eq!(mcp_call(&st, &me, "list_issues", &json!({}), find).unwrap(), mcp_call(&st, &me, "list_tasks", &json!({}), find).unwrap());
+
+        let id = &ids[0];
+        mcp_call(&st, &me, "update_issue", &json!({ "id": id, "status": "in_progress", "note": "via issue" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "update_task", &json!({ "id": id, "note": "via task" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "comment_issue", &json!({ "id": id, "text": "Comment one" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "comment_task", &json!({ "id": id, "text": "Comment two" }), find).unwrap().unwrap();
+        let view = mcp_call(&st, &me, "get_issue", &json!({ "id": id }), find).unwrap().unwrap();
+        assert_eq!(view, mcp_call(&st, &me, "get_task", &json!({ "id": id }), find).unwrap().unwrap());
+        for text in ["via issue", "via task", "Comment one", "Comment two"] {
+            assert!(view.contains(text), "{text} missing from {view}");
+        }
+        assert!(mcp_call(&st, &me, "no_such_tool", &json!({}), find).is_none());
     }
 
     #[test]

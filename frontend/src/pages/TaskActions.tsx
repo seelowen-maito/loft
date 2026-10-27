@@ -71,7 +71,7 @@ function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
     }
   };
   return (
-    <Modal title="Edit task" onClose={onClose}>
+    <Modal title="Edit Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className={FIELD} aria-label="Title" />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
       {ACTIVE.includes(t.status) && <p className="text-[12px] text-fg-3">The agent already has the old description: message it if the work changes.</p>}
@@ -143,17 +143,17 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
         )}
         {!finished && (
           <button className="btn" disabled={busy} onClick={() => setDialog("cancel")}>
-            <X className="size-3.5" /> Cancel task
+            <X className="size-3.5" /> Cancel issue
           </button>
         )}
         <button className="btn-ghost" onClick={() => setDialog("edit")} title="Edit title, description, labels and owner">
           <Pencil className="size-3.5" /> Edit
         </button>
-        <button className="btn-ghost" onClick={copyLink} title="Copy a link to this task">
+        <button className="btn-ghost" onClick={copyLink} title="Copy a link to this issue">
           <Link2 className="size-3.5" /> {copied ? "Copied" : "Copy link"}
         </button>
         {!active && (
-          <button className="btn-ghost text-fg-3 hover:text-bad" onClick={() => setDialog("delete")} title="Delete this task">
+          <button className="btn-ghost text-fg-3 hover:text-bad" onClick={() => setDialog("delete")} title="Delete this issue">
             <Trash2 className="size-3.5" />
           </button>
         )}
@@ -163,7 +163,7 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
       {dialog === "edit" && <EditDialog task={t} onClose={() => setDialog(null)} />}
       {dialog === "cancel" && (
-        <Modal title="Cancel this task?" onClose={() => setDialog(null)}>
+        <Modal title="Cancel this issue?" onClose={() => setDialog(null)}>
           <p className="text-[13px] text-fg-2">
             It's marked cancelled.{" "}
             {active && agent ? `${agent.name} is told to stop working on it; you can also stop its current run, which may be doing other work too.` : "Nobody is working on it right now."}
@@ -173,13 +173,13 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
             {active && agent?.running && (
               <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, true))}>Cancel and stop {agent.name}</button>
             )}
-            <button className="btn-primary" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel task</button>
+            <button className="btn-primary" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel issue</button>
           </div>
           {error && <div className="text-[12px] text-bad">{error}</div>}
         </Modal>
       )}
       {dialog === "delete" && (
-        <Modal title="Delete this task?" onClose={() => setDialog(null)}>
+        <Modal title="Delete this issue?" onClose={() => setDialog(null)}>
           <p className="text-[13px] text-fg-2">It's removed with its thread. Subtasks stay, without a parent. This can't be undone.</p>
           <div className="flex justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
@@ -290,7 +290,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
           }}
           ref={box}
           rows={2}
-          placeholder={agent && send ? `Comment, or ask ${agent.name} about this task…` : "A note on this task…"}
+          placeholder={agent && send ? `Comment, or ask ${agent.name} about this issue…` : "A note on this issue…"}
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
         <div className="flex flex-wrap items-center gap-3">
@@ -301,7 +301,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
             </label>
           )}
           {agent && send && finished && (
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run the task again with this comment as the instruction">
+            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run it again with this comment as the instruction">
               <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} className="accent-[var(--color-accent)]" />
               Reopen and run again
             </label>
@@ -321,7 +321,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   );
 }
 
-/** "New task" from the list. */
+/** "New Loft issue" from the list. */
 export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; projects: string[]; onClose: () => void }) {
   const navigate = useNavigate();
   const [title, setTitle] = useState("");
@@ -350,7 +350,7 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
   };
   const field = FIELD;
   return (
-    <Modal title="New task" onClose={onClose}>
+    <Modal title="New Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing" className={field} />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
       <AgentSelect agents={agents} value={agentId} onChange={setAgentId} placeholder="No agent (a to-do for you)" />

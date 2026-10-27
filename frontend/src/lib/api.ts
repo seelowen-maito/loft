@@ -444,10 +444,10 @@ export const api = {
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
-  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/issues?project=${encodeURIComponent(project)}` : "/issues"),
-  issue: (project: string, n: number) => req<IssueDetail>("GET", `/issues/${n}?project=${encodeURIComponent(project)}`),
+  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/github/issues?project=${encodeURIComponent(project)}` : "/github/issues"),
+  issue: (project: string, n: number) => req<IssueDetail>("GET", `/github/issues/${n}?project=${encodeURIComponent(project)}`),
   /** Sends `agent` a chat message with the issue's number and link, which wakes it; it must be on the issue's repo. */
-  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/issues/${n}/send`, { project, agent }),
+  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/github/issues/${n}/send`, { project, agent }),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
@@ -475,27 +475,27 @@ export const api = {
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
-  tasks: () => req<Task[]>("GET", "/tasks"),
-  task: (id: string) => req<Task>("GET", `/tasks/${id}`),
+  tasks: () => req<Task[]>("GET", "/issues"),
+  task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
-  taskPlan: (id: string) => req<TaskPlan>("GET", `/tasks/${id}/plan`),
-  taskComments: (id: string) => req<TaskComment[]>("GET", `/tasks/${id}/comments?limit=200`),
+  taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
+  taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `reopen`: run a finished task again with it. */
   commentTask: (id: string, text: string, opts: { send: boolean; reopen: boolean }) =>
-    req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/tasks/${id}/comments`, {
+    req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
       ...opts,
     }),
-  createTask: (t: Partial<Task> & { title: string }) => req<Task>("POST", "/tasks", { ...t, id: crypto.randomUUID() }),
-  updateTask: (id: string, p: Partial<Omit<Task, "owner">> & { owner?: string | null }) => req<Task>("PATCH", `/tasks/${id}`, p),
-  runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/tasks/${id}/execute`, { agent_id: agentId, note }),
-  cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/tasks/${id}/cancel`, { stop_run: stopRun }),
-  deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/tasks/${id}`),
+  createTask: (t: Partial<Task> & { title: string }) => req<Task>("POST", "/issues", { ...t, id: crypto.randomUUID() }),
+  updateTask: (id: string, p: Partial<Omit<Task, "owner">> & { owner?: string | null }) => req<Task>("PATCH", `/issues/${id}`, p),
+  runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/issues/${id}/execute`, { agent_id: agentId, note }),
+  cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/issues/${id}/cancel`, { stop_run: stopRun }),
+  deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
   grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>

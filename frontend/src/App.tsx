@@ -93,11 +93,12 @@ export default function App() {
             <NavLink to="/agents" className={tab} aria-label="Agents">
               <Bot className="size-3.5" /> <span className="max-md:hidden">Agents</span>
             </NavLink>
-            <NavLink to="/issues" className={tab} aria-label="Issues">
-              <CircleDot className="size-3.5" /> <span className="max-md:hidden">Issues</span>
+            <NavLink to="/tasks" className={tab} aria-label="Issues">
+              <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
             </NavLink>
-            <NavLink to="/tasks" className={tab} aria-label="Tasks">
-              <ListTodo className="size-3.5" /> <span className="max-md:hidden">Tasks</span>
+            {/* The GitHub issues read live, until they are folded into the Loft issues list. */}
+            <NavLink to="/issues" className={tab} aria-label="GitHub issues" title="GitHub issues, read live">
+              <CircleDot className="size-3.5" /> <span className="max-md:hidden">GitHub</span>
             </NavLink>
             {showSimulator && (
               <NavLink to="/simulator" className={tab} aria-label="Simulator">
