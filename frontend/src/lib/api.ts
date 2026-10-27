@@ -347,8 +347,17 @@ export type SettingsView = {
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
 export type Usage = { windows: UsageWindow[]; error: string | null };
 
-/** The Mac's hottest CPU die sensor, sampled every 30 s. Null where it can't be read. */
-export type SystemReading = { cpu_temp_c: number | null; level: "nominal" | "warm" | "hot" | null; sampled_at: string | null };
+/** The Mac's hottest CPU die sensor and memory, sampled every 30 s. Null where it can't be read. */
+export type SystemReading = {
+  cpu_temp_c: number | null;
+  level: "nominal" | "warm" | "hot" | null;
+  /** Active + wired + compressed, like Activity Monitor's "Memory Used". */
+  mem_used_bytes: number | null;
+  mem_total_bytes: number | null;
+  /** high at ≥ 80 % used, critical at ≥ 90 %. */
+  mem_level: "nominal" | "high" | "critical" | null;
+  sampled_at: string | null;
+};
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 

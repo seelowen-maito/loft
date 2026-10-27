@@ -1,5 +1,5 @@
-//! This Mac's CPU temperature, for the apps' headers. Sampled in the background and
-//! cached, so requests never touch the sensors.
+//! This Mac's CPU temperature and memory, for the apps' headers. Sampled in the background
+//! and cached, so requests never touch the sensors.
 //!
 //! Apple Silicon exposes its die sensors through the IOHID event system (the private API
 //! tools like Stats and macmon use; no root needed). One reading of the die sensors costs a
@@ -19,6 +19,8 @@ use crate::state::{AppState, Event};
 pub const INTERVAL: Duration = Duration::from_secs(30);
 /// Push an update to clients when the temperature moves at least this much.
 const NOTIFY_DELTA: f64 = 2.0;
+/// Or when memory used moves at least this much.
+const NOTIFY_MEM_DELTA: u64 = 512 << 20;
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Reading {
@@ -26,6 +28,12 @@ pub struct Reading {
     pub cpu_temp_c: Option<f64>,
     /// nominal | warm | hot, from the temperature (Apple Silicon throttles around 100 °C).
     pub level: Option<&'static str>,
+    /// Active + wired + compressed pages, like Activity Monitor's "Memory Used".
+    pub mem_used_bytes: Option<u64>,
+    /// The machine's memory size.
+    pub mem_total_bytes: Option<u64>,
+    /// nominal | high (≥ 80 %) | critical (≥ 90 %), from memory used.
+    pub mem_level: Option<&'static str>,
     pub sampled_at: Option<String>,
 }
 
@@ -46,36 +54,53 @@ pub fn level(c: f64) -> &'static str {
     }
 }
 
-/// Whether a new reading is worth pushing to connected clients.
-pub fn changed(old: &Reading, new: &Reading) -> bool {
-    match (old.cpu_temp_c, new.cpu_temp_c) {
-        (Some(a), Some(b)) => (a - b).abs() >= NOTIFY_DELTA || old.level != new.level,
-        (a, b) => a.is_some() != b.is_some(),
+pub fn mem_level(used: u64, total: u64) -> &'static str {
+    match used * 100 / total.max(1) {
+        p if p >= 90 => "critical",
+        p if p >= 80 => "high",
+        _ => "nominal",
     }
 }
 
+/// Whether a new reading is worth pushing to connected clients.
+pub fn changed(old: &Reading, new: &Reading) -> bool {
+    let temp = match (old.cpu_temp_c, new.cpu_temp_c) {
+        (Some(a), Some(b)) => (a - b).abs() >= NOTIFY_DELTA || old.level != new.level,
+        (a, b) => a.is_some() != b.is_some(),
+    };
+    let mem = match (old.mem_used_bytes, new.mem_used_bytes) {
+        (Some(a), Some(b)) => a.abs_diff(b) >= NOTIFY_MEM_DELTA || old.mem_level != new.mem_level,
+        (a, b) => a.is_some() != b.is_some(),
+    };
+    temp || mem
+}
+
+/// Takes a reading and caches it. Returns it when clients should hear about it.
+async fn refresh(state: &AppState) -> Option<Reading> {
+    let (temp, mem) = tokio::task::spawn_blocking(|| (sensors::max_die_temp(), memory::used_total()))
+        .await
+        .unwrap_or_default();
+    let reading = Reading {
+        cpu_temp_c: temp.map(|t| (t * 10.0).round() / 10.0),
+        level: temp.map(level),
+        mem_used_bytes: mem.map(|m| m.0),
+        mem_total_bytes: mem.map(|m| m.1),
+        mem_level: mem.map(|(u, t)| mem_level(u, t)),
+        sampled_at: Some(crate::db::now()),
+    };
+    let mut cur = state.system.0.lock().unwrap();
+    let push = changed(&cur, &reading);
+    *cur = reading.clone();
+    push.then_some(reading)
+}
+
 pub async fn sampler(state: AppState) {
+    // Without die sensors (Intel) a temperature read is a no-op, so memory still samples every 30 s.
     let mut tick = tokio::time::interval(INTERVAL);
     loop {
         tick.tick().await;
-        let temp = tokio::task::spawn_blocking(sensors::max_die_temp).await.ok().flatten();
-        let reading = Reading {
-            cpu_temp_c: temp.map(|t| (t * 10.0).round() / 10.0),
-            level: temp.map(level),
-            sampled_at: Some(crate::db::now()),
-        };
-        let push = {
-            let mut cur = state.system.0.lock().unwrap();
-            let push = changed(&cur, &reading);
-            *cur = reading.clone();
-            push
-        };
-        if push {
+        if let Some(reading) = refresh(&state).await {
             state.emit(Event::System { system: json!(reading) });
-        }
-        if temp.is_none() {
-            // Nothing to read on this machine; check rarely instead of every 30 s.
-            tokio::time::sleep(Duration::from_secs(600)).await;
         }
     }
 }
@@ -212,6 +237,47 @@ mod sensors {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod memory {
+    unsafe extern "C" {
+        fn mach_host_self() -> libc::mach_port_t;
+        fn host_statistics64(
+            host: libc::mach_port_t,
+            flavor: libc::c_int,
+            info: *mut libc::c_int,
+            count: *mut libc::mach_msg_type_number_t,
+        ) -> libc::c_int;
+    }
+
+    /// (used, total) bytes. Used is active + wired + compressed pages.
+    pub fn used_total() -> Option<(u64, u64)> {
+        let mut total: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let ok = unsafe {
+            libc::sysctlbyname(c"hw.memsize".as_ptr(), &mut total as *mut u64 as *mut _, &mut len, std::ptr::null_mut(), 0)
+        };
+        if ok != 0 || total == 0 {
+            return None;
+        }
+        let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        let kr = unsafe { host_statistics64(mach_host_self(), libc::HOST_VM_INFO64, &mut vm as *mut _ as *mut _, &mut count) };
+        if kr != 0 {
+            return None;
+        }
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        let pages = vm.active_count as u64 + vm.wire_count as u64 + vm.compressor_page_count as u64;
+        Some(((pages * page).min(total), total))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod memory {
+    pub fn used_total() -> Option<(u64, u64)> {
+        None
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 mod sensors {
     pub fn max_die_temp() -> Option<f64> {
@@ -231,13 +297,39 @@ mod tests {
     }
 
     #[test]
+    fn mem_levels() {
+        assert_eq!(mem_level(20, 32), "nominal");
+        assert_eq!(mem_level(26, 32), "high");
+        assert_eq!(mem_level(29, 32), "critical");
+    }
+
+    #[test]
     fn pushes_only_meaningful_changes() {
-        let r = |t: Option<f64>| Reading { cpu_temp_c: t, level: t.map(level), sampled_at: None };
+        let r = |t: Option<f64>| Reading { cpu_temp_c: t, level: t.map(level), ..Default::default() };
         assert!(!changed(&r(Some(60.0)), &r(Some(61.5))));
         assert!(changed(&r(Some(60.0)), &r(Some(62.0))));
         assert!(changed(&r(Some(84.5)), &r(Some(85.5))), "crossing into warm pushes even under 2 °C");
         assert!(changed(&r(None), &r(Some(60.0))));
         assert!(!changed(&r(None), &r(None)));
+
+        const GB: u64 = 1 << 30;
+        let m = |used: u64| Reading { mem_used_bytes: Some(used), mem_total_bytes: Some(32 * GB), mem_level: Some(mem_level(used, 32 * GB)), ..Default::default() };
+        assert!(!changed(&m(20 * GB), &m(20 * GB + (100 << 20))));
+        assert!(changed(&m(20 * GB), &m(21 * GB)));
+        assert!(changed(&m(25 * GB + (600 << 20)), &m(25 * GB + (700 << 20))), "crossing 80 % pushes even under 512 MB");
+    }
+
+    #[tokio::test]
+    async fn api_returns_memory_used_and_total() {
+        let state = crate::tasks::tests::state();
+        refresh(&state).await;
+        let Json(v) = get(State(state)).await;
+        if cfg!(target_os = "macos") {
+            let total = v["mem_total_bytes"].as_u64().expect("total");
+            let used = v["mem_used_bytes"].as_u64().expect("used");
+            assert!(total > 0 && used <= total, "used {used} of {total}");
+            assert!(v["mem_level"].is_string());
+        }
     }
 
     /// On an Apple Silicon Mac this reads real sensors; elsewhere it just checks nothing panics.
