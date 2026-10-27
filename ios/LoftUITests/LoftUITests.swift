@@ -100,6 +100,7 @@ final class LoftUITests: XCTestCase {
         openQAChat(app)
         XCTAssertTrue(app.staticTexts["Direct · Idle"].appears(timeout: 5))
         XCTAssertTrue(app.textFields["composerField"].exists)
+        XCTAssertTrue(any("runDone", app).label.hasPrefix("Done in 2m 23s · "), "the last run's line, until the next run")
     }
 
     /// The Orchestrator chat: compact task rows, sending, the @ picker, the mic's long press, and no manual grill.
@@ -107,6 +108,11 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         openOrchestratorChat(app)
         XCTAssertTrue(app.staticTexts["Orchestrator · Working"].appears(timeout: 5))
+        // The run line: the time since the run's start (12 minutes ago in the fixture), then the status text.
+        let run = any("workingIndicator", app)
+        XCTAssertTrue(run.appears(timeout: 5))
+        XCTAssertTrue(run.label.hasPrefix("Working: 12m "), run.label)
+        XCTAssertTrue(run.label.hasSuffix("s · Planning the settings work"), run.label)
 
         let brief = app.buttons["Task: Renew the domain"]
         XCTAssertTrue(brief.appears(timeout: 5))

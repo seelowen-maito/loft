@@ -136,6 +136,15 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 m(8, "orch", "user", "text", "[Task t4] “Test the integrated flow”, which you delegated to me, is now blocked: Waiting for the backend and iOS work", 6,
                   meta: ["task_id": "t4", "task_role": "report", "task_status": "blocked", "from_agent": ["id": "qa", "name": "QA Agent"]]),
             ],
+            // A finished run, for the chat's "Done in" line.
+            "qa": [
+                m(30, "qa", "user", "text", "Run the smoke tests on the staging build.", 93),
+                ChatMessage(id: 31, agentId: "qa", runId: "qa-r1", role: "system", kind: "run_start", content: "", meta: nil, createdAt: ago(93)),
+                ChatMessage(id: 32, agentId: "qa", runId: "qa-r1", role: "assistant", kind: "text", content: "All 14 smoke tests passed on staging.",
+                            meta: nil, createdAt: ago(90.7)),
+                ChatMessage(id: 33, agentId: "qa", runId: "qa-r1", role: "system", kind: "run_end", content: "",
+                            meta: ["duration_ms": .number(143_000)], createdAt: ago(93).addingTimeInterval(143)),
+            ],
         ]
         perms = [
             PermissionRequest(id: "p1", agentId: "ios", source: "prompt", toolName: "Bash", input: ["command": "xcodebuild test -scheme Loft"],

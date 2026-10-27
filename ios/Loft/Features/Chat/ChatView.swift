@@ -107,13 +107,15 @@ struct ChatView: View {
                     }
                     if let a = shownQuickAck { QuickAckRow(text: a.text).id("quickAck") }
                     if state == .working {
-                        WorkingIndicator(text: agent.statusText?.isEmpty == false ? agent.statusText! : "Working…").id("working")
+                        RunIndicator(startedAt: agent.lastRunAt, status: agent.statusText).id("working")
                     } else if grill == nil, awaitingReply(agent), shownQuickAck == nil {
                         // Right after you send: an instant "got it" until the agent's run shows up.
                         WorkingIndicator(text: "Got it, thinking…").id("working")
                     } else if let s = grill, s.state == .preparing || s.waiting == true {
                         // The agent is writing the first round, or the next one after you sent yours.
                         WorkingIndicator(text: s.state == .preparing ? "Preparing questions…" : "Next round…").id("working")
+                    } else if let run = RunTimer.lastFinished(store.conversation(agentId)) {
+                        RunDoneLine(text: RunTimer.done(run.duration, endedAt: run.endedAt)).id("runDone")
                     }
                     ForEach(store.pendingApprovals(for: agentId)) { ApprovalCard(request: $0) }
                     Color.clear.frame(height: 1).id("bottom")
@@ -943,6 +945,69 @@ private struct PendingBubble: View {
                 }
             }
         }
+    }
+}
+
+/// The chat's run line while the agent works: an animated ✻, the time since the run's start ticking every second,
+/// and the status text. Like the web's RunIndicator.
+private struct RunIndicator: View {
+    let startedAt: Date?
+    let status: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Static in UI tests, like WorkingIndicator: a repeating animation keeps the screen from ever counting as idle.
+    private static let uiTesting = ProcessInfo.processInfo.arguments.contains("-ui-testing") || TestMode.noAnimations
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let elapsed = RunTimer.elapsed(since: startedAt, now: ctx.date)
+            let text = status?.isEmpty == false ? "\(elapsed) · \(status!)" : elapsed
+            HStack(spacing: 8) {
+                star
+                Text(text).monospacedDigit().lineLimit(2)
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 6)
+            .padding(.leading, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Working: \(text)")
+            .accessibilityIdentifier("workingIndicator")
+        }
+    }
+
+    @ViewBuilder private var star: some View {
+        let glyph = Text("✻").font(.body).foregroundStyle(Theme.accent)
+        if reduceMotion || Self.uiTesting {
+            glyph
+        } else {
+            // ✻ looks the same turned 180°, so the loop's jump back to 0° doesn't show.
+            glyph.phaseAnimator([0.0, 90.0, 180.0]) { view, angle in
+                view.rotationEffect(.degrees(angle))
+                    .scaleEffect(angle == 90 ? 0.8 : 1)
+                    .opacity(angle == 90 ? 0.55 : 1)
+            } animation: { angle in
+                angle == 0 ? nil : .easeInOut(duration: 1.2)
+            }
+        }
+    }
+}
+
+/// `✻ Done in 2m 23s · Thu 16:23`, after the run until the next one.
+private struct RunDoneLine: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("✻").font(.body).foregroundStyle(Theme.accent)
+            Text(text).monospacedDigit().foregroundStyle(.tertiary)
+        }
+        .font(.footnote)
+        .padding(.vertical, 6)
+        .padding(.leading, 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier("runDone")
     }
 }
 
