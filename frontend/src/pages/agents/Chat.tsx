@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -209,13 +209,14 @@ export function Chat({
   };
 
   // The end-of-planning card: a fresh session, with the suggested next message waiting in the composer, unsent.
-  const clearWith = async (next: string) => {
+  // Stable, so a grill event doesn't re-render every memoized MessageRow.
+  const clearWith = useCallback(async (next: string) => {
     setCmdError(null);
     await api.resetSession(agent.id);
     setText(next);
     stick.current = true;
     composer.current?.focus();
-  };
+  }, [agent.id]);
 
   const compactContext = async (instructions: string) => {
     setCmdError(null);
@@ -466,7 +467,9 @@ export function Chat({
               const req = perms.get(it.m.meta?.request_id);
               return req ? <PermissionCard key={it.m.id} req={req} /> : null;
             }
-            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={grill} onClearWith={clearWith} />;
+            // Only round cards read the session: other rows get null and skip re-rendering on grill events.
+            const session = it.m.meta?.grill?.role === "round" ? grill : null;
+            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} />;
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
@@ -743,7 +746,7 @@ function findAgent(agents: Agent[], key: string | undefined) {
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
 }
 
-function MessageRow({ m, agent, agents, grill, onClearWith }: {
+const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith }: {
   m: Message;
   agent: Agent;
   agents: Agent[];
@@ -879,7 +882,7 @@ function MessageRow({ m, agent, agents, grill, onClearWith }: {
       </div>
     </div>
   );
-}
+});
 
 function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Message; agent: Agent; agents: Agent[] }) {
   const to = findAgent(agents, use.meta?.input?.agent);
