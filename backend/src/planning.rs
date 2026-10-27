@@ -245,8 +245,10 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     for &i in &order {
         let t = &ts[i];
         let k = format!("{scope}/{}", key(&t.title));
-        // The database id is only read from GitHub when a link still needs it.
-        let (n, mut id, new) = if let Ok(Some(n)) = state.db.published_issue(&slug, "ticket", &k) {
+        // A standalone ticket counts as published only while it's still open: once closed, the same
+        // request is new work. The database id is only read from GitHub when a link still needs it.
+        let recorded = state.db.published_issue(&slug, "ticket", &k).ok().flatten().filter(|n| spec.is_some() || listed.iter().any(|l| l.0 == *n));
+        let (n, mut id, new) = if let Some(n) = recorded {
             (n, listed.iter().find(|l| l.0 == n).map(|l| l.1), false)
         } else if let Some(l) = listed.iter().find(|l| l.2 == key(&t.title)) {
             state.db.record_published_issue(&slug, "ticket", &k, l.0).map_err(|e| e.to_string())?;
@@ -538,7 +540,7 @@ mod tests {
         assert_eq!(posts(&fake, slug, "issues/40/sub_issues"), [json!({ "sub_issue_id": 4100 }), json!({ "sub_issue_id": 4200 }), json!({ "sub_issue_id": 4300 })]);
         assert_eq!(posts(&fake, slug, "issues/42/dependencies/blocked_by"), [json!({ "issue_id": 4100 })]);
         assert_eq!(posts(&fake, slug, "issues/43/dependencies/blocked_by"), [json!({ "issue_id": 4200 }), json!({ "issue_id": 4100 })]);
-        assert!(posts(&fake, slug, "issues/41/dependencies").is_empty());
+        assert!(posts(&fake, slug, "issues/41/dependencies/blocked_by").is_empty());
         assert!(posts(&fake, slug, "labels").is_empty());
     }
 
@@ -615,9 +617,38 @@ mod tests {
         assert!(fake.seen(&format!("/repos/{slug}/issues/")).is_empty(), "no parent, no links");
         assert!(fake.seen(&format!("/repos/{slug}/issues?labels=ready-for-agent&state=open")).len() == 1);
 
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([{ "number": 5, "id": 500, "title": "Blue button" }]));
         let again = publish_tickets(&st, &a, None, vec![ticket("blue  button", &[])]).await.unwrap();
         assert!(again.contains("#5 blue button, already published"), "{again}");
         assert_eq!(posts(&fake, slug, "issues").len(), 1);
+
+        // Once #5 is closed it no longer lists as open: the same request is new work.
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 8, "id": 800 }));
+        let later = publish_tickets(&st, &a, None, vec![ticket("Blue button", &[])]).await.unwrap();
+        assert!(later.contains("- #8 Blue button: "), "{later}");
+        assert_eq!(posts(&fake, slug, "issues").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_sub_issue_link_that_failed_is_made_on_the_retry() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-unlinked";
+        let a = planner_on(&st, "tickets-unlinked", Some("git@github.com:octo/tickets-unlinked.git"));
+        tickets_repo(&fake, slug, 20, &[21]);
+        fake.route("POST", &format!("/repos/{slug}/issues/20/sub_issues"), 500, json!({ "message": "Server Error" }));
+
+        let err = publish_tickets(&st, &a, Some(20), vec![ticket("Only", &[])]).await.unwrap_err();
+        assert!(err.starts_with("Couldn't make #21 a sub-issue of spec #20: GitHub 500: Server Error. What was published so far stays"), "{err}");
+
+        // The retry knows #21 but not its id, which links need: it reads it from GitHub.
+        fake.route("POST", &format!("/repos/{slug}/issues/20/sub_issues"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/issues/21"), 200, json!({ "number": 21, "id": 2100, "title": "Only" }));
+        let out = publish_tickets(&st, &a, Some(20), vec![ticket("Only", &[])]).await.unwrap();
+        assert!(out.contains("- #21 Only, already published:"), "{out}");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1);
+        assert_eq!(posts(&fake, slug, "issues/20/sub_issues"), [json!({ "sub_issue_id": 2100 }), json!({ "sub_issue_id": 2100 })]);
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/21")).len(), 1);
     }
 
     #[tokio::test]
@@ -630,6 +661,9 @@ mod tests {
         };
         assert!(err(vec![ticket("A", &[]), ticket("B", &[])], None).await.starts_with("Several tickets belong to a spec"));
         assert_eq!(err(vec![], Some(1)).await, "tickets is empty");
+        assert_eq!(err((0..51).map(|i| ticket(&format!("T{i}"), &[])).collect(), Some(1)).await, "at most 50 tickets at a time");
+        assert_eq!(err(vec![json!({ "title": "A", "body": "  " })], Some(1)).await, "ticket 1 needs a title and a body");
+        assert!(err(vec![ticket(&"x".repeat(201), &[])], Some(1)).await.ends_with("a title is at most 200 characters"));
         assert_eq!(err(vec![ticket("A", &[]), ticket("a", &[])], Some(1)).await, "two tickets are titled \"a\": every ticket needs its own title");
         assert_eq!(err(vec![ticket("A", &["Z"])], Some(1)).await, "\"A\" is blocked by \"Z\", which isn't one of these tickets");
         assert_eq!(err(vec![ticket("A", &["A"])], Some(1)).await, "\"A\" can't block itself");
