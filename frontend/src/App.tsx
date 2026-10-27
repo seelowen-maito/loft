@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router";
 import { Bot, CircleDot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
-import { api } from "./lib/api";
+import { api, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import IssuesPage from "./pages/Issues";
-import SettingsPage from "./pages/Settings";
+import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -58,8 +58,21 @@ function PendingBadge() {
   );
 }
 
+/** Whether the Simulator tab is on (Settings → Navigation). Off until the settings load. */
+function useShowSimulator() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    api.settings().then((v) => setShow(v.settings.show_simulator)).catch(() => {});
+    const onSaved = (e: Event) => setShow((e as CustomEvent<Settings>).detail.show_simulator);
+    window.addEventListener(SETTINGS_SAVED, onSaved);
+    return () => window.removeEventListener(SETTINGS_SAVED, onSaved);
+  }, []);
+  return show;
+}
+
 export default function App() {
   const live = useLiveConnection();
+  const showSimulator = useShowSimulator();
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
       "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors",
@@ -86,9 +99,11 @@ export default function App() {
             <NavLink to="/tasks" className={tab} aria-label="Tasks">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Tasks</span>
             </NavLink>
-            <NavLink to="/simulator" className={tab} aria-label="Simulator">
-              <Smartphone className="size-3.5" /> <span className="max-md:hidden">Simulator</span>
-            </NavLink>
+            {showSimulator && (
+              <NavLink to="/simulator" className={tab} aria-label="Simulator">
+                <Smartphone className="size-3.5" /> <span className="max-md:hidden">Simulator</span>
+              </NavLink>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-4 max-md:gap-3">
             <PendingBadge />

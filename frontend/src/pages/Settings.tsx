@@ -7,6 +7,9 @@ import { cx } from "../lib/format";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
+/** Window event fired after a save, with the saved Settings as detail, so the navbar can follow. */
+export const SETTINGS_SAVED = "loft:settings-saved";
+
 function Field({ label, hint, restart, children }: { label: string; hint?: string; restart?: boolean; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
@@ -84,6 +87,7 @@ export default function SettingsPage() {
       setView(v);
       setDraft(v.settings);
       setToken(undefined);
+      window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -178,6 +182,15 @@ export default function SettingsPage() {
             onChange={(v) => set("auto_update", v)}
             label="Update automatically"
             hint="Checks for new commits every minute. Installs once no agent is running, then restarts."
+          />
+        </Section>
+
+        <Section title="Navigation">
+          <Toggle
+            on={draft.show_simulator}
+            onChange={(v) => set("show_simulator", v)}
+            label="Show Simulator"
+            hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
         </Section>
 

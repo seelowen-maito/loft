@@ -329,6 +329,7 @@ export type Settings = {
   /** Always "" from the server; see SettingsView.github_token_set. */
   github_token: string;
   auto_update: boolean;
+  show_simulator: boolean;
 };
 
 export type SettingsView = {

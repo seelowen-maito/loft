@@ -20,6 +20,8 @@ pub struct Settings {
     pub github_token: String,
     /// Pull, rebuild and restart when the upstream branch moves (see updater.rs).
     pub auto_update: bool,
+    /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
+    pub show_simulator: bool,
     pub push: Push,
 }
 
@@ -51,6 +53,7 @@ impl Default for Settings {
             ssh_host: String::new(),
             github_token: String::new(),
             auto_update: false,
+            show_simulator: false,
             push: Push::default(),
         }
     }
