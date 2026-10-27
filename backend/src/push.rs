@@ -73,7 +73,7 @@ impl Pusher {
         for d in &devices {
             let wanted: Vec<&&PushItem> = fresh
                 .iter()
-                .filter(|i| d.kinds.iter().any(|k| k == i.kind))
+                .filter(|i| d.kinds.iter().any(|k| apns::kind(k) == i.kind))
                 .filter(|_| d.quiet_hours.as_ref().is_none_or(|q| !in_quiet(q, now_min)))
                 .collect();
             let mut skipped = 0;
@@ -226,6 +226,39 @@ mod tests {
         st.db.save_permission(&PermissionRequest { status: "allowed_once".into(), ..st.db.list_permissions(None).unwrap().into_iter().find(|p| p.id == "new").unwrap() }).unwrap();
         tick(&st, &mut p).await;
         assert_eq!(got(&seen, &all).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn each_new_round_is_pushed_once_including_to_devices_that_chose_the_old_kind() {
+        let seen = crate::apns::tests::fake_apns();
+        let st = state();
+        crate::apns::tests::configure(&st);
+        let lead = crate::grill::tests::planner(&st, "Lead");
+        let (now_kind, old_kind) = (format!("{}04", "aa".repeat(31)), format!("{}05", "aa".repeat(31)));
+        device(&st, &now_kind, &["grill_round"], None);
+        device(&st, &old_kind, &["grill_question"], None);
+        let mut p = Pusher::default();
+        tick(&st, &mut p).await;
+
+        let q = serde_json::json!([{ "text": "Who pays?", "speak": "Who pays?", "recommendation": "The team lead" }, { "text": "Trial?", "speak": "Trial?", "recommendation": "No" }]);
+        crate::grill::mcp_call(&st, &lead, "grill_round", &serde_json::json!({ "topic": "Pricing", "questions": q })).unwrap().unwrap();
+        tick(&st, &mut p).await;
+        for token in [&now_kind, &old_kind] {
+            let pushes = got(&seen, token);
+            assert_eq!(pushes.len(), 1, "{token}");
+            let b = &pushes[0].1;
+            assert_eq!((b["type"].clone(), b["aps"]["alert"]["title"].clone(), b["aps"]["alert"]["body"].clone()), (serde_json::json!("grill_round"), serde_json::json!("Lead: round 1"), serde_json::json!("Interview: Pricing")));
+        }
+        // Answering doesn't push again; the next round does.
+        let s = crate::grill::active(&st, &lead.id).unwrap();
+        let tag = serde_json::json!({ "role": "answer", "session_id": s.id, "question_id": s.rounds[0].questions[0].id });
+        crate::grill::on_user_message(&st, &lead, "yes", Some(&tag), serde_json::json!({})).ok().unwrap();
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &now_kind).len(), 1);
+        crate::grill::on_user_message(&st, &lead, "send", None, serde_json::json!({})).ok().unwrap();
+        crate::grill::mcp_call(&st, &lead, "grill_round", &serde_json::json!({ "questions": [] })).unwrap().unwrap();
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &now_kind).last().unwrap().1["aps"]["alert"]["title"], serde_json::json!("Lead: round 2"));
     }
 
     #[tokio::test]

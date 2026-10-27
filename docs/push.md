@@ -46,7 +46,8 @@ uses the right host per device. The same auth key works for both.
 | `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
-`grill_question`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
+`grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
+`grill_question`, the name before rounds, is still accepted and stored as `grill_round`.
 `quiet_hours`: `{start: "22:00", end: "07:00", tz: "Europe/Lisbon", utc_offset_minutes: 60}`.
 
 When Apple answers **410**, or **400 BadDeviceToken / DeviceTokenNotForTopic**, the device is removed.
@@ -91,7 +92,7 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 | task_approval | "<agent> needs your approval" | task title |
 | task_blocked | "<agent> is blocked" | task title |
 | question | "<agent> asked you something" | "Open the chat to answer" |
-| grill_question | "<agent>: question <n>" | "Interview: <topic>" |
+| grill_round | "<agent>: round <n>" | "Interview: <topic>" |
 | stuck | "<agent> may be stuck" | "No activity for N min" / "Waiting on a background task" |
 | task_failed | "A task failed" | task title |
 | pr_ready | "Ready to merge" | "<repo>#<n>: <title>" |

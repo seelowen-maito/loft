@@ -295,7 +295,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             let answered = r.questions.iter().filter(|q| q.state != "open").count();
             items.push(Item {
                 id: format!("grill:{}:{}", s.id, r.index),
-                kind: "grill_question",
+                kind: "grill_round",
                 urgency: if paused { 1 } else { 2 },
                 agent: Some((a.id.clone(), a.name.clone())),
                 task_id: None,
@@ -541,7 +541,7 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<J
 }
 
 /// `POST /api/needs-you/{id}/dismiss`: hide an item until it changes (a changed item gets a new id).
-/// Permission prompts and grill questions can't be dismissed: they block an agent until answered.
+/// Permission prompts and open grill rounds can't be dismissed: they block an agent until answered.
 pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
@@ -669,7 +669,7 @@ mod tests {
             std::fs::write(path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
         }
         let types: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["permission", "task_blocked", "question", "grill_question", "task_failed", "pr_ready", "pr_ready", "pr_review", "task_done"], "{v:#}");
+        assert_eq!(types, ["permission", "task_blocked", "question", "grill_round", "task_failed", "pr_ready", "pr_ready", "pr_review", "task_done"], "{v:#}");
         assert_eq!((v["count"].clone(), v["urgent"].clone(), v["version"].clone()), (json!(9), json!(4), json!(1)));
         // PRs carry their repo as separate fields, for grouping by project.
         let prs: Vec<&Value> = v["items"].as_array().unwrap().iter().filter(|i| i["pr"].is_object()).collect();
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(item(&v, "question")["reason"], json!("Should I use B2 or S3?"));
         assert_eq!(item(&v, "task_failed")["reason"], json!("Failed: Xcode 27 missing"));
         assert_eq!(item(&v, "task_done")["reason"], json!("Done: 15 GB after cleanup."));
-        assert_eq!((item(&v, "grill_question")["text"].clone(), item(&v, "grill_question")["reason"].clone()), (json!("• Who pays?"), json!("Round 1: 0 of 1 answered")));
+        assert_eq!((item(&v, "grill_round")["text"].clone(), item(&v, "grill_round")["reason"].clone()), (json!("• Who pays?"), json!("Round 1: 0 of 1 answered")));
         let merge = &item(&v, "pr_ready")["actions"][0];
         assert_eq!((merge["path"].clone(), merge["body"]["method"].clone()), (json!("/api/pull-requests/pr1/merge"), json!("squash")));
         assert_eq!(item(&v, "pr_ready")["links"][0]["url"], json!("https://github.com/o/r/pull/7"), "links are kept apart from the text");
@@ -702,7 +702,31 @@ mod tests {
         assert!(dismiss_item(State(st.clone()), Path(done_id.clone())).await.is_ok());
         assert!(!ids(&snapshot(&st).unwrap()).contains(&done_id));
         assert!(dismiss_item(State(st.clone()), Path("permission:p1".into())).await.is_err());
+        assert!(dismiss_item(State(st.clone()), Path(item(&v, "grill_round")["id"].as_str().unwrap().into())).await.is_err(), "an open round can't be dismissed");
         assert!(dismiss_item(State(st.clone()), Path("question:999999".into())).await.is_err(), "unknown ids are refused");
+    }
+
+    #[test]
+    fn an_open_round_is_one_item_until_it_is_sent() {
+        let st = state();
+        let lead = crate::grill::tests::planner(&st, "Lead");
+        let qs = json!([{ "text": "Who pays?", "speak": "Who pays?", "recommendation": "The team lead" }, { "text": "Trial?", "speak": "Trial?", "recommendation": "No" }]);
+        crate::grill::mcp_call(&st, &lead, "grill_round", &json!({ "topic": "Pricing", "questions": qs })).unwrap().unwrap();
+        let rounds = |st: &AppState| snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "grill_round").cloned().collect::<Vec<_>>();
+        let r = rounds(&st);
+        assert_eq!(r.len(), 1, "one item for the round, not one per question");
+        assert_eq!((r[0]["text"].clone(), r[0]["urgency"].clone(), r[0]["actions"][0]["kind"].clone()), (json!("• Who pays?\n• Trial?"), json!(2), json!("open")));
+        assert!(!r[0]["actions"].as_array().unwrap().iter().any(|a| a["kind"] == "dismiss"));
+        // Answering and pausing keep the same item (no new push), with its progress and a lower urgency.
+        let id = r[0]["id"].clone();
+        let s = crate::grill::active(&st, &lead.id).unwrap();
+        crate::grill::on_user_message(&st, &lead, "yes", Some(&json!({ "role": "answer", "session_id": s.id, "question_id": s.rounds[0].questions[0].id })), json!({})).ok().unwrap();
+        crate::grill::on_user_message(&st, &lead, "pause", None, json!({})).ok().unwrap();
+        let r = rounds(&st);
+        assert_eq!((r[0]["id"].clone(), r[0]["urgency"].clone(), r[0]["reason"].clone()), (id, json!(1), json!("Round 1: 1 of 2 answered (interview paused)")));
+        // Sent: nothing waits on the user until the next round.
+        crate::grill::on_user_message(&st, &lead, "send", None, json!({})).ok().unwrap();
+        assert!(rounds(&st).is_empty());
     }
 
     #[test]

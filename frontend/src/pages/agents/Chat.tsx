@@ -677,6 +677,7 @@ export function Chat({
                 placeholder={
                   watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                   : running ? `${agent.name} is working. Your message will be delivered next.`
+                  : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
                   : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                 }
                 className="max-h-48 flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"

@@ -89,7 +89,8 @@ pub struct Question {
     /// The agent's proposed answer; "yes" accepts it.
     #[serde(default)]
     pub recommendation: String,
-    /// open | answered | discuss | decided (left to the agent: its recommendation stands) | carried (sent unanswered)
+    /// open | answered | discuss (the answer is the user's comment) | decided (left to the agent: its
+    /// recommendation stands) | carried (sent unanswered: Loft asks it again, unchanged, in the next round)
     pub state: String,
     #[serde(default)]
     pub answer: Option<String>,
@@ -98,6 +99,9 @@ pub struct Question {
     pub accepted: bool,
     #[serde(default)]
     pub answered_at: Option<String>,
+    /// The round it was first asked in, when it was carried into this one unanswered.
+    #[serde(default)]
+    pub from_round: Option<u32>,
 }
 
 /// Grill mode is part of Planning, which is switched on per agent.
@@ -187,7 +191,7 @@ fn post_round(state: &AppState, s: &Session, r: &Round) {
     let questions: Vec<Value> = r
         .questions
         .iter()
-        .map(|q| json!({ "id": q.id, "text": q.text, "speak": q.speak, "kind": q.kind, "options": q.options, "recommendation": q.recommendation }))
+        .map(|q| json!({ "id": q.id, "text": q.text, "speak": q.speak, "kind": q.kind, "options": q.options, "recommendation": q.recommendation, "from_round": q.from_round }))
         .collect();
     let g = json!({ "session_id": s.id, "role": "round", "round": r.index, "topic": s.topic, "questions": questions });
     add_msg(state, &s.agent_id, None, "assistant", "text", text.trim_end(), json!({ "grill": g }));
@@ -200,6 +204,7 @@ fn answer_line(q: &Question) -> String {
         "answered" => format!("\"{}\"", q.answer.as_deref().unwrap_or("")),
         "discuss" => format!("wants to discuss first: \"{}\"", q.answer.as_deref().unwrap_or("")),
         "decided" => "left it to you: your recommendation is the decision".into(),
+        "carried" => "no answer (Loft asks it again in the next round)".into(),
         _ => "no answer".into(),
     }
 }
@@ -210,7 +215,8 @@ fn answers_text(s: &Session, r: &Round) -> String {
     for (i, q) in r.questions.iter().enumerate() {
         let a = match q.state.as_str() {
             "answered" if q.accepted => format!("{} ({})", say(s, "Yes", "Sim"), q.recommendation),
-            "answered" | "discuss" => q.answer.clone().unwrap_or_default(),
+            "answered" => q.answer.clone().unwrap_or_default(),
+            "discuss" => format!("{} {}", say(s, "Let's discuss:", "Vamos discutir:"), q.answer.as_deref().unwrap_or("")),
             "decided" => say(s, &format!("Up to you ({})", q.recommendation), &format!("Você decide ({})", q.recommendation)),
             _ => format!("({})", say(s, "no answer", "sem resposta")),
         };
@@ -264,6 +270,7 @@ fn parse_questions(v: &Value) -> Result<Vec<Question>, String> {
                 answer: None,
                 accepted: false,
                 answered_at: None,
+                from_round: None,
             })
         })
         .collect()
@@ -330,7 +337,7 @@ fn transcript(s: &Session) -> String {
 /// The run after the user sends a round.
 fn round_prompt(s: &Session, r: &Round) -> String {
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers. If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round` (ask again what was left unanswered, if it still matters). When every branch is resolved, finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers. Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -394,30 +401,29 @@ pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Optio
         return if tagged { Err(conflict("question_closed")) } else { Ok(Routed::Normal(meta)) };
     }
 
-    // Untagged text (the web composer, old app builds) may be a command; app-tagged answers never are.
-    let mut text = text.to_string();
+    // Untagged text (the web composer, old app builds) may be a command; anything else is ordinary chat,
+    // never an answer: answers are tagged with their question (the cards, the app's voice loop).
     if !tagged {
-        match commands::parse(&text) {
-            commands::Parsed::Command(cmd) => {
-                meta["grill"] = json!({ "session_id": s.id, "role": "command", "command": cmd });
-                let message = add_msg(state, &agent.id, None, "user", "text", &text, meta);
-                let wake = apply_command(state, &mut s, cmd, None, message.as_ref().map(|m| m.id))?;
-                return Ok(Routed::Handled { message, wake });
-            }
-            commands::Parsed::Answer(a) => text = a,
+        let commands::Parsed::Command(cmd) = commands::parse(text) else { return Ok(Routed::Normal(meta)) };
+        meta["grill"] = json!({ "session_id": s.id, "role": "command", "command": cmd });
+        let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        if commands::CLIENT_ONLY.contains(&cmd) {
+            // Stepping through questions only means something by voice; say so rather than doing nothing.
+            let hint = say(
+                &s,
+                "Skip, back and repeat step through questions by voice. Here, answer the cards in any order: questions left open are asked again in the next round.",
+                "Pular, voltar e repetir servem para a voz. Aqui, responda os cartões em qualquer ordem: o que ficar aberto volta na próxima rodada.",
+            );
+            status_row(state, &s, &hint, json!({ "state": "hint", "command": cmd }));
+            return Ok(Routed::Handled { message, wake: None });
         }
+        let wake = apply_command(state, &mut s, cmd, None, message.as_ref().map(|m| m.id))?;
+        return Ok(Routed::Handled { message, wake });
     }
 
-    let qid = match grill.and_then(|g| g["question_id"].as_str()) {
-        Some(id) => id.to_string(),
-        None if tagged => return Err(ApiError(StatusCode::BAD_REQUEST, "an answer needs question_id".into())),
-        // Untagged text while a round waits answers its first open question, as voice does.
-        None => match open_round(&s).and_then(|r| r.questions.iter().find(|q| q.state == "open")) {
-            Some(q) => q.id.clone(),
-            None => return Ok(Routed::Normal(meta)),
-        },
-    };
-    record_answer(state, &mut s, &qid, &text)?;
+    let qid = grill.and_then(|g| g["question_id"].as_str()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "an answer needs question_id".into()))?;
+    let discuss = grill.is_some_and(|g| g["discuss"] == true);
+    record_answer(state, &mut s, qid, text, discuss)?;
     Ok(Routed::Handled { message: None, wake: None })
 }
 
@@ -428,19 +434,29 @@ fn is_yes(text: &str) -> bool {
 }
 
 /// Holds `text` as the answer to `qid` in the open round, without waking the agent. The user may change
-/// it until the round is sent.
-fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str) -> Result<(), ApiError> {
+/// it until the round is sent. With `discuss`, the text is a comment instead of a decision: the agent
+/// explains and asks again in the next round.
+fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str, discuss: bool) -> Result<(), ApiError> {
     let closed = || ApiError(StatusCode::CONFLICT, "question_closed".into());
     let q = open_round_mut(s).and_then(|r| r.questions.iter_mut().find(|q| q.id == qid)).ok_or_else(closed)?;
-    q.accepted = is_yes(text);
+    q.accepted = !discuss && is_yes(text);
     q.answer = Some(if q.accepted { q.recommendation.clone() } else { clip(text, MAX_ANSWER) });
-    q.state = "answered".into();
+    q.state = if discuss { "discuss" } else { "answered" }.into();
     q.answered_at = Some(now());
+    resume_if_paused(state, s, None);
+    save(state, s).map_err(internal)
+}
+
+/// Answering, deciding or sending while paused picks the grill up again, with the same row as Resume.
+fn resume_if_paused(state: &AppState, s: &mut Session, extra: Option<Value>) {
     if s.status == "paused" {
         s.status = "active".into();
-        status_row(state, s, &say(s, "Resumed", "Retomada"), json!({ "state": "resumed" }));
+        let mut meta = json!({ "state": "resumed" });
+        if let (Some(m), Some(Value::Object(e))) = (meta.as_object_mut(), extra) {
+            m.extend(e);
+        }
+        status_row(state, s, &say(s, "Resumed", "Retomada"), meta);
     }
-    save(state, s).map_err(internal)
 }
 
 /// Applies a command to the running session and saves it. Returns a prompt to wake the agent with, if any.
@@ -457,13 +473,14 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
     let mut wake = None;
     match cmd {
         "send" => {
+            open_round(s).ok_or_else(closed)?;
+            resume_if_paused(state, s, Some(json!({ "command": cmd })));
             let r = open_round_mut(s).ok_or_else(closed)?;
             r.sent_at = Some(now());
             for q in r.questions.iter_mut().filter(|q| q.state == "open") {
                 q.state = "carried".into();
             }
             let r = r.clone();
-            s.status = "active".into();
             let text = answers_text(s, &r);
             let mut meta = json!({ "grill": { "session_id": s.id, "role": "answers", "round": r.index } });
             if let Some(id) = tagged_message_id {
@@ -474,15 +491,24 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
         }
         "decide" => {
             let r = open_round_mut(s).ok_or_else(closed)?;
-            let q = match question_id {
-                Some(id) => r.questions.iter_mut().find(|q| q.id == id),
-                None => r.questions.iter_mut().find(|q| q.state == "open"),
+            let (n, q) = match question_id {
+                Some(id) => r.questions.iter_mut().enumerate().find(|(_, q)| q.id == id),
+                None => r.questions.iter_mut().enumerate().find(|(_, q)| q.state == "open"),
             }
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, "question_closed".into()))?;
             q.state = "decided".into();
             q.answer = Some(q.recommendation.clone());
             q.accepted = false;
             q.answered_at = Some(now());
+            let (qid, rec) = (q.id.clone(), q.recommendation.clone());
+            resume_if_paused(state, s, Some(json!({ "command": cmd })));
+            // The decision shows in the chat, so a typed "I don't know" never changes a card unseen.
+            let text = say(s, &format!("Question {} left to the agent: {rec}", n + 1), &format!("Pergunta {} decidida pelo agente: {rec}", n + 1));
+            let mut extra = json!({ "state": "decided", "command": cmd, "round": s.rounds.last().map(|r| r.index), "question_id": qid });
+            if let Some(id) = tagged_message_id {
+                extra["tagged_message_id"] = json!(id);
+            }
+            status_row(state, s, &text, extra);
         }
         "pause" => {
             s.status = "paused".into();
@@ -688,12 +714,13 @@ pub fn mcp_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "grill_round",
-            "description": "Post a round of the grill in this chat: every question whose prerequisites are settled, each with a recommendation. The first round starts the grill. Loft holds the user's answers and wakes you once, with all of them, when the user sends the round.",
+            "description": "Post a round of the grill in this chat: every question whose prerequisites are settled, each with a recommendation. The first round starts the grill. Questions the user sent unanswered are carried into it unchanged by Loft, before yours. Loft holds the user's answers and wakes you once, with all of them, when the user sends the round.",
             "inputSchema": { "type": "object", "properties": {
                 "topic": { "type": "string", "description": "A few words, shown on the round bar. First round only." },
                 "goal": { "type": "string", "description": "What the grill should decide. First round only." },
                 "language": { "type": "string", "enum": ["en", "pt"], "description": "The language the user wrote in; questions, status rows and the summary follow it. First round only." },
-                "questions": { "type": "array", "items": question, "description": format!("The round, most fundamental first: 1-{MAX_ROUND} questions.") }
+                "questions": { "type": "array", "items": question, "description": format!("The new questions, most fundamental first. With the carried ones, at most {MAX_ROUND}. May be empty when questions carry over.") },
+                "drop": { "type": "array", "items": { "type": "string" }, "description": "Ids of unanswered questions from the last round that no longer matter, so they aren't carried." }
             }, "required": ["questions"] }
         }),
         json!({
@@ -728,13 +755,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
     }
     Some((|| match name {
         "grill_round" => {
-            let qs = parse_questions(&args["questions"])?;
-            if qs.is_empty() {
-                return Err("give at least one question".into());
-            }
-            if qs.len() > MAX_ROUND {
-                return Err(format!("a round holds at most {MAX_ROUND} questions; ask the rest once these are settled"));
-            }
+            let mut qs = parse_questions(&args["questions"])?;
             let topic = args["topic"].as_str().unwrap_or("").trim();
             let mut s = match active(state, &me.id) {
                 Some(s) => s,
@@ -746,6 +767,31 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             if s.rounds.len() >= MAX_ROUNDS {
                 return Err(format!("a grill holds at most {MAX_ROUNDS} rounds; wrap up with grill_end"));
             }
+            // What the user sent unanswered comes back first, unchanged, unless the agent drops it.
+            let drop: Vec<&str> = args["drop"].as_array().map(|d| d.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            let carried: Vec<Question> = s
+                .rounds
+                .last()
+                .map(|r| {
+                    r.questions
+                        .iter()
+                        .filter(|q| q.state == "carried" && !drop.contains(&q.id.as_str()))
+                        .map(|q| Question { id: uuid::Uuid::new_v4().to_string(), state: "open".into(), answer: None, accepted: false, answered_at: None, from_round: q.from_round.or(Some(r.index)), ..q.clone() })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if qs.is_empty() && carried.is_empty() {
+                return Err("give at least one question".into());
+            }
+            if qs.len() + carried.len() > MAX_ROUND {
+                return Err(if carried.is_empty() {
+                    format!("a round holds at most {MAX_ROUND} questions; ask the rest once these are settled")
+                } else {
+                    format!("a round holds at most {MAX_ROUND} questions and {} carry over unanswered: post at most {} new ones, or `drop` carried ones that no longer matter", carried.len(), MAX_ROUND.saturating_sub(carried.len()))
+                });
+            }
+            let n_carried = carried.len();
+            qs.splice(0..0, carried);
             let first = s.status == "preparing";
             if first {
                 if !topic.is_empty() {
@@ -767,8 +813,9 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             let (n, k) = (r.index, r.questions.len());
             s.rounds.push(r);
             save(state, &mut s)?;
+            let carried = if n_carried > 0 { format!(" ({n_carried} carried over unanswered, first)") } else { String::new() };
             Ok(format!(
-                "Round {n} posted with {k} question(s) in grill {}; it is already in the chat. End your turn now with no reply text: don't mention, list or repeat the questions. You're woken with every answer when the user sends the round.",
+                "Round {n} posted with {k} question(s){carried} in grill {}; it is already in the chat. End your turn now with no reply text: don't mention, list or repeat the questions. You're woken with every answer when the user sends the round.",
                 s.id
             ))
         }
@@ -832,7 +879,8 @@ When the user asks to be grilled, interviewed or quizzed on an idea ("grill me o
 - Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
-- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree, and post the next round, asking again what was left unanswered if it still matters. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered.
+- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered.
+- What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
 - Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
 - The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`)."#
 }
@@ -991,29 +1039,120 @@ pub(crate) mod tests {
         assert_eq!(st.db.list_messages(&o.id, 50, None).unwrap().iter().filter(|m| m.meta["grill"]["role"] == "round").count(), 2);
     }
 
+    fn rows(st: &AppState, a: &Agent) -> Vec<String> {
+        st.db.list_messages(&a.id, 100, None).unwrap().into_iter().filter(|m| m.kind == "notice").map(|m| m.content).collect()
+    }
+
     #[test]
-    fn typed_text_answers_the_first_open_question_and_typed_commands_work() {
+    fn typed_text_is_chat_not_an_answer_and_typed_commands_work() {
         let st = state();
         let o = planner(&st, "Lead");
         round(&st, &o, &["A?", "B?", "C?"]).unwrap();
         let qs = |st: &AppState| active(st, &o.id).unwrap().rounds[0].questions.clone();
 
-        assert!(matches!(on_user_message(&st, &o, "sim", None, json!({})).unwrap(), Routed::Handled { wake: None, .. }));
-        assert!(qs(&st)[0].accepted);
-        // "I don't know" leaves the next open question to the agent: its recommendation stands.
+        // A side remark (or a bare "yes") in the composer goes to the agent as chat; no card changes unseen.
+        for text in ["wait, what does A mean?", "sim", "answer: skip"] {
+            assert!(matches!(on_user_message(&st, &o, text, None, json!({})).unwrap(), Routed::Normal(_)), "{text:?}");
+        }
+        assert!(qs(&st).iter().all(|q| q.state == "open"));
+        // "I don't know" leaves the first open question to the agent, and says so in the chat.
         let Routed::Handled { message, wake } = on_user_message(&st, &o, "I don't know", None, json!({})).unwrap() else { panic!() };
         assert_eq!((message.unwrap().meta["grill"]["command"].clone(), wake), (json!("decide"), None));
-        assert_eq!((qs(&st)[1].state.as_str(), qs(&st)[1].answer.as_deref()), ("decided", Some("rec for B?")));
-        on_user_message(&st, &o, "Somewhere in between", None, json!({})).unwrap();
-        assert_eq!(qs(&st)[2].answer.as_deref(), Some("Somewhere in between"));
-        // With every question answered, typed text that isn't a command is ordinary chat.
-        assert!(matches!(on_user_message(&st, &o, "By the way, the app is for teams", None, json!({})).unwrap(), Routed::Normal(_)));
-        // Skip and back are the voice client's to step through; the server leaves the round alone.
-        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "skip", None, json!({})).unwrap() else { panic!() };
-        assert!(wake.is_none());
+        assert_eq!((qs(&st)[0].state.as_str(), qs(&st)[0].answer.as_deref()), ("decided", Some("rec for A?")));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Question 1 left to the agent: rec for A?");
+        // Skip, back and repeat only mean something by voice: the chat says so and the round is untouched.
+        for text in ["skip", "go back", "repeat"] {
+            let Routed::Handled { message, wake } = on_user_message(&st, &o, text, None, json!({})).unwrap() else { panic!() };
+            assert!(message.is_some() && wake.is_none());
+            assert!(rows(&st, &o).last().unwrap().starts_with("Skip, back and repeat step through questions by voice"), "{text:?}");
+        }
+        assert_eq!(qs(&st).iter().filter(|q| q.state == "open").count(), 2);
         // "send it" sends the round.
         let Routed::Handled { wake, .. } = on_user_message(&st, &o, "send it", None, json!({})).unwrap() else { panic!() };
         assert!(wake.unwrap().contains("left it to you"));
+        // Tagged answers still need their question.
+        let s = active(&st, &o.id).unwrap();
+        assert_eq!(on_user_message(&st, &o, "x", Some(&json!({ "role": "answer", "session_id": s.id })), json!({})).err().map(|e| e.0), Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn discuss_answers_reach_the_agent_as_comments_not_decisions() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?", "Offer a trial?"]).unwrap();
+        let ids = qids(&st, &o);
+        let s = active(&st, &o.id).unwrap();
+        let tag = json!({ "role": "answer", "session_id": s.id, "question_id": ids[0], "discuss": true });
+        // Even "yes" is a comment when the user chose to discuss.
+        on_user_message(&st, &o, "yes, but what about teams?", Some(&tag), json!({})).unwrap();
+        let q = &active(&st, &o.id).unwrap().rounds[0].questions[0];
+        assert_eq!((q.state.as_str(), q.accepted, q.answer.as_deref()), ("discuss", false, Some("yes, but what about teams?")));
+        assert_eq!(view(&active(&st, &o.id).unwrap())["answered"], json!(1));
+        // A plain answer afterwards turns it back into a decision.
+        answer(&st, &o, &ids[1], "No trial");
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("wants to discuss first: \"yes, but what about teams?\"") && wake.contains("ask again, split into smaller questions"), "{wake}");
+        let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(sent.content.contains("1. Let's discuss: yes, but what about teams?"), "{}", sent.content);
+        // Discussed questions are the agent's to ask again: Loft doesn't carry them.
+        round(&st, &o, &["Per-seat pricing for teams?"]).unwrap();
+        let texts: Vec<String> = active(&st, &o.id).unwrap().rounds[1].questions.iter().map(|q| q.text.clone()).collect();
+        assert_eq!(texts, ["Per-seat pricing for teams?"]);
+    }
+
+    #[test]
+    fn a_partial_send_carries_open_questions_into_the_next_round_unchanged() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?", "C?"]).unwrap();
+        let ids = qids(&st, &o);
+        answer(&st, &o, &ids[0], "yes");
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("Loft asks it again in the next round") && wake.contains("don't ask them again"), "{wake}");
+
+        let r = round(&st, &o, &["D?"]).unwrap();
+        assert!(r.contains("2 carried over unanswered"), "{r}");
+        let s = active(&st, &o.id).unwrap();
+        let qs = &s.rounds[1].questions;
+        let got: Vec<(&str, &str, &str, Option<u32>)> = qs.iter().map(|q| (q.text.as_str(), q.recommendation.as_str(), q.state.as_str(), q.from_round)).collect();
+        assert_eq!(got, [("B?", "rec for B?", "open", Some(1)), ("C?", "rec for C?", "open", Some(1)), ("D?", "rec for D?", "open", None)]);
+        assert!(qs.iter().all(|q| !ids.contains(&q.id)), "carried questions get new ids in the new round");
+        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.meta["grill"]["role"] == "round").last().unwrap();
+        assert_eq!(posted.meta["grill"]["questions"][0]["from_round"], json!(1));
+        assert!(posted.content.contains("1. B?") && posted.content.contains("3. D?"), "{}", posted.content);
+
+        // Carried again, they keep the round they were first asked in; the agent may drop one, or post only carried ones.
+        send(&st, &o);
+        let c = active(&st, &o.id).unwrap().rounds[1].questions[1].id.clone();
+        mcp_call(&st, &o, "grill_round", &json!({ "questions": [], "drop": [c] })).unwrap().unwrap();
+        let got: Vec<(String, Option<u32>)> = active(&st, &o.id).unwrap().rounds[2].questions.iter().map(|q| (q.text.clone(), q.from_round)).collect();
+        assert_eq!(got, [("B?".to_string(), Some(1)), ("D?".to_string(), Some(2))]);
+        // The round limit counts carried questions.
+        send(&st, &o);
+        let many: Vec<String> = (0..MAX_ROUND - 1).map(|i| format!("Q{i}?")).collect();
+        let e = round(&st, &o, &many.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_err();
+        assert!(e.contains("2 carry over unanswered: post at most 10 new ones"), "{e}");
+    }
+
+    #[test]
+    fn decide_for_me_records_the_recommendation_and_shows_it_in_chat() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "Preços", "language": "pt", "questions": [q("Cobrar por mês?"), q("Oferecer teste grátis?")] })).unwrap().unwrap();
+        let ids = qids(&st, &o);
+        let mut s = active(&st, &o.id).unwrap();
+        // The card's button names its question.
+        assert!(apply_command(&st, &mut s, "decide", Some(&ids[1]), None).unwrap().is_none(), "deciding doesn't run the agent");
+        let q = &active(&st, &o.id).unwrap().rounds[0].questions[1];
+        assert_eq!((q.state.as_str(), q.answer.as_deref()), ("decided", Some("rec for Oferecer teste grátis?")));
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").last().unwrap();
+        assert_eq!(row.content, "Pergunta 2 decidida pelo agente: rec for Oferecer teste grátis?");
+        assert_eq!((row.meta["grill"]["state"].clone(), row.meta["grill"]["question_id"].clone()), (json!("decided"), json!(ids[1])));
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("left it to you: your recommendation is the decision"), "{wake}");
+        let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(sent.content.contains("2. Você decide (rec for Oferecer teste grátis?)"), "{}", sent.content);
+        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some(&ids[0]), None).err().map(|e| e.1), Some("round_closed".into()));
     }
 
     #[test]
@@ -1047,9 +1186,13 @@ pub(crate) mod tests {
         let id = active(&st, &o.id).unwrap().id;
         on_user_message(&st, &o, "hold on", None, json!({})).unwrap();
         assert_eq!(active(&st, &o.id).unwrap().status, "paused");
-        // An answer resumes.
+        // A second pause adds nothing; the button resumes, and so does an answer.
+        apply_command(&st, &mut active(&st, &o.id).unwrap(), "resume", None, None).unwrap();
+        apply_command(&st, &mut active(&st, &o.id).unwrap(), "resume", None, None).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
         answer(&st, &o, &qids(&st, &o)[0], "Postgres");
         assert_eq!(active(&st, &o.id).unwrap().status, "active");
+        assert_eq!(rows(&st, &o), ["Grill started: Pricing", "Paused", "Resumed", "Paused", "Resumed"]);
         // Tagged answers from the app are never re-read as commands.
         answer(&st, &o, &qids(&st, &o)[1], "stop");
         assert_eq!(active(&st, &o.id).unwrap().rounds[0].questions[1].answer.as_deref(), Some("stop"));
@@ -1060,6 +1203,20 @@ pub(crate) mod tests {
         mcp_call(&st, &o, "grill_end", &json!({ "summary": "Postgres." })).unwrap().unwrap();
         assert!(st.db.get_grill(&id).unwrap().unwrap().summarized);
         assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "again" })).unwrap().is_err(), "only once");
+    }
+
+    #[test]
+    fn sending_or_deciding_while_paused_resumes_with_a_row() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?"]).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
+        on_user_message(&st, &o, "decide for me", None, json!({})).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
+        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "send", None, json!({})).unwrap() else { panic!() };
+        assert!(wake.is_some());
+        assert_eq!(active(&st, &o.id).unwrap().status, "active");
+        assert_eq!(rows(&st, &o), ["Grill started: Pricing", "Paused", "Resumed", "Question 1 left to the agent: rec for A?", "Paused", "Resumed"]);
     }
 
     #[test]

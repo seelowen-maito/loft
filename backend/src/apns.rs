@@ -58,8 +58,13 @@ pub struct QuietHours {
 }
 
 /// Every type a device can ask for, and the ones on by default.
-pub const KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_question", "stuck", "task_failed", "pr_ready", "pr_review"];
-pub const DEFAULT_KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_question", "stuck"];
+pub const KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "pr_review"];
+pub const DEFAULT_KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck"];
+
+/// A kind under its current name: app builds from before rounds ask for `grill_question`.
+pub fn kind(k: &str) -> &str {
+    if k == "grill_question" { "grill_round" } else { k }
+}
 
 /// Where the key lives; tests point it elsewhere with LOFT_APNS_DIR.
 pub fn key_dir() -> PathBuf {

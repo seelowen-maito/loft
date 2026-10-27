@@ -49,7 +49,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `task_approval` | 3 | Task in `waiting_approval` | answer, open, dismiss |
 | `task_blocked` | 2 | Task `blocked` (reason = its error) | answer, open, dismiss |
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days) | answer, open, dismiss |
-| `grill_question` | 2 (1 if paused) | An interview question is waiting | answer, skip, open |
+| `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
 | `task_failed` | 1 | Task `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
@@ -87,7 +87,7 @@ Teammates' PRs only appear when they request the user's review. A PR already tra
 ## `POST /api/needs-you/{id}/dismiss`
 
 Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
-`permission` and `grill_question` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
+`permission` and `grill_round` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
 
 ## Live updates
 

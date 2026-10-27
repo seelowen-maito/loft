@@ -126,11 +126,13 @@ export type GrillQuestion = {
   options: string[];
   /** The agent's proposed answer; "yes" accepts it. */
   recommendation: string;
-  /** decided: left to the agent, its recommendation stands; carried: sent unanswered. */
+  /** discuss: the answer is a comment, not a decision; decided: left to the agent, its recommendation stands; carried: sent unanswered. */
   state: "open" | "answered" | "discuss" | "decided" | "carried";
   answer: string | null;
   /** The answer is the recommendation, accepted as-is. */
   accepted: boolean;
+  /** Carried over unanswered: the round it was first asked in. */
+  from_round: number | null;
 };
 
 /** An interview (grill) the agent is running, in rounds; `GET /agents/{id}/grill`. */
@@ -415,8 +417,9 @@ export const api = {
   grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
     req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
-  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string) =>
-    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId } } }),
+  /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
+  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
   /** Asks a Planning agent for a grill; the backend opens the session. */
   grillStart: (agentId: string, text: string) =>
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
