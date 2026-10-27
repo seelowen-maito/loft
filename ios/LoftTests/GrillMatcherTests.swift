@@ -78,6 +78,14 @@ final class GrillMatcherTests: XCTestCase {
         XCTAssertNil(GrillMatcher.match("Outra vez", phrases: p), "same version, other catalog: not the cached one")
     }
 
+    func testFillersFromEachCatalogAreTrimmed() {
+        XCTAssertEqual(sure("hey skip"), .command(.skip), "a filler only grill_phrases.json lists")
+        let p = GrillPhrases(version: "1", maxWords: 4, fillers: ["xyz"], commands: [:])
+        XCTAssertEqual(GrillMatcher.match("xyz skip", phrases: p), .init(intent: .command(.skip), confidence: .sure),
+                       "a filler only the server lists")
+        XCTAssertNotEqual(GrillMatcher.match("xyz skip")?.confidence, .sure, "not a filler without the server's catalog")
+    }
+
     func testLevenshtein() {
         XCTAssertEqual(GrillMatcher.levenshtein("skip", "skop"), 1)
         XCTAssertEqual(GrillMatcher.levenshtein("", "abc"), 3)
