@@ -4,9 +4,11 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertTriangle, ArrowLeft, CircleCheck, CircleDot, ExternalLink, FolderGit2, KeyRound, MessageSquare, RefreshCw, Search } from "lucide-react";
 import { api, type Issue, type IssueDetail, type IssueLink, type ProjectIssues } from "../lib/api";
+import { ProjectHeader, useCollapsed } from "../components/ProjectGroup";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 
+const COLLAPSED_KEY = "loft:collapsed-issue-projects";
 const issuePath = (project: string, n: number) => `/issues/${encodeURIComponent(project)}/${n}`;
 
 function StateIcon({ state, className }: { state: string; className?: string }) {
@@ -45,6 +47,8 @@ export default function IssuesPage() {
   const [state, setState] = useState<"open" | "closed">("open");
   // Bumped when Loft publishes on a project, so the open issue refetches too.
   const [published, setPublished] = useState(0);
+  // Project groups folded away in the list, remembered per browser; new projects start expanded.
+  const folded = useCollapsed(COLLAPSED_KEY);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -114,32 +118,37 @@ export default function IssuesPage() {
           {data && !data.projects.length && (
             <Notice icon={FolderGit2} title="No projects yet.">Issues are shown per project: set a project on an agent in its Config tab.</Notice>
           )}
-          {visible.map((p) => (
-            <section key={p.project}>
-              <div className="flex items-center gap-2 px-2.5 pb-1">
-                <span className="eyebrow truncate">{p.project}</span>
-                {p.repo && (
-                  <a href={`https://github.com/${p.repo}/issues`} target="_blank" rel="noreferrer" className="ml-auto flex items-center gap-1 font-mono text-[10.5px] text-fg-3 hover:text-fg">
-                    {p.repo} <ExternalLink className="size-3" />
-                  </a>
-                )}
-              </div>
-              {p.problem ? (
-                <div className="mx-2.5 rounded-xl border border-line px-3 py-2 text-[12.5px] text-fg-3">No GitHub remote: {p.problem}</div>
-              ) : p.error ? (
-                <div className="mx-2.5 rounded-xl border border-bad/20 bg-bad/[0.05] px-3 py-2 text-[12.5px] text-fg-2">{p.error}</div>
-              ) : data?.connected && !p.shown.length ? (
-                <div className="px-2.5 py-1 text-[12.5px] text-fg-3">No {state} issues{query.trim() ? " match" : ""}.</div>
-              ) : (
-                p.shown.map((i) => <IssueRow key={i.number} project={p.project} i={i} active={selected?.project === p.project && selected.number === i.number} />)
-              )}
-              {p.truncated && (
-                <div className="px-2.5 py-1 text-[12px] text-fg-3">
-                  Showing the first 1,000 issues and pull requests, open ones first. The rest are on <a href={`https://github.com/${p.repo}/issues`} target="_blank" rel="noreferrer" className="text-accent underline decoration-accent/30 underline-offset-2">GitHub</a>.
+          {visible.map((p) => {
+            const open = folded.isOpen(p.project);
+            return (
+              <section key={p.project}>
+                <div className="flex items-center gap-2 pb-1 pr-2.5">
+                  <ProjectHeader name={p.project} open={open} onToggle={() => folded.toggle(p.project)} className="min-w-0">
+                    {!p.problem && !p.error && <span title={`${p.shown.length} ${state} issues`}>{p.shown.length}</span>}
+                  </ProjectHeader>
+                  {p.repo && (
+                    <a href={`https://github.com/${p.repo}/issues`} target="_blank" rel="noreferrer" className="flex shrink-0 items-center gap-1 pt-3 font-mono text-[10.5px] text-fg-3 hover:text-fg">
+                      {p.repo} <ExternalLink className="size-3" />
+                    </a>
+                  )}
                 </div>
-              )}
-            </section>
-          ))}
+                {!open ? null : p.problem ? (
+                  <div className="mx-2.5 rounded-xl border border-line px-3 py-2 text-[12.5px] text-fg-3">No GitHub remote: {p.problem}</div>
+                ) : p.error ? (
+                  <div className="mx-2.5 rounded-xl border border-bad/20 bg-bad/[0.05] px-3 py-2 text-[12.5px] text-fg-2">{p.error}</div>
+                ) : data?.connected && !p.shown.length ? (
+                  <div className="px-2.5 py-1 text-[12.5px] text-fg-3">No {state} issues{query.trim() ? " match" : ""}.</div>
+                ) : (
+                  p.shown.map((i) => <IssueRow key={i.number} project={p.project} i={i} active={selected?.project === p.project && selected.number === i.number} />)
+                )}
+                {open && p.truncated && (
+                  <div className="px-2.5 py-1 text-[12px] text-fg-3">
+                    Showing the first 1,000 issues and pull requests, open ones first. The rest are on <a href={`https://github.com/${p.repo}/issues`} target="_blank" rel="noreferrer" className="text-accent underline decoration-accent/30 underline-offset-2">GitHub</a>.
+                  </div>
+                )}
+              </section>
+            );
+          })}
         </div>
       </aside>
       <section className={cx("min-h-0 overflow-y-auto", !selected && "max-lg:hidden")}>

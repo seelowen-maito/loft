@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ChevronRight, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
+import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, groupByProject, timeAgo } from "../../lib/format";
+import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
 import { Sticker } from "../../components/Sticker";
 import { Chat } from "./Chat";
 import { Inspector } from "./Inspector";
@@ -19,14 +20,6 @@ const onWideChange = (cb: () => void) => {
   return () => WIDE.removeEventListener("change", cb);
 };
 
-function loadCollapsed(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
 export default function AgentsPage() {
   const { id: routeId } = useParams();
   const navigate = useNavigate();
@@ -37,17 +30,7 @@ export default function AgentsPage() {
   const [creating, setCreating] = useState(false);
   const [grill, setGrill] = useState<GrillSession | null>(null);
   // Project groups folded away in the roster, remembered per browser.
-  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsed);
-  const toggleGroup = (project: string) =>
-    setCollapsed((c) => {
-      const next = c.includes(project) ? c.filter((p) => p !== project) : [...c, project];
-      try {
-        localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
-      } catch {
-        /* storage unavailable */
-      }
-      return next;
-    });
+  const folded = useCollapsed(COLLAPSED_KEY);
 
   // Inspector: a remembered column on wide screens, an overlay opened on demand on narrow ones.
   const wide = useSyncExternalStore(onWideChange, () => WIDE.matches);
@@ -196,26 +179,17 @@ export default function AgentsPage() {
         </div>
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
           {groups.map((g) => {
-            const open = !projects.length || !collapsed.includes(g.project);
+            const open = !projects.length || folded.isOpen(g.project);
             const groupWorking = g.agents.filter((a) => a.running).length;
             const groupPending = g.agents.reduce((n, a) => n + (pendingBy.get(a.id) ?? 0), 0);
             return (
               <div key={g.project} className="space-y-1">
                 {projects.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(g.project)}
-                    aria-expanded={open}
-                    className="flex w-full items-center gap-1.5 rounded-lg px-2.5 pb-0.5 pt-3 text-left text-fg-3 transition hover:text-fg"
-                  >
-                    <ChevronRight className={cx("size-3 shrink-0 transition-transform", open && "rotate-90")} />
-                    <span className="eyebrow truncate">{g.project || "Other"}</span>
-                    <span className="ml-auto flex items-center gap-2 font-mono text-[10.5px]">
-                      {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
-                      {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
-                      <span>{g.agents.length}</span>
-                    </span>
-                  </button>
+                  <ProjectHeader name={g.project || "Other"} open={open} onToggle={() => folded.toggle(g.project)}>
+                    {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
+                    {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
+                    <span>{g.agents.length}</span>
+                  </ProjectHeader>
                 )}
                 {open && g.agents.map((a, i) => {
                   const s = statusOf(a);
