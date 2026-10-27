@@ -8,15 +8,22 @@ use std::sync::LazyLock;
 use serde_json::{Value, json};
 
 /// Bump when a phrase list changes, so clients refresh their cached copy.
-pub const VERSION: &str = "2";
+pub const VERSION: &str = "3";
 /// Longer messages are always answers.
 pub const MAX_WORDS: usize = 6;
 
-/// Commands the server applies.
-pub const COMMANDS: &[&str] = &["skip", "back", "pause", "resume", "end", "summarize", "decide", "repeat"];
+/// Commands clients may send. The server applies all but `CLIENT_ONLY`.
+pub const COMMANDS: &[&str] = &["send", "skip", "back", "pause", "resume", "end", "summarize", "decide", "repeat"];
+/// Stepping through a round's questions one at a time, which only a voice client does.
+pub const CLIENT_ONLY: &[&str] = &["skip", "back", "repeat"];
 
 /// (command, English phrases, Portuguese phrases), already normalised (see `normalize`).
 const PHRASES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "send",
+        &["send", "send it", "send the round", "send round", "send the answers", "send my answers", "submit", "submit the round", "submit answers"],
+        &["envia", "enviar", "envia ai", "envia a rodada", "envia as respostas", "manda", "mandar", "manda ai", "manda a rodada", "manda as respostas"],
+    ),
     (
         "skip",
         &["skip", "skip it", "skip this", "skip this one", "skip question", "skip this question", "pass", "i pass", "next", "next question", "next one", "move on", "go on"],
@@ -325,8 +332,8 @@ pub fn catalog() -> Value {
         "max_words": MAX_WORDS,
         "fillers": FILLERS,
         "lead_ins": LEAD_INS.iter().map(|l| normalize(l)).collect::<Vec<_>>(),
-        // `repeat` re-reads the card on the device; the server re-posts the question for clients without one.
-        "client_only": ["repeat"],
+        // Stepping through a round is done on the device; the server ignores these.
+        "client_only": CLIENT_ONLY,
         "commands": commands,
     })
 }
@@ -338,6 +345,10 @@ mod tests {
     #[test]
     fn whole_short_utterances_are_commands() {
         let cases = [
+            ("Send", "send"),
+            ("send the round", "send"),
+            ("Envia as respostas", "send"),
+            ("pode mandar", "send"),
             ("Skip", "skip"),
             ("skip this one please", "skip"),
             ("Uh, next question.", "skip"),
@@ -409,7 +420,8 @@ mod tests {
             "8 dollars",
             "não sei se vale a pena cobrar por isso",
             "and",   // one edit from "end", but `end` is exact-match only
-            "send",
+            "lend",
+            "Send it by email",
             "\"skip\"",
             "answer: skip",
             "/frobnicate",

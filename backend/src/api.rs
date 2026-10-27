@@ -433,7 +433,7 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {
-                agents::wake(&state, &id, p.prompt, p.trigger);
+                agents::wake(&state, &id, p, "grill");
             }
             return Ok(Json(json!({ "ok": true, "queued": queued, "message": message })));
         }

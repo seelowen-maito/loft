@@ -287,29 +287,25 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         crate::agents::run_fields(state, &a.id, &mut run);
         let running = run["running"].as_bool().unwrap_or(false);
 
-        // An open grill question.
+        // A grill round waiting for the user's answers.
         if let Some(s) = crate::grill::active(state, &a.id)
-            && let Some(q) = s.current.as_deref().and_then(|id| s.questions.iter().find(|q| q.id == id))
-            && q.status == "asked"
+            && let Some(r) = crate::grill::open_round(&s)
         {
             let paused = s.status == "paused";
+            let answered = r.questions.iter().filter(|q| q.state != "open").count();
             items.push(Item {
-                id: format!("grill:{}:{}", s.id, q.id),
+                id: format!("grill:{}:{}", s.id, r.index),
                 kind: "grill_question",
                 urgency: if paused { 1 } else { 2 },
                 agent: Some((a.id.clone(), a.name.clone())),
                 task_id: None,
                 title: text(&format!("{} is interviewing you: {}", a.name, s.topic), MAX_TITLE),
-                reason: text(&format!("Question {}{}", q.index.unwrap_or(0), if paused { " (interview paused)" } else { "" }), MAX_REASON),
-                text: text(&q.text, MAX_TEXT),
-                created_at: q.asked_at.clone().unwrap_or_else(|| s.updated_at.clone()),
+                reason: text(&format!("Round {}: {answered} of {} answered{}", r.index, r.questions.len(), if paused { " (interview paused)" } else { "" }), MAX_REASON),
+                text: text(&r.questions.iter().map(|q| format!("• {}", q.text)).collect::<Vec<_>>().join("\n"), MAX_TEXT),
+                created_at: r.posted_at.clone(),
                 links: vec![],
-                actions: vec![
-                    action("answer", "Answer", "POST", format!("/api/agents/{}/messages", a.id), json!({ "text": "", "meta": { "grill": { "role": "answer", "session_id": s.id, "question_id": q.id } } })),
-                    action("skip", "Skip", "POST", format!("/api/grill/{}/command", s.id), json!({ "command": "skip", "question_id": q.id })),
-                    open_chat(&a.id),
-                ],
-                push: (format!("{}: question {}", a.name, q.index.unwrap_or(0)), format!("Interview: {}", s.topic)),
+                actions: vec![open_chat(&a.id)],
+                push: (format!("{}: round {}", a.name, r.index), format!("Interview: {}", s.topic)),
                 project: agent_project(&a.id),
                 pr: None,
             });
@@ -651,7 +647,7 @@ mod tests {
         crate::agents::add_msg(&st, &orch.id, None, "assistant", "text", "Want me to start?", json!({}));
         crate::agents::add_msg(&st, &orch.id, None, "user", "text", "yes", json!({}));
         // A grill question on Orchestrator.
-        crate::grill::mcp_call(&st, &orch, "grill_start", &json!({ "topic": "Pricing", "questions": [{ "text": "Who pays?", "speak": "Who pays?" }] })).unwrap().unwrap();
+        crate::grill::mcp_call(&st, &orch, "grill_round", &json!({ "topic": "Pricing", "questions": [{ "text": "Who pays?", "speak": "Who pays?", "recommendation": "The team lead" }] })).unwrap().unwrap();
         // A PR ready to merge, and one with failing checks (not ready).
         let pr = |id: &str, failed: i64| PullRequest {
             id: id.into(), agent_id: dev.id.clone(), slug: "o/r".into(), number: 7 + failed, url: "https://github.com/o/r/pull/7".into(), title: "Fix it".into(),
@@ -696,7 +692,7 @@ mod tests {
         assert_eq!(item(&v, "question")["reason"], json!("Should I use B2 or S3?"));
         assert_eq!(item(&v, "task_failed")["reason"], json!("Failed: Xcode 27 missing"));
         assert_eq!(item(&v, "task_done")["reason"], json!("Done: 15 GB after cleanup."));
-        assert_eq!(item(&v, "grill_question")["text"], json!("Who pays?"));
+        assert_eq!((item(&v, "grill_question")["text"].clone(), item(&v, "grill_question")["reason"].clone()), (json!("• Who pays?"), json!("Round 1: 0 of 1 answered")));
         let merge = &item(&v, "pr_ready")["actions"][0];
         assert_eq!((merge["path"].clone(), merge["body"]["method"].clone()), (json!("/api/pull-requests/pr1/merge"), json!("squash")));
         assert_eq!(item(&v, "pr_ready")["links"][0]["url"], json!("https://github.com/o/r/pull/7"), "links are kept apart from the text");

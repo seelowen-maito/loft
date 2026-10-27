@@ -118,7 +118,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/grill/commands", get(grill::command_catalog))
         .route("/grill/{id}", get(grill::get))
         .route("/grill/{id}/command", post(grill::command))
-        .route("/grill/{id}/undo", post(grill::undo))
         .route("/tasks", get(tasks::list).post(tasks::create_task))
         .route("/tasks/{id}", get(tasks::get).patch(tasks::update).delete(tasks::delete))
         .route("/tasks/{id}/execute", post(tasks::execute_task))

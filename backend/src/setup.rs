@@ -99,7 +99,7 @@ pub struct Template {
     pub model: &'static str,
     /// Default schedule, in minutes. 0: it only runs when messaged until it sets its own (`set_schedule`).
     pub interval_minutes: i64,
-    /// Planning on (the grill and its `grill_*` tools), for agents that start by asking the user questions.
+    /// Planning on (the grill in rounds and its `grill_*` tools), for agents that start by asking the user questions.
     pub planning: bool,
     /// Created as its project's Lead (taking the mark from any other agent there).
     pub lead: bool,
@@ -123,7 +123,7 @@ pub const TEMPLATES: &[Template] = &[
 ## 1. Agree on a direction
 Before writing any code:
 1. Keep a clone of the repo in your workspace and read it: the README, the structure, recent commits, open issues and pull requests. Know what the project is and where it stands.
-2. Interview the user with a grill (`mcp__loft__grill_start`): who the project is for, where they want it to be in a few months, the next features they care about most, what is out of scope, constraints (stack, design, performance, budget), and how they like to review work. Ask about the project as it really is, not generic questions.
+2. Interview the user with a grill (`mcp__loft__grill_round`): who the project is for, where they want it to be in a few months, the next features they care about most, what is out of scope, constraints (stack, design, performance, budget), and how they like to review work. Ask about the project as it really is, not generic questions.
 3. Turn the answers into a short roadmap: the goal in one line, then a prioritized list of features, each small enough for one pull request. Save it as `notes/roadmap.md` in your workspace and remember the goal and the top items (`mcp__loft__remember`).
 4. Show the user the roadmap and ask them to confirm or reorder it.
 
@@ -146,7 +146,7 @@ On each check-in, and whenever the user asks:
         interval_minutes: 0,
         planning: true,
         lead: false,
-        kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with `mcp__loft__grill_start` in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
+        kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with a first round (`mcp__loft__grill_round`) in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
         greeting: "Hey! I'm {name}, and I'll be building new features for **{project}**. Before I write any code, I want to know where you want to take it, so I have a few quick questions. Once we agree on a roadmap and how often I should work, I'll start shipping it one pull request at a time.",
     },
     Template {
@@ -856,7 +856,7 @@ mod tests {
         assert!(crate::grill::enabled(&a));
         // The avatar run started; the interview is queued right behind it, as a quiet grill run.
         let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
-        assert!(g.len() == 1 && g[0].1 == "grill" && g[0].0.starts_with("[Loft: you were just created by loft]") && g[0].0.contains("grill_start"), "{g:?}");
+        assert!(g.len() == 1 && g[0].starts_with("[Loft: you were just created by loft]") && g[0].contains("grill_round"), "{g:?}");
         assert!(st.rt.lock().unwrap().queued.get(&a.id).is_none_or(|q| q.is_empty()));
         let first = st.db.list_messages(&a.id, 10, None).unwrap().into_iter().find(|m| m.kind == "text").unwrap();
         assert!(first.role == "assistant" && first.content.starts_with("Hey! I'm Dev, and I'll be building new features for **homebase**."), "{}", first.content);
@@ -870,7 +870,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();
-        // A model that only narrates: it never calls grill_start.
+        // A model that only narrates: it never posts a round.
         let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
 prompt=$(cat)

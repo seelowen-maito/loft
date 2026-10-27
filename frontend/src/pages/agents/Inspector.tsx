@@ -191,7 +191,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Planning" hint="Lets it grill you on an idea, in guided interviews you can start with “grill me”. Without it, that's an ordinary message.">
+      <Field label="Planning" hint="Lets it grill you on an idea, in rounds of questions that each come with a recommendation. Start one with /grill or “grill me”. Without it, that's an ordinary message.">
         <label className="flex items-center gap-2 text-[12.5px] text-fg">
           <input type="checkbox" checked={draft.planning || draft.lead} disabled={draft.lead} onChange={(e) => set("planning", e.target.checked)} className="accent-[var(--color-accent)]" />
           Can plan with you{draft.lead && <span className="text-fg-3">(a Lead always can)</span>}

@@ -10,6 +10,7 @@ import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
+import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
@@ -73,6 +74,7 @@ const COMMANDS: Command[] = [
   { name: "/clear", description: "Clear the conversation context and start fresh. Memory is kept." },
   { name: "/compact", description: "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary." },
   { name: "/code", description: "Open this agent's workspace folder in VS Code." },
+  { name: "/grill", description: "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it." },
 ];
 
 const SUGGESTIONS = [
@@ -226,11 +228,35 @@ export function Chat({
     }
   };
 
+  const startGrill = async (topic: string) => {
+    if (!agent.planning) {
+      setCmdError(`Planning is off for ${agent.name}. Turn it on in the Config tab to be grilled.`);
+      return;
+    }
+    setSending(true);
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.grillStart(agent.id, topic ? `Grill me on ${topic}` : "Grill me");
+      setText("");
+    } catch (e) {
+      setCmdError((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  };
+
   const runCommand = async (name: string) => {
     setCmdNote(null);
     if (name === "/clear") return clearContext();
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor();
+    if (name === "/grill") {
+      // Picked from the menu: leave room for the topic; Enter again starts it.
+      setText("/grill ");
+      setCmdNote("Add what to plan, then press Enter.");
+      return;
+    }
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
@@ -287,6 +313,8 @@ export function Chat({
     }
     const compact = /^\/compact(?:\s+([\s\S]*))?$/i.exec(v);
     if (compact) return compactContext(compact[1]?.trim() ?? "");
+    const grillTopic = /^\/grill(?:\s+([\s\S]*))?$/i.exec(v);
+    if (grillTopic) return startGrill(grillTopic[1]?.trim() ?? "");
     if (v.startsWith("/") && !/\s/.test(v)) return runCommand(v.toLowerCase());
     setSending(true);
     setCmdError(null);
@@ -427,7 +455,7 @@ export function Chat({
               const req = perms.get(it.m.meta?.request_id);
               return req ? <PermissionCard key={it.m.id} req={req} /> : null;
             }
-            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} />;
+            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={grill} />;
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
@@ -702,7 +730,7 @@ function findAgent(agents: Agent[], key: string | undefined) {
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
 }
 
-function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Agent[] }) {
+function MessageRow({ m, agent, agents, grill }: { m: Message; agent: Agent; agents: Agent[]; grill: GrillSession | null }) {
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -766,6 +794,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
     );
   }
   if (m.kind === "thinking") return <Thinking m={m} />;
+  if (m.meta?.grill?.role === "round") return <GrillRound m={m} agentId={agent.id} session={grill} />;
   if (m.role === "user" && m.meta?.from_agent) {
     const from = findAgent(agents, m.meta.from_agent.id);
     return (

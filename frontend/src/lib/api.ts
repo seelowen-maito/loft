@@ -117,17 +117,36 @@ export type TaskPlan = {
   progress: { total: number; done: number; in_progress: number; waiting: number; failed: number; todo: number; cancelled: number; percent: number };
 };
 
-/** An interview (grill) the agent is running; `GET /agents/{id}/grill`. */
+/** One question of a grill round, with the user's answer so far. */
+export type GrillQuestion = {
+  id: string;
+  text: string;
+  speak: string;
+  kind: string;
+  options: string[];
+  /** The agent's proposed answer; "yes" accepts it. */
+  recommendation: string;
+  /** decided: left to the agent, its recommendation stands; carried: sent unanswered. */
+  state: "open" | "answered" | "discuss" | "decided" | "carried";
+  answer: string | null;
+  /** The answer is the recommendation, accepted as-is. */
+  accepted: boolean;
+};
+
+/** An interview (grill) the agent is running, in rounds; `GET /agents/{id}/grill`. */
 export type GrillSession = {
   session_id: string;
   agent_id: string;
   state: "preparing" | "active" | "paused" | "ended";
   end_reason: string | null;
   topic: string;
-  index: number | null;
+  /** The latest round's number, its size and how many of its questions have an answer. */
+  round: number | null;
   total: number | null;
-  answered: number;
-  current: { question_id: string; index: number | null } | null;
+  answered: number | null;
+  /** The latest round was sent; the agent is working on the next one. */
+  waiting: boolean;
+  questions: GrillQuestion[] | null;
   started_at: string;
   updated_at: string;
 };
@@ -393,8 +412,14 @@ export const api = {
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/tasks/${id}`),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
-  grillCommand: (sessionId: string, command: "pause" | "resume" | "end") =>
-    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, client_id: crypto.randomUUID() }),
+  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
+    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
+  /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
+  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId } } }),
+  /** Asks a Planning agent for a grill; the backend opens the session. */
+  grillStart: (agentId: string, text: string) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),

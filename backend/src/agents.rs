@@ -410,8 +410,7 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
 }
 
 /// Run the agent with `prompt` (queued behind a running run) without recording a user message.
-/// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees);
-/// "grill_revise" also runs on the cheaper `GRILL_REVISE_MODEL`.
+/// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees).
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
     start(state, agent_id, Some(prompt), trigger);
 }
@@ -424,9 +423,6 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     );
     start(state, agent_id, Some(prompt), "avatar");
 }
-
-/// Model for the background runs that revise a grill's question queue after each answer.
-pub const GRILL_REVISE_MODEL: &str = "haiku";
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors.
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
@@ -471,8 +467,8 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
     let kill = {
         let mut rt = state.rt.lock().unwrap();
         if rt.running.contains_key(agent_id) {
-            if trigger.starts_with("grill") {
-                rt.grill_queued.entry(agent_id.to_string()).or_default().push((prompt, trigger));
+            if trigger == "grill" {
+                rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
             }
@@ -505,11 +501,7 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                         }
                         Some((q.join("\n\n"), "user"))
                     }
-                    (_, Some(g)) if !g.is_empty() => {
-                        // Merged grill work runs on the cheaper model only if all of it is revision.
-                        let t = if g.iter().all(|(_, t)| *t == "grill_revise") { "grill_revise" } else { "grill" };
-                        Some((g.into_iter().map(|(p, _)| p).collect::<Vec<_>>().join("\n\n"), t))
-                    }
+                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill")),
                     _ => {
                         rt.running.remove(&agent_id);
                         None
@@ -722,14 +714,11 @@ async fn run_process(
     kill: Arc<Notify>,
     resume: bool,
 ) -> Result<RunOutcome> {
-    let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-    let quiet = trigger.starts_with("grill") || trigger == "avatar";
+    let agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    let quiet = trigger == "grill" || trigger == "avatar";
     // Set once the run has called a grill tool: the tools post what the user sees, so any text the agent
     // writes after that (models narrate despite being told not to) would only repeat or spoil it.
     let mut grill_spoke = false;
-    if trigger == "grill_revise" {
-        agent.model = GRILL_REVISE_MODEL.into();
-    }
     std::fs::create_dir_all(workspace(state, agent_id))?;
     // Chats this agent was @-mentioned in; its reply is copied there at the end of the run.
     let mirrors = crate::mentions::take_mirrors(state, agent_id, prompt);
@@ -742,7 +731,7 @@ async fn run_process(
         a.status_text = match trigger {
             "schedule" => "Waking up…".into(),
             "compact" => "Compacting context…".into(),
-            "grill" | "grill_revise" => "Following the interview…".into(),
+            "grill" => "Following the interview…".into(),
             "avatar" => "Drawing its avatar…".into(),
             _ => "Thinking…".into(),
         };
@@ -812,7 +801,7 @@ async fn run_process(
                     let user_work = rt.queued.get(agent_id).is_some_and(|q| !q.is_empty());
                     match rt.grill_queued.get_mut(agent_id) {
                         // Only grill follow-ups are waiting: tell the agent there, rather than starting a visible run.
-                        Some(g) if !g.is_empty() && !user_work => g.insert(0, (note, "grill")),
+                        Some(g) if !g.is_empty() && !user_work => g.insert(0, note),
                         _ => rt.queued.entry(agent_id.to_string()).or_default().insert(0, note),
                     }
                 }
