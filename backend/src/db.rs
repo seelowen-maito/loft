@@ -569,14 +569,29 @@ impl Db {
         Ok(rows)
     }
 
-    /// "Needs you" item ids already considered for push (last 30 days).
-    pub fn push_seen_ids(&self) -> Result<std::collections::HashSet<String>> {
+    /// Which of these "needs you" item ids were already considered for push.
+    pub fn push_seen_among(&self, ids: &[&str]) -> Result<std::collections::HashSet<String>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let c = self.0.lock().unwrap();
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut st = c.prepare(&format!("SELECT item_id FROM push_seen WHERE item_id IN ({marks})"))?;
+        let rows = st.query_map(rusqlite::params_from_iter(ids), |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Forgets push marks older than 30 days; returns how many.
+    pub fn prune_push_seen(&self) -> Result<usize> {
         let c = self.0.lock().unwrap();
         let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-        c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?;
-        let mut st = c.prepare("SELECT item_id FROM push_seen")?;
-        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(rows.into_iter().collect())
+        Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
+    }
+
+    /// Raw access for tests elsewhere in the crate that need to set up rows directly.
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap()
     }
 
     pub fn mark_push_seen(&self, item_id: &str) -> Result<()> {
@@ -1077,5 +1092,23 @@ mod tests {
         // New agents land at the bottom.
         db.save_agent(&agent("d")).unwrap();
         assert_eq!(ids(&db), ["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn push_marks_are_looked_up_by_id_and_pruned_after_30_days() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        for id in ["a", "b", "old"] {
+            db.mark_push_seen(id).unwrap();
+        }
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        db.0.lock().unwrap().execute("UPDATE push_seen SET seen_at = ?1 WHERE item_id = 'old'", [&old]).unwrap();
+        let among = |ids: &[&str]| { let mut v: Vec<String> = db.push_seen_among(ids).unwrap().into_iter().collect(); v.sort(); v };
+        assert_eq!(among(&["a", "c", "old"]), ["a", "old"], "only the ids asked about");
+        assert!(among(&[]).is_empty());
+        // Marking again keeps the first time seen.
+        db.mark_push_seen("a").unwrap();
+        assert_eq!(db.prune_push_seen().unwrap(), 1);
+        assert_eq!(among(&["a", "b", "old"]), ["a", "b"]);
+        assert_eq!(db.prune_push_seen().unwrap(), 0);
     }
 }
