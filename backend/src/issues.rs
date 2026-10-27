@@ -48,24 +48,88 @@ fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
     Ok(ps)
 }
 
-/// GitHub's page size; pull requests count toward it, so a page can hold fewer issues.
-const PER_PAGE: usize = 100;
-/// Pages read per repo at most: 1,000 issues and PRs.
+/// Pages of 100 read per repo at most: 1,000 issues.
 const MAX_PAGES: usize = 10;
 
-/// `state` (open or closed) issues, PRs left out, reading at most `max_pages` pages; also the pages
-/// read and whether more were left.
-async fn fetch_issues(state: &AppState, repo: &str, which: &str, max_pages: usize) -> anyhow::Result<(Vec<Value>, usize, bool)> {
-    let mut issues = vec![];
-    for page in 1..=max_pages {
-        let v = crate::github::get(state, &format!("/repos/{repo}/issues?state={which}&per_page={PER_PAGE}&page={page}")).await?;
-        let items = v.as_array().map(Vec::as_slice).unwrap_or_default();
-        issues.extend(items.iter().filter(|i| i.get("pull_request").is_none()).map(|i| shape(i, false)));
-        if items.len() < PER_PAGE {
-            return Ok((issues, page, false));
+/// Open and closed issues, newest first. GraphQL's `issues` never holds pull requests, so a PR-heavy repo
+/// costs no pages; a connection whose `want` is false is skipped.
+const QUERY: &str = r#"
+query($owner: String!, $name: String!, $wantOpen: Boolean!, $openAfter: String, $wantClosed: Boolean!, $closedAfter: String) {
+  repository(owner: $owner, name: $name) {
+    open: issues(states: OPEN, first: 100, after: $openAfter, orderBy: {field: CREATED_AT, direction: DESC}) @include(if: $wantOpen) { ...page }
+    closed: issues(states: CLOSED, first: 100, after: $closedAfter, orderBy: {field: CREATED_AT, direction: DESC}) @include(if: $wantClosed) { ...page }
+  }
+}
+fragment page on IssueConnection {
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    number title state stateReason url author { login } createdAt updatedAt
+    labels(first: 20) { nodes { name color description } }
+    assignees(first: 10) { nodes { login avatarUrl } }
+    comments { totalCount }
+    subIssuesSummary { total completed }
+    issueDependenciesSummary { blockedBy blocking }
+  }
+}"#;
+
+/// A GraphQL issue in the REST fields `shape` reads.
+fn rest(n: &Value) -> Value {
+    let lower = |v: &Value| v.as_str().map_or(Value::Null, |s| json!(s.to_lowercase()));
+    json!({
+        "number": n["number"], "title": n["title"], "state": lower(&n["state"]), "state_reason": lower(&n["stateReason"]),
+        "html_url": n["url"], "user": { "login": n["author"]["login"] },
+        "labels": n["labels"]["nodes"],
+        "assignees": n["assignees"]["nodes"].as_array().into_iter().flatten().map(|a| json!({ "login": a["login"], "avatar_url": a["avatarUrl"] })).collect::<Vec<_>>(),
+        "comments": n["comments"]["totalCount"], "created_at": n["createdAt"], "updated_at": n["updatedAt"],
+        "sub_issues_summary": n["subIssuesSummary"],
+        "issue_dependencies_summary": { "blocked_by": n["issueDependenciesSummary"]["blockedBy"], "blocking": n["issueDependenciesSummary"]["blocking"] },
+    })
+}
+
+/// Where one connection stands: pages read and the cursor of the next, if any.
+struct Conn {
+    pages: usize,
+    next: Option<String>,
+}
+
+impl Conn {
+    fn more(&self) -> bool {
+        self.pages == 0 || self.next.is_some()
+    }
+}
+
+/// Open issues in full (up to `MAX_PAGES`), closed ones with the pages left, so an old open issue never
+/// drops off. The first request asks for both, so most repos take one; also whether any were left.
+async fn fetch_issues(state: &AppState, repo: &str) -> anyhow::Result<(Vec<Value>, bool)> {
+    let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
+    let (mut open, mut closed) = (Conn { pages: 0, next: None }, Conn { pages: 0, next: None });
+    let (mut opens, mut closeds) = (vec![], vec![]);
+    loop {
+        let want_open = open.more() && open.pages < MAX_PAGES;
+        let want_closed = closed.more() && (closed.pages == 0 || !open.more()) && open.pages + closed.pages < MAX_PAGES;
+        if !want_open && !want_closed {
+            break;
+        }
+        let vars = json!({
+            "owner": owner, "name": name,
+            "wantOpen": want_open, "openAfter": open.next, "wantClosed": want_closed, "closedAfter": closed.next,
+        });
+        let resp = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": QUERY, "variables": vars }))).await?;
+        if let Some(e) = resp["errors"][0]["message"].as_str() {
+            anyhow::bail!("GitHub: {e}");
+        }
+        for (want, key, conn, out) in [(want_open, "open", &mut open, &mut opens), (want_closed, "closed", &mut closed, &mut closeds)] {
+            if !want {
+                continue;
+            }
+            let c = &resp["data"]["repository"][key];
+            out.extend(c["nodes"].as_array().into_iter().flatten().map(|n| shape(&rest(n), false)));
+            conn.pages += 1;
+            conn.next = c["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false).then(|| c["pageInfo"]["endCursor"].as_str().map(String::from)).flatten();
         }
     }
-    Ok((issues, max_pages, true))
+    opens.extend(closeds);
+    Ok((opens, open.next.is_some() || closed.next.is_some()))
 }
 
 async fn project_issues(state: &AppState, project: String) -> Value {
@@ -73,17 +137,7 @@ async fn project_issues(state: &AppState, project: String) -> Value {
         Ok(r) => r,
         Err(e) => return json!({ "project": project, "repo": null, "problem": format!("{e}."), "issues": [] }),
     };
-    // Open ones in full, then closed ones with the pages left, so an old open issue never drops off.
-    let all = async {
-        let (mut issues, read, mut truncated) = fetch_issues(state, &repo, "open", MAX_PAGES).await?;
-        if read < MAX_PAGES {
-            let (closed, _, more) = fetch_issues(state, &repo, "closed", MAX_PAGES - read).await?;
-            issues.extend(closed);
-            truncated = more;
-        }
-        anyhow::Ok((issues, truncated))
-    };
-    match all.await {
+    match fetch_issues(state, &repo).await {
         Ok((issues, truncated)) => json!({ "project": project, "repo": repo, "issues": issues, "truncated": truncated }),
         Err(e) => json!({ "project": project, "repo": repo, "error": e.to_string(), "issues": [] }),
     }
@@ -156,7 +210,7 @@ pub async fn get(State(state): State<AppState>, Path(number): Path<i64>, Query(q
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::tests::{fake_github, state_with_token};
+    use crate::github::tests::{fake_github, own_fake, state_with_token};
 
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
     fn state() -> AppState {
@@ -197,15 +251,53 @@ mod tests {
         })
     }
 
+    /// `issue` as GraphQL lists it.
+    fn node(n: i64, title: &str) -> Value {
+        json!({
+            "number": n, "title": title, "state": "OPEN", "stateReason": null,
+            "url": format!("https://github.com/octo/issues-tab/issues/{n}"), "author": { "login": "octo-me" },
+            "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z",
+            "labels": { "nodes": [{ "name": "spec", "color": "5319e7", "description": "What to build" }] },
+            "assignees": { "nodes": [{ "login": "octo-me", "avatarUrl": "https://avatars.example/octo-me" }] },
+            "comments": { "totalCount": 3 },
+            "subIssuesSummary": { "total": 2, "completed": 1 },
+            "issueDependenciesSummary": { "blockedBy": 1, "blocking": 2 },
+        })
+    }
+
+    /// One connection's page: these issues, then the cursor of the next page if there is one.
+    fn conn(nodes: Vec<Value>, next: Option<&str>) -> Value {
+        json!({ "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next }, "nodes": nodes })
+    }
+
+    /// A GraphQL reply with the `open` and `closed` connections asked for.
+    fn reply(open: Option<Value>, closed: Option<Value>) -> (u16, Value) {
+        let mut r = json!({});
+        if let Some(o) = open {
+            r["open"] = o;
+        }
+        if let Some(c) = closed {
+            r["closed"] = c;
+        }
+        (200, json!({ "data": { "repository": r } }))
+    }
+
+    /// The variables of each issues query the fake got, oldest first.
+    fn queries(fake: &crate::github::tests::Fake) -> Vec<Value> {
+        fake.seen("/graphql").into_iter().map(|s| s.body["variables"].clone()).collect()
+    }
+
     #[tokio::test]
     async fn lists_issues_per_project_and_explains_missing_remotes() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-tab", Some("git@github.com:octo/issues-tab.git"));
         project(&st, "Issues-local", Some(""));
         project(&st, "issues-gitlab", Some("https://gitlab.com/octo/x.git"));
         project(&st, "issues-folderless", None);
-        let pr = json!({ "number": 9, "title": "A PR", "pull_request": {} });
-        fake.in_turn("GET", "/repos/octo/issues-tab/issues", vec![(200, json!([issue(4, "Rounds"), pr])), (200, json!([]))]);
+        let mut done = node(3, "Shipped");
+        (done["state"], done["stateReason"]) = (json!("CLOSED"), json!("NOT_PLANNED"));
+        fake.in_turn("POST", "/graphql", vec![reply(Some(conn(vec![node(4, "Rounds")], None)), Some(conn(vec![done], None)))]);
 
         let Json(v) = list(State(st.clone()), Query(Filter { project: None })).await.unwrap();
         assert_eq!(v["connected"], true);
@@ -217,89 +309,93 @@ mod tests {
         assert!(ps[..3].iter().all(|p| p["repo"].is_null() && p["issues"] == json!([])));
 
         assert_eq!(ps[3]["repo"], "octo/issues-tab");
-        assert_eq!(ps[3]["issues"], json!([{
+        assert_eq!(ps[3]["issues"][0], json!({
             "number": 4, "title": "Rounds", "state": "open", "state_reason": null,
             "url": "https://github.com/octo/issues-tab/issues/4", "author": "octo-me",
             "labels": [{ "name": "spec", "color": "5319e7", "description": "What to build" }],
             "assignees": [{ "login": "octo-me", "avatar_url": "https://avatars.example/octo-me" }],
             "comments": 3, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
             "sub_issues": { "total": 2, "completed": 1 }, "blocked_by": 1, "blocking": 2,
-        }]), "pull requests are left out and the list has no body");
+        }), "the same fields as REST gave, and no body");
+        assert_eq!((&ps[3]["issues"][1]["state"], &ps[3]["issues"][1]["state_reason"]), (&json!("closed"), &json!("not_planned")));
         assert_eq!(ps[3]["truncated"], false);
-        assert_eq!(fake.seen("/repos/octo/issues-tab/").iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), [
-            "/repos/octo/issues-tab/issues?state=open&per_page=100&page=1",
-            "/repos/octo/issues-tab/issues?state=closed&per_page=100&page=1",
-        ]);
-    }
-
-    /// A full page: issues numbered from `from`, then `prs` pull requests, as GitHub mixes them in.
-    fn page(from: i64, prs: usize) -> Value {
-        let n = PER_PAGE - prs;
-        let issues = (from..from + n as i64).map(|n| issue(n, "Old"));
-        let prs = (0..prs as i64).map(|n| json!({ "number": 1000 + n, "title": "A PR", "pull_request": {} }));
-        json!(issues.chain(prs).collect::<Vec<_>>())
+        let q = queries(&fake);
+        assert_eq!(q.len(), 1, "open and closed ones in one request");
+        assert_eq!(q[0], json!({ "owner": "octo", "name": "issues-tab", "wantOpen": true, "openAfter": null, "wantClosed": true, "closedAfter": null }));
     }
 
     #[tokio::test]
     async fn reads_every_page_open_ones_first() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-many", Some("https://github.com/octo/issues-many"));
-        let mut closed = issue(500, "Done");
-        closed["state"] = json!("closed");
-        fake.in_turn("GET", "/repos/octo/issues-many/issues", vec![(200, page(1, 40)), (200, json!([issue(200, "Oldest open")])), (200, json!([closed]))]);
+        let mut closed = node(500, "Done");
+        closed["state"] = json!("CLOSED");
+        let mut older = closed.clone();
+        older["number"] = json!(400);
+        fake.in_turn("POST", "/graphql", vec![
+            reply(Some(conn((1..=100).map(|n| node(n, "Old")).collect(), Some("o1"))), Some(conn(vec![closed], Some("c1")))),
+            reply(Some(conn(vec![node(200, "Oldest open")], None)), None),
+            reply(None, Some(conn(vec![older], None))),
+        ]);
 
         let Json(v) = list(State(st), Query(Filter { project: None })).await.unwrap();
         let p = &v["projects"][0];
         let numbers: Vec<i64> = p["issues"].as_array().unwrap().iter().map(|i| i["number"].as_i64().unwrap()).collect();
-        assert_eq!(numbers.len(), 62, "60 from the first page, PRs left out, then one from the second, then the closed one");
-        assert_eq!(numbers[60..], [200, 500]);
+        assert_eq!(numbers.len(), 103);
+        assert_eq!(numbers[99..], [100, 200, 500, 400], "every open one, then the closed ones");
         assert_eq!(p["truncated"], false);
-        assert_eq!(fake.seen("/repos/octo/issues-many/").iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), [
-            "/repos/octo/issues-many/issues?state=open&per_page=100&page=1",
-            "/repos/octo/issues-many/issues?state=open&per_page=100&page=2",
-            "/repos/octo/issues-many/issues?state=closed&per_page=100&page=1",
-        ]);
+        let q = queries(&fake);
+        let asked: Vec<_> = q.iter().map(|q| (q["wantOpen"].clone(), q["openAfter"].clone(), q["wantClosed"].clone(), q["closedAfter"].clone())).collect();
+        assert_eq!(asked, [
+            (json!(true), json!(null), json!(true), json!(null)),
+            (json!(true), json!("o1"), json!(false), json!("c1")),
+            (json!(false), json!(null), json!(true), json!("c1")),
+        ], "closed pages go on once open ones are done");
     }
 
     #[tokio::test]
     async fn stops_after_max_pages() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-huge", Some("https://github.com/octo/issues-huge"));
-        fake.route("GET", "/repos/octo/issues-huge/issues", 200, page(1, 0));
+        fake.route("POST", "/graphql", 200, reply(Some(conn(vec![node(1, "Open")], Some("o"))), Some(conn(vec![node(2, "Closed")], Some("c")))).1);
         let Json(v) = list(State(st), Query(Filter { project: None })).await.unwrap();
         assert_eq!(v["projects"][0]["truncated"], true);
-        let seen = fake.seen("/repos/octo/issues-huge/");
-        assert_eq!(seen.len(), MAX_PAGES, "no closed page once open ones fill the budget");
-        assert!(seen.iter().all(|s| s.path.contains("state=open")));
+        let q = queries(&fake);
+        assert_eq!(q.len(), MAX_PAGES, "no more closed pages while open ones fill the budget");
+        assert!(q[1..].iter().all(|q| q["wantOpen"] == true && q["wantClosed"] == false));
     }
 
     #[tokio::test]
     async fn one_project_fetches_only_that_repo() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-this", Some("https://github.com/octo/issues-this"));
         project(&st, "issues-that", Some("https://github.com/octo/issues-that"));
-        fake.route("GET", "/repos/octo/issues-this/issues", 200, json!([issue(1, "This")]));
-        fake.route("GET", "/repos/octo/issues-that/issues", 200, json!([issue(2, "That")]));
+        fake.route("POST", "/graphql", 200, reply(Some(conn(vec![node(1, "This")], None)), Some(conn(vec![], None))).1);
 
         let Json(v) = list(State(st.clone()), Query(Filter { project: Some(" issues-this ".into()) })).await.unwrap();
         assert_eq!(v["projects"].as_array().unwrap().iter().map(|p| p["project"].as_str().unwrap()).collect::<Vec<_>>(), ["issues-this"]);
-        assert_eq!(fake.seen("/repos/octo/issues-this/").len(), 2);
-        assert!(fake.seen("/repos/octo/issues-that/").is_empty());
+        assert_eq!(queries(&fake).iter().map(|q| q["name"].as_str().unwrap()).collect::<Vec<_>>(), ["issues-this"]);
         assert_eq!(list(State(st), Query(Filter { project: Some("../elsewhere".into()) })).await.unwrap_err().1, "not found");
     }
 
     #[tokio::test]
     async fn a_repo_github_turns_down_shows_its_error() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-gone", Some("https://github.com/octo/issues-gone"));
-        fake.route("GET", "/repos/octo/issues-gone/issues", 404, json!({ "message": "Not Found" }));
+        let message = "Could not resolve to a Repository with the name 'octo/issues-gone'.";
+        fake.route("POST", "/graphql", 200, json!({ "data": { "repository": null }, "errors": [{ "type": "NOT_FOUND", "message": message }] }));
         let Json(v) = list(State(st), Query(Filter { project: None })).await.unwrap();
-        assert_eq!(v["projects"][0], json!({ "project": "issues-gone", "repo": "octo/issues-gone", "error": "GitHub 404: Not Found", "issues": [] }));
+        assert_eq!(v["projects"][0], json!({ "project": "issues-gone", "repo": "octo/issues-gone", "error": format!("GitHub: {message}"), "issues": [] }));
     }
 
     #[tokio::test]
     async fn without_a_token_nothing_is_fetched() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         project(&st, "issues-offline", Some("https://github.com/octo/issues-offline"));
         let mut s = st.settings.get();
         s.github_token = String::new();
@@ -307,7 +403,7 @@ mod tests {
 
         let Json(v) = list(State(st.clone()), Query(Filter { project: None })).await.unwrap();
         assert_eq!(v, json!({ "connected": false, "projects": [{ "project": "issues-offline", "repo": "octo/issues-offline", "problem": null, "issues": [] }] }));
-        assert!(fake.seen("/repos/octo/issues-offline/").is_empty());
+        assert!(fake.seen("/").is_empty());
         let err = get(State(st), Path(1), Query(One { project: "issues-offline".into() })).await.unwrap_err();
         assert_eq!(err.1, "GitHub isn't connected");
     }
