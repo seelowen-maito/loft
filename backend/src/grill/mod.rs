@@ -5,6 +5,9 @@
 //! Rounds, sent answers, status rows and the summary are ordinary chat messages tagged with `meta.grill`,
 //! so they render inline in the same conversation (and as plain chat on clients that don't know the tag).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -134,12 +137,35 @@ pub fn enabled(a: &Agent) -> bool {
     a.planning
 }
 
+/// One lock per agent, held around every load, change and save of its grill session. Writers (answers
+/// from the web and the phone, commands, the agent's tools, publishing, the sweeper) would otherwise
+/// overwrite each other's changes to the session blob.
+#[derive(Default)]
+pub struct Locks(Mutex<HashMap<String, Arc<Mutex<()>>>>);
+
+impl Locks {
+    fn of(&self, agent_id: &str) -> Arc<Mutex<()>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(agent_id.into()).or_default().clone()
+    }
+}
+
+/// Runs `f` holding `agent_id`'s grill lock.
+fn locked<T>(state: &AppState, agent_id: &str, f: impl FnOnce() -> T) -> T {
+    let lock = state.grill_locks.of(agent_id);
+    let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.active_grill(agent_id).ok()?
 }
 
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
 pub fn record_published(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
+    locked(state, agent_id, || record_published_locked(state, agent_id, repo, spec, tickets))
+}
+
+fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
     let Some(mut s) = active(state, agent_id) else { return };
     let p = s.published.get_or_insert_with(Default::default);
     if p.repo != repo {
@@ -449,7 +475,11 @@ pub enum Routed {
 
 /// Routes a message the user sent to `agent`. Only the user's own messages reach this; messages from
 /// other agents, task briefs and wake-ups never count as answers.
-pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
+pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, meta: Value) -> Result<Routed, ApiError> {
+    locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta))
+}
+
+fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
     let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
     let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
 
@@ -678,21 +708,30 @@ pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json
     if uuid::Uuid::parse_str(&id).is_err() {
         return Err(not_found());
     }
-    let mut s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
-    let client_id = b.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
-    if client_id.as_ref().is_some_and(|c| s.seen_commands.contains(c)) {
+    let agent_id = state.db.get_grill(&id)?.ok_or_else(not_found)?.agent_id;
+    let (s, wake, duplicate) = locked(&state, &agent_id, || -> Result<_, ApiError> {
+        // Read again under the lock: another writer may have changed it since.
+        let mut s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
+        let client_id = b.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
+        if client_id.as_ref().is_some_and(|c| s.seen_commands.contains(c)) {
+            return Ok((s, None, true));
+        }
+        if s.status == "ended" || s.status == "preparing" {
+            return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
+        }
+        let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
+        if let Some(c) = client_id {
+            s.seen_commands.push(c);
+            let n = s.seen_commands.len();
+            s.seen_commands.drain(..n.saturating_sub(50));
+        }
+        let wake = apply_command(&state, &mut s, cmd, b.question_id.as_deref(), None)?;
+        Ok((s, wake, false))
+    })?;
+    if duplicate {
         return Ok(Json(json!({ "ok": true, "duplicate": true, "session": view(&s) })));
     }
-    if s.status == "ended" || s.status == "preparing" {
-        return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
-    }
-    let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
-    if let Some(c) = client_id {
-        s.seen_commands.push(c);
-        let n = s.seen_commands.len();
-        s.seen_commands.drain(..n.saturating_sub(50));
-    }
-    if let Some(p) = apply_command(&state, &mut s, cmd, b.question_id.as_deref(), None)? {
+    if let Some(p) = wake {
         crate::agents::wake(&state, &s.agent_id, p, "grill");
     }
     Ok(Json(json!({ "ok": true, "session": view(&s) })))
@@ -753,7 +792,11 @@ const PREPARING_FOR_MINS: i64 = 10;
 /// Applies idle timeouts to every open grill. Returns the agents to wake with a summary request.
 fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, String)> {
     let mut wakes = vec![];
-    for mut s in state.db.open_grills().unwrap_or_default() {
+    for open in state.db.open_grills().unwrap_or_default() {
+        let lock = state.grill_locks.of(&open.agent_id);
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Read again under the lock: an answer may have just come in.
+        let Some(mut s) = state.db.get_grill(&open.id).ok().flatten() else { continue };
         let Ok(at) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { continue };
         let idle = now.signed_duration_since(at);
         match s.status.as_str() {
@@ -851,7 +894,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
     if !enabled(me) {
         return Some(Err("Planning isn't on for you.".into()));
     }
-    Some((|| match name {
+    Some(locked(state, &me.id, || match name {
         "grill_round" => {
             let mut qs = parse_questions(&args["questions"])?;
             let topic = args["topic"].as_str().unwrap_or("").trim();
@@ -973,7 +1016,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             ))
         }
         _ => Err(format!("unknown tool {name}")),
-    })())
+    }))
 }
 
 /// The system-prompt section for agents with Planning on.
@@ -1149,6 +1192,62 @@ pub(crate) mod tests {
 
     fn qids(st: &AppState, a: &Agent) -> Vec<String> {
         active(st, &a.id).unwrap().rounds.last().unwrap().questions.iter().map(|q| q.id.clone()).collect()
+    }
+
+    #[test]
+    fn concurrent_answers_are_all_kept_and_a_late_one_never_reopens_a_sent_round() {
+        let st = state();
+        let o = planner(&st, "Orchestrator");
+        let texts: Vec<String> = (0..10).map(|i| format!("Q{i}?")).collect();
+        round(&st, &o, &texts.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+        let ids = qids(&st, &o);
+        let sid = active(&st, &o.id).unwrap().id;
+        // Ten answers at once, one per card, as quick taps or the web and the phone together would send them.
+        let barrier = std::sync::Barrier::new(ids.len());
+        std::thread::scope(|sc| {
+            for (i, qid) in ids.iter().enumerate() {
+                let (st, o, sid, barrier) = (&st, &o, &sid, &barrier);
+                sc.spawn(move || {
+                    barrier.wait();
+                    on_user_message(st, o, &format!("answer {i}"), Some(&json!({ "role": "answer", "session_id": sid, "question_id": qid })), json!({})).ok().unwrap();
+                });
+            }
+        });
+        let s = active(&st, &o.id).unwrap();
+        let got: Vec<Option<String>> = s.rounds[0].questions.iter().map(|q| q.answer.clone()).collect();
+        assert_eq!(got, (0..10).map(|i| Some(format!("answer {i}"))).collect::<Vec<_>>());
+
+        // A second round, answered while the user sends it: each answer either lands before the send or is refused.
+        send(&st, &o);
+        mcp_call(&st, &o, "grill_round", &json!({ "questions": texts.iter().map(|t| q(t)).collect::<Vec<_>>() })).unwrap().unwrap();
+        let ids = qids(&st, &o);
+        let barrier = std::sync::Barrier::new(ids.len() + 1);
+        let kept: Vec<(String, bool)> = std::thread::scope(|sc| {
+            let (st, o, barrier) = (&st, &o, &barrier);
+            sc.spawn(move || {
+                barrier.wait();
+                on_user_message(st, o, "send", None, json!({})).ok().unwrap();
+            });
+            let answers: Vec<_> = ids
+                .iter()
+                .map(|qid| {
+                    let sid = &sid;
+                    sc.spawn(move || {
+                        barrier.wait();
+                        let ok = on_user_message(st, o, "yes", Some(&json!({ "role": "answer", "session_id": sid, "question_id": qid })), json!({})).is_ok();
+                        (qid.clone(), ok)
+                    })
+                })
+                .collect();
+            answers.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let s = active(&st, &o.id).unwrap();
+        let r = &s.rounds[1];
+        assert!(r.sent_at.is_some(), "a late answer must not reopen the sent round");
+        for (qid, ok) in kept {
+            let q = r.questions.iter().find(|q| q.id == qid).unwrap();
+            assert_eq!(q.answer.is_some(), ok, "an accepted answer is kept, a refused one isn't");
+        }
     }
 
     #[tokio::test]

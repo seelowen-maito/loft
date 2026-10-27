@@ -89,6 +89,8 @@ pub struct AppState {
     pub usage: Arc<crate::usage::Cache>,
     /// Latest CPU temperature reading.
     pub system: Arc<crate::system::Cache>,
+    /// Serializes writes to each agent's grill session.
+    pub grill_locks: Arc<crate::grill::Locks>,
 }
 
 impl AppState {

@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
         settings: Arc::new(settings::Store::load(&data_dir)?),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
+        grill_locks: Arc::new(grill::Locks::default()),
     };
     setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));

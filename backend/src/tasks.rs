@@ -962,6 +962,7 @@ pub(crate) mod tests {
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
             usage: Arc::new(Default::default()),
             system: Arc::new(Default::default()),
+            grill_locks: Arc::new(Default::default()),
         }
     }
 
