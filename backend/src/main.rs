@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
+        .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1)))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))

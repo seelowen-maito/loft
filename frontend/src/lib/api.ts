@@ -167,8 +167,8 @@ export type EndCard = {
   next_message: string;
   /** Roles no agent in the project fills: "dev", "reviewer". */
   missing_roles: string[];
-  /** The message "Set up the team with loft" sends, when roles are missing. */
-  setup: { agent_id: string; message: string } | null;
+  /** The message "Set up the team with loft" sends, when roles are missing; `sent_at` once it was sent. */
+  setup: { agent_id: string; message: string; sent_at?: string } | null;
 };
 
 /** A phone registered for push (`/api/devices`). */
@@ -433,6 +433,9 @@ export const api = {
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
   send: (id: string, text: string, images: string[] = [], taskId?: string) =>
     req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, { text, images, ...(taskId ? { meta: { task_id: taskId } } : {}) }),
+  /** "Set up the team with loft" on an end-of-planning card: sends its setup message once. */
+  sendTeamSetup: (id: string, messageId: number) =>
+    req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
   /** Stores a pasted image for the next message; send its `file` in `send`'s images. */
   upload: async (id: string, image: Blob) => {
     const res = await fetch(`/api/agents/${id}/uploads`, { method: "POST", body: image });

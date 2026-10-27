@@ -1,8 +1,11 @@
 //! Publishing a plan as GitHub issues: Loft itself creates them with the user's token, on the repo
 //! of the agent's project, and records what it published so a retry never creates a second one.
 
+use axum::Json;
+use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
+use crate::api::{ApiResult, bad, not_found};
 use crate::db::Agent;
 use crate::grill::IssueLink;
 use crate::state::AppState;
@@ -60,6 +63,24 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     // Even a failure can leave issues published, so the Issues tab refetches either way.
     state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
     Some(out)
+}
+
+/// `POST /api/agents/{id}/messages/{mid}/team-setup`: the end-of-planning card's "Set up the team with
+/// loft". Sends the card's setup message to loft once and records `sent_at` on the card, so it shows as
+/// sent after a reload and a second click (or another device) gets the card back instead of a resend.
+pub async fn send_team_setup(State(state): State<AppState>, Path((id, mid)): Path<(String, i64)>) -> ApiResult<Value> {
+    let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
+    let setup = m.meta["grill"]["end_card"]["setup"].clone();
+    let (Some(to), Some(text)) = (setup["agent_id"].as_str(), setup["message"].as_str()) else {
+        return Err(bad("This card has no team setup."));
+    };
+    if !state.db.mark_team_setup_sent(&id, mid)? {
+        return Ok(Json(json!({ "ok": true, "duplicate": true, "message": m })));
+    }
+    crate::agents::enqueue_with(&state, to, Some(text.to_string()), json!({}), "user");
+    let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
+    state.emit(crate::state::Event::Message { message: json!(m) });
+    Ok(Json(json!({ "ok": true, "message": m })))
 }
 
 /// The team check: the roles no agent in `project` fills, going by their stored roles.
@@ -771,6 +792,41 @@ pub(crate) mod tests {
                 "message": format!("Set up the team for the card-team project: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
             },
         }));
+    }
+
+    #[tokio::test]
+    async fn the_team_setup_is_sent_once_and_stays_sent() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "card-setup", Some("git@github.com:octo/card-setup.git"));
+        tickets_repo(&fake, "octo/card-setup", 9, &[9]);
+        // Busy, so the setup message is queued instead of starting a real claude run.
+        st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        crate::setup::ensure_loft(&st);
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Setup").await.unwrap();
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let card = summary(&st, &a);
+        assert_eq!(card.meta["grill"]["end_card"]["setup"]["sent_at"], Value::Null);
+
+        let click = || send_team_setup(State(st.clone()), Path((a.id.clone(), card.id)));
+        let first = click().await.unwrap().0;
+        assert!(first["message"]["meta"]["grill"]["end_card"]["setup"]["sent_at"].is_string(), "{first}");
+        let second = click().await.unwrap().0;
+        assert_eq!(second["duplicate"], true);
+
+        // Reloading the chat shows the card as sent, and loft got the message once.
+        let sent_at = &summary(&st, &a).meta["grill"]["end_card"]["setup"]["sent_at"];
+        assert_eq!(sent_at, &first["message"]["meta"]["grill"]["end_card"]["setup"]["sent_at"]);
+        let setup = card.meta["grill"]["end_card"]["setup"]["message"].as_str().unwrap();
+        let to_loft = st.db.list_messages(crate::setup::LOFT_ID, 50, None).unwrap().into_iter().filter(|m| m.role == "user" && m.content == setup).count();
+        assert_eq!(to_loft, 1);
+
+        // A card without a setup, or another agent's message, sends nothing.
+        let plain = crate::tasks::tests::agent(&st, "card-setup-other");
+        assert_eq!(send_team_setup(State(st.clone()), Path((plain.id.clone(), card.id))).await.err().unwrap().0, axum::http::StatusCode::NOT_FOUND);
+        let note = crate::agents::add_msg(&st, &a.id, None, "assistant", "text", "hi", json!({})).unwrap();
+        assert_eq!(send_team_setup(State(st.clone()), Path((a.id.clone(), note.id))).await.err().unwrap().0, axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

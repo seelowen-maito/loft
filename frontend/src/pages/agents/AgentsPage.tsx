@@ -124,7 +124,8 @@ export default function AgentsPage() {
             break;
           case "message":
             if (e.message.agent_id === selectedId) {
-              setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms : [...ms, e.message]));
+              // A known id is that message updated (an end-of-planning card marked sent).
+              setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms.map((m) => (m.id === e.message.id ? e.message : m)) : [...ms, e.message]));
             }
             break;
           case "pull_request":

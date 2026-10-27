@@ -680,6 +680,29 @@ impl Db {
         })
     }
 
+    pub fn get_message(&self, agent_id: &str, id: i64) -> Result<Option<Message>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages WHERE agent_id = ?1 AND id = ?2",
+            params![agent_id, id],
+            message_from_row,
+        )
+        .optional()?)
+    }
+
+    /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or
+    /// it was already sent, so two clicks can't both send it.
+    pub fn mark_team_setup_sent(&self, agent_id: &str, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        let n = c.execute(
+            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.setup.sent_at', ?3)
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.setup') = 'object'
+               AND json_extract(meta, '$.grill.end_card.setup.sent_at') IS NULL",
+            params![agent_id, id, now()],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Most recent `limit` messages, returned oldest-first. `before` pages backwards.
     pub fn list_messages(&self, agent_id: &str, limit: i64, before: Option<i64>) -> Result<Vec<Message>> {
         let c = self.0.lock().unwrap();

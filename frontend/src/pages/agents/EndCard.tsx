@@ -18,7 +18,7 @@ function Issue({ i, icon }: { i: PlannedIssue; icon: React.ReactNode }) {
 }
 
 /** The end of a planning grill: the spec and tickets it published, Clear context with the next message, and the team check. */
-export function EndCard({ card, onClear }: { card: Card; onClear: (next: string) => Promise<void> }) {
+export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
   const [busy, setBusy] = useState<"clear" | "setup" | null>(null);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +34,7 @@ export function EndCard({ card, onClear }: { card: Card; onClear: (next: string)
     }
   };
   const setup = card.setup;
+  const shown = sent || !!setup?.sent_at;
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {card.repo}</div>
@@ -55,20 +56,20 @@ export function EndCard({ card, onClear }: { card: Card; onClear: (next: string)
         >
           {busy === "clear" ? <Loader2 className="size-3.5 animate-spin" /> : <Eraser className="size-3.5" />} Clear context
         </button>
-        {setup && !sent && (
+        {setup && !shown && (
           <button
             className="btn text-[12.5px]"
             disabled={busy !== null}
             title={setup.message}
             onClick={() => run("setup", async () => {
-              await api.send(setup.agent_id, setup.message);
+              await api.sendTeamSetup(agentId, messageId);
               setSent(true);
             })}
           >
             {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with loft
           </button>
         )}
-        {setup && sent && (
+        {setup && shown && (
           <Link to={`/agents/${setup.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
             Sent to loft · open its chat
           </Link>

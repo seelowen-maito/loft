@@ -862,7 +862,7 @@ function MessageRow({ m, agent, agents, grill, onClearWith }: {
     return (
       <div className="space-y-2">
         <MessageRow m={{ ...m, meta: { ...m.meta, grill: { ...m.meta.grill, end_card: null } } }} agent={agent} agents={agents} grill={grill} onClearWith={onClearWith} />
-        <EndCard card={m.meta.grill.end_card} onClear={onClearWith} />
+        <EndCard agentId={m.agent_id} messageId={m.id} card={m.meta.grill.end_card} onClear={onClearWith} />
       </div>
     );
   }
