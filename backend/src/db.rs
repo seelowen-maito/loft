@@ -172,14 +172,23 @@ pub struct PullRequest {
     pub created_at: String,
 }
 
-/// A unit of work: a personal todo, or work handed to an agent. Agents report
-/// progress on the tasks they own through MCP; the user owns the rest.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
+/// GitHub issue (title, markdown description, labels, owner, open or closed) plus what Loft adds: an
+/// agent, an execution status and a thread. Agents report progress on the tasks they own through MCP;
+/// the user owns the rest.
+///
+/// Serialized by hand (below) so the API also carries `state`, derived from `status`.
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Task {
     pub id: String,
     pub title: String,
+    /// Markdown.
     pub description: String,
+    /// Label names, as on GitHub. Items stored before labels existed load with none.
+    pub labels: Vec<String>,
+    /// The GitHub login of the person who owns it, or empty. Always a person, never an agent.
+    pub owner: String,
     /// todo (personal; never runs by itself) | work (meant for an agent)
     pub kind: String,
     /// inbox | ready | in_progress | blocked | waiting_approval | done | failed | cancelled
@@ -201,6 +210,43 @@ pub struct Task {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+impl Task {
+    /// `open` or `closed`, as on GitHub: done and cancelled are closed, everything else is open.
+    pub fn state(&self) -> &'static str {
+        if matches!(self.status.as_str(), "done" | "cancelled") { "closed" } else { "open" }
+    }
+}
+
+impl Serialize for Task {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut m = s.serialize_struct("Task", 25)?;
+        m.serialize_field("id", &self.id)?;
+        m.serialize_field("title", &self.title)?;
+        m.serialize_field("description", &self.description)?;
+        m.serialize_field("labels", &self.labels)?;
+        m.serialize_field("owner", &self.owner)?;
+        m.serialize_field("state", self.state())?;
+        m.serialize_field("kind", &self.kind)?;
+        m.serialize_field("status", &self.status)?;
+        m.serialize_field("priority", &self.priority)?;
+        m.serialize_field("project", &self.project)?;
+        m.serialize_field("agent_id", &self.agent_id)?;
+        m.serialize_field("parent_id", &self.parent_id)?;
+        m.serialize_field("depends_on", &self.depends_on)?;
+        m.serialize_field("due_at", &self.due_at)?;
+        m.serialize_field("created_by", &self.created_by)?;
+        m.serialize_field("note", &self.note)?;
+        m.serialize_field("summary", &self.summary)?;
+        m.serialize_field("error", &self.error)?;
+        m.serialize_field("created_at", &self.created_at)?;
+        m.serialize_field("updated_at", &self.updated_at)?;
+        m.serialize_field("started_at", &self.started_at)?;
+        m.serialize_field("completed_at", &self.completed_at)?;
+        m.end()
+    }
 }
 
 pub fn now() -> String {
@@ -511,6 +557,13 @@ impl Db {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c.query_row("SELECT data FROM tasks WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    /// A task row exactly as given, for tests that start from data an older Loft wrote.
+    #[cfg(test)]
+    pub(crate) fn insert_raw_task(&self, id: &str, data: &str, created_at: &str) {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT INTO tasks (id, data, created_at) VALUES (?1, ?2, ?3)", params![id, data, created_at]).unwrap();
     }
 
     pub fn save_task(&self, t: &Task) -> Result<()> {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, ChevronRight, CircleDot, ListTodo, MessageSquare, NotebookPen, Plus, Search } from "lucide-react";
+import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ListTodo, MessageSquare, NotebookPen, Plus, Search, UserRound } from "lucide-react";
 import { api, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
@@ -32,6 +32,16 @@ const STATUS_TONE: Record<string, string> = {
 const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
 const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
+
+/** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
+function StateIcon({ task: t, className }: { task: Task; className?: string }) {
+  if (t.state === "open") return <CircleDot className={cx(className, STATUS_TONE[t.status])} aria-label="Open" />;
+  return <CircleCheck className={cx(className, t.status === "cancelled" ? "text-fg-3" : "text-merged")} aria-label="Closed" />;
+}
+
+function LabelChip({ name }: { name: string }) {
+  return <span className="inline-flex items-center rounded-full border border-line-strong bg-white/[0.04] px-2 py-px font-sans text-[11px] text-fg-2">{name}</span>;
+}
 
 export default function TasksPage() {
   const { id: routeId } = useParams();
@@ -71,7 +81,7 @@ export default function TasksPage() {
     const q = query.trim().toLowerCase();
     return (tasks ?? []).filter(
       (t) =>
-        (!q || t.title.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)) &&
+        (!q || t.title.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.labels.some((l) => l.toLowerCase().includes(q)) || t.owner.toLowerCase() === q.replace(/^@/, "")) &&
         (!project || t.project === project) &&
         (!agentId || t.agent_id === agentId) &&
         (!mine || t.created_by === "user"),
@@ -183,9 +193,14 @@ export default function TasksPage() {
 function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent; active: boolean; onOpen: () => void }) {
   return (
     <button onClick={onOpen} className={cx("flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors", active ? "bg-white/[0.06]" : "hover:bg-white/[0.03]")}>
-      <CircleDot className={cx("mt-0.5 size-3.5 shrink-0", STATUS_TONE[t.status])} />
+      <StateIcon task={t} className="mt-0.5 size-3.5 shrink-0" />
       <div className="min-w-0 flex-1">
-        <div className={cx("truncate text-[13.5px]", t.status === "cancelled" && "text-fg-3 line-through")}>{t.title}</div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={cx("truncate text-[13.5px]", t.status === "cancelled" && "text-fg-3 line-through")}>{t.title}</span>
+          {/* Two labels fit next to a title; the rest are counted and show on the task's page. */}
+          {t.labels.slice(0, 2).map((l) => <span key={l} className="shrink-0"><LabelChip name={l} /></span>)}
+          {t.labels.length > 2 && <span className="shrink-0 font-mono text-[10.5px] text-fg-3" title={t.labels.slice(2).join(", ")}>+{t.labels.length - 2}</span>}
+        </div>
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
           {agent && <>· {agent.name}</>}
@@ -235,12 +250,32 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
         )}
         <h1 className="text-[22px] font-medium leading-snug tracking-tight">{t.title}</h1>
         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+          <span className={cx("inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-sans text-[12px] font-medium text-ink-950", t.state === "open" ? "bg-good" : t.status === "cancelled" ? "bg-fg-3" : "bg-merged")}>
+            {t.state === "open" ? <CircleDot className="size-3" /> : <CircleCheck className="size-3" />}
+            {t.state === "open" ? "Open" : t.status === "cancelled" ? "Closed · not planned" : "Closed"}
+          </span>
           <span className={cx("chip", STATUS_TONE[t.status])}>{statusLabel(t.status)}</span>
           {t.priority !== "normal" && <span className={cx("chip", (t.priority === "high" || t.priority === "urgent") && "text-warn")}>{t.priority}</span>}
           {t.project && <span className="chip">{t.project}</span>}
           <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
           {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
         </div>
+        {(t.labels.length > 0 || t.owner) && (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
+            {t.labels.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="eyebrow mr-1">Labels</span>
+                {t.labels.map((l) => <LabelChip key={l} name={l} />)}
+              </div>
+            )}
+            {t.owner && (
+              <div className="flex items-center gap-1.5 text-[12.5px] text-fg-2">
+                <span className="eyebrow mr-1">Owner</span>
+                <UserRound className="size-3.5 text-fg-3" /> <span className="font-mono">{t.owner}</span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="pt-2">
           <TaskActions task={t} agents={agents} />
         </div>
@@ -260,7 +295,7 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
       {t.error && t.status !== "done" && <Block title="Problem" tone="text-bad" text={t.error} />}
       {t.summary && <Block title="Summary" text={t.summary} />}
       {t.note && t.status !== "done" && <Block title="Latest progress" text={t.note} />}
-      {t.description && <Block title="Details" text={t.description} />}
+      {t.description && <Block title="Description" text={t.description} />}
 
       {(subtasks.length > 0 || deps.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -306,7 +341,7 @@ function TaskLinks({ title, tasks }: { title: string; tasks: Task[] }) {
       <div className="space-y-1">
         {tasks.map((x) => (
           <Link key={x.id} to={`/tasks/${x.id}`} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
-            <CircleDot className={cx("size-3 shrink-0", STATUS_TONE[x.status])} />
+            <StateIcon task={x} className="size-3 shrink-0" />
             <span className="truncate">{x.title}</span>
           </Link>
         ))}

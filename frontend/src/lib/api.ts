@@ -64,10 +64,18 @@ export type Message = {
 export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waiting_approval" | "done" | "failed" | "cancelled";
 
 /** A task on the shared list (`/api/tasks`). */
+/** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 export type Task = {
   id: string;
   title: string;
+  /** Markdown. */
   description: string;
+  /** Label names, as on GitHub. */
+  labels: string[];
+  /** GitHub login of the person who owns it, or "". */
+  owner: string;
+  /** Derived from status: done and cancelled are closed. Read-only. */
+  state: "open" | "closed";
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -484,7 +492,7 @@ export const api = {
       ...opts,
     }),
   createTask: (t: Partial<Task> & { title: string }) => req<Task>("POST", "/tasks", { ...t, id: crypto.randomUUID() }),
-  updateTask: (id: string, p: Partial<Task>) => req<Task>("PATCH", `/tasks/${id}`, p),
+  updateTask: (id: string, p: Partial<Omit<Task, "owner">> & { owner?: string | null }) => req<Task>("PATCH", `/tasks/${id}`, p),
   runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/tasks/${id}/execute`, { agent_id: agentId, note }),
   cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/tasks/${id}/cancel`, { stop_run: stopRun }),
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/tasks/${id}`),

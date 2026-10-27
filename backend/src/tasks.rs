@@ -14,6 +14,9 @@ use crate::db::{Agent, Task, TaskComment, now};
 use crate::state::{AppState, Event};
 
 const PRIORITIES: &[&str] = &["low", "normal", "high", "urgent"];
+/// GitHub's limits: label names up to 50 characters; Loft keeps at most 20 labels on an issue.
+const MAX_LABEL: usize = 50;
+const MAX_LABELS: usize = 20;
 /// Statuses the user may set directly. The rest come from the agent doing the work, or from execute/cancel.
 const USER_STATUSES: &[&str] = &["inbox", "ready", "done"];
 /// Statuses an agent may report on a task it owns.
@@ -62,7 +65,12 @@ fn is_active(t: &Task) -> bool {
 }
 
 fn is_closed(t: &Task) -> bool {
-    matches!(t.status.as_str(), "done" | "cancelled")
+    t.state() == "closed"
+}
+
+/// A GitHub login: 1–39 letters, digits or hyphens, not starting or ending with a hyphen, no double hyphen.
+fn is_github_login(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 39 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !s.starts_with('-') && !s.ends_with('-') && !s.contains("--")
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -94,6 +102,38 @@ fn apply_fields(state: &AppState, t: &mut Task, p: &Value) -> Result<(), String>
         t.title = clip(v, 200);
     }
     if let Some(v) = str_field("description") { t.description = clip(&v, 20_000); }
+    if let Some(v) = p.get("labels") {
+        let names: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| "labels must be a list of label names".to_string())?;
+        let mut labels: Vec<String> = vec![];
+        for n in names {
+            let n = n.trim();
+            if n.is_empty() {
+                continue;
+            }
+            if n.chars().count() > MAX_LABEL {
+                return Err(format!("a label can be at most {MAX_LABEL} characters, like on GitHub"));
+            }
+            // GitHub label names are case-insensitive: keep the first spelling.
+            if !labels.iter().any(|l| l.eq_ignore_ascii_case(n)) {
+                labels.push(n.to_string());
+            }
+        }
+        if labels.len() > MAX_LABELS {
+            return Err(format!("at most {MAX_LABELS} labels"));
+        }
+        t.labels = labels;
+    }
+    if let Some(v) = p.get("owner") {
+        let login = match v {
+            Value::Null => String::new(),
+            Value::String(s) => s.trim().trim_start_matches('@').to_string(),
+            _ => return Err("owner must be a GitHub login or null".into()),
+        };
+        if !login.is_empty() && !is_github_login(&login) {
+            return Err("owner must be a GitHub login: letters, digits and single hyphens, at most 39 characters".into());
+        }
+        t.owner = login;
+    }
     if let Some(v) = str_field("project") { t.project = clip(&v, 100); }
     if let Some(v) = str_field("priority") {
         if !PRIORITIES.contains(&v.as_str()) {
@@ -1201,6 +1241,70 @@ pub(crate) mod tests {
         assert!(create(&st, &json!({ "title": "x", "agent_id": "nope" }), "user").is_err());
         assert!(create(&st, &json!({ "title": "x", "parent_id": "nope" }), "user").is_err());
         assert!(create(&st, &json!({ "title": "x", "due_at": "tomorrow" }), "user").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_issue_has_a_description_labels_an_owner_and_a_state() {
+        let st = state();
+        let (code, Json(v)) = create_task(
+            State(st.clone()),
+            Json(json!({ "title": "Retry cap", "description": "## What\n\nCap at **5**.", "labels": [" bug ", "Bug", "ready-for-agent", ""], "owner": "@octo-cat" })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!((&v["description"], &v["labels"], &v["owner"], &v["state"]), (&json!("## What\n\nCap at **5**."), &json!(["bug", "ready-for-agent"]), &json!("octo-cat"), &json!("open")));
+        let id = v["id"].as_str().unwrap().to_string();
+
+        // Edits change only what's sent; null and [] clear.
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "labels": ["docs"] }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"], &v["description"]), (&json!(["docs"]), &json!("octo-cat"), &json!("## What\n\nCap at **5**.")));
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "owner": null, "labels": [] }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"]), (&json!([]), &json!("")));
+
+        // Open/closed follows the status, both ways.
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "status": "done" }))).await.unwrap();
+        assert_eq!(v["state"], "closed");
+        let Json(v) = get(State(st.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(v["state"], "closed");
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "status": "inbox" }))).await.unwrap();
+        assert_eq!(v["state"], "open");
+        let Json(v) = cancel(State(st.clone()), Path(id.clone()), None).await.unwrap();
+        assert_eq!((&v["task"]["status"], &v["task"]["state"]), (&json!("cancelled"), &json!("closed")));
+
+        // Bad values are refused and change nothing.
+        for bad in [json!({ "owner": "not a login" }), json!({ "owner": "-x" }), json!({ "owner": "a--b" }), json!({ "owner": 7 }), json!({ "labels": "bug" }), json!({ "labels": ["x".repeat(51)] })] {
+            assert_eq!(update(State(st.clone()), Path(id.clone()), Json(bad.clone())).await.unwrap_err().0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let many: Vec<String> = (0..21).map(|i| format!("l{i}")).collect();
+        assert!(create_task(State(st.clone()), Json(json!({ "title": "x", "labels": many }))).await.is_err());
+        let Json(v) = get(State(st), Path(id)).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"]), (&json!([]), &json!("")));
+    }
+
+    #[tokio::test]
+    async fn tasks_stored_before_labels_and_owner_still_load_and_work() {
+        let st = state();
+        let id = uuid::Uuid::new_v4().to_string();
+        // A row as an older Loft wrote it: no labels, owner or state.
+        let old = json!({
+            "id": id, "title": "Old one", "description": "From before", "kind": "todo", "status": "ready", "priority": "normal",
+            "project": "api", "agent_id": null, "parent_id": null, "depends_on": [], "due_at": null, "created_by": "user",
+            "note": "", "summary": "", "error": "", "created_at": "2026-10-01T10:00:00+00:00", "updated_at": "2026-10-01T10:00:00+00:00",
+            "started_at": null, "completed_at": null,
+        });
+        st.db.insert_raw_task(&id, &old.to_string(), "2026-10-01T10:00:00+00:00");
+
+        let Json(list) = list(State(st.clone()), Query(ListQuery { status: None, agent_id: None, parent_id: None, project: None })).await.unwrap();
+        let v = &list[0];
+        assert_eq!((&v["title"], &v["description"], &v["labels"], &v["owner"], &v["state"]), (&json!("Old one"), &json!("From before"), &json!([]), &json!(""), &json!("open")));
+
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "labels": ["bug"], "owner": "octo" }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"], &v["title"], &v["status"]), (&json!(["bug"]), &json!("octo"), &json!("Old one"), &json!("ready")));
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        let Json(v) = execute_task(State(st.clone()), Path(id.clone()), Some(Json(ExecuteBody { agent_id: Some(a.id.clone()), ..Default::default() }))).await.unwrap();
+        assert_eq!((&v["task"]["status"], &v["task"]["labels"], &v["task"]["state"]), (&json!("in_progress"), &json!(["bug"]), &json!("open")));
     }
 
     #[test]
