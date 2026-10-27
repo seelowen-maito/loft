@@ -20,6 +20,10 @@ _Avoid_: Workspace (that is the agent's private folder)
 The one agent per team marked as lead: it plans with the user and hands ready tickets to the rest of the team. A team has at most one.
 _Avoid_: Orchestrator, manager, planner
 
+**Run**:
+One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
+_Avoid_: Session, turn, job
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
