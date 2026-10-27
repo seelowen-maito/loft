@@ -29,6 +29,8 @@ const MAX_RECOMMENDATION: usize = 500;
 const MAX_OPTIONS: usize = 6;
 const MAX_OPTION: usize = 60;
 const MAX_ANSWER: usize = 4000;
+/// Before the grill's last call: the glossary and ADRs written along the way go up as one PR.
+const DOCS_PR_STEP: &str = "if your docs branch has commits, push it and open its one PR with `gh pr create` (pass its URL as `docs_pr`; with no commits, open no PR), then ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -337,7 +339,7 @@ fn transcript(s: &Session) -> String {
 /// The run after the user sends a round.
 fn round_prompt(s: &Session, r: &Round) -> String {
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers. Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -536,7 +538,7 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
             }
             finish_with(state, s, "stopped", extra).map_err(internal)?;
             return Ok(Some(format!(
-                "[Grill {} on \"{}\": the user stopped it]\n\n{}\n\nCall `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
+                "[Grill {} on \"{}\": the user stopped it]\n\n{}\n\n{DOCS_PR_STEP}call `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
                 s.id,
                 s.topic,
                 transcript(s)
@@ -676,7 +678,7 @@ fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, S
                     wakes.push((
                         s.agent_id.clone(),
                         format!(
-                            "[Grill {} on \"{}\" ended after a day without answers]\n\n{}\n\nCall `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
+                            "[Grill {} on \"{}\" ended after a day without answers]\n\n{}\n\n{DOCS_PR_STEP}call `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
                             s.id,
                             s.topic,
                             transcript(&s)
@@ -739,7 +741,8 @@ pub fn mcp_tools() -> Vec<Value> {
             "name": "grill_end",
             "description": "Finish the grill. `summary` (Markdown, the user's language) is posted in chat: decisions, open questions, what was left unanswered.",
             "inputSchema": { "type": "object", "properties": {
-                "summary": { "type": "string" }
+                "summary": { "type": "string" },
+                "docs_pr": { "type": "string", "description": "The URL of the docs PR you opened for this grill's glossary and ADR changes. Leave it out when the grill resolved no terms or decisions: then there is no PR." }
             }, "required": ["summary"] }
         }),
     ]
@@ -845,10 +848,22 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             if let Some(r) = open_round(&s).filter(|_| s.status != "ended") {
                 return Err(format!("Round {} is waiting for the user's answers, so the grill can't end yet. Reply with nothing; you're woken when the user sends it.", r.index));
             }
+            let docs_pr = match args["docs_pr"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+                None => None,
+                Some(_) if !has_repo(state, me) => return Err("You have no project repo, so this grill has no docs PR. Call grill_end again without `docs_pr`.".into()),
+                Some(u) => match crate::github::extract_pr_links(u).into_iter().next() {
+                    Some((slug, n)) => Some(format!("https://github.com/{slug}/pull/{n}")),
+                    None => return Err("docs_pr must look like https://github.com/<owner>/<repo>/pull/<number>".into()),
+                },
+            };
             if !has_repo(state, me) {
                 s.notes_path = write_notes(state, &s, summary);
             }
-            add_msg(state, &me.id, None, "assistant", "text", summary, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path } }));
+            let content = match &docs_pr {
+                Some(url) if !summary.contains(url.as_str()) => format!("{summary}\n\n{}: {url}", say(&s, "Docs PR", "PR de docs")),
+                _ => summary.to_string(),
+            };
+            add_msg(state, &me.id, None, "assistant", "text", &content, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path, "docs_pr": docs_pr } }));
             s.summarized = true;
             if s.status == "ended" {
                 save(state, &mut s)?;
@@ -882,7 +897,45 @@ When the user asks to be grilled, interviewed or quizzed on an idea ("grill me o
 - Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered.
 - What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
 - Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
-- The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`)."#
+- The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`).
+
+# Planning: docs
+While you grill, build the project's language and record its hard decisions.
+- Domain modeling: challenge every term the user uses against `GLOSSARY.md`; when a word is fuzzy or overloaded ("account", "job"), propose one precise term and ask about it in the round. Test terms and relations with concrete scenarios ("a Lead leaves the project: who leads?"), and check them against the code. When the user's words and the code disagree, ask which one is right.
+- Glossary: write a term into `GLOSSARY.md` as soon as it is resolved, not at the end. Only terms that mean something to the user's domain, not implementation details; define what the thing is, in one or two sentences, in the glossary's language. Keep its format:
+
+  ```md
+  # <Project>
+
+  <One sentence on what the project is.>
+
+  ## <Group>
+
+  **<Term>**:
+  <What it is.>
+  _Avoid_: <synonyms not to use>
+  ```
+
+- ADRs: offer an ADR, as a round question, only for a decision that is all three: hard to reverse, surprising to someone reading the code later without the context, and the result of a real trade-off. Everything else is a decision in the summary, not an ADR. Write accepted ones as `docs/adr/NNNN-<slug>.md`, numbered after the highest existing one:
+
+  ```md
+  # <The decision, as a short statement>
+
+  Status: accepted (<YYYY-MM-DD>)
+
+  ## Context
+  <The forces and the facts that made this a choice.>
+
+  ## Decision
+  <What was decided, and what was rejected.>
+
+  ## Consequences
+  - <What gets easier, what gets harder, what was accepted.>
+  ```
+
+- Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
+- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
+- One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR."#
 }
 
 #[cfg(test)]
@@ -1297,5 +1350,74 @@ pub(crate) mod tests {
         assert!(!r.contains("notes/"), "{r}");
         assert!(st.db.list_grills(&o.id).unwrap()[0].notes_path.is_none());
         assert!(!crate::agents::workspace(&st, &o.id).join("notes").join("grill").exists());
+    }
+
+    #[test]
+    fn the_planning_prompt_teaches_domain_modeling_and_the_docs_formats() {
+        let st = state();
+        let p = prompt_section(&planner(&st, "Lead"));
+        for want in [
+            "# Planning: docs",
+            "Domain modeling",
+            "concrete scenarios",
+            "**<Term>**:",
+            "_Avoid_:",
+            "hard to reverse, surprising",
+            "real trade-off",
+            "docs/adr/NNNN-<slug>.md",
+            "## Consequences",
+            "never in the project folder",
+            "`docs/<topic>`",
+            "no `CLAUDE.md`",
+            "`gh pr create`",
+            "opens no PR",
+        ] {
+            assert!(p.contains(want), "missing {want:?}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_a_grill_asks_for_the_docs_pr_first() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("docs branch") && wake.contains("`gh pr create`") && wake.contains("open no PR"), "{wake}");
+        round(&st, &o, &["B?"]).unwrap();
+        let mut s = active(&st, &o.id).unwrap();
+        let stopped = apply_command(&st, &mut s, "end", None, None).unwrap().unwrap();
+        assert!(stopped.contains("`gh pr create`") && stopped.find("docs_pr") < stopped.find("grill_end"), "{stopped}");
+    }
+
+    #[test]
+    fn ending_with_a_docs_pr_links_it_in_the_summary() {
+        let st = state();
+        let mut o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        send(&st, &o);
+        // Without a repo there is nowhere for docs to go.
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "https://github.com/me/homebase/pull/7" })).unwrap();
+        assert!(r.unwrap_err().contains("no project repo"));
+
+        o.project = "homebase".into();
+        st.db.save_agent(&o).unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase").join(".git")).unwrap();
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "not a pr" })).unwrap();
+        assert!(r.unwrap_err().contains("docs_pr must look like"));
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "https://github.com/me/homebase/pull/7" })).unwrap().unwrap();
+        let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
+        assert_eq!(summary.content, "Done.\n\nDocs PR: https://github.com/me/homebase/pull/7");
+        assert_eq!(summary.meta["grill"]["docs_pr"], json!("https://github.com/me/homebase/pull/7"));
+    }
+
+    #[test]
+    fn a_grill_that_resolved_nothing_ends_without_a_docs_pr() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        send(&st, &o);
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Nothing settled." })).unwrap().unwrap();
+        let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
+        assert_eq!((summary.content.as_str(), summary.meta["grill"]["docs_pr"].clone()), ("Nothing settled.", Value::Null));
     }
 }
