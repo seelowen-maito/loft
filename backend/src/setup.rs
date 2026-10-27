@@ -54,7 +54,7 @@ When the user is new, or asks you to set things up:
 1. Call `mcp__loft__list_agents` to see what already exists, so you never duplicate an agent.
 2. Call `mcp__loft__list_projects`. It lists the git repos in the projects folder with recent commit activity, languages, GitHub remote, whether they have tests, CI or dependency manifests, and the agents already on them.
 3. Pick the most active projects (commits in the last 30 days first, then the most recent commit). Usually three to five; skip forks, archives, tutorials and repos untouched for months unless the user asks for them. Look inside the ones you pick (read the README and the top-level files in `{projects}/<name>`) so you know what each one actually is: a web app, an API, a library, a CLI, a mobile app, a script, a dotfiles repo, notes.
-4. Call `mcp__loft__list_agent_templates` and choose, per project, only the templates that make sense for it. Each template says when it fits and when it doesn't. Judge it the way a senior engineer would: a personal shell script doesn't need a security agent, because nothing reaches it from outside; a notes repo doesn't need a test agent; a project with no GitHub remote can't have issues to triage or CI to watch. Fewer, well-chosen agents beat a full set on every repo. Suggest a Dev agent for the projects the user is actively building, unless one already has a developer agent: it starts by chatting with them about where to take the project, and only works on its own once they agree.
+4. Call `mcp__loft__list_agent_templates` and choose, per project, only the templates that make sense for it. Each template says when it fits and when it doesn't. Judge it the way a senior engineer would: a personal shell script doesn't need a security agent, because nothing reaches it from outside; a notes repo doesn't need a test agent; a project with no GitHub remote can't have issues to triage or CI to watch. Fewer, well-chosen agents beat a full set on every repo. Suggest a Dev agent for the projects the user is actively building, unless one already has a developer agent: it starts by chatting with them about where to take the project, and only works on its own once they agree. Suggest a Lead for projects that will have more than one agent, unless one already has a Lead: it plans with the user and hands the work to the team.
 5. Show the plan before creating anything, in exactly this shape and nothing more:
    ```
    **homebase** (Rust/TS dashboard, 472 commits/30d)
@@ -99,8 +99,12 @@ pub struct Template {
     pub model: &'static str,
     /// Default schedule, in minutes. 0: it only runs when messaged until it sets its own (`set_schedule`).
     pub interval_minutes: i64,
-    /// Guided interviews (the `grill_*` tools) on, for agents that start by asking the user questions.
-    pub grill: bool,
+    /// Starts by grilling the user (an interview in rounds) as soon as it is created.
+    pub planning: bool,
+    /// Created as its project's Lead (taking the mark from any other agent there).
+    pub lead: bool,
+    /// Its role in the end-of-planning team check: "dev", "reviewer" (code review, QA, security) or "".
+    pub role: &'static str,
     /// Its first run, right after it is created: `{creator}` is filled in. Empty: it waits to be messaged.
     pub kickoff: &'static str,
     /// Posted in its chat as its first message when it is created, so the user knows who it is before the
@@ -121,7 +125,7 @@ pub const TEMPLATES: &[Template] = &[
 ## 1. Agree on a direction
 Before writing any code:
 1. Keep a clone of the repo in your workspace and read it: the README, the structure, recent commits, open issues and pull requests. Know what the project is and where it stands.
-2. Interview the user with a grill (`mcp__loft__grill_start`): who the project is for, where they want it to be in a few months, the next features they care about most, what is out of scope, constraints (stack, design, performance, budget), and how they like to review work. Ask about the project as it really is, not generic questions.
+2. Interview the user with a grill (`mcp__loft__grill_round`): who the project is for, where they want it to be in a few months, the next features they care about most, what is out of scope, constraints (stack, design, performance, budget), and how they like to review work. Ask about the project as it really is, not generic questions.
 3. Turn the answers into a short roadmap: the goal in one line, then a prioritized list of features, each small enough for one pull request. Save it as `notes/roadmap.md` in your workspace and remember the goal and the top items (`mcp__loft__remember`).
 4. Show the user the roadmap and ask them to confirm or reorder it.
 
@@ -142,9 +146,49 @@ On each check-in, and whenever the user asks:
 - When the user changes direction, update the roadmap first, then follow it."#,
         model: "sonnet",
         interval_minutes: 0,
-        grill: true,
-        kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with `mcp__loft__grill_start` in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
+        planning: true,
+        lead: false,
+        role: "dev",
+        kickoff: "[Loft: you were just created by {creator}] This is not a message from the user. Loft already greeted the user for you, so don't introduce yourself. Read the project (step 1.1 of your instructions), then start the interview about its direction with a first round (`mcp__loft__grill_round`) in English (`language: \"en\"`), the language of the greeting, and end your turn. If the user answers in another language, follow them from then on. Don't write code yet.",
         greeting: "Hey! I'm {name}, and I'll be building new features for **{project}**. Before I write any code, I want to know where you want to take it, so I have a few quick questions. Once we agree on a roadmap and how often I should work, I'll start shipping it one pull request at a time.",
+    },
+    Template {
+        key: "lead",
+        name: "Lead",
+        title: "Team lead",
+        fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets and hand them to the team. Suggest it once a project has a Dev or the user plans to grow its team.",
+        skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
+        personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
+        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate, plan with the user and coordinate the team. You never write or edit product code, approve, or merge.
+
+Work only in your clone in your workspace; pull the default branch before you investigate.
+
+## Questions and investigations
+- Answer from the code, not memory: read the files in your clone and cite them as `path:line`. For broad searches use an Explore subagent.
+- If the answer leads to work, offer to turn it into a ticket. Don't create one unasked.
+
+## Planning
+Plan with your Planning tools: a grill when the user asks for one, a spec and tickets once the plan is settled, or a single ticket for a small change.
+
+## Handing out work (only when the user asks)
+- Give one ticket at a time to the team member whose job fits (`mcp__loft__create_task`): the next one whose blockers are all closed on GitHub. Label it `in-progress`.
+- On a shared feature branch, a ticket is done when the team's reviewers have passed its commits. When every ticket is done, have the developer open one PR from the branch to the default branch.
+
+## Tracking
+- A PR is ready when every reviewer on the team (code review, QA, security: whoever this project has) has passed it and nothing asks for changes. Then tell the user, with the link.
+- Count changes-requested rounds per PR. At 3 rounds, or when anyone says they're blocked, label the ticket `needs-human` and tell the user why.
+- When someone reports a bug found along the way, tell the user and suggest where it fits; don't assign it unasked.
+- If the team is missing a role, tell the user and suggest asking `loft` to set it up. Never create or delete agents.
+
+## Memory
+One entry per spec (number, status, changes-requested rounds per PR) plus decisions the user made. Remove it when the spec closes. Ticket order lives in GitHub's blocking links, not in memory."#,
+        model: "opus",
+        interval_minutes: 0,
+        planning: true,
+        lead: true,
+        role: "",
+        kickoff: "",
+        greeting: "Hi! I'm {name}, the Lead for **{project}**. Bring me an idea and I'll plan it with you: a few rounds of questions, each with my recommendation, then a spec and tickets the team can pick up.",
     },
     Template {
         key: "reviewer",
@@ -165,7 +209,9 @@ On each check-in:
 If nothing changed, say so in one line."#,
         model: "sonnet",
         interval_minutes: 240,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -189,7 +235,9 @@ On each check-in:
 If you found nothing new, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -212,7 +260,9 @@ On each check-in:
 If everything passes and nothing new needs tests, say so in one line."#,
         model: "sonnet",
         interval_minutes: 720,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "reviewer",
         kickoff: "",
         greeting: "",
     },
@@ -235,7 +285,9 @@ On each check-in:
 If everything is current, say so in one line."#,
         model: "sonnet",
         interval_minutes: 10080,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -257,7 +309,9 @@ On each check-in:
 If the docs are already accurate, say so in one line."#,
         model: "sonnet",
         interval_minutes: 1440,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -280,7 +334,9 @@ On each check-in:
 If there is nothing new, say so in one line."#,
         model: "haiku",
         interval_minutes: 180,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -302,7 +358,9 @@ On each check-in:
 If CI is green, say so in one line."#,
         model: "haiku",
         interval_minutes: 120,
-        grill: false,
+        planning: false,
+        lead: false,
+        role: "",
         kickoff: "",
         greeting: "",
     },
@@ -398,6 +456,8 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "name": { "type": "string", "description": "Short name, unique within the project. Defaults to the template's." },
                 "title": { "type": "string" },
+                "lead": { "type": "boolean", "description": "Make it its project's Lead (taking the mark from any other agent there). Defaults to the template's: on for \"lead\", off otherwise." },
+                "role": { "type": "string", "enum": ["dev", "reviewer", ""], "description": "Its role in the end-of-planning team check: \"dev\" builds the tickets, \"reviewer\" reviews them (code review, QA, security). Defaults to the template's; set it when writing an agent from scratch." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
                 "personality": { "type": "string" },
@@ -524,6 +584,11 @@ async fn list_projects(state: &AppState, limit: usize) -> String {
 }
 
 async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    // Planning ends with a team check, and its fix goes through `loft`: a Lead, or an agent grilling the
+    // user, never builds the team itself.
+    if (me.lead || crate::grill::active(state, &me.id).is_some()) && !me.builtin {
+        return Err("Planning agents don't create agents: that stays with loft. Leave it to the end-of-planning card's \"Set up the team with loft\" button, or tell the user to ask loft.".into());
+    }
     let s = |k: &str| args[k].as_str().unwrap_or("").trim().to_string();
     let tpl = match s("template") {
         k if k.is_empty() => None,
@@ -578,7 +643,8 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "interval_minutes": interval,
         "quiet_hours": quiet,
         "avatar_brief": s("avatar_brief"),
-        "grill": tpl.is_some_and(|t| t.grill),
+        "lead": args["lead"].as_bool().unwrap_or_else(|| tpl.is_some_and(|t| t.lead)),
+        "role": Some(s("role")).filter(|r| !r.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.role.to_string())),
     });
 
     let allowed = me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, CREATE_RULE, &patch));
@@ -590,7 +656,12 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         }
     }
 
-    let a = crate::api::new_agent(state, uuid::Uuid::new_v4().to_string(), &patch, Some(me.id.clone())).map_err(|e| e.1)?;
+    let (a, moved) = crate::api::new_agent(state, uuid::Uuid::new_v4().to_string(), &patch, Some(me.id.clone())).map_err(|e| e.1)?;
+    let lead = match (a.lead, moved) {
+        (true, Some(o)) => format!(" It is the project's Lead now (moved from {}).", o.name),
+        (true, None) => " It is the project's Lead.".into(),
+        _ => String::new(),
+    };
     let schedule = if a.interval_minutes > 0 {
         let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(" (paused {})", crate::schedule::describe(&a.quiet_hours)) };
         format!("checks in every {}{quiet}", every(a.interval_minutes))
@@ -604,7 +675,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         crate::agents::add_msg(state, &a.id, None, "assistant", "text", &g.replace("{name}", &a.name).replace("{project}", project), json!({ "greeting": true }));
     }
     let starts = match tpl.filter(|t| !t.kickoff.is_empty()) {
-        Some(t) if t.grill => {
+        Some(t) if t.planning => {
             open_interview(state, &a.id, t.kickoff.replace("{creator}", &me.name));
             " It greeted the user and is opening an interview with them now."
         }
@@ -614,7 +685,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         }
         None => "",
     };
-    Ok(format!("Created {} (id {}) for {}; it {schedule}.{drawing}{starts}", a.name, a.id, if a.project.is_empty() { "no project" } else { &a.project }))
+    Ok(format!("Created {} (id {}) for {}; it {schedule}.{lead}{drawing}{starts}", a.name, a.id, if a.project.is_empty() { "no project" } else { &a.project }))
 }
 
 /// Run a new agent's kickoff as a grill run: only the interview questions reach the chat, which the grill
@@ -686,6 +757,18 @@ async fn set_schedule(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
 mod tests {
     use super::*;
     use crate::tasks::tests::{agent, state};
+
+    #[tokio::test]
+    async fn a_planning_agent_never_creates_agents() {
+        let st = state();
+        let mut lead = agent(&st, "Lead");
+        (lead.lead, lead.project) = (true, "homebase".into());
+        lead.allowed_tools.push(CREATE_RULE.into());
+        st.db.save_agent(&lead).unwrap();
+        let err = create_agent(&st, &lead, &json!({ "template": "dev", "project": "homebase" })).await.unwrap_err();
+        assert!(err.starts_with("Planning agents don't create agents: that stays with loft."), "{err}");
+        assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Dev"));
+    }
 
     #[tokio::test]
     async fn loft_creates_an_agent_from_a_template_with_default_tools_only() {
@@ -810,25 +893,24 @@ mod tests {
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
-        assert_eq!((a.interval_minutes, a.grill), (0, Some(true)));
-        assert!(crate::grill::enabled(&a));
+        assert_eq!((a.interval_minutes, a.role.as_str()), (0, "dev"));
         // The avatar run started; the interview is queued right behind it, as a quiet grill run.
         let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
-        assert!(g.len() == 1 && g[0].1 == "grill" && g[0].0.starts_with("[Loft: you were just created by loft]") && g[0].0.contains("grill_start"), "{g:?}");
+        assert!(g.len() == 1 && g[0].starts_with("[Loft: you were just created by loft]") && g[0].contains("grill_round"), "{g:?}");
         assert!(st.rt.lock().unwrap().queued.get(&a.id).is_none_or(|q| q.is_empty()));
         let first = st.db.list_messages(&a.id, 10, None).unwrap().into_iter().find(|m| m.kind == "text").unwrap();
         assert!(first.role == "assistant" && first.content.starts_with("Hey! I'm Dev, and I'll be building new features for **homebase**."), "{}", first.content);
         // Other templates don't interview and wait to be woken.
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
-        assert_eq!(r.grill, Some(false));
+        assert_eq!(r.role, "reviewer");
         assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();
-        // A model that only narrates: it never calls grill_start.
+        // A model that only narrates: it never posts a round.
         let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
 prompt=$(cat)
@@ -896,5 +978,67 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             assert!(t.interval_minutes == 0 || t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
         }
         assert!(list_templates().contains("## security: Security (Security auditor)"));
+        assert!(list_templates().contains("## lead: Lead (Team lead)"));
+    }
+
+    #[tokio::test]
+    async fn the_lead_template_creates_its_project_s_lead() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        let out = create_agent(&st, &me, &json!({ "template": "lead", "project": "homebase" })).await.unwrap();
+        assert!(out.contains("It is the project's Lead."), "{out}");
+        let first = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Lead").unwrap();
+        assert!(first.lead && first.interval_minutes == 0);
+        // A second one in the same project takes the mark; without a project it can't be created.
+        let out = create_agent(&st, &me, &json!({ "template": "lead", "name": "Captain", "project": "homebase" })).await.unwrap();
+        assert!(out.contains("It is the project's Lead now (moved from Lead)."), "{out}");
+        assert!(!st.db.get_agent(&first.id).unwrap().unwrap().lead);
+        let err = create_agent(&st, &me, &json!({ "template": "lead", "name": "Loner" })).await.unwrap_err();
+        assert!(err.starts_with("Only an agent with a project can be Lead"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn lead_option_overrides_the_template_s() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        let lead = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap().lead;
+        let out = create_agent(&st, &me, &json!({ "template": "dev", "name": "Boss", "project": "homebase", "lead": true })).await.unwrap();
+        assert!(out.contains("It is the project's Lead."), "{out}");
+        assert!(lead("Boss"));
+        create_agent(&st, &me, &json!({ "template": "lead", "name": "Helper", "project": "garden", "lead": false })).await.unwrap();
+        assert!(!lead("Helper"));
+        // Without `lead`, only the lead template makes a Lead.
+        create_agent(&st, &me, &json!({ "template": "reviewer", "project": "garden" })).await.unwrap();
+        create_agent(&st, &me, &json!({ "name": "Notes", "prompt": "Tidy my notes.", "project": "garden" })).await.unwrap();
+        assert!(!lead("Reviewer") && !lead("Notes"));
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "garden" })).await.unwrap();
+        assert!(lead("Lead"));
+    }
+
+    #[tokio::test]
+    async fn a_lead_gets_the_standard_instructions_and_planning_takes_precedence() {
+        let st = crate::planning::tests::state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "lead-std" })).await.unwrap();
+        let lead = st.db.list_agents().unwrap().into_iter().find(|a| a.project == "lead-std").unwrap();
+        let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
+        assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");
+        assert!(lead.prompt.starts_with(&format!(
+            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate, plan with the user and coordinate the team. You never write or edit product code, approve, or merge.\n\nWork only in your clone in your workspace;"
+        )), "{}", lead.prompt);
+        for want in ["## Handing out work (only when the user asks)", "Label it `in-progress`.", "At 3 rounds, or when anyone says they're blocked, label the ticket `needs-human`", "Ticket order lives in GitHub's blocking links, not in memory."] {
+            assert!(lead.prompt.contains(want), "missing {want}");
+        }
+        assert!(!lead.prompt.contains("{project}") && !lead.prompt.contains("{path}"));
+        let t = template("lead").unwrap();
+        assert_eq!((t.name, t.title, t.model, t.planning, t.lead), ("Lead", "Team lead", "opus", true, true));
+
+        // Planning's rules win over standing instructions on specs and tickets.
+        let sys = crate::agents::system_prompt(&st, &lead);
+        assert!(sys.contains(&lead.prompt));
+        assert!(sys.contains("# Planning: precedence\nLoft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published"), "{sys}");
     }
 }

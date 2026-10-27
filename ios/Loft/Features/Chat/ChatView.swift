@@ -15,18 +15,17 @@ struct ChatView: View {
     private static let page = 60
     @State private var confirmStop = false
     @State private var actionError: APIError?
-    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var confirmEndGrill = false
     // Grill voice loop, all inside this chat: read the question, open the mic, catch spoken commands.
     @State private var composerControl: ComposerControl?
     /// The last question read aloud, so each is read once.
-    @State private var spokenQuestionId: Int64?
-    /// Only questions that arrive while the chat is open are read; one already waiting isn't read out of the blue.
+    @State private var spokenQuestionId: String?
+    /// Only rounds that arrive while the chat is open are read; one already waiting isn't read out of the blue.
     @State private var openedAt = Date()
     /// A spoken command that needs a yes/no ("Skip this question?").
     @State private var grillSuggestion: GrillMatcher.Intent?
     /// The question the suggestion is about, so a reload that briefly drops the current question doesn't clear it.
-    @State private var suggestionFor: Int64?
+    @State private var suggestionFor: String?
     @State private var commandCheck: Task<Void, Never>?
     @Environment(Speaker.self) private var speaker
     @AppStorage(Prefs.grillReadAloud) private var grillReadAloud = true
@@ -101,21 +100,22 @@ struct ChatView: View {
                             .padding(.top, 40)
                     }
                     ForEach(items) { item in
-                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id,
-                                     choose: { draft = $0 }, command: grillCommand).id(item.id)
+                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith).id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
                         PendingBubble(message: p).id(p.id)
                     }
                     if let a = shownQuickAck { QuickAckRow(text: a.text).id("quickAck") }
                     if state == .working {
-                        WorkingIndicator(text: agent.statusText?.isEmpty == false ? agent.statusText! : "Working…").id("working")
+                        RunIndicator(startedAt: agent.lastRunAt, status: agent.statusText).id("working")
                     } else if grill == nil, awaitingReply(agent), shownQuickAck == nil {
                         // Right after you send: an instant "got it" until the agent's run shows up.
                         WorkingIndicator(text: "Got it, thinking…").id("working")
-                    } else if let s = grill, s.state == .preparing || (s.state == .active && currentQuestion == nil) {
-                        // Between an answer and the next question (normally instant: the server holds the queue).
-                        WorkingIndicator(text: s.state == .preparing ? "Preparing questions…" : "Next question…").id("working")
+                    } else if let s = grill, s.state == .preparing || s.waiting == true {
+                        // The agent is writing the first round, or the next one after you sent yours.
+                        WorkingIndicator(text: s.state == .preparing ? "Preparing questions…" : "Next round…").id("working")
+                    } else if let run = RunTimer.lastFinished(store.conversation(agentId)) {
+                        RunDoneLine(text: RunTimer.done(run.duration, endedAt: run.endedAt)).id("runDone")
                     }
                     ForEach(store.pendingApprovals(for: agentId)) { ApprovalCard(request: $0) }
                     Color.clear.frame(height: 1).id("bottom")
@@ -193,7 +193,6 @@ struct ChatView: View {
                     .accessibilityIdentifier("attachedTask")
                 }
                 ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
-                             placeholder: currentQuestion == nil ? nil : (typeSize.isAccessibilitySize ? "Answer…" : "Your answer…"),
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
@@ -201,10 +200,11 @@ struct ChatView: View {
                              startVoice: { Task { await voice.start(agentId: agentId) } },
                              onVoiceSent: continueByVoice,
                              onVoiceStop: stopByVoice,
-                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text in
-                    // While a question waits, what you send is its answer, tagged so it can't land on another one.
-                    if let q = currentQuestion {
-                        Task { await store.answerGrill(text, to: q) }
+                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text, byVoice in
+                    // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
+                    // on another one) and the voice moves on; typed text is always chat, as on the web.
+                    if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
+                        Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
                     } else {
                         quickReply(to: text)
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
@@ -294,11 +294,13 @@ struct ChatView: View {
             // A different question (or the interview ending) makes the suggestion moot; a reload doesn't.
             if let id, id != suggestionFor { grillSuggestion = nil }
             guard let id, id != spokenQuestionId, let q = currentQuestion else { return }
-            let n = q.grill?.index ?? 0
-            VoiceLog.shared.add("question \(n) arrived")
-            // One already waiting when the chat opens isn't read out of the blue (it's on the card).
-            guard q.createdAt > openedAt.addingTimeInterval(-5) else {
-                return VoiceLog.shared.add("question \(n): not read, it was already waiting when the chat opened")
+            let n = currentQuestionNumber ?? 0
+            VoiceLog.shared.add("question \(n) is next")
+            // A round already waiting when the chat opens isn't read out of the blue (it's on the cards), unless
+            // the voice has already moved through it.
+            let posted = store.grillRoundMessage(for: agentId)?.createdAt ?? .distantPast
+            guard posted > openedAt.addingTimeInterval(-5) || store.grillVoiceAt[agentId] != nil else {
+                return VoiceLog.shared.add("question \(n): not read, its round was already waiting when the chat opened")
             }
             spokenQuestionId = id
             readAloud(q)
@@ -346,13 +348,14 @@ extension ChatView {
         else { return false }
         return last.role == "user" && last.fromAgentName == nil && last.taskRole == nil && Date().timeIntervalSince(last.createdAt) < 120
     }
-    fileprivate var currentQuestion: ChatMessage? { store.currentGrillQuestion(for: agentId) }
+    fileprivate var currentQuestion: GrillQuestion? { store.currentGrillQuestion(for: agentId) }
+    fileprivate var currentQuestionNumber: Int? { currentQuestion.flatMap { grill?.number(of: $0.id) } }
 
-    /// Reads a question in the chosen voice (its short `speak` text, without links or PR numbers), then
-    /// opens the mic when hands-free is on. With VoiceOver running, VoiceOver announces it instead.
-    fileprivate func readAloud(_ q: ChatMessage) {
-        let text = q.grill?.speak ?? VoiceText.speakable(q.displayContent).text
-        let n = q.grill?.index ?? 0
+    /// Reads a question in the chosen voice (its short `speak` text, without links or PR numbers, and its
+    /// recommendation), then opens the mic when hands-free is on. With VoiceOver running, VoiceOver announces it instead.
+    fileprivate func readAloud(_ q: GrillQuestion) {
+        let n = grill?.number(of: q.id) ?? 1
+        let text = q.spoken(number: n, of: grill?.questions?.count ?? 1, language: grill?.language)
         if UIAccessibility.isVoiceOverRunning {
             VoiceLog.shared.add("question \(n): announced by VoiceOver")
             UIAccessibility.post(notification: .announcement, argument: text)
@@ -369,7 +372,7 @@ extension ChatView {
             }
             speaker.phrases = store.grillPhrases
             VoiceLog.shared.add("question \(n): reading")
-            let ended = await speaker.speak(text, messageId: q.id, interruptible: handsFree)
+            let ended = await speaker.speak(text, messageId: store.grillRoundMessage(for: agentId)?.id, interruptible: handsFree)
             VoiceLog.shared.add("question \(n): read \(ended.map { "until “\($0)”" } ?? "through")")
             switch ended {
             case .skip:
@@ -501,7 +504,7 @@ extension ChatView {
         commandCheck = Task {
             try? await Task.sleep(for: .seconds(1.2))
             guard !Task.isCancelled else { return }
-            let question = currentQuestion.map { $0.grill?.speak ?? $0.displayContent } ?? ""
+            let question = currentQuestion.map { $0.speak ?? $0.text } ?? ""
             let m = await GrillUnderstanding.read(text, question: question, phrases: store.grillPhrases,
                                                   model: OnDeviceFeatures.grillLabel)
             // More was said while the model thought: that text gets its own check.
@@ -531,6 +534,16 @@ extension ChatView {
         }
     }
 
+    /// The end-of-planning card's Clear context: a fresh session, with the next message waiting in the composer, unsent.
+    fileprivate func clearWith(_ next: String) {
+        Task {
+            do {
+                try await store.resetSession(agentId)
+                draft = next
+            } catch { actionError = APIError.from(error) }
+        }
+    }
+
     fileprivate func grillCommand(_ c: GrillCommand) {
         if c == .end { interviewEnded() }
         Task {
@@ -555,12 +568,6 @@ enum ChatItem: Identifiable, Hashable {
     }
 
     static func build(_ messages: [ChatMessage]) -> [ChatItem] {
-        // A grill question posted again (after back, resume or repeat) keeps its question_id: show only
-        // the newest card for it, where its answer and actions belong.
-        var latestQuestion: [String: Int64] = [:]
-        for m in messages {
-            if let g = m.grill, g.role == .question, let qid = g.questionId { latestQuestion[qid] = m.id }
-        }
         var out: [ChatItem] = []
         var tools: [ChatMessage] = []
         func flush() {
@@ -584,7 +591,6 @@ enum ChatItem: Identifiable, Hashable {
                 flush()
                 out.append(.divider(id: m.id, text: "Conversation compacted", date: m.createdAt))
             default:
-                if let g = m.grill, g.role == .question, let qid = g.questionId, latestQuestion[qid] != m.id { continue }
                 flush()
                 out.append(.message(m))
             }
@@ -597,24 +603,23 @@ enum ChatItem: Identifiable, Hashable {
 private struct ChatItemView: View {
     let item: ChatItem
     let agent: Agent
-    var currentQuestionId: Int64?
-    var choose: (String) -> Void = { _ in }
+    var currentQuestionId: String?
     var command: (GrillCommand) -> Void = { _ in }
+    var clearWith: (String) -> Void = { _ in }
 
     var body: some View {
         switch item {
         case .message(let m) where m.taskRole != nil: TaskMessageRow(message: m)
-        case .message(let m) where m.grill?.role == .question:
-            GrillQuestionRow(message: m, agent: agent, isCurrent: m.id == currentQuestionId, choose: choose, command: command)
+        case .message(let m) where m.grill?.role == .round:
+            GrillRoundCard(message: m, agent: agent, currentQuestionId: currentQuestionId, command: command)
         case .message(let m) where m.grill?.role == .status: GrillStatusRow(message: m)
-        case .message(let m) where m.grill?.role == .note:
-            Text(m.displayContent).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
         case .message(let m) where m.grill?.role == .summary:
             VStack(alignment: .leading, spacing: 4) {
                 Label(m.grill?.final == true ? "Interview summary" : "Summary so far", systemImage: "text.alignleft")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.accent)
                 MessageBubble(message: m, agent: agent)
+                if let card = m.grill?.endCard { EndCardView(message: m, card: card, clearWith: clearWith) }
             }
         case .message(let m): MessageBubble(message: m, agent: agent)
         case .tools(_, let calls): ToolGroup(calls: calls)
@@ -940,6 +945,69 @@ private struct PendingBubble: View {
                 }
             }
         }
+    }
+}
+
+/// The chat's run line while the agent works: an animated ✻, the time since the run's start ticking every second,
+/// and the status text. Like the web's RunIndicator.
+private struct RunIndicator: View {
+    let startedAt: Date?
+    let status: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Static in UI tests, like WorkingIndicator: a repeating animation keeps the screen from ever counting as idle.
+    private static let uiTesting = ProcessInfo.processInfo.arguments.contains("-ui-testing") || TestMode.noAnimations
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let elapsed = RunTimer.elapsed(since: startedAt, now: ctx.date)
+            let text = status?.isEmpty == false ? "\(elapsed) · \(status!)" : elapsed
+            HStack(spacing: 8) {
+                star
+                Text(text).monospacedDigit().lineLimit(2)
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 6)
+            .padding(.leading, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Working: \(text)")
+            .accessibilityIdentifier("workingIndicator")
+        }
+    }
+
+    @ViewBuilder private var star: some View {
+        let glyph = Text("✻").font(.body).foregroundStyle(Theme.accent)
+        if reduceMotion || Self.uiTesting {
+            glyph
+        } else {
+            // ✻ looks the same turned 180°, so the loop's jump back to 0° doesn't show.
+            glyph.phaseAnimator([0.0, 90.0, 180.0]) { view, angle in
+                view.rotationEffect(.degrees(angle))
+                    .scaleEffect(angle == 90 ? 0.8 : 1)
+                    .opacity(angle == 90 ? 0.55 : 1)
+            } animation: { angle in
+                angle == 0 ? nil : .easeInOut(duration: 1.2)
+            }
+        }
+    }
+}
+
+/// `✻ Done in 2m 23s · Thu 16:23`, after the run until the next one.
+private struct RunDoneLine: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("✻").font(.body).foregroundStyle(Theme.accent)
+            Text(text).monospacedDigit().foregroundStyle(.tertiary)
+        }
+        .font(.footnote)
+        .padding(.vertical, 6)
+        .padding(.leading, 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier("runDone")
     }
 }
 

@@ -1,8 +1,12 @@
-//! "Grill me": a guided interview inside the normal chat. The agent plans questions with the `grill_*`
-//! MCP tools; Loft keeps them in a queue and posts the next one the moment the user answers, so
-//! the interview doesn't wait for a new agent run between questions. Questions, answers, status rows
-//! and the summary are ordinary chat messages tagged with `meta.grill`, so they render inline in the
-//! same conversation (and as plain chat on clients that don't know the tag).
+//! "Grill me": a guided interview inside the normal chat, in rounds (ADR 0001). The agent posts a
+//! round with `grill_round`: every question whose prerequisites are settled, each with a recommendation
+//! worded so "yes" accepts it. Loft holds the user's answers without running the agent; sending the
+//! round wakes the agent once with all of them, and it posts the next round or ends with a summary.
+//! Rounds, sent answers, status rows and the summary are ordinary chat messages tagged with `meta.grill`,
+//! so they render inline in the same conversation (and as plain chat on clients that don't know the tag).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -17,14 +21,22 @@ use crate::state::{AppState, Event};
 
 pub mod commands;
 
-/// Most questions one session may hold, follow-ups included.
-pub const MAX_QUESTIONS: usize = 40;
+/// Most questions one round may hold.
+pub const MAX_ROUND: usize = 12;
+/// Most rounds one session may hold.
+pub const MAX_ROUNDS: usize = 20;
 const KINDS: &[&str] = &["free_text", "single_choice", "multi_choice", "yes_no", "number"];
 const MAX_TEXT: usize = 500;
 const MAX_SPEAK: usize = 300;
+const MAX_RECOMMENDATION: usize = 500;
 const MAX_OPTIONS: usize = 6;
 const MAX_OPTION: usize = 60;
 const MAX_ANSWER: usize = 4000;
+/// Context size, in tokens, near the end of the smart zone (about 100k, past which models get noticeably
+/// worse): a round sent beyond it, before the tickets are published, has the agent suggest `/compact`.
+pub const COMPACT_AT: u64 = 80_000;
+/// Before the grill's last call: the glossary and ADRs written along the way go up as one PR.
+const DOCS_PR_STEP: &str = "if your docs branch has commits, push it and open its one PR with `gh pr create` (pass its URL as `docs_pr`; with no commits, open no PR), then ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -38,11 +50,9 @@ pub struct Session {
     /// done | stopped | timeout | superseded
     #[serde(default)]
     pub end_reason: Option<String>,
+    /// In the order posted; only the last one can be open (not sent yet).
     #[serde(default)]
-    pub questions: Vec<Question>,
-    /// The question waiting for an answer, if any.
-    #[serde(default)]
-    pub current: Option<String>,
+    pub rounds: Vec<Round>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -61,32 +71,42 @@ pub struct Session {
     /// `client_id`s of recent commands, so a retried request isn't applied twice.
     #[serde(default)]
     pub seen_commands: Vec<String>,
-    /// The last command matched from untagged text, which the user may undo for a few seconds.
+    /// The spec and tickets published while this grill ran, for the end-of-planning card.
     #[serde(default)]
-    pub undo: Option<Undo>,
+    pub published: Option<Published>,
 }
 
-/// State before a command the backend inferred from text, to put back if the user says it was an answer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Published {
+    /// `owner/repo` they were published on.
+    pub repo: String,
+    #[serde(default)]
+    pub spec: Option<IssueLink>,
+    #[serde(default)]
+    pub tickets: Vec<IssueLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueLink {
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Undo {
-    pub message_id: i64,
-    pub text: String,
-    pub command: String,
-    pub at: String,
-    pub status: String,
-    pub current: Option<String>,
+pub struct Round {
+    /// 1-based.
+    pub index: u32,
     pub questions: Vec<Question>,
+    pub posted_at: String,
+    /// When the user sent it; None while it waits for answers.
+    #[serde(default)]
+    pub sent_at: Option<String>,
 }
-
-/// How long "Treated as Skip · Undo" stays available.
-const UNDO_SECS: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
     pub id: String,
-    /// 1-based position in the order asked; set when the question is posted.
-    #[serde(default)]
-    pub index: Option<u32>,
     pub text: String,
     /// Short plain version for reading aloud.
     #[serde(default)]
@@ -94,58 +114,139 @@ pub struct Question {
     pub kind: String,
     #[serde(default)]
     pub options: Vec<String>,
-    /// queued | asked | answered | skipped | delegated | withdrawn
-    pub status: String,
+    /// The agent's proposed answer; "yes" accepts it.
+    #[serde(default)]
+    pub recommendation: String,
+    /// open | answered | discuss (the answer is the user's comment) | decided (left to the agent: its
+    /// recommendation stands) | carried (sent unanswered: Loft asks it again, unchanged, in the next round)
+    pub state: String,
     #[serde(default)]
     pub answer: Option<String>,
+    /// The answer is the recommendation, accepted as-is.
     #[serde(default)]
-    pub answer_message_id: Option<i64>,
-    /// user | agent (a "decide for me" answer)
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub asked_at: Option<String>,
+    pub accepted: bool,
     #[serde(default)]
     pub answered_at: Option<String>,
+    /// The round it was first asked in, when it was carried into this one unanswered.
+    #[serde(default)]
+    pub from_round: Option<u32>,
 }
 
-/// Grill mode is on per agent. Unset means on for the Orchestrator only, for now.
-pub fn enabled(a: &Agent) -> bool {
-    a.grill.unwrap_or(a.name == "Orchestrator")
+/// One lock per agent, held around every load, change and save of its grill session. Writers (answers
+/// from the web and the phone, commands, the agent's tools, publishing, the sweeper) would otherwise
+/// overwrite each other's changes to the session blob.
+#[derive(Default)]
+pub struct Locks(Mutex<HashMap<String, Arc<Mutex<()>>>>);
+
+impl Locks {
+    fn of(&self, agent_id: &str) -> Arc<Mutex<()>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(agent_id.into()).or_default().clone()
+    }
+}
+
+/// Runs `f` holding `agent_id`'s grill lock.
+fn locked<T>(state: &AppState, agent_id: &str, f: impl FnOnce() -> T) -> T {
+    let lock = state.grill_locks.of(agent_id);
+    let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
 }
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
-    state.db.list_grills(agent_id).ok()?.into_iter().find(|s| s.status != "ended")
+    state.db.active_grill(agent_id).ok()?
+}
+
+/// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
+pub fn record_published(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
+    locked(state, agent_id, || record_published_locked(state, agent_id, repo, spec, tickets))
+}
+
+fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
+    let Some(mut s) = active(state, agent_id) else { return };
+    let p = s.published.get_or_insert_with(Default::default);
+    if p.repo != repo {
+        *p = Published { repo: repo.into(), ..Default::default() };
+    }
+    if let Some(sp) = spec {
+        // Publishing tickets names the spec by number only: keep the title publish_spec gave.
+        if p.spec.as_ref().is_none_or(|old| old.number != sp.number || !sp.title.is_empty()) {
+            p.spec = Some(sp);
+        }
+    }
+    for t in tickets {
+        if !p.tickets.iter().any(|o| o.number == t.number) {
+            p.tickets.push(t);
+        }
+    }
+    let _ = save(state, &mut s);
+}
+
+/// The end-of-planning card for a grill that published something: links to the spec and tickets, the
+/// suggested next message for the composer after clearing context, and the roles the team lacks.
+fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
+    let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
+    let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": format!("https://github.com/{}/issues/{}", p.repo, i.number) });
+    let next = match (&p.spec, p.tickets.as_slice()) {
+        (Some(sp), _) => say(s, &format!("Implement spec #{}: hand the ready tickets to the team", sp.number), &format!("Implemente a spec #{}: entregue os tickets prontos ao time", sp.number)),
+        (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
+        (None, _) => say(s, "Implement the ready tickets: hand them to the team", "Implemente os tickets prontos: entregue-os ao time"),
+    };
+    let missing = crate::planning::missing_roles(state, &me.project);
+    let setup = (!missing.is_empty()).then(|| {
+        let roles = missing.iter().map(|r| if *r == "dev" { "Dev" } else { "reviewer" }).collect::<Vec<_>>().join(" or ");
+        let plan = match (&p.spec, p.tickets.first()) {
+            (Some(sp), _) => format!("spec #{}: https://github.com/{}/issues/{}", sp.number, p.repo, sp.number),
+            (None, Some(t)) => format!("ticket #{}: https://github.com/{}/issues/{}", t.number, p.repo, t.number),
+            (None, None) => unreachable!("a card has a spec or a ticket"),
+        };
+        json!({
+            "agent_id": crate::setup::LOFT_ID,
+            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.project.trim(), me.name),
+        })
+    });
+    Some(json!({
+        "repo": p.repo,
+        "spec": p.spec.as_ref().map(link),
+        "tickets": p.tickets.iter().map(link).collect::<Vec<_>>(),
+        "next_message": next,
+        "missing_roles": missing,
+        "setup": setup,
+    }))
 }
 
 fn clip(s: &str, max: usize) -> String {
     s.trim().chars().take(max).collect()
 }
 
-fn total(s: &Session) -> usize {
-    s.questions.iter().filter(|q| q.status != "withdrawn").count()
+/// The round waiting for the user's answers, if any.
+pub fn open_round(s: &Session) -> Option<&Round> {
+    s.rounds.last().filter(|r| r.sent_at.is_none())
 }
 
-fn current(s: &Session) -> Option<&Question> {
-    s.current.as_deref().and_then(|id| s.questions.iter().find(|q| q.id == id))
+fn open_round_mut(s: &mut Session) -> Option<&mut Round> {
+    s.rounds.last_mut().filter(|r| r.sent_at.is_none())
 }
 
-/// The session as clients see it (`GET /agents/{id}/grill` and the `grill` event).
+/// The session as clients see it (`GET /agents/{id}/grill` and the `grill` event): the latest round with
+/// its answers so far, for the round bar and the cards.
 pub fn view(s: &Session) -> Value {
-    let cur = current(s);
+    let last = s.rounds.last();
     json!({
         "session_id": s.id,
         "agent_id": s.agent_id,
         "state": s.status,
         "end_reason": s.end_reason,
         "topic": s.topic,
-        "index": cur.and_then(|q| q.index),
-        "total": if s.status == "preparing" { Value::Null } else { json!(total(s)) },
-        "answered": s.questions.iter().filter(|q| q.status == "answered").count(),
-        "current": cur.map(|q| json!({ "question_id": q.id, "index": q.index })),
+        "round": last.map(|r| r.index),
+        "total": last.map(|r| r.questions.len()),
+        "answered": last.map(|r| r.questions.iter().filter(|q| q.state != "open").count()),
+        // The user sent the latest round and the agent is working on the next one.
+        "waiting": last.is_some_and(|r| r.sent_at.is_some()) && s.status != "ended",
+        "questions": last.map(|r| &r.questions),
         "started_at": s.started_at,
         "updated_at": s.updated_at,
         "notes_path": s.notes_path,
+        // en | pt, for the phrases the app reads aloud: en until the first round sets it, null only for sessions saved before it was kept.
+        "language": (!s.lang.is_empty()).then_some(&s.lang),
     })
 }
 
@@ -181,41 +282,52 @@ fn status_row(state: &AppState, s: &Session, text: &str, extra: Value) {
     add_msg(state, &s.agent_id, None, "system", "notice", text, json!({ "grill": g }));
 }
 
-/// Posts the next queued question. False when the queue is empty.
-fn ask_next(state: &AppState, s: &mut Session) -> bool {
-    let asked = s.questions.iter().filter(|q| q.index.is_some()).count() as u32;
-    let total = total(s);
-    let Some(q) = s.questions.iter_mut().find(|q| q.status == "queued") else {
-        s.current = None;
-        return false;
-    };
-    q.status = "asked".into();
-    q.index = Some(asked + 1);
-    q.asked_at = Some(now());
-    s.current = Some(q.id.clone());
-    post_question(state, s, &s.questions.iter().find(|x| s.current.as_deref() == Some(&x.id)).unwrap().clone(), total, false);
-    true
+/// The chat message for a round: the questions as Markdown for clients without cards, and the questions
+/// themselves in `meta.grill` for the ones with.
+fn post_round(state: &AppState, s: &Session, r: &Round) {
+    let rec = say(s, "Recommendation", "Recomendação");
+    let mut text = format!("**{} {}**\n", say(s, "Round", "Rodada"), r.index);
+    for (i, q) in r.questions.iter().enumerate() {
+        text += &format!("\n{}. {}\n   _{rec}:_ {}\n", i + 1, q.text, q.recommendation);
+    }
+    let questions: Vec<Value> = r
+        .questions
+        .iter()
+        .map(|q| json!({ "id": q.id, "text": q.text, "speak": q.speak, "kind": q.kind, "options": q.options, "recommendation": q.recommendation, "from_round": q.from_round }))
+        .collect();
+    let g = json!({ "session_id": s.id, "role": "round", "round": r.index, "topic": s.topic, "questions": questions });
+    add_msg(state, &s.agent_id, None, "assistant", "text", text.trim_end(), json!({ "grill": g }));
 }
 
-/// The chat message for a question. `repeat` marks a re-post (after "back", "repeat" or "resume").
-fn post_question(state: &AppState, s: &Session, q: &Question, total: usize, repeat: bool) {
-    let mut g = json!({
-        "session_id": s.id, "role": "question", "question_id": q.id, "index": q.index,
-        "total": total, "topic": s.topic, "kind": q.kind, "allow_free_text": true,
-    });
-    if !q.options.is_empty() {
-        g["options"] = json!(q.options);
+/// One question's answer, as the agent reads it.
+fn answer_line(q: &Question) -> String {
+    match q.state.as_str() {
+        "answered" if q.accepted => "accepted the recommendation".into(),
+        "answered" => format!("\"{}\"", q.answer.as_deref().unwrap_or("")),
+        "discuss" => format!("wants to discuss first: \"{}\"", q.answer.as_deref().unwrap_or("")),
+        "decided" => "left it to you: your recommendation is the decision".into(),
+        "carried" => "no answer (Loft asks it again in the next round)".into(),
+        _ => "no answer".into(),
     }
-    if !q.speak.is_empty() {
-        g["speak"] = json!(q.speak);
-    }
-    if repeat {
-        g["repeat"] = json!(true);
-    }
-    add_msg(state, &s.agent_id, None, "assistant", "text", &q.text, json!({ "grill": g }));
 }
 
-/// Validates the `questions` argument of `grill_start` / `grill_ask`.
+/// The user's answers to a round, posted in chat when it is sent. Plain text: clients show user messages as typed.
+fn answers_text(s: &Session, r: &Round) -> String {
+    let mut out = format!("{} {}:\n", say(s, "Answers to round", "Respostas da rodada"), r.index);
+    for (i, q) in r.questions.iter().enumerate() {
+        let a = match q.state.as_str() {
+            "answered" if q.accepted => format!("{} ({})", say(s, "Yes", "Sim"), q.recommendation),
+            "answered" => q.answer.clone().unwrap_or_default(),
+            "discuss" => format!("{} {}", say(s, "Let's discuss:", "Vamos discutir:"), q.answer.as_deref().unwrap_or("")),
+            "decided" => say(s, &format!("Up to you ({})", q.recommendation), &format!("Você decide ({})", q.recommendation)),
+            _ => format!("({})", say(s, "no answer", "sem resposta")),
+        };
+        out += &format!("\n{}. {a}", i + 1);
+    }
+    out
+}
+
+/// Validates the `questions` argument of `grill_round`.
 fn parse_questions(v: &Value) -> Result<Vec<Question>, String> {
     let arr = v.as_array().ok_or("questions must be an array")?;
     arr.iter()
@@ -227,6 +339,13 @@ fn parse_questions(v: &Value) -> Result<Vec<Question>, String> {
             }
             if text.chars().count() > MAX_TEXT {
                 return Err(format!("question text is limited to {MAX_TEXT} characters; split it up"));
+            }
+            let recommendation = s("recommendation");
+            if recommendation.is_empty() {
+                return Err("every question needs a `recommendation`: your proposed answer".to_string());
+            }
+            if recommendation.chars().count() > MAX_RECOMMENDATION {
+                return Err(format!("a recommendation is limited to {MAX_RECOMMENDATION} characters"));
             }
             let kind = if s("kind").is_empty() { "free_text".to_string() } else { s("kind") };
             if !KINDS.contains(&kind.as_str()) {
@@ -244,17 +363,16 @@ fn parse_questions(v: &Value) -> Result<Vec<Question>, String> {
             }
             Ok(Question {
                 id: uuid::Uuid::new_v4().to_string(),
-                index: None,
                 text,
                 speak: clip(&s("speak"), MAX_SPEAK),
                 kind,
                 options,
-                status: "queued".into(),
+                recommendation,
+                state: "open".into(),
                 answer: None,
-                answer_message_id: None,
-                source: None,
-                asked_at: None,
+                accepted: false,
                 answered_at: None,
+                from_round: None,
             })
         })
         .collect()
@@ -268,8 +386,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         goal: String::new(),
         status: status.into(),
         end_reason: None,
-        questions: vec![],
-        current: None,
+        rounds: vec![],
         created_at: now(),
         updated_at: now(),
         started_at: None,
@@ -278,7 +395,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         lang: "en".into(),
         summarized: false,
         seen_commands: vec![],
-        undo: None,
+        published: None,
     }
 }
 
@@ -290,11 +407,6 @@ fn finish_with(state: &AppState, s: &mut Session, reason: &str, extra: Value) ->
     s.status = "ended".into();
     s.end_reason = Some(reason.into());
     s.ended_at = Some(now());
-    s.current = None;
-    for q in s.questions.iter_mut().filter(|q| q.status == "queued" || q.status == "asked") {
-        q.status = "withdrawn".into();
-    }
-    s.undo = None;
     let mut meta = json!({ "state": "ended", "end_reason": reason });
     if let (Some(m), Some(extra)) = (meta.as_object_mut(), extra.as_object()) {
         m.extend(extra.clone());
@@ -308,102 +420,88 @@ fn finish_with(state: &AppState, s: &mut Session, reason: &str, extra: Value) ->
     save(state, s)
 }
 
-fn queue_empty_prompt(s: &Session) -> String {
-    format!(
-        "[Grill {} on \"{}\": every queued question is answered]\n\n{}\n\nAsk follow-ups with `mcp__loft__grill_ask`, or finish with `mcp__loft__grill_end` and a summary in the user's language.",
-        s.id,
-        s.topic,
-        transcript(s)
-    )
-}
-
 fn internal(e: String) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, e)
 }
 
-/// The Q&A so far, for prompts and `grill_state`.
+/// Every round so far with its answers, for prompts and `grill_state`.
 fn transcript(s: &Session) -> String {
     let mut out = vec![];
-    for q in s.questions.iter().filter(|q| q.index.is_some()) {
-        let a = match q.status.as_str() {
-            "answered" => format!("A ({}): {}", q.source.as_deref().unwrap_or("user"), q.answer.as_deref().unwrap_or("")),
-            other => format!("({other})"),
-        };
-        out.push(format!("Q{} [{}]: {}\n{a}", q.index.unwrap_or(0), q.id, q.text));
+    for r in &s.rounds {
+        let mut block = format!("Round {}{}:", r.index, if r.sent_at.is_none() { " (waiting for the user)" } else { "" });
+        for q in &r.questions {
+            block += &format!("\n- [{}] {}\n  Recommendation: {}\n  Answer: {}", q.id, q.text, q.recommendation, answer_line(q));
+        }
+        out.push(block);
     }
-    let queued: Vec<String> = s.questions.iter().filter(|q| q.status == "queued").map(|q| format!("- [{}] {}", q.id, q.text)).collect();
-    if !queued.is_empty() {
-        out.push(format!("Still queued:\n{}", queued.join("\n")));
-    }
-    out.join("\n\n")
+    if out.is_empty() { "(no rounds yet)".into() } else { out.join("\n\n") }
+}
+
+/// The run after the user sends a round. `context` is the agent's context size in tokens, if known.
+fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
+    // A long grill fills the context: before the spec is written on a degraded one, suggest compacting.
+    let ticketed = s.published.as_ref().is_some_and(|p| !p.tickets.is_empty());
+    let compact = match context {
+        Some(n) if n >= COMPACT_AT && !ticketed => format!(
+            "Your context holds about {}k tokens, near the end of the smart zone, and the tickets aren't published yet. Before anything else, write one short line to the user, in their language, suggesting they type `/compact` before the spec and tickets are written. Apart from that line, follow the steps below.\n\n",
+            n / 1000
+        ),
+        _ => String::new(),
+    };
+    format!(
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        s.id,
+        s.topic,
+        r.index,
+        transcript(s),
+        r.index + 1
+    )
 }
 
 // ---- user side --------------------------------------------------------------
-
-/// A prompt to run the agent with in the background. Grill runs are quiet: only errors reach the chat.
-pub struct Wake {
-    pub prompt: String,
-    /// "grill" (the agent's own model) or "grill_revise" (the cheaper revision model)
-    pub trigger: &'static str,
-}
-
-fn quiet(prompt: String) -> Wake {
-    Wake { prompt, trigger: "grill" }
-}
-
-/// After an answer: let the agent adjust the queue, on the cheaper model, while the user is already on
-/// the next question.
-fn revise_prompt(s: &Session, q: &Question) -> String {
-    let queued: Vec<String> = s.questions.iter().filter(|q| q.status == "queued").map(|q| format!("- [{}] {}", q.id, q.text)).collect();
-    format!(
-        "[Grill {} on \"{}\": question {} answered]\nQ{}: {}\nA: {}\n\nOn screen now: {}\nStill queued:\n{}\n\nIf this answer makes a queued question pointless, call `mcp__loft__grill_withdraw`; if it calls for a follow-up, call `mcp__loft__grill_ask` with `position: next`. Otherwise do nothing. Don't write a reply: this run isn't shown to the user.",
-        s.id,
-        s.topic,
-        q.index.unwrap_or(0),
-        q.index.unwrap_or(0),
-        q.text,
-        q.answer.as_deref().unwrap_or(""),
-        current(s).map(|c| c.text.as_str()).unwrap_or("(nothing)"),
-        if queued.is_empty() { "(nothing)".to_string() } else { queued.join("\n") }
-    )
-}
 
 /// What `send_message` should do with a user message, given its optional `meta.grill`.
 pub enum Routed {
     /// Not part of a grill: deliver as usual, with this extra meta.
     Normal(Value),
-    /// Stored by the grill; wake the agent with this prompt if there is one.
-    Handled { message: Option<Message>, wake: Option<Wake> },
+    /// Stored by the grill; wake the agent (quietly, trigger "grill") with this prompt if there is one.
+    Handled { message: Option<Message>, wake: Option<String> },
 }
 
 /// Routes a message the user sent to `agent`. Only the user's own messages reach this; messages from
 /// other agents, task briefs and wake-ups never count as answers.
-pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
+pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, meta: Value) -> Result<Routed, ApiError> {
+    locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta))
+}
+
+fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
     let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
     let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
 
-    // A new request typed while an interview is open (web, old app builds) replaces it rather than
-    // being taken as an answer to the open question.
-    let typed_start = role.is_empty() && enabled(agent) && active(state, &agent.id).is_some() && commands::is_start_request(text);
+    // "Grill me…" typed (the web composer, old app builds) starts a grill like /grill does, and replaces an
+    // open one rather than being taken as an answer.
+    let typed_start = role.is_empty() && commands::is_start_request(text);
     if role == "start_request" || typed_start {
-        if !enabled(agent) {
-            return Ok(Routed::Normal(meta));
-        }
         let mut s = match active(state, &agent.id) {
             Some(s) if s.status == "preparing" => s,
             Some(mut old) => {
-                finish(state, &mut old, "superseded").map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                finish(state, &mut old, "superseded").map_err(internal)?;
                 new_session(&agent.id, text, "preparing")
             }
             None => new_session(&agent.id, text, "preparing"),
         };
-        save(state, &mut s).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save(state, &mut s).map_err(internal)?;
         meta["grill"] = json!({ "session_id": s.id, "role": "start_request" });
         let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        let new_project = if crate::greenfield::needs_repo(state, agent) {
+            " Your project has no GitHub repo yet: the first round also offers to create one (see Planning: new project)."
+        } else {
+            ""
+        };
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be interviewed. Call `mcp__loft__grill_start` with the topic and a first batch of 3-8 questions, in the language the user wrote in.]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}]"
         );
-        return Ok(Routed::Handled { message, wake: Some(quiet(wake)) });
+        return Ok(Routed::Handled { message, wake: Some(wake) });
     }
 
     if !role.is_empty() && role != "answer" {
@@ -418,175 +516,136 @@ pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Optio
         return Err(conflict("grill_closed"));
     }
     if s.status == "preparing" {
-        // No questions yet: tagged answers can't belong anywhere, and plain text is context for the agent.
+        // No round yet: tagged answers can't belong anywhere, and plain text is context for the agent.
         return if tagged { Err(conflict("question_closed")) } else { Ok(Routed::Normal(meta)) };
     }
-    s.undo = None;
 
-    // Untagged text (web, old app builds) may be a command; app-tagged answers never are.
-    let mut text = text.to_string();
+    // Untagged text (the web composer, old app builds) may be a command; anything else is ordinary chat,
+    // never an answer: answers are tagged with their question (the cards, the app's voice loop).
     if !tagged {
-        match commands::parse(&text) {
-            commands::Parsed::Command(cmd) => {
-                meta["grill"] = json!({ "session_id": s.id, "role": "command", "command": cmd });
-                let message = add_msg(state, &agent.id, None, "user", "text", &text, meta);
-                let before = s.clone();
-                let wake = apply_command(state, &mut s, cmd, message.as_ref().map(|m| m.id))?.map(quiet);
-                if let Some(m) = &message {
-                    if cmd != "end" && s.status != "ended" {
-                        s.undo = Some(Undo {
-                            message_id: m.id,
-                            text: text.clone(),
-                            command: cmd.into(),
-                            at: now(),
-                            status: before.status,
-                            current: before.current,
-                            questions: before.questions,
-                        });
-                        state.db.save_grill(&s).map_err(|e| internal(e.to_string()))?;
-                    }
-                }
-                return Ok(Routed::Handled { message, wake });
-            }
-            commands::Parsed::Answer(a) => text = a,
+        let commands::Parsed::Command(cmd) = commands::parse(text) else { return Ok(Routed::Normal(meta)) };
+        meta["grill"] = json!({ "session_id": s.id, "role": "command", "command": cmd });
+        let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        if commands::CLIENT_ONLY.contains(&cmd) {
+            // Stepping through questions only means something by voice; say so rather than doing nothing.
+            let hint = say(
+                &s,
+                "Skip, back and repeat step through questions by voice. Here, answer the cards in any order: questions left open are asked again in the next round.",
+                "Pular, voltar e repetir servem para a voz. Aqui, responda os cartões em qualquer ordem: o que ficar aberto volta na próxima rodada.",
+            );
+            status_row(state, &s, &hint, json!({ "state": "hint", "command": cmd }));
+            return Ok(Routed::Handled { message, wake: None });
         }
+        let wake = apply_command(state, &mut s, cmd, None, message.as_ref().map(|m| m.id))?;
+        return Ok(Routed::Handled { message, wake });
     }
 
-    let qid = match grill.and_then(|g| g["question_id"].as_str()) {
-        Some(id) => id.to_string(),
-        None if tagged => return Err(ApiError(StatusCode::BAD_REQUEST, "an answer needs question_id".into())),
-        // Untagged text while a question waits (or the grill is paused on one) is its answer.
-        None => match &s.current {
-            Some(id) => id.clone(),
-            None => return Ok(Routed::Normal(meta)),
-        },
-    };
-    let (message, wake) = record_answer(state, &mut s, &qid, &text, meta)?;
-    Ok(Routed::Handled { message, wake })
+    let qid = grill.and_then(|g| g["question_id"].as_str()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "an answer needs question_id".into()))?;
+    let discuss = grill.is_some_and(|g| g["discuss"] == true);
+    record_answer(state, &mut s, qid, text, discuss)?;
+    Ok(Routed::Handled { message: None, wake: None })
 }
 
-/// Stores `text` as the user's answer to `qid`, then asks the next question.
-fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str, mut meta: Value) -> Result<(Option<Message>, Option<Wake>), ApiError> {
-    let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
-    let Some(q) = s.questions.iter_mut().find(|q| q.id == qid) else {
-        return Err(conflict("question_closed"));
-    };
-    if q.status != "asked" {
-        return Err(conflict("question_closed"));
-    }
-    meta["grill"] = json!({ "session_id": s.id, "role": "answer", "question_id": q.id, "index": q.index });
-    let answer = clip(text, MAX_ANSWER);
-    let message = add_msg(state, &s.agent_id, None, "user", "text", &answer, meta);
-    q.status = "answered".into();
-    q.answer = Some(answer);
-    q.answer_message_id = message.as_ref().map(|m| m.id);
-    q.source = Some("user".into());
+/// True when `text` is a plain "yes", which accepts the recommendation.
+fn is_yes(text: &str) -> bool {
+    const YES: &[&str] = &["yes", "y", "yep", "yeah", "yes please", "sure", "ok", "okay", "agreed", "accept", "sim", "s", "pode ser", "claro", "beleza", "aceito", "concordo", "isso"];
+    YES.contains(&commands::normalize(text).as_str())
+}
+
+/// Holds `text` as the answer to `qid` in the open round, without waking the agent. The user may change
+/// it until the round is sent. With `discuss`, the text is a comment instead of a decision: the agent
+/// explains and asks again in the next round.
+fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str, discuss: bool) -> Result<(), ApiError> {
+    let closed = || ApiError(StatusCode::CONFLICT, "question_closed".into());
+    let q = open_round_mut(s).and_then(|r| r.questions.iter_mut().find(|q| q.id == qid)).ok_or_else(closed)?;
+    q.accepted = !discuss && is_yes(text);
+    q.answer = Some(if q.accepted { q.recommendation.clone() } else { clip(text, MAX_ANSWER) });
+    q.state = if discuss { "discuss" } else { "answered" }.into();
     q.answered_at = Some(now());
+    resume_if_paused(state, s, None);
+    save(state, s).map_err(internal)
+}
+
+/// Answering, deciding or sending while paused picks the grill up again, with the same row as Resume.
+fn resume_if_paused(state: &AppState, s: &mut Session, extra: Option<Value>) {
     if s.status == "paused" {
         s.status = "active".into();
-        status_row(state, s, &say(s, "Resumed", "Retomada"), json!({ "state": "resumed" }));
+        let mut meta = json!({ "state": "resumed" });
+        if let (Some(m), Some(Value::Object(e))) = (meta.as_object_mut(), extra) {
+            m.extend(e);
+        }
+        status_row(state, s, &say(s, "Resumed", "Retomada"), meta);
     }
-    let more = s.current.as_deref() != Some(qid) || ask_next(state, s);
-    save(state, s).map_err(internal)?;
-    let answered = s.questions.iter().find(|q| q.id == qid).cloned();
-    let wake = if more {
-        answered.map(|q| Wake { prompt: revise_prompt(s, &q), trigger: "grill_revise" })
-    } else {
-        Some(quiet(queue_empty_prompt(s)))
-    };
-    Ok((message, wake))
 }
 
 /// Applies a command to the running session and saves it. Returns a prompt to wake the agent with, if any.
-fn apply_command(state: &AppState, s: &mut Session, cmd: &str, tagged_message_id: Option<i64>) -> Result<Option<String>, ApiError> {
-    let row = |s: &Session, text: &str, st: &str, index: Option<u32>| {
-        let mut extra = json!({ "state": st, "command": cmd, "index": index });
+/// `question_id` picks the question for `decide` (default: the first open one).
+fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Option<&str>, tagged_message_id: Option<i64>) -> Result<Option<String>, ApiError> {
+    let row = |s: &Session, text: &str, st: &str| {
+        let mut extra = json!({ "state": st, "command": cmd, "round": s.rounds.last().map(|r| r.index) });
         if let Some(id) = tagged_message_id {
             extra["tagged_message_id"] = json!(id);
         }
         status_row(state, s, text, extra);
     };
-    let cur = current(s).cloned();
-    let need_current = || cur.clone().ok_or_else(|| ApiError(StatusCode::CONFLICT, "question_closed".into()));
+    let closed = || ApiError(StatusCode::CONFLICT, "round_closed".into());
     let mut wake = None;
     match cmd {
-        "skip" | "decide" => {
-            let q = need_current()?;
-            let n = q.index.unwrap_or(0);
-            if let Some(x) = s.questions.iter_mut().find(|x| x.id == q.id) {
-                x.status = if cmd == "skip" { "skipped" } else { "delegated" }.into();
-                x.answered_at = Some(now());
+        "send" => {
+            open_round(s).ok_or_else(closed)?;
+            resume_if_paused(state, s, Some(json!({ "command": cmd })));
+            let r = open_round_mut(s).ok_or_else(closed)?;
+            r.sent_at = Some(now());
+            for q in r.questions.iter_mut().filter(|q| q.state == "open") {
+                q.state = "carried".into();
             }
-            if s.status == "paused" {
-                s.status = "active".into();
+            let r = r.clone();
+            let text = answers_text(s, &r);
+            let mut meta = json!({ "grill": { "session_id": s.id, "role": "answers", "round": r.index } });
+            if let Some(id) = tagged_message_id {
+                meta["grill"]["tagged_message_id"] = json!(id);
             }
-            if cmd == "skip" {
-                row(s, &say(s, &format!("Skipped question {n}"), &format!("Pergunta {n} pulada")), "command", Some(n));
-            } else {
-                row(s, &say(s, &format!("Question {n} left to the agent"), &format!("Pergunta {n} fica a critério do agente")), "command", Some(n));
-                wake = Some(format!(
-                    "[Grill {}: the user left question {n} to you]\nQ{n} [{}]: {}\n\nDecide it and call `mcp__loft__grill_record` with that question_id and your choice in one short line. The grill goes on meanwhile; don't post anything else.",
-                    s.id, q.id, q.text
-                ));
-            }
-            if !ask_next(state, s) {
-                let empty = queue_empty_prompt(s);
-                wake = Some(match wake {
-                    Some(w) => format!("{w}\n\n{empty}"),
-                    None => empty,
-                });
-            }
+            add_msg(state, &s.agent_id, None, "user", "text", &text, meta);
+            let context = state.db.get_agent(&s.agent_id).ok().flatten().and_then(|a| a.context_tokens);
+            wake = Some(round_prompt(s, &r, context));
         }
-        "back" => {
-            let cur_index = cur.as_ref().and_then(|q| q.index).unwrap_or(u32::MAX);
-            let prev = s
-                .questions
-                .iter()
-                .filter(|q| q.index.is_some_and(|i| i < cur_index) && ["answered", "skipped", "delegated"].contains(&q.status.as_str()))
-                .max_by_key(|q| q.index)
-                .cloned()
-                .ok_or_else(|| ApiError(StatusCode::CONFLICT, "no_previous_question".into()))?;
-            // The question on screen goes back to the front of the queue; the previous one is asked again.
-            if let Some(c) = &cur {
-                let pos = s.questions.iter().position(|q| q.id == c.id).unwrap();
-                let mut c = s.questions.remove(pos);
-                c.status = "queued".into();
-                c.index = None;
-                c.asked_at = None;
-                let at = s.questions.iter().position(|q| q.id == prev.id).unwrap() + 1;
-                s.questions.insert(at, c);
+        "decide" => {
+            let r = open_round_mut(s).ok_or_else(closed)?;
+            let (n, q) = match question_id {
+                Some(id) => r.questions.iter_mut().enumerate().find(|(_, q)| q.id == id),
+                None => r.questions.iter_mut().enumerate().find(|(_, q)| q.state == "open"),
             }
-            if let Some(p) = s.questions.iter_mut().find(|q| q.id == prev.id) {
-                p.status = "asked".into();
+            .ok_or_else(|| ApiError(StatusCode::CONFLICT, "question_closed".into()))?;
+            // Already left to the agent (the voice went back to it): nothing to do, and no second row.
+            if q.state == "decided" {
+                return Ok(None);
             }
-            s.current = Some(prev.id.clone());
-            if s.status == "paused" {
-                s.status = "active".into();
+            q.state = "decided".into();
+            q.answer = Some(q.recommendation.clone());
+            q.accepted = false;
+            q.answered_at = Some(now());
+            let (qid, rec) = (q.id.clone(), q.recommendation.clone());
+            resume_if_paused(state, s, Some(json!({ "command": cmd })));
+            // The decision shows in the chat, so a typed "I don't know" never changes a card unseen.
+            let text = say(s, &format!("Question {} left to the agent: {rec}", n + 1), &format!("Pergunta {} decidida pelo agente: {rec}", n + 1));
+            let mut extra = json!({ "state": "decided", "command": cmd, "round": s.rounds.last().map(|r| r.index), "question_id": qid });
+            if let Some(id) = tagged_message_id {
+                extra["tagged_message_id"] = json!(id);
             }
-            let n = prev.index.unwrap_or(0);
-            row(s, &say(s, &format!("Back to question {n}"), &format!("De volta à pergunta {n}")), "command", Some(n));
-            post_question(state, s, &prev, total(s), true);
-        }
-        "repeat" => {
-            let q = need_current()?;
-            post_question(state, s, &q, total(s), true);
+            status_row(state, s, &text, extra);
         }
         "pause" => {
             s.status = "paused".into();
-            row(s, &say(s, "Paused", "Pausada"), "paused", cur.as_ref().and_then(|q| q.index));
+            row(s, &say(s, "Paused", "Pausada"), "paused");
         }
         "resume" => {
-            let was_paused = s.status == "paused";
-            s.status = "active".into();
-            if was_paused {
-                row(s, &say(s, "Resumed", "Retomada"), "resumed", cur.as_ref().and_then(|q| q.index));
-            }
-            if let Some(q) = &cur {
-                post_question(state, s, q, total(s), true);
+            if s.status == "paused" {
+                s.status = "active".into();
+                row(s, &say(s, "Resumed", "Retomada"), "resumed");
             }
         }
         "summarize" => {
-            row(s, &say(s, "Summary requested", "Resumo pedido"), "command", cur.as_ref().and_then(|q| q.index));
+            row(s, &say(s, "Summary requested", "Resumo pedido"), "command");
             wake = Some(format!(
                 "[Grill {} on \"{}\": the user asked for a summary so far]\n\n{}\n\nCall `mcp__loft__grill_summary` with a short summary in the user's language (decided, still open). The grill continues; don't post anything else.",
                 s.id,
@@ -601,12 +660,14 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, tagged_message_id
             }
             finish_with(state, s, "stopped", extra).map_err(internal)?;
             return Ok(Some(format!(
-                "[Grill {} on \"{}\": the user stopped it]\n\n{}\n\nCall `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
+                "[Grill {} on \"{}\": the user stopped it]\n\n{}\n\n{DOCS_PR_STEP}call `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
                 s.id,
                 s.topic,
                 transcript(s)
             )));
         }
+        // Stepping through questions is the voice client's job; there is nothing for the server to do.
+        c if commands::CLIENT_ONLY.contains(&c) => return Ok(None),
         other => return Err(ApiError(StatusCode::BAD_REQUEST, format!("unknown command {other}"))),
     }
     save(state, s).map_err(internal)?;
@@ -620,14 +681,14 @@ pub async fn get_active(State(state): State<AppState>, Path(id): Path<String>) -
     active(&state, &id).map(|s| Json(view(&s))).ok_or_else(not_found)
 }
 
-/// `GET /api/grill/{id}`: one session with every question and answer.
+/// `GET /api/grill/{id}`: one session with every round and answer.
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     if uuid::Uuid::parse_str(&id).is_err() {
         return Err(not_found());
     }
     let s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
     let mut v = view(&s);
-    v["questions"] = json!(s.questions.iter().filter(|q| q.index.is_some()).collect::<Vec<_>>());
+    v["rounds"] = json!(s.rounds);
     Ok(Json(v))
 }
 
@@ -638,91 +699,39 @@ pub struct CommandBody {
     client_id: Option<String>,
 }
 
-/// `POST /api/grill/{id}/command`: a button or a spoken command from the app. Answered in chat with a
-/// status row; a retry with the same `client_id` isn't applied twice.
+/// `POST /api/grill/{id}/command`: a button or a spoken command (send the round, decide for me, pause,
+/// resume, end, summarize). A retry with the same `client_id` isn't applied twice.
 pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<CommandBody>) -> Result<Json<Value>, ApiError> {
     if uuid::Uuid::parse_str(&id).is_err() {
         return Err(not_found());
     }
-    let mut s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
-    let client_id = b.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
-    if client_id.as_ref().is_some_and(|c| s.seen_commands.contains(c)) {
+    let agent_id = state.db.get_grill(&id)?.ok_or_else(not_found)?.agent_id;
+    let (s, wake, duplicate) = locked(&state, &agent_id, || -> Result<_, ApiError> {
+        // Read again under the lock: another writer may have changed it since.
+        let mut s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
+        let client_id = b.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
+        if client_id.as_ref().is_some_and(|c| s.seen_commands.contains(c)) {
+            return Ok((s, None, true));
+        }
+        if s.status == "ended" || s.status == "preparing" {
+            return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
+        }
+        let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
+        if let Some(c) = client_id {
+            s.seen_commands.push(c);
+            let n = s.seen_commands.len();
+            s.seen_commands.drain(..n.saturating_sub(50));
+        }
+        let wake = apply_command(&state, &mut s, cmd, b.question_id.as_deref(), None)?;
+        Ok((s, wake, false))
+    })?;
+    if duplicate {
         return Ok(Json(json!({ "ok": true, "duplicate": true, "session": view(&s) })));
     }
-    if s.status == "ended" || s.status == "preparing" {
-        return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
-    }
-    let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
-    if let Some(q) = &b.question_id {
-        if s.current.as_deref() != Some(q) && ["skip", "decide", "back"].contains(&cmd) {
-            return Err(ApiError(StatusCode::CONFLICT, "question_closed".into()));
-        }
-    }
-    s.undo = None;
-    if let Some(c) = client_id {
-        s.seen_commands.push(c);
-        let n = s.seen_commands.len();
-        s.seen_commands.drain(..n.saturating_sub(50));
-    }
-    if let Some(p) = apply_command(&state, &mut s, cmd, None)? {
+    if let Some(p) = wake {
         crate::agents::wake(&state, &s.agent_id, p, "grill");
     }
     Ok(Json(json!({ "ok": true, "session": view(&s) })))
-}
-
-#[derive(Deserialize)]
-pub struct UndoBody {
-    message_id: i64,
-}
-
-/// `POST /api/grill/{id}/undo`: "that was my answer, not a command". Within a few seconds of a command
-/// the backend inferred from text, puts the session back and records the text as the answer.
-pub async fn undo(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<UndoBody>) -> Result<Json<Value>, ApiError> {
-    if uuid::Uuid::parse_str(&id).is_err() {
-        return Err(not_found());
-    }
-    let mut s = state.db.get_grill(&id)?.ok_or_else(not_found)?;
-    if let Some(p) = undo_command(&state, &mut s, b.message_id)? {
-        crate::agents::wake(&state, &s.agent_id, p, "grill");
-    }
-    Ok(Json(json!({ "ok": true, "session": view(&s) })))
-}
-
-/// Puts the session back as it was before the command matched from message `message_id`, and records
-/// that message as the answer. Returns a prompt to wake the agent with, if the queue ran out.
-fn undo_command(state: &AppState, s: &mut Session, message_id: i64) -> Result<Option<String>, ApiError> {
-    let b = UndoBody { message_id };
-    let u = s.undo.take().filter(|u| u.message_id == b.message_id).ok_or_else(|| ApiError(StatusCode::CONFLICT, "nothing_to_undo".into()))?;
-    let age = chrono::DateTime::parse_from_rfc3339(&u.at).map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds()).unwrap_or(i64::MAX);
-    if age > UNDO_SECS || s.status == "ended" {
-        return Err(ApiError(StatusCode::CONFLICT, "nothing_to_undo".into()));
-    }
-    let qid = u.current.clone().ok_or_else(|| ApiError(StatusCode::CONFLICT, "nothing_to_undo".into()))?;
-    // The command may have put the next question on screen already; keep it instead of posting it twice.
-    let on_screen = current(&s).cloned();
-    s.status = if u.status == "paused" { "active".into() } else { u.status };
-    s.current = u.current;
-    s.questions = u.questions;
-    let q = s.questions.iter_mut().find(|q| q.id == qid && q.status == "asked").ok_or_else(|| ApiError(StatusCode::CONFLICT, "nothing_to_undo".into()))?;
-    q.status = "answered".into();
-    q.answer = Some(clip(&u.text, MAX_ANSWER));
-    q.answer_message_id = Some(u.message_id);
-    q.source = Some("user".into());
-    q.answered_at = Some(now());
-    status_row(state, s, &say(s, "Treated as an answer", "Considerada uma resposta"), json!({ "state": "command", "command": "undo", "tagged_message_id": u.message_id, "question_id": qid }));
-    let shown = on_screen.and_then(|o| s.questions.iter_mut().find(|q| q.id == o.id && q.status == "queued").map(|q| (q, o)));
-    let more = match shown {
-        Some((q, o)) => {
-            q.status = "asked".into();
-            q.index = o.index;
-            q.asked_at = o.asked_at;
-            s.current = Some(o.id);
-            true
-        }
-        None => ask_next(state, s),
-    };
-    save(state, s).map_err(internal)?;
-    Ok((!more).then(|| queue_empty_prompt(s)))
 }
 
 /// `GET /api/grill/commands`: phrase lists for on-device matching. Clients cache by `version` / ETag.
@@ -733,7 +742,12 @@ pub async fn command_catalog() -> impl axum::response::IntoResponse {
 
 // ---- notes and timeouts -----------------------------------------------------------
 
-/// Writes the Q&A and the summary to `notes/grill/<date>-<topic>.md` in the agent's workspace. The path
+/// True when the agent's project folder is a git repo. Without one, a grill's record is the notes file.
+fn has_repo(state: &AppState, a: &Agent) -> bool {
+    !a.project.trim().is_empty() && state.settings.boot().projects_dir.join(&a.project).join(".git").exists()
+}
+
+/// Writes the rounds and the summary to `notes/grill/<date>-<topic>.md` in the agent's workspace. The path
 /// is built here from the date and a `[a-z0-9-]` slug, never from text the agent or user supplied as-is.
 fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
     let slug: String = commands::normalize(&s.topic).split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join("-").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
@@ -748,16 +762,19 @@ fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
     if !s.goal.is_empty() {
         out += &format!("\n{}\n", s.goal);
     }
-    out += &format!("\n## {}\n\n{}\n\n## {}\n", say(s, "Summary", "Resumo"), summary.trim(), say(s, "Questions and answers", "Perguntas e respostas"));
-    for q in s.questions.iter().filter(|q| q.index.is_some()) {
-        let a = match q.status.as_str() {
-            "answered" if q.source.as_deref() == Some("agent") => format!("**{}** {}", say(s, "Decided by the agent:", "Decidido pelo agente:"), q.answer.as_deref().unwrap_or("")),
-            "answered" => q.answer.clone().unwrap_or_default(),
-            "skipped" => format!("_{}_", say(s, "Skipped", "Pulada")),
-            "delegated" => format!("_{}_", say(s, "Left to the agent, not decided", "Deixada para o agente, sem decisão")),
-            _ => format!("_{}_", say(s, "Not answered", "Sem resposta")),
-        };
-        out += &format!("\n### {}. {}\n\n{a}\n", q.index.unwrap_or(0), q.text);
+    out += &format!("\n## {}\n\n{}\n", say(s, "Summary", "Resumo"), summary.trim());
+    for r in &s.rounds {
+        out += &format!("\n## {} {}\n", say(s, "Round", "Rodada"), r.index);
+        for (i, q) in r.questions.iter().enumerate() {
+            let a = match q.state.as_str() {
+                "answered" if q.accepted => format!("{} {}", say(s, "Accepted:", "Aceita:"), q.recommendation),
+                "answered" => q.answer.clone().unwrap_or_default(),
+                "discuss" => format!("**{}** {}", say(s, "To discuss:", "Para discutir:"), q.answer.as_deref().unwrap_or("")),
+                "decided" => format!("**{}** {}", say(s, "Decided by the agent:", "Decidido pelo agente:"), q.recommendation),
+                _ => format!("_{}_ ({} {})", say(s, "Not answered", "Sem resposta"), say(s, "recommended:", "recomendado:"), q.recommendation),
+            };
+            out += &format!("\n### {}. {}\n\n{a}\n", i + 1, q.text);
+        }
     }
     std::fs::write(dir.join(&name), out).ok()?;
     Some(format!("notes/grill/{name}"))
@@ -772,7 +789,11 @@ const PREPARING_FOR_MINS: i64 = 10;
 /// Applies idle timeouts to every open grill. Returns the agents to wake with a summary request.
 fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, String)> {
     let mut wakes = vec![];
-    for mut s in state.db.open_grills().unwrap_or_default() {
+    for open in state.db.open_grills().unwrap_or_default() {
+        let lock = state.grill_locks.of(&open.agent_id);
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Read again under the lock: an answer may have just come in.
+        let Some(mut s) = state.db.get_grill(&open.id).ok().flatten() else { continue };
         let Ok(at) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { continue };
         let idle = now.signed_duration_since(at);
         match s.status.as_str() {
@@ -786,13 +807,13 @@ fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, S
                 let _ = save(state, &mut s);
             }
             "paused" if idle.num_hours() >= END_AFTER_HOURS => {
-                let answered = s.questions.iter().any(|q| q.status == "answered");
+                let answered = s.rounds.iter().flat_map(|r| &r.questions).any(|q| q.state != "open" && q.state != "carried");
                 s.summarized = !answered;
                 if finish(state, &mut s, "timeout").is_ok() && answered {
                     wakes.push((
                         s.agent_id.clone(),
                         format!(
-                            "[Grill {} on \"{}\" ended after a day without answers]\n\n{}\n\nCall `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
+                            "[Grill {} on \"{}\" ended after a day without answers]\n\n{}\n\n{DOCS_PR_STEP}call `mcp__loft__grill_end` with a summary of what was covered (the user's language), then reply with nothing.",
                             s.id,
                             s.topic,
                             transcript(&s)
@@ -821,49 +842,28 @@ pub async fn sweeper(state: AppState) {
 
 pub fn mcp_tools() -> Vec<Value> {
     let question = json!({ "type": "object", "properties": {
-        "text": { "type": "string", "description": "The question as shown in chat (Markdown, one question, at most 500 characters)." },
-        "speak": { "type": "string", "description": "A short plain version read aloud: no Markdown, links, ids or PR numbers; include the options. Always give one." },
+        "text": { "type": "string", "description": "The question as shown in chat (Markdown, one decision, at most 500 characters), worded so that \"yes\" accepts the recommendation." },
+        "recommendation": { "type": "string", "description": "Your proposed answer, grounded in what you looked up. The user accepts it with \"yes\"." },
+        "speak": { "type": "string", "description": "A short plain version read aloud: no Markdown, links, ids or PR numbers; include the recommendation. Always give one." },
         "kind": { "type": "string", "enum": KINDS },
         "options": { "type": "array", "items": { "type": "string" }, "description": "Suggested answers (at most 6). Required for single_choice / multi_choice." }
-    }, "required": ["text", "speak"] });
+    }, "required": ["text", "recommendation", "speak"] });
     vec![
         json!({
-            "name": "grill_start",
-            "description": "Start a grill (guided interview) in this chat. Loft posts the questions one at a time, as soon as the previous one is answered, so plan a first batch up front.",
+            "name": "grill_round",
+            "description": "Post a round of the grill in this chat: every question whose prerequisites are settled, each with a recommendation. The first round starts the grill. Questions the user sent unanswered are carried into it unchanged by Loft, before yours. Loft holds the user's answers and wakes you once, with all of them, when the user sends the round.",
             "inputSchema": { "type": "object", "properties": {
-                "topic": { "type": "string", "description": "A few words, shown on the banner." },
-                "goal": { "type": "string", "description": "What the interview should decide." },
-                "language": { "type": "string", "enum": ["en", "pt"], "description": "The language the user wrote in; questions, status rows and the summary follow it." },
-                "questions": { "type": "array", "items": question, "description": "First batch, in order: 3-8 questions." }
-            }, "required": ["topic", "questions"] }
-        }),
-        json!({
-            "name": "grill_ask",
-            "description": "Add follow-up questions to the running grill. `position: next` asks them before the rest of the queue.",
-            "inputSchema": { "type": "object", "properties": {
-                "questions": { "type": "array", "items": question },
-                "position": { "type": "string", "enum": ["next", "end"] }
+                "topic": { "type": "string", "description": "A few words, shown on the round bar. First round only." },
+                "goal": { "type": "string", "description": "What the grill should decide. First round only." },
+                "language": { "type": "string", "enum": ["en", "pt"], "description": "The language the user wrote in; questions, status rows and the summary follow it. First round only." },
+                "questions": { "type": "array", "items": question, "description": format!("The new questions, most fundamental first. With the carried ones, at most {MAX_ROUND}. May be empty when questions carry over.") },
+                "drop": { "type": "array", "items": { "type": "string" }, "description": "Ids of unanswered questions from the last round that no longer matter, so they aren't carried." }
             }, "required": ["questions"] }
         }),
         json!({
-            "name": "grill_withdraw",
-            "description": "Drop queued questions an earlier answer made pointless.",
-            "inputSchema": { "type": "object", "properties": {
-                "question_ids": { "type": "array", "items": { "type": "string" } }
-            }, "required": ["question_ids"] }
-        }),
-        json!({
             "name": "grill_state",
-            "description": "The running grill: every question asked so far with its answer, and the queue.",
+            "description": "The running grill: every round so far with the user's answers.",
             "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "grill_record",
-            "description": "Record your decision for a question the user left to you (\"decide for me\"). One short line.",
-            "inputSchema": { "type": "object", "properties": {
-                "question_id": { "type": "string" },
-                "answer": { "type": "string" }
-            }, "required": ["question_id", "answer"] }
         }),
         json!({
             "name": "grill_summary",
@@ -874,123 +874,89 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "grill_end",
-            "description": "Finish the grill. `summary` (Markdown, the user's language) is posted in chat: decisions, open questions, what was skipped.",
+            "description": "Finish the grill. `summary` (Markdown, the user's language) is posted in chat: decisions, open questions, what was left unanswered.",
             "inputSchema": { "type": "object", "properties": {
-                "summary": { "type": "string" }
+                "summary": { "type": "string" },
+                "docs_pr": { "type": "string", "description": "The URL of the docs PR you opened for this grill's glossary and ADR changes. Leave it out when the grill resolved no terms or decisions: then there is no PR." }
             }, "required": ["summary"] }
         }),
     ]
 }
 
-/// What an MCP call did, plus a prompt to wake the agent with (never for the caller's own run).
+/// What an MCP call did. Never wakes the caller: it is the one running.
 pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Option<Result<String, String>> {
     if !name.starts_with("grill_") {
         return None;
     }
-    if !enabled(me) {
-        return Some(Err("Grill mode isn't enabled for you.".into()));
-    }
-    Some((|| match name {
-        "grill_start" => {
+    Some(locked(state, &me.id, || match name {
+        "grill_round" => {
             let mut qs = parse_questions(&args["questions"])?;
-            if qs.is_empty() {
-                return Err("give at least one question".into());
-            }
-            qs.truncate(MAX_QUESTIONS);
             let topic = args["topic"].as_str().unwrap_or("").trim();
             let mut s = match active(state, &me.id) {
-                Some(s) if s.status == "preparing" => s,
-                Some(mut old) => {
-                    finish(state, &mut old, "superseded")?;
-                    new_session(&me.id, topic, "active")
+                Some(s) => s,
+                None => new_session(&me.id, topic, "preparing"),
+            };
+            if let Some(r) = open_round(&s) {
+                return Err(format!("Round {} is still waiting for the user's answers; you're woken with them when the user sends it. End your turn with no reply text.", r.index));
+            }
+            if s.rounds.len() >= MAX_ROUNDS {
+                return Err(format!("a grill holds at most {MAX_ROUNDS} rounds; wrap up with grill_end"));
+            }
+            // What the user sent unanswered comes back first, unchanged, unless the agent drops it.
+            let drop: Vec<&str> = args["drop"].as_array().map(|d| d.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            let carried: Vec<Question> = s
+                .rounds
+                .last()
+                .map(|r| {
+                    r.questions
+                        .iter()
+                        .filter(|q| q.state == "carried" && !drop.contains(&q.id.as_str()))
+                        .map(|q| Question { id: uuid::Uuid::new_v4().to_string(), state: "open".into(), answer: None, accepted: false, answered_at: None, from_round: q.from_round.or(Some(r.index)), ..q.clone() })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if qs.is_empty() && carried.is_empty() {
+                return Err("give at least one question".into());
+            }
+            if qs.len() + carried.len() > MAX_ROUND {
+                return Err(if carried.is_empty() {
+                    format!("a round holds at most {MAX_ROUND} questions; ask the rest once these are settled")
+                } else {
+                    format!("a round holds at most {MAX_ROUND} questions and {} carry over unanswered: post at most {} new ones, or `drop` carried ones that no longer matter", carried.len(), MAX_ROUND.saturating_sub(carried.len()))
+                });
+            }
+            let n_carried = carried.len();
+            qs.splice(0..0, carried);
+            let first = s.status == "preparing";
+            if first {
+                if !topic.is_empty() {
+                    s.topic = clip(topic, 120);
                 }
-                None => new_session(&me.id, topic, "active"),
-            };
-            if !topic.is_empty() {
-                s.topic = clip(topic, 120);
+                s.goal = clip(args["goal"].as_str().unwrap_or(""), 1000);
+                s.lang = match args["language"].as_str().map(|l| l.to_lowercase()) {
+                    Some(l) if l.starts_with("pt") => "pt".into(),
+                    Some(l) if l.starts_with("en") => "en".into(),
+                    // Models often leave it out: go by the user's request (a prepared session's topic) and the questions.
+                    _ => guess_lang(&format!("{} {}", s.topic, qs.iter().map(|q| q.text.as_str()).collect::<Vec<_>>().join(" "))).into(),
+                };
+                s.status = "active".into();
+                s.started_at = Some(now());
+                status_row(state, &s, &say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic)), json!({ "state": "started" }));
             }
-            s.goal = clip(args["goal"].as_str().unwrap_or(""), 1000);
-            s.lang = match args["language"].as_str().map(|l| l.to_lowercase()) {
-                Some(l) if l.starts_with("pt") => "pt".into(),
-                Some(l) if l.starts_with("en") => "en".into(),
-                // Models often leave it out: go by the user's request (a prepared session's topic) and the questions.
-                _ => guess_lang(&format!("{} {}", s.topic, qs.iter().map(|q| q.text.as_str()).collect::<Vec<_>>().join(" "))).into(),
-            };
-            s.status = "active".into();
-            s.started_at = Some(now());
-            s.questions = qs;
-            status_row(state, &s, &say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic)), json!({ "state": "started" }));
-            ask_next(state, &mut s);
+            let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None };
+            post_round(state, &s, &r);
+            let (n, k) = (r.index, r.questions.len());
+            s.rounds.push(r);
             save(state, &mut s)?;
+            let carried = if n_carried > 0 { format!(" ({n_carried} carried over unanswered, first)") } else { String::new() };
             Ok(format!(
-                "Grill {} started with {} questions; question 1 is already in the chat. End your turn now with no reply text: don't mention, list or repeat the questions. Answers come back to you when the queue runs out.",
-                s.id,
-                s.questions.len()
+                "Round {n} posted with {k} question(s){carried} in grill {}; it is already in the chat. End your turn now with no reply text: don't mention, list or repeat the questions. You're woken with every answer when the user sends the round.",
+                s.id
             ))
-        }
-        "grill_ask" => {
-            let mut s = active(state, &me.id).filter(|s| s.status != "preparing").ok_or("No grill is running. Call grill_start.")?;
-            let known: Vec<String> = s.questions.iter().filter(|q| q.status != "withdrawn").map(|q| commands::normalize(&q.text)).collect();
-            let given = parse_questions(&args["questions"])?;
-            let n_given = given.len();
-            // A follow-up that only repeats a question already asked or queued is dropped.
-            let qs: Vec<Question> = given.into_iter().filter(|q| !known.contains(&commands::normalize(&q.text))).collect();
-            if qs.is_empty() && n_given > 0 {
-                return Err("Those questions were already asked or are queued. Ask something new, or finish with grill_end.".into());
-            }
-            if total(&s) + qs.len() > MAX_QUESTIONS {
-                return Err(format!("a grill holds at most {MAX_QUESTIONS} questions; wrap up with grill_end"));
-            }
-            let n = qs.len();
-            if args["position"].as_str() == Some("next") {
-                let at = s.questions.iter().position(|q| q.status == "queued").unwrap_or(s.questions.len());
-                s.questions.splice(at..at, qs);
-            } else {
-                s.questions.extend(qs);
-            }
-            // Nothing on screen (the queue had run out): ask right away.
-            if s.current.is_none() && s.status == "active" {
-                ask_next(state, &mut s);
-            }
-            save(state, &mut s)?;
-            Ok(format!("Added {n} question(s). End your turn with no reply text: they appear in the chat on their own."))
-        }
-        "grill_withdraw" => {
-            let mut s = active(state, &me.id).ok_or("No grill is running.")?;
-            let ids: Vec<&str> = args["question_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
-            let mut n = 0;
-            for q in s.questions.iter_mut().filter(|q| q.status == "queued" && ids.contains(&q.id.as_str())) {
-                q.status = "withdrawn".into();
-                n += 1;
-            }
-            save(state, &mut s)?;
-            Ok(format!("Withdrew {n} queued question(s)."))
         }
         "grill_state" => {
             let s = active(state, &me.id).ok_or("No grill is running.")?;
             Ok(format!("Grill {} on \"{}\" ({}).\n\n{}", s.id, s.topic, s.status, transcript(&s)))
-        }
-        "grill_record" => {
-            let mut s = active(state, &me.id).ok_or("No grill is running.")?;
-            let qid = args["question_id"].as_str().unwrap_or("");
-            let answer = clip(args["answer"].as_str().unwrap_or(""), 500);
-            if answer.is_empty() {
-                return Err("answer is required".into());
-            }
-            let Some(q) = s.questions.iter_mut().find(|q| q.id == qid) else {
-                return Err("No question with that id. Call grill_state.".into());
-            };
-            if q.status != "delegated" {
-                // The user went back and answered it, or skipped it, before you got here.
-                return Ok("The user has dealt with that question themselves; nothing to record. Reply with nothing.".into());
-            }
-            q.status = "answered".into();
-            q.answer = Some(answer.clone());
-            q.source = Some("agent".into());
-            let n = q.index.unwrap_or(0);
-            status_row(state, &s, &say(&s, &format!("Agent decided question {n}: {answer}"), &format!("O agente decidiu a pergunta {n}: {answer}")), json!({ "state": "command", "command": "decide", "index": n }));
-            save(state, &mut s)?;
-            Ok("Recorded.".into())
         }
         "grill_summary" => {
             let s = active(state, &me.id).ok_or("No grill is running.")?;
@@ -1010,15 +976,27 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             if summary.is_empty() {
                 return Err("summary is required".into());
             }
-            // A follow-up may have gone on screen since this run started; don't end under the user's feet.
-            if let Some(q) = current(&s).filter(|_| s.status != "ended") {
-                return Err(format!(
-                    "Question {} is on screen waiting for the user's answer, so the grill can't end yet. Reply with nothing; you're woken again when the queue runs out.",
-                    q.index.unwrap_or(0)
-                ));
+            // The user is answering a round: don't end under their feet.
+            if let Some(r) = open_round(&s).filter(|_| s.status != "ended") {
+                return Err(format!("Round {} is waiting for the user's answers, so the grill can't end yet. Reply with nothing; you're woken when the user sends it.", r.index));
             }
-            s.notes_path = write_notes(state, &s, summary);
-            add_msg(state, &me.id, None, "assistant", "text", summary, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path } }));
+            let docs_pr = match args["docs_pr"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+                None => None,
+                Some(_) if !has_repo(state, me) => return Err("You have no project repo, so this grill has no docs PR. Call grill_end again without `docs_pr`.".into()),
+                Some(u) => match crate::github::extract_pr_links(u).into_iter().next() {
+                    Some((slug, n)) => Some(format!("https://github.com/{slug}/pull/{n}")),
+                    None => return Err("docs_pr must look like https://github.com/<owner>/<repo>/pull/<number>".into()),
+                },
+            };
+            if !has_repo(state, me) {
+                s.notes_path = write_notes(state, &s, summary);
+            }
+            let content = match &docs_pr {
+                Some(url) if !summary.contains(url.as_str()) => format!("{summary}\n\n{}: {url}", say(&s, "Docs PR", "PR de docs")),
+                _ => summary.to_string(),
+            };
+            let card = end_card(state, me, &s);
+            add_msg(state, &me.id, None, "assistant", "text", &content, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path, "docs_pr": docs_pr, "end_card": card } }));
             s.summarized = true;
             if s.status == "ended" {
                 save(state, &mut s)?;
@@ -1026,280 +1004,554 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 finish(state, &mut s, "done")?;
             }
             Ok(format!(
-                "Grill ended; the summary is in the chat{}. End your turn now without any reply text.",
-                s.notes_path.as_deref().map(|p| format!(" and the full Q&A is in `{p}` in your workspace")).unwrap_or_default()
+                "Grill ended; the summary is in the chat{}{}. End your turn now without any reply text.",
+                s.notes_path.as_deref().map(|p| format!(" and the full record is in `{p}` in your workspace")).unwrap_or_default(),
+                if card.is_some() { ", with the end-of-planning card (spec and ticket links, Clear context, and the team check)" } else { "" }
             ))
         }
         _ => Err(format!("unknown tool {name}")),
-    })())
+    }))
 }
 
-/// The system-prompt section for agents with grill mode on.
-pub fn prompt_section(a: &Agent) -> &'static str {
-    if !enabled(a) {
-        return "";
-    }
+/// The system-prompt section every agent gets: what Planning overrides and what to do with a direct
+/// request for issues. The grill's own instructions come with the grill (`brief`).
+pub fn prompt_section() -> &'static str {
     r#"
 
-# Grill mode
-When the user asks to be grilled, interviewed or quizzed on something ("grill me on this", "me sabatina", "me entrevista sobre isso"), run a guided interview instead of a normal reply:
-- Call `mcp__loft__grill_start` with a short `topic`, a `goal`, and a first batch of 3-8 questions, ordered from broad to specific. Loft shows them one at a time and posts the next the moment the user answers, so you aren't asked between questions.
-- One question per item, answerable in a sentence. Give every question a `speak` version: short and plain, no Markdown, links, ids or PR numbers, options included. Use `kind` and `options` when there are obvious choices.
-- Ask in the language the user used (pass it as `language`), and write the summary in it too.
-- Never mention, list or repeat questions in your own replies: they appear in the chat by themselves, and talking about them spoils what comes next. After a grill tool, end your turn with no text.
-- Never re-ask a question that was already answered; a follow-up must ask something new.
-- When the queue runs out you get the answers: add follow-ups with `grill_ask` or finish with `grill_end` and a summary (decisions, open questions, what was skipped). After `grill_end`, reply with nothing: the summary is the reply.
-- End the final summary with a one-line offer to turn it into a task (in the user's language). Only if the user says yes, call `mcp__loft__create_task` with the decisions as the description and the notes file path that `grill_end` gives you.
-- The user can skip, go back, pause or stop at any time; Loft handles that. You only hear about it when you have something to do: a question left to you ("decide for me", answer it with `grill_record`), a summary so far (`grill_summary`), or a stopped grill (`grill_end`)."#
+# Planning: precedence
+Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). Your standing instructions still set your role, your team and how work is implemented.
+
+# Planning: direct requests
+When the user asks for an issue or a plan without a grill ("create an issue for X"):
+- Never start a grill unasked. Ask at most one short question in normal chat when something essential is missing; otherwise go ahead with sensible choices.
+- Before writing a spec or tickets, call `mcp__loft__planning_guide` for their templates and rules, and follow it.
+- One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
+- Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
+- When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: type `/grill <topic>` and I'll grill you on it."). Only the user starts a grill: Loft then sends you its instructions.
+- Work the user sends you as a task stays a task: don't open issues for it."#
+}
+
+/// What a grill needs the agent to know, sent with the first grill run in a context (see `with_brief`).
+const BRIEF: &str = r#"[Loft: Planning instructions for this grill. Follow them until the grill ends.]
+
+# Planning: grilling
+The user asked to be grilled on an idea: interview them relentlessly until you share an understanding of what to build, instead of replying normally.
+- Design tree: lay out the decisions the idea needs as a tree, where a decision depends on the ones above it. Walk every branch until each decision is resolved.
+- Frontier: each round asks every question whose prerequisites are settled, and nothing that depends on an open question; that waits for a later round. Post a round with `mcp__loft__grill_round`, most fundamental question first, one decision per question.
+- Recommendations: give every question your recommended answer, and word the question so that "yes" accepts it ("Use Postgres for storage?", not "Which database?"). Give every question a `speak` version too: short and plain, no Markdown, links, ids or PR numbers, recommendation included.
+- Start from what's written: before the first round, read the project's existing documents (README, `GLOSSARY.md`, `docs/`, `docs/adr/`, `CLAUDE.md`, notes, earlier specs) and take them as facts. Never ask what they already answer.
+- Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
+- Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
+- Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
+- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
+- What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
+- Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
+- The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`).
+
+# Planning: docs
+While you grill, build the project's language and record its hard decisions.
+- Domain modeling: challenge every term the user uses against `GLOSSARY.md`; when a word is fuzzy or overloaded ("account", "job"), propose one precise term and ask about it in the round. Test terms and relations with concrete scenarios ("a Lead leaves the project: who leads?"), and check them against the code. When the user's words and the code disagree, ask which one is right.
+- Glossary: write a term into `GLOSSARY.md` as soon as it is resolved, not at the end. Only terms that mean something to the user's domain, not implementation details; define what the thing is, in one or two sentences, in the glossary's language. Keep its format:
+
+  ```md
+  # <Project>
+
+  <One sentence on what the project is.>
+
+  ## <Group>
+
+  **<Term>**:
+  <What it is.>
+  _Avoid_: <synonyms not to use>
+  ```
+
+- ADRs: offer an ADR, as a round question, only for a decision that is all three: hard to reverse, surprising to someone reading the code later without the context, and the result of a real trade-off. Everything else is a decision in the summary, not an ADR. Write accepted ones as `docs/adr/NNNN-<slug>.md`, numbered after the highest existing one:
+
+  ```md
+  # <The decision, as a short statement>
+
+  Status: accepted (<YYYY-MM-DD>)
+
+  ## Context
+  <The forces and the facts that made this a choice.>
+
+  ## Decision
+  <What was decided, and what was rejected.>
+
+  ## Consequences
+  - <What gets easier, what gets harder, what was accepted.>
+  ```
+
+- Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
+- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
+- One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
+
+{SPEC}
+
+# Planning: new project
+When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
+- The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
+- Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
+- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
+- If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
+
+{TICKETS}
+
+# Planning: the end
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
+- When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
+
+/// The spec and ticket rules, in the brief and from `planning_guide` for a direct request.
+pub const SPEC: &str = r#"# Planning: spec
+At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns.
+- Offer it: when your project has a repo (or is a new project: see Planning: new project) and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
+- Test seams: before writing the spec, put how it will be tested to the user as a round question with your recommendation: the seams the tests drive (an API, the tools, the UI) and what they assert on, following the prior art in the repo's tests ("Test it through the tools and the API, with a fake GitHub, like the existing grill tests?").
+- Write it in the glossary's terms, respecting the existing ADRs, in the user's language, with this template:
+
+  ```md
+  ## Problem Statement
+  <The problem, from the user's side.>
+
+  ## Solution
+  <What gets built, from the user's side.>
+
+  ## User Stories
+  1. As a <actor>, I want <feature>, so that <benefit>.
+
+  ## Implementation Decisions
+  - <The modules built or changed, their interfaces, schema and API changes, architectural decisions. No file paths or code: they go stale.>
+
+  ## Testing Decisions
+  - <What makes a good test here (behaviour from outside, not internals), the seams agreed in the round, prior art.>
+
+  ## Out of Scope
+  - <What this spec doesn't cover.>
+
+  ## Further Notes
+  - <Anything else: the glossary terms and ADRs it relies on.>
+  ```
+
+- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
+- When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
+- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#;
+pub const TICKETS: &str = r#"# Planning: tickets
+Once the spec is published, split it into tickets the team can pick up.
+- Vertical slices: each ticket is a thin tracer bullet through every layer it touches (data, API, UI, tests), verifiable on its own. Never one ticket per layer; prefer several thin slices to one thick one.
+- Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
+- Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
+- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
+- Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
+
+  ```md
+  ## Parent
+
+  #<spec number>
+
+  ## What to build
+
+  <The slice end to end, from the user's side.>
+
+  ## Acceptance criteria
+
+  - [ ] <A behaviour someone can check.>
+  ```
+
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+
+/// The grill instructions in full.
+pub fn brief() -> String {
+    BRIEF.replace("{SPEC}", SPEC).replace("{TICKETS}", TICKETS)
+}
+
+/// `prompt` for a grill run, with the brief in front unless this context already has it. A new
+/// session, `/clear` and a compaction (`grill_briefed` cleared) each lose it.
+pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
+    let mut fresh = false;
+    let _ = state.db.update_agent(agent_id, |a| {
+        fresh = !a.grill_briefed;
+        a.grill_briefed = true;
+    });
+    if fresh { format!("{}\n\n{prompt}", brief()) } else { prompt }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tasks::tests::{agent, state};
 
     fn q(text: &str) -> Value {
-        json!({ "text": text, "speak": text })
+        json!({ "text": text, "speak": text, "recommendation": format!("rec for {text}") })
+    }
+
+    /// A saved agent, ready to grill.
+    pub(crate) fn planner(st: &AppState, name: &str) -> Agent {
+        agent(st, name)
+    }
+
+    pub(crate) fn round(st: &AppState, a: &Agent, qs: &[&str]) -> Result<String, String> {
+        mcp_call(st, a, "grill_round", &json!({ "topic": "Pricing", "questions": qs.iter().map(|t| q(t)).collect::<Vec<_>>() })).unwrap()
+    }
+
+    fn answer(st: &AppState, a: &Agent, qid: &str, text: &str) -> Routed {
+        let s = active(st, &a.id).unwrap();
+        on_user_message(st, a, text, Some(&json!({ "role": "answer", "session_id": s.id, "question_id": qid })), json!({})).unwrap()
+    }
+
+    pub(crate) fn send(st: &AppState, a: &Agent) -> Option<String> {
+        let mut s = active(st, &a.id).unwrap();
+        apply_command(st, &mut s, "send", None, None).unwrap()
+    }
+
+    fn qids(st: &AppState, a: &Agent) -> Vec<String> {
+        active(st, &a.id).unwrap().rounds.last().unwrap().questions.iter().map(|q| q.id.clone()).collect()
     }
 
     #[test]
-    fn enabled_for_the_orchestrator_by_default() {
+    fn concurrent_answers_are_all_kept_and_a_late_one_never_reopens_a_sent_round() {
         let st = state();
-        let mut o = agent(&st, "Orchestrator");
-        let mut x = agent(&st, "Helper");
-        assert!(enabled(&o) && !enabled(&x));
-        o.grill = Some(false);
-        x.grill = Some(true);
-        assert!(!enabled(&o) && enabled(&x));
-        assert_eq!(mcp_call(&st, &agent(&st, "Other"), "grill_state", &json!({})), Some(Err("Grill mode isn't enabled for you.".into())));
+        let o = planner(&st, "Orchestrator");
+        let texts: Vec<String> = (0..10).map(|i| format!("Q{i}?")).collect();
+        round(&st, &o, &texts.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+        let ids = qids(&st, &o);
+        let sid = active(&st, &o.id).unwrap().id;
+        // Ten answers at once, one per card, as quick taps or the web and the phone together would send them.
+        let barrier = std::sync::Barrier::new(ids.len());
+        std::thread::scope(|sc| {
+            for (i, qid) in ids.iter().enumerate() {
+                let (st, o, sid, barrier) = (&st, &o, &sid, &barrier);
+                sc.spawn(move || {
+                    barrier.wait();
+                    on_user_message(st, o, &format!("answer {i}"), Some(&json!({ "role": "answer", "session_id": sid, "question_id": qid })), json!({})).ok().unwrap();
+                });
+            }
+        });
+        let s = active(&st, &o.id).unwrap();
+        let got: Vec<Option<String>> = s.rounds[0].questions.iter().map(|q| q.answer.clone()).collect();
+        assert_eq!(got, (0..10).map(|i| Some(format!("answer {i}"))).collect::<Vec<_>>());
+
+        // A second round, answered while the user sends it: each answer either lands before the send or is refused.
+        send(&st, &o);
+        mcp_call(&st, &o, "grill_round", &json!({ "questions": texts.iter().map(|t| q(t)).collect::<Vec<_>>() })).unwrap().unwrap();
+        let ids = qids(&st, &o);
+        let barrier = std::sync::Barrier::new(ids.len() + 1);
+        let kept: Vec<(String, bool)> = std::thread::scope(|sc| {
+            let (st, o, barrier) = (&st, &o, &barrier);
+            sc.spawn(move || {
+                barrier.wait();
+                on_user_message(st, o, "send", None, json!({})).ok().unwrap();
+            });
+            let answers: Vec<_> = ids
+                .iter()
+                .map(|qid| {
+                    let sid = &sid;
+                    sc.spawn(move || {
+                        barrier.wait();
+                        let ok = on_user_message(st, o, "yes", Some(&json!({ "role": "answer", "session_id": sid, "question_id": qid })), json!({})).is_ok();
+                        (qid.clone(), ok)
+                    })
+                })
+                .collect();
+            answers.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let s = active(&st, &o.id).unwrap();
+        let r = &s.rounds[1];
+        assert!(r.sent_at.is_some(), "a late answer must not reopen the sent round");
+        for (qid, ok) in kept {
+            let q = r.questions.iter().find(|q| q.id == qid).unwrap();
+            assert_eq!(q.answer.is_some(), ok, "an accepted answer is kept, a refused one isn't");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_agent_can_grill() {
+        let st = state();
+        let o = agent(&st, "Anyone");
+        assert!(brief().contains("# Planning: grilling") && !prompt_section().contains("# Planning: grilling"));
         assert_eq!(mcp_call(&st, &o, "remember", &json!({})), None);
+        let r = on_user_message(&st, &o, "grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).unwrap();
+        assert!(matches!(r, Routed::Handled { .. }));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        assert!(round(&st, &o, &["Who pays?"]).is_ok());
+    }
+
+    #[test]
+    fn the_old_grill_tools_are_gone() {
+        let names: Vec<String> = mcp_tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["grill_round", "grill_state", "grill_summary", "grill_end"]);
+        let st = state();
+        let o = planner(&st, "Lead");
+        for old in ["grill_start", "grill_ask", "grill_withdraw", "grill_record"] {
+            assert!(mcp_call(&st, &o, old, &json!({})).unwrap().is_err(), "{old}");
+        }
     }
 
     #[test]
     fn questions_are_validated() {
-        assert!(parse_questions(&json!([{ "text": "" }])).is_err());
-        assert!(parse_questions(&json!([{ "text": "x".repeat(501) }])).is_err());
-        assert!(parse_questions(&json!([{ "text": "a", "kind": "essay" }])).is_err());
-        assert!(parse_questions(&json!([{ "text": "a", "kind": "single_choice" }])).is_err());
-        assert!(parse_questions(&json!([{ "text": "a", "kind": "single_choice", "options": ["1", "2", "3", "4", "5", "6", "7"] }])).is_err());
-        let ok = parse_questions(&json!([{ "text": "a", "kind": "yes_no" }, { "text": "b" }])).unwrap();
-        assert_eq!((ok[0].kind.as_str(), ok[1].kind.as_str()), ("yes_no", "free_text"));
+        let rec = |v: Value| { let mut v = v; v["recommendation"] = json!("r"); v };
+        assert!(parse_questions(&json!([rec(json!({ "text": "" }))])).is_err());
+        assert!(parse_questions(&json!([rec(json!({ "text": "x".repeat(501) }))])).is_err());
+        assert!(parse_questions(&json!([rec(json!({ "text": "a", "kind": "essay" }))])).is_err());
+        assert!(parse_questions(&json!([rec(json!({ "text": "a", "kind": "single_choice" }))])).is_err());
+        assert!(parse_questions(&json!([rec(json!({ "text": "a", "kind": "single_choice", "options": ["1", "2", "3", "4", "5", "6", "7"] }))])).is_err());
+        assert!(parse_questions(&json!([{ "text": "a" }])).unwrap_err().contains("recommendation"), "every question carries a recommendation");
+        let ok = parse_questions(&json!([rec(json!({ "text": "a", "kind": "yes_no" })), rec(json!({ "text": "b" }))])).unwrap();
+        assert_eq!((ok[0].kind.as_str(), ok[1].kind.as_str(), ok[0].state.as_str()), ("yes_no", "free_text", "open"));
+        let st = state();
+        let o = planner(&st, "Lead");
+        let many: Vec<String> = (0..=MAX_ROUND).map(|i| format!("Q{i}?")).collect();
+        assert!(round(&st, &o, &many.iter().map(String::as_str).collect::<Vec<_>>()).is_err());
     }
 
     #[test]
-    fn answers_post_the_next_question_and_wake_the_agent_when_the_queue_runs_out() {
+    fn posting_a_round_puts_every_question_in_the_chat_with_its_recommendation() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        let r = mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing", "questions": [q("Monthly or yearly?"), q("Free trial?")] }));
-        assert!(r.unwrap().is_ok());
-        let s = active(&st, &o.id).unwrap();
-        let q1 = s.current.clone().unwrap();
+        let o = planner(&st, "Lead");
+        let r = round(&st, &o, &["Charge monthly?", "Offer a free trial?"]).unwrap();
+        assert!(r.contains("Round 1 posted") && r.contains("End your turn"), "{r}");
         let msgs = st.db.list_messages(&o.id, 50, None).unwrap();
-        let question = msgs.iter().find(|m| m.meta["grill"]["role"] == "question").unwrap();
-        assert_eq!((question.role.as_str(), question.content.as_str()), ("assistant", "Monthly or yearly?"));
-        assert_eq!((question.meta["grill"]["index"].clone(), question.meta["grill"]["total"].clone()), (json!(1), json!(2)));
-
-        // Untagged text answers the question on screen; the next one follows right away.
-        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "Yearly", None, json!({})).unwrap() else { panic!() };
-        // The next question is up already; the agent revises the queue in the background, on the cheaper model.
-        let wake = wake.unwrap();
-        assert_eq!(wake.trigger, "grill_revise");
-        assert!(wake.prompt.contains("Yearly") && wake.prompt.contains("Free trial?"));
-        let s = active(&st, &o.id).unwrap();
-        assert_ne!(s.current.as_deref(), Some(q1.as_str()));
-        assert_eq!(s.questions[0].answer.as_deref(), Some("Yearly"));
-
-        // An answer to a closed question, or to a session that ended, is refused with a code the app can show.
-        let late = json!({ "role": "answer", "session_id": s.id, "question_id": q1 });
-        assert_eq!(on_user_message(&st, &o, "Monthly", Some(&late), json!({})).err().map(|e| (e.0, e.1)), Some((StatusCode::CONFLICT, "question_closed".into())));
-
-        let q2 = json!({ "role": "answer", "session_id": s.id, "question_id": s.current });
-        let Routed::Handled { wake, message } = on_user_message(&st, &o, "No", Some(&q2), json!({ "client_id": "c1" })).unwrap() else { panic!() };
-        assert_eq!(message.unwrap().meta["client_id"], "c1");
-        let wake = wake.expect("the agent is woken when the queue runs out");
-        assert_eq!(wake.trigger, "grill");
-        assert!(wake.prompt.contains("Yearly") && wake.prompt.contains("No"));
-
-        assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "Yearly, no trial." })).unwrap().is_ok());
-        assert!(active(&st, &o.id).is_none());
-        assert_eq!(on_user_message(&st, &o, "x", Some(&q2), json!({})).err().map(|e| e.1), Some("grill_closed".into()));
-        // With no session, plain text is ordinary chat again.
-        assert!(matches!(on_user_message(&st, &o, "hello", None, json!({})).unwrap(), Routed::Normal(_)));
+        let posted: Vec<_> = msgs.iter().filter(|m| m.meta["grill"]["role"] == "round").collect();
+        assert_eq!(posted.len(), 1, "one message per round");
+        let m = posted[0];
+        assert_eq!((m.role.as_str(), m.meta["grill"]["round"].clone()), ("assistant", json!(1)));
+        assert!(m.content.contains("Charge monthly?") && m.content.contains("_Recommendation:_ rec for Offer a free trial?"), "{}", m.content);
+        let qs = m.meta["grill"]["questions"].as_array().unwrap();
+        assert_eq!((qs.len(), qs[1]["recommendation"].clone()), (2, json!("rec for Offer a free trial?")));
+        let v = view(&active(&st, &o.id).unwrap());
+        assert_eq!((v["state"].clone(), v["round"].clone(), v["total"].clone(), v["answered"].clone(), v["waiting"].clone()), (json!("active"), json!(1), json!(2), json!(0), json!(false)));
+        assert_eq!(v["language"], json!("en"));
+        let rows: Vec<String> = msgs.iter().filter(|m| m.kind == "notice").map(|m| m.content.clone()).collect();
+        assert_eq!(rows, ["Grill started: Pricing"]);
+        // A second round can't go up while the user is still answering the first.
+        assert!(round(&st, &o, &["More?"]).unwrap_err().contains("Round 1 is still waiting"));
     }
 
     #[test]
-    fn repeated_follow_ups_are_dropped() {
+    fn answers_are_held_without_waking_the_agent_and_sending_wakes_it_once_with_all_of_them() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("Monthly or yearly?"), q("B?")] })).unwrap().unwrap();
-        on_user_message(&st, &o, "yearly", None, json!({})).ok().unwrap();
-        assert!(mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("**Monthly or yearly?**")] })).unwrap().is_err());
-        mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("monthly or yearly"), q("New one?")] })).unwrap().unwrap();
-        assert_eq!(total(&active(&st, &o.id).unwrap()), 3);
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?", "Offer a free trial?", "Show prices in euros?"]).unwrap();
+        let ids = qids(&st, &o);
+        let before = st.db.list_messages(&o.id, 50, None).unwrap().len();
+
+        // "yes" accepts the recommendation; other text is the answer; either can change before sending.
+        let Routed::Handled { message, wake } = answer(&st, &o, &ids[0], "Yes") else { panic!() };
+        assert!(message.is_none() && wake.is_none(), "an answer doesn't run the agent");
+        let Routed::Handled { wake, .. } = answer(&st, &o, &ids[1], "Only 7 days") else { panic!() };
+        assert!(wake.is_none());
+        answer(&st, &o, &ids[1], "Only 14 days");
+        let s = active(&st, &o.id).unwrap();
+        let qs = &s.rounds[0].questions;
+        assert_eq!((qs[0].state.as_str(), qs[0].accepted, qs[0].answer.as_deref()), ("answered", true, Some("rec for Charge monthly?")));
+        assert_eq!((qs[1].accepted, qs[1].answer.as_deref()), (false, Some("Only 14 days")));
+        assert_eq!(view(&s)["answered"], json!(2));
+        assert_eq!(st.db.list_messages(&o.id, 50, None).unwrap().len(), before, "answers are held on the session, not posted");
+
+        // Sending wakes the agent once, with every answer of the round; the unanswered one is carried.
+        let wake = send(&st, &o).expect("sending wakes the agent");
+        assert!(wake.contains("the user sent round 1") && wake.contains("accepted the recommendation") && wake.contains("\"Only 14 days\"") && wake.contains("no answer"), "{wake}");
+        assert!(wake.contains("grill_round") && wake.contains("grill_end"));
+        let s = active(&st, &o.id).unwrap();
+        assert_eq!(s.rounds[0].questions[2].state, "carried");
+        assert_eq!(view(&s)["waiting"], json!(true));
+        let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert_eq!(sent.role, "user");
+        assert!(sent.content.contains("1. Yes (rec for Charge monthly?)") && sent.content.contains("2. Only 14 days") && sent.content.contains("3. (no answer)"), "{}", sent.content);
+
+        // The round is closed: answers and a second send are refused.
+        let late = json!({ "role": "answer", "session_id": s.id, "question_id": ids[0] });
+        assert_eq!(on_user_message(&st, &o, "No", Some(&late), json!({})).err().map(|e| (e.0, e.1)), Some((StatusCode::CONFLICT, "question_closed".into())));
+        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "send", None, None).err().map(|e| e.1), Some("round_closed".into()));
+
+        // The next round appears in the chat, and its answers are new.
+        assert!(round(&st, &o, &["Annual discount of 20%?"]).unwrap().contains("Round 2"));
+        let s = active(&st, &o.id).unwrap();
+        assert_eq!((view(&s)["round"].clone(), view(&s)["waiting"].clone(), view(&s)["answered"].clone()), (json!(2), json!(false), json!(0)));
+        assert_eq!(st.db.list_messages(&o.id, 50, None).unwrap().iter().filter(|m| m.meta["grill"]["role"] == "round").count(), 2);
+    }
+
+    fn rows(st: &AppState, a: &Agent) -> Vec<String> {
+        st.db.list_messages(&a.id, 100, None).unwrap().into_iter().filter(|m| m.kind == "notice").map(|m| m.content).collect()
     }
 
     #[test]
-    fn follow_ups_can_jump_the_queue_and_restart_an_empty_one() {
+    fn typed_text_is_chat_not_an_answer_and_typed_commands_work() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
-        mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("A2?")], "position": "next" })).unwrap().unwrap();
-        on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
-        assert_eq!(current(&active(&st, &o.id).unwrap()).unwrap().text, "A2?");
-        on_user_message(&st, &o, "a2", None, json!({})).ok().unwrap();
-        on_user_message(&st, &o, "b", None, json!({})).ok().unwrap();
-        assert!(active(&st, &o.id).unwrap().current.is_none());
-        mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("C?")] })).unwrap().unwrap();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?", "C?"]).unwrap();
+        let qs = |st: &AppState| active(st, &o.id).unwrap().rounds[0].questions.clone();
+
+        // A side remark (or a bare "yes") in the composer goes to the agent as chat; no card changes unseen.
+        for text in ["wait, what does A mean?", "sim", "answer: skip"] {
+            assert!(matches!(on_user_message(&st, &o, text, None, json!({})).unwrap(), Routed::Normal(_)), "{text:?}");
+        }
+        assert!(qs(&st).iter().all(|q| q.state == "open"));
+        // "I don't know" leaves the first open question to the agent, and says so in the chat.
+        let Routed::Handled { message, wake } = on_user_message(&st, &o, "I don't know", None, json!({})).unwrap() else { panic!() };
+        assert_eq!((message.unwrap().meta["grill"]["command"].clone(), wake), (json!("decide"), None));
+        assert_eq!((qs(&st)[0].state.as_str(), qs(&st)[0].answer.as_deref()), ("decided", Some("rec for A?")));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Question 1 left to the agent: rec for A?");
+        // Skip, back and repeat only mean something by voice: the chat says so and the round is untouched.
+        for text in ["skip", "go back", "repeat"] {
+            let Routed::Handled { message, wake } = on_user_message(&st, &o, text, None, json!({})).unwrap() else { panic!() };
+            assert!(message.is_some() && wake.is_none());
+            assert!(rows(&st, &o).last().unwrap().starts_with("Skip, back and repeat step through questions by voice"), "{text:?}");
+        }
+        assert_eq!(qs(&st).iter().filter(|q| q.state == "open").count(), 2);
+        // "send it" sends the round.
+        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "send it", None, json!({})).unwrap() else { panic!() };
+        assert!(wake.unwrap().contains("left it to you"));
+        // Tagged answers still need their question.
         let s = active(&st, &o.id).unwrap();
-        assert_eq!((current(&s).unwrap().text.as_str(), current(&s).unwrap().index), ("C?", Some(4)));
+        assert_eq!(on_user_message(&st, &o, "x", Some(&json!({ "role": "answer", "session_id": s.id })), json!({})).err().map(|e| e.0), Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn discuss_answers_reach_the_agent_as_comments_not_decisions() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?", "Offer a trial?"]).unwrap();
+        let ids = qids(&st, &o);
+        let s = active(&st, &o.id).unwrap();
+        let tag = json!({ "role": "answer", "session_id": s.id, "question_id": ids[0], "discuss": true });
+        // Even "yes" is a comment when the user chose to discuss.
+        on_user_message(&st, &o, "yes, but what about teams?", Some(&tag), json!({})).unwrap();
+        let q = &active(&st, &o.id).unwrap().rounds[0].questions[0];
+        assert_eq!((q.state.as_str(), q.accepted, q.answer.as_deref()), ("discuss", false, Some("yes, but what about teams?")));
+        assert_eq!(view(&active(&st, &o.id).unwrap())["answered"], json!(1));
+        // A plain answer afterwards turns it back into a decision.
+        answer(&st, &o, &ids[1], "No trial");
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("wants to discuss first: \"yes, but what about teams?\"") && wake.contains("ask again, split into smaller questions"), "{wake}");
+        let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(sent.content.contains("1. Let's discuss: yes, but what about teams?"), "{}", sent.content);
+        // Discussed questions are the agent's to ask again: Loft doesn't carry them.
+        round(&st, &o, &["Per-seat pricing for teams?"]).unwrap();
+        let texts: Vec<String> = active(&st, &o.id).unwrap().rounds[1].questions.iter().map(|q| q.text.clone()).collect();
+        assert_eq!(texts, ["Per-seat pricing for teams?"]);
+    }
+
+    #[test]
+    fn a_partial_send_carries_open_questions_into_the_next_round_unchanged() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?", "C?"]).unwrap();
+        let ids = qids(&st, &o);
+        answer(&st, &o, &ids[0], "yes");
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("Loft asks it again in the next round") && wake.contains("don't ask them again"), "{wake}");
+
+        let r = round(&st, &o, &["D?"]).unwrap();
+        assert!(r.contains("2 carried over unanswered"), "{r}");
+        let s = active(&st, &o.id).unwrap();
+        let qs = &s.rounds[1].questions;
+        let got: Vec<(&str, &str, &str, Option<u32>)> = qs.iter().map(|q| (q.text.as_str(), q.recommendation.as_str(), q.state.as_str(), q.from_round)).collect();
+        assert_eq!(got, [("B?", "rec for B?", "open", Some(1)), ("C?", "rec for C?", "open", Some(1)), ("D?", "rec for D?", "open", None)]);
+        assert!(qs.iter().all(|q| !ids.contains(&q.id)), "carried questions get new ids in the new round");
+        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.meta["grill"]["role"] == "round").last().unwrap();
+        assert_eq!(posted.meta["grill"]["questions"][0]["from_round"], json!(1));
+        assert!(posted.content.contains("1. B?") && posted.content.contains("3. D?"), "{}", posted.content);
+
+        // Carried again, they keep the round they were first asked in; the agent may drop one, or post only carried ones.
+        send(&st, &o);
+        let c = active(&st, &o.id).unwrap().rounds[1].questions[1].id.clone();
+        mcp_call(&st, &o, "grill_round", &json!({ "questions": [], "drop": [c] })).unwrap().unwrap();
+        let got: Vec<(String, Option<u32>)> = active(&st, &o.id).unwrap().rounds[2].questions.iter().map(|q| (q.text.clone(), q.from_round)).collect();
+        assert_eq!(got, [("B?".to_string(), Some(1)), ("D?".to_string(), Some(2))]);
+        // The round limit counts carried questions.
+        send(&st, &o);
+        let many: Vec<String> = (0..MAX_ROUND - 1).map(|i| format!("Q{i}?")).collect();
+        let e = round(&st, &o, &many.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_err();
+        assert!(e.contains("2 carry over unanswered: post at most 10 new ones"), "{e}");
+    }
+
+    #[test]
+    fn decide_for_me_records_the_recommendation_and_shows_it_in_chat() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "Preços", "language": "pt", "questions": [q("Cobrar por mês?"), q("Oferecer teste grátis?")] })).unwrap().unwrap();
+        let ids = qids(&st, &o);
+        let mut s = active(&st, &o.id).unwrap();
+        // The card's button names its question.
+        assert!(apply_command(&st, &mut s, "decide", Some(&ids[1]), None).unwrap().is_none(), "deciding doesn't run the agent");
+        let q = &active(&st, &o.id).unwrap().rounds[0].questions[1];
+        assert_eq!((q.state.as_str(), q.answer.as_deref()), ("decided", Some("rec for Oferecer teste grátis?")));
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").last().unwrap();
+        assert_eq!(row.content, "Pergunta 2 decidida pelo agente: rec for Oferecer teste grátis?");
+        assert_eq!((row.meta["grill"]["state"].clone(), row.meta["grill"]["question_id"].clone()), (json!("decided"), json!(ids[1])));
+        // Deciding it again (the voice went back to it) succeeds and leaves it as it was.
+        let notices = |st: &AppState| st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").count();
+        let (before, at) = (notices(&st), q.answered_at.clone());
+        assert!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some(&ids[1]), None).unwrap().is_none());
+        assert_eq!((notices(&st), active(&st, &o.id).unwrap().rounds[0].questions[1].answered_at.clone()), (before, at));
+        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some("no-such-question"), None).err().map(|e| (e.0, e.1)), Some((StatusCode::CONFLICT, "question_closed".into())));
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("left it to you: your recommendation is the decision"), "{wake}");
+        let sent = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(sent.content.contains("2. Você decide (rec for Oferecer teste grátis?)"), "{}", sent.content);
+        assert_eq!(apply_command(&st, &mut active(&st, &o.id).unwrap(), "decide", Some(&ids[0]), None).err().map(|e| e.1), Some("round_closed".into()));
     }
 
     #[test]
     fn start_request_prepares_a_session_and_a_new_start_supersedes_the_old_one() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
+        let o = planner(&st, "Lead");
         let start = json!({ "role": "start_request" });
         let Routed::Handled { wake, .. } = on_user_message(&st, &o, "Grill me on pricing", Some(&start), json!({})).unwrap() else { panic!() };
-        assert!(wake.unwrap().prompt.contains("grill_start"));
+        let wake = wake.unwrap();
+        assert!(wake.contains("grill_round") && wake.contains("sub-agents"), "{wake}");
         let prep = active(&st, &o.id).unwrap();
-        assert_eq!((prep.status.as_str(), view(&prep)["total"].clone()), ("preparing", Value::Null));
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing", "questions": [q("A?")] })).unwrap().unwrap();
-        assert_eq!(active(&st, &o.id).unwrap().id, prep.id, "grill_start fills the prepared session");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "Other", "questions": [q("B?")] })).unwrap().unwrap();
+        assert_eq!((prep.status.as_str(), view(&prep)["round"].clone()), ("preparing", Value::Null));
+        round(&st, &o, &["A?"]).unwrap();
+        assert_eq!(active(&st, &o.id).unwrap().id, prep.id, "the first round fills the prepared session");
+        // Typed while a round is open, a start request replaces the grill instead of answering it.
+        let Routed::Handled { message, .. } = on_user_message(&st, &o, "Grill me about onboarding", None, json!({})).unwrap() else { panic!() };
+        assert_eq!(message.unwrap().meta["grill"]["role"], json!("start_request"));
         let old = st.db.get_grill(&prep.id).unwrap().unwrap();
         assert_eq!((old.status.as_str(), old.end_reason.as_deref()), ("ended", Some("superseded")));
-        // A helper without grill mode treats the request as plain chat.
-        assert!(matches!(on_user_message(&st, &agent(&st, "Helper"), "Grill me", Some(&start), json!({})).unwrap(), Routed::Normal(_)));
+        assert!(old.rounds[0].questions[0].answer.is_none());
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
     }
 
     #[test]
-    fn a_typed_start_request_replaces_the_open_grill_instead_of_answering_it() {
-        for paused in [false, true] {
-            let st = state();
-            let o = agent(&st, "Orchestrator");
-            mcp_call(&st, &o, "grill_start", &json!({ "topic": "Settings screen", "questions": [q("Who uses it?"), q("B?")] })).unwrap().unwrap();
-            let old = active(&st, &o.id).unwrap().id;
-            if paused {
-                on_user_message(&st, &o, "pause", None, json!({})).unwrap();
-                assert_eq!(active(&st, &o.id).unwrap().status, "paused");
-            }
-            let Routed::Handled { message, wake } = on_user_message(&st, &o, "Grill me about the pricing for a small todo app", None, json!({})).unwrap() else { panic!() };
-            let old = st.db.get_grill(&old).unwrap().unwrap();
-            assert_eq!((old.status.as_str(), old.end_reason.as_deref()), ("ended", Some("superseded")), "paused: {paused}");
-            assert!(old.questions.iter().all(|q| q.answer.is_none()), "the request was recorded as an answer");
-            let new = active(&st, &o.id).unwrap();
-            assert_eq!(new.status, "preparing");
-            assert_eq!(message.unwrap().meta["grill"]["role"], json!("start_request"));
-            assert!(wake.unwrap().prompt.contains("grill_start"));
-            let rows: Vec<_> = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().map(|m| m.content).collect();
-            assert!(rows.iter().any(|c| c == "Grill ended: a new one was requested"), "{rows:?}");
-        }
-    }
-
-    #[test]
-    fn typed_commands_skip_decide_and_go_back() {
+    fn pause_resume_and_stop() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?"), q("C?"), q("D?")] })).unwrap().unwrap();
-        let qs = |st: &AppState| active(st, &o.id).unwrap();
-
-        // "pula" skips A and asks B; the user's message is kept, tagged as a command.
-        let Routed::Handled { message, wake } = on_user_message(&st, &o, "Pula essa", None, json!({})).unwrap() else { panic!() };
-        assert_eq!(message.unwrap().meta["grill"]["command"], "skip");
-        assert!(wake.is_none());
-        assert_eq!((qs(&st).questions[0].status.as_str(), current(&qs(&st)).unwrap().text.as_str()), ("skipped", "B?"));
-        let rows = st.db.list_messages(&o.id, 50, None).unwrap();
-        let row = rows.iter().rev().find(|m| m.meta["grill"]["role"] == "status").unwrap();
-        assert_eq!(row.content, "Skipped question 1");
-        assert!(row.meta["grill"]["tagged_message_id"].is_i64(), "lets the app offer Undo");
-
-        // "I don't know" leaves B to the agent, which is woken to decide while C goes up.
-        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "I don't know", None, json!({})).unwrap() else { panic!() };
-        let wake = wake.unwrap();
-        assert_eq!(wake.trigger, "grill");
-        assert!(wake.prompt.contains("grill_record") && wake.prompt.contains("B?"));
-        let b = qs(&st).questions[1].clone();
-        assert_eq!(b.status, "delegated");
-        mcp_call(&st, &o, "grill_record", &json!({ "question_id": b.id, "answer": "Go with yearly" })).unwrap().unwrap();
-        assert_eq!(qs(&st).questions[1].source.as_deref(), Some("agent"));
-
-        // An answer, then "go back" re-asks it; the question that was on screen comes next again.
-        on_user_message(&st, &o, "c answer", None, json!({})).ok().unwrap();
-        assert_eq!(current(&qs(&st)).unwrap().text, "D?");
-        on_user_message(&st, &o, "go back", None, json!({})).ok().unwrap();
-        let s = qs(&st);
-        assert_eq!((current(&s).unwrap().text.as_str(), current(&s).unwrap().index), ("C?", Some(3)));
-        on_user_message(&st, &o, "c, better answer", None, json!({})).ok().unwrap();
-        let s = qs(&st);
-        assert_eq!(s.questions.iter().find(|x| x.text == "C?").unwrap().answer.as_deref(), Some("c, better answer"));
-        assert_eq!((current(&s).unwrap().text.as_str(), current(&s).unwrap().index), ("D?", Some(4)));
-    }
-
-    #[test]
-    fn pause_resume_and_long_text_is_an_answer() {
-        let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
-        on_user_message(&st, &o, "hold on", None, json!({})).ok().unwrap();
-        assert_eq!(active(&st, &o.id).unwrap().status, "paused");
-        // Any answer resumes, and it lands on the paused question.
-        on_user_message(&st, &o, "Skip the database part and use Postgres", None, json!({})).ok().unwrap();
-        let s = active(&st, &o.id).unwrap();
-        assert_eq!((s.status.as_str(), s.questions[0].answer.as_deref()), ("active", Some("Skip the database part and use Postgres")));
-        // Tagged answers from the app are never re-read as commands.
-        let tag = json!({ "role": "answer", "session_id": s.id, "question_id": s.current });
-        on_user_message(&st, &o, "stop", Some(&tag), json!({})).ok().unwrap();
-        assert_eq!(active(&st, &o.id).unwrap().questions[1].answer.as_deref(), Some("stop"));
-    }
-
-    #[test]
-    fn stop_ends_at_once_and_the_agent_still_writes_the_summary() {
-        let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?"]).unwrap();
         let id = active(&st, &o.id).unwrap().id;
+        on_user_message(&st, &o, "hold on", None, json!({})).unwrap();
+        assert_eq!(active(&st, &o.id).unwrap().status, "paused");
+        // A second pause adds nothing; the button resumes, and so does an answer.
+        apply_command(&st, &mut active(&st, &o.id).unwrap(), "resume", None, None).unwrap();
+        apply_command(&st, &mut active(&st, &o.id).unwrap(), "resume", None, None).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
+        answer(&st, &o, &qids(&st, &o)[0], "Postgres");
+        assert_eq!(active(&st, &o.id).unwrap().status, "active");
+        assert_eq!(rows(&st, &o), ["Grill started: Pricing", "Paused", "Resumed", "Paused", "Resumed"]);
+        // Tagged answers from the app are never re-read as commands.
+        answer(&st, &o, &qids(&st, &o)[1], "stop");
+        assert_eq!(active(&st, &o.id).unwrap().rounds[0].questions[1].answer.as_deref(), Some("stop"));
         let Routed::Handled { wake, .. } = on_user_message(&st, &o, "That's enough", None, json!({})).unwrap() else { panic!() };
-        assert!(wake.unwrap().prompt.contains("grill_end"));
+        assert!(wake.unwrap().contains("grill_end"));
         assert!(active(&st, &o.id).is_none());
-        let s = st.db.get_grill(&id).unwrap().unwrap();
-        assert_eq!(s.end_reason.as_deref(), Some("stopped"));
-        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Nothing decided." })).unwrap().unwrap();
+        assert_eq!(st.db.get_grill(&id).unwrap().unwrap().end_reason.as_deref(), Some("stopped"));
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Postgres." })).unwrap().unwrap();
         assert!(st.db.get_grill(&id).unwrap().unwrap().summarized);
         assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "again" })).unwrap().is_err(), "only once");
     }
 
     #[test]
-    fn natural_stop_wordings_end_the_grill_instead_of_answering() {
-        for text in ["stop grill session", "Can we end the interview now?", "encerra a sessão do grill"] {
-            let st = state();
-            let o = agent(&st, "Orchestrator");
-            mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
-            let id = active(&st, &o.id).unwrap().id;
-            on_user_message(&st, &o, text, None, json!({})).unwrap();
-            let s = st.db.get_grill(&id).unwrap().unwrap();
-            assert_eq!((s.status.as_str(), s.end_reason.as_deref()), ("ended", Some("stopped")), "{text:?}");
-            assert!(s.questions.iter().all(|q| q.answer.is_none()), "{text:?} was recorded as an answer");
-        }
-    }
-
-    #[test]
-    fn undo_turns_a_misread_command_back_into_the_answer() {
+    fn sending_or_deciding_while_paused_resumes_with_a_row() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("What comes after design?"), q("B?")] })).unwrap().unwrap();
-        let Routed::Handled { message, .. } = on_user_message(&st, &o, "next", None, json!({})).unwrap() else { panic!() };
-        let mid = message.unwrap().id;
-        let mut s = active(&st, &o.id).unwrap();
-        assert_eq!(s.questions[0].status, "skipped");
-        assert!(undo_command(&st, &mut s, mid + 1).is_err(), "only the matched message can be undone");
-        let mut s = active(&st, &o.id).unwrap();
-        undo_command(&st, &mut s, mid).unwrap();
-        let s = active(&st, &o.id).unwrap();
-        let posts = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.content == "B?").count();
-        assert_eq!(posts, 1, "B is already on screen, so it isn't posted again");
-        assert!(undo_command(&st, &mut active(&st, &o.id).unwrap(), mid).is_err(), "only once");
-        assert_eq!((s.questions[0].status.as_str(), s.questions[0].answer.as_deref()), ("answered", Some("next")));
-        assert_eq!(current(&s).unwrap().text, "B?");
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?"]).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
+        on_user_message(&st, &o, "decide for me", None, json!({})).unwrap();
+        on_user_message(&st, &o, "pause", None, json!({})).unwrap();
+        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "send", None, json!({})).unwrap() else { panic!() };
+        assert!(wake.is_some());
+        assert_eq!(active(&st, &o.id).unwrap().status, "active");
+        assert_eq!(rows(&st, &o), ["Grill started: Pricing", "Paused", "Resumed", "Question 1 left to the agent: rec for A?", "Paused", "Resumed"]);
     }
 
     #[test]
@@ -1307,31 +1559,22 @@ mod tests {
         assert_eq!(guess_lang("Me sabatina sobre o nome do próximo recurso. O que é o recurso? Quem vai usar?"), "pt");
         assert_eq!(guess_lang("Grill me on pricing. Who is the main buyer? What should it cost?"), "en");
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "Nome do recurso", "questions": [q("Qual é o nome que você prefere?")] })).unwrap().unwrap();
+        let o = planner(&st, "Lead");
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "Nome do recurso", "questions": [q("Qual é o nome que você prefere?")] })).unwrap().unwrap();
         on_user_message(&st, &o, "pausa", None, json!({})).ok().unwrap();
         let rows: Vec<String> = st.db.list_messages(&o.id, 20, None).unwrap().into_iter().filter(|m| m.kind == "notice").map(|m| m.content).collect();
         assert_eq!(rows, ["Entrevista iniciada: Nome do recurso", "Pausada"]);
-    }
-
-    #[test]
-    fn commands_need_a_question_on_screen() {
-        let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?")] })).unwrap().unwrap();
-        let mut s = active(&st, &o.id).unwrap();
-        assert_eq!(apply_command(&st, &mut s, "back", None).err().map(|e| e.1), Some("no_previous_question".into()));
-        apply_command(&st, &mut s, "skip", None).unwrap();
-        assert_eq!(apply_command(&st, &mut s, "skip", None).err().map(|e| e.1), Some("question_closed".into()));
-        assert_eq!(apply_command(&st, &mut s, "launch", None).err().map(|e| e.0), Some(StatusCode::BAD_REQUEST));
+        let posted = st.db.list_messages(&o.id, 20, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "round").unwrap();
+        assert!(posted.content.starts_with("**Rodada 1**") && posted.content.contains("_Recomendação:_"), "{}", posted.content);
+        assert_eq!(view(&active(&st, &o.id).unwrap())["language"], json!("pt"), "the app reads its phrases in it");
     }
 
     #[test]
     fn idle_grills_pause_then_end_and_still_get_a_summary() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?"), q("B?")] })).unwrap().unwrap();
-        on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?", "B?"]).unwrap();
+        answer(&st, &o, &qids(&st, &o)[0], "a");
         let now = chrono::Utc::now();
         assert!(sweep(&st, now + chrono::Duration::minutes(29)).is_empty());
         assert_eq!(active(&st, &o.id).unwrap().status, "active");
@@ -1349,34 +1592,164 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_cannot_end_while_a_question_waits() {
+    fn the_agent_cannot_end_while_a_round_waits() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "T", "questions": [q("A?")] })).unwrap().unwrap();
-        on_user_message(&st, &o, "a", None, json!({})).ok().unwrap();
-        // A revision run adds a follow-up, which goes on screen right away...
-        mcp_call(&st, &o, "grill_ask", &json!({ "questions": [q("A2?")] })).unwrap().unwrap();
-        // ...while the run woken for the empty queue tries to wrap up.
-        assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "x" })).unwrap().unwrap_err().contains("on screen"));
-        on_user_message(&st, &o, "a2", None, json!({})).ok().unwrap();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "x" })).unwrap().unwrap_err().contains("waiting for the user"));
+        send(&st, &o);
         assert!(mcp_call(&st, &o, "grill_end", &json!({ "summary": "x" })).unwrap().is_ok());
     }
 
     #[test]
-    fn the_end_writes_a_notes_file_in_the_workspace() {
+    fn ending_without_a_repo_posts_the_summary_and_writes_a_notes_file() {
         let st = state();
-        let o = agent(&st, "Orchestrator");
-        mcp_call(&st, &o, "grill_start", &json!({ "topic": "Pricing / ../../etc", "questions": [q("Monthly or yearly?"), q("Trial?")] })).unwrap().unwrap();
-        on_user_message(&st, &o, "Yearly", None, json!({})).ok().unwrap();
-        on_user_message(&st, &o, "skip", None, json!({})).ok().unwrap();
-        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Yearly." })).unwrap().unwrap();
+        let o = planner(&st, "Lead");
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "Pricing / ../../etc", "questions": [q("Charge monthly?"), q("Offer a trial?")] })).unwrap().unwrap();
+        answer(&st, &o, &qids(&st, &o)[0], "yes");
+        send(&st, &o);
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Monthly." })).unwrap().unwrap();
         let s = st.db.list_grills(&o.id).unwrap().remove(0);
+        assert_eq!((s.status.as_str(), s.end_reason.as_deref()), ("ended", Some("done")));
         let path = s.notes_path.clone().unwrap();
         assert!(path.starts_with("notes/grill/") && path.ends_with("-pricing-etc.md"), "{path}");
         assert!(r.contains(&path));
         let text = std::fs::read_to_string(crate::agents::workspace(&st, &o.id).join(&path)).unwrap();
-        assert!(text.contains("Yearly.") && text.contains("### 1. Monthly or yearly?") && text.contains("_Skipped_"));
+        assert!(text.contains("Monthly.") && text.contains("## Round 1") && text.contains("### 1. Charge monthly?\n\nAccepted: rec for Charge monthly?") && text.contains("_Not answered_"), "{text}");
         let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
-        assert_eq!(summary.meta["grill"]["notes_path"], json!(path));
+        assert_eq!((summary.content.as_str(), summary.meta["grill"]["notes_path"].clone()), ("Monthly.", json!(path)));
+    }
+
+    #[test]
+    fn ending_in_a_project_repo_posts_the_summary_without_a_notes_file() {
+        let st = state();
+        let mut o = planner(&st, "Lead");
+        o.project = "homebase".into();
+        st.db.save_agent(&o).unwrap();
+        let repo = st.settings.boot().projects_dir.join("homebase");
+        assert!(repo.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        round(&st, &o, &["A?"]).unwrap();
+        send(&st, &o);
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        assert!(!r.contains("notes/"), "{r}");
+        assert!(st.db.list_grills(&o.id).unwrap()[0].notes_path.is_none());
+        assert!(!crate::agents::workspace(&st, &o.id).join("notes").join("grill").exists());
+    }
+
+    #[test]
+    fn the_brief_goes_with_the_first_grill_run_and_again_once_the_context_lost_it() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        let first = with_brief(&st, &o.id, "round 1".into());
+        assert!(first.starts_with("[Loft: Planning instructions for this grill.") && first.ends_with("\n\nround 1"), "{first}");
+        assert_eq!(with_brief(&st, &o.id, "round 2".into()), "round 2", "the context already has it");
+        // A compaction or a cleared session clears the mark.
+        st.db.update_agent(&o.id, |a| a.grill_briefed = false).unwrap();
+        assert!(with_brief(&st, &o.id, "round 3".into()).contains("# Planning: grilling"));
+    }
+
+    #[test]
+    fn typing_grill_me_starts_a_grill_like_the_command() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        let Routed::Handled { message, wake } = on_user_message(&st, &o, "Grill me on pricing", None, json!({})).unwrap() else { panic!() };
+        assert_eq!(message.unwrap().meta["grill"]["role"], json!("start_request"));
+        assert!(wake.unwrap().contains("grill_round"));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        // Mentioning a grill later on is ordinary chat.
+        let other = planner(&st, "Dev");
+        assert!(matches!(on_user_message(&st, &other, "We should grill the users first", None, json!({})).unwrap(), Routed::Normal(_)));
+    }
+
+    #[test]
+    fn the_planning_prompt_teaches_domain_modeling_and_the_docs_formats() {
+        let p = brief();
+        for want in [
+            "# Planning: docs",
+            "Domain modeling",
+            "concrete scenarios",
+            "**<Term>**:",
+            "_Avoid_:",
+            "hard to reverse, surprising",
+            "real trade-off",
+            "docs/adr/NNNN-<slug>.md",
+            "## Consequences",
+            "never in the project folder",
+            "`docs/<topic>`",
+            "no `CLAUDE.md`",
+            "`gh pr create`",
+            "opens no PR",
+        ] {
+            assert!(p.contains(want), "missing {want:?}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_a_grill_asks_for_the_docs_pr_first() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("docs branch") && wake.contains("`gh pr create`") && wake.contains("open no PR"), "{wake}");
+        round(&st, &o, &["B?"]).unwrap();
+        let mut s = active(&st, &o.id).unwrap();
+        let stopped = apply_command(&st, &mut s, "end", None, None).unwrap().unwrap();
+        assert!(stopped.contains("`gh pr create`") && stopped.find("docs_pr") < stopped.find("grill_end"), "{stopped}");
+    }
+
+    #[test]
+    fn ending_with_a_docs_pr_links_it_in_the_summary() {
+        let st = state();
+        let mut o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        send(&st, &o);
+        // Without a repo there is nowhere for docs to go.
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "https://github.com/me/homebase/pull/7" })).unwrap();
+        assert!(r.unwrap_err().contains("no project repo"));
+
+        o.project = "homebase".into();
+        st.db.save_agent(&o).unwrap();
+        let repo = st.settings.boot().projects_dir.join("homebase");
+        assert!(repo.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let r = mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "not a pr" })).unwrap();
+        assert!(r.unwrap_err().contains("docs_pr must look like"));
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Done.", "docs_pr": "https://github.com/me/homebase/pull/7" })).unwrap().unwrap();
+        let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
+        assert_eq!(summary.content, "Done.\n\nDocs PR: https://github.com/me/homebase/pull/7");
+        assert_eq!(summary.meta["grill"]["docs_pr"], json!("https://github.com/me/homebase/pull/7"));
+    }
+
+    #[test]
+    fn a_grill_that_resolved_nothing_ends_without_a_docs_pr() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        send(&st, &o);
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "Nothing settled." })).unwrap().unwrap();
+        let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
+        assert_eq!((summary.content.as_str(), summary.meta["grill"]["docs_pr"].clone()), ("Nothing settled.", Value::Null));
+    }
+
+    #[tokio::test]
+    async fn a_round_sent_near_the_smart_zone_limit_suggests_compact_until_the_tickets_are_out() {
+        let st = state();
+        let mut o = planner(&st, "Orchestrator");
+        round(&st, &o, &["Who pays?"]).unwrap();
+        o.context_tokens = Some(COMPACT_AT - 1);
+        st.db.save_agent(&o).unwrap();
+        assert!(!send(&st, &o).unwrap().contains("/compact"), "below the limit, no suggestion");
+
+        round(&st, &o, &["Monthly?"]).unwrap();
+        o.context_tokens = Some(COMPACT_AT + 12_000);
+        st.db.save_agent(&o).unwrap();
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("about 92k tokens") && wake.contains("suggesting they type `/compact`"), "{wake}");
+
+        // Once the tickets are published, the spec is written: no point compacting for it.
+        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into() }), vec![IssueLink { number: 5, title: "Plans".into() }]);
+        round(&st, &o, &["Annual too?"]).unwrap();
+        assert!(!send(&st, &o).unwrap().contains("/compact"));
     }
 }

@@ -338,6 +338,8 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
+- When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
+- Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
@@ -374,7 +376,7 @@ Use `mcp__loft__remember` for durable facts worth keeping: user preferences, dec
 Be concise in chat. Lead with the answer or the result. When you finish a task, say what you did and where the output lives."#,
         name = a.name,
         subagents = subagents,
-        grill = crate::grill::prompt_section(a),
+        grill = crate::grill::prompt_section(),
         title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
@@ -409,8 +411,7 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
 }
 
 /// Run the agent with `prompt` (queued behind a running run) without recording a user message.
-/// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees);
-/// "grill_revise" also runs on the cheaper `GRILL_REVISE_MODEL`.
+/// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees).
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
     start(state, agent_id, Some(prompt), trigger);
 }
@@ -423,9 +424,6 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     );
     start(state, agent_id, Some(prompt), "avatar");
 }
-
-/// Model for the background runs that revise a grill's question queue after each answer.
-pub const GRILL_REVISE_MODEL: &str = "haiku";
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors.
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
@@ -470,8 +468,8 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
     let kill = {
         let mut rt = state.rt.lock().unwrap();
         if rt.running.contains_key(agent_id) {
-            if trigger.starts_with("grill") {
-                rt.grill_queued.entry(agent_id.to_string()).or_default().push((prompt, trigger));
+            if trigger == "grill" {
+                rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
             }
@@ -490,6 +488,9 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
         let mut prompt = prompt;
         let mut trigger = trigger;
         loop {
+            if trigger == "grill" {
+                prompt = crate::grill::with_brief(&state, &agent_id, prompt);
+            }
             if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
@@ -504,11 +505,7 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                         }
                         Some((q.join("\n\n"), "user"))
                     }
-                    (_, Some(g)) if !g.is_empty() => {
-                        // Merged grill work runs on the cheaper model only if all of it is revision.
-                        let t = if g.iter().all(|(_, t)| *t == "grill_revise") { "grill_revise" } else { "grill" };
-                        Some((g.into_iter().map(|(p, _)| p).collect::<Vec<_>>().join("\n\n"), t))
-                    }
+                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill")),
                     _ => {
                         rt.running.remove(&agent_id);
                         None
@@ -686,6 +683,7 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
                 if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
                     a.session_id = None;
                     a.context_tokens = None;
+                    a.grill_briefed = false;
                 }) {
                     emit_agent(state, &a);
                 }
@@ -721,14 +719,11 @@ async fn run_process(
     kill: Arc<Notify>,
     resume: bool,
 ) -> Result<RunOutcome> {
-    let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-    let quiet = trigger.starts_with("grill") || trigger == "avatar";
+    let agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    let quiet = trigger == "grill" || trigger == "avatar";
     // Set once the run has called a grill tool: the tools post what the user sees, so any text the agent
     // writes after that (models narrate despite being told not to) would only repeat or spoil it.
     let mut grill_spoke = false;
-    if trigger == "grill_revise" {
-        agent.model = GRILL_REVISE_MODEL.into();
-    }
     std::fs::create_dir_all(workspace(state, agent_id))?;
     // Chats this agent was @-mentioned in; its reply is copied there at the end of the run.
     let mirrors = crate::mentions::take_mirrors(state, agent_id, prompt);
@@ -741,7 +736,7 @@ async fn run_process(
         a.status_text = match trigger {
             "schedule" => "Waking up…".into(),
             "compact" => "Compacting context…".into(),
-            "grill" | "grill_revise" => "Following the interview…".into(),
+            "grill" => "Following the interview…".into(),
             "avatar" => "Drawing its avatar…".into(),
             _ => "Thinking…".into(),
         };
@@ -811,7 +806,7 @@ async fn run_process(
                     let user_work = rt.queued.get(agent_id).is_some_and(|q| !q.is_empty());
                     match rt.grill_queued.get_mut(agent_id) {
                         // Only grill follow-ups are waiting: tell the agent there, rather than starting a visible run.
-                        Some(g) if !g.is_empty() && !user_work => g.insert(0, (note, "grill")),
+                        Some(g) if !g.is_empty() && !user_work => g.insert(0, note),
                         _ => rt.queued.entry(agent_id.to_string()).or_default().insert(0, note),
                     }
                 }
@@ -846,6 +841,8 @@ async fn run_process(
                         "trigger": m["trigger"], "pre_tokens": m["pre_tokens"], "post_tokens": m["post_tokens"],
                     }));
                     set_context_tokens(state, agent_id, m["post_tokens"].as_u64());
+                    // The summary may have dropped the grill instructions: the next grill run resends them.
+                    state.db.update_agent(agent_id, |a| a.grill_briefed = false)?;
                 }
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
@@ -1127,6 +1124,21 @@ mod tests {
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn every_agent_is_told_to_use_the_project_s_glossary_and_adrs() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        assert!(p.contains("`GLOSSARY.md`") && p.contains("`docs/adr/`"), "{p}");
+    }
+
+    #[test]
+    fn every_agent_assigns_the_issues_it_creates_to_the_user() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("Assign every GitHub issue you create to the user") && p.contains("unless the user explicitly says to assign no one or someone else"), "{p}");
     }
 
     #[test]

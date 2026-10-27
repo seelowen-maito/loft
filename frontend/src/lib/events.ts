@@ -13,7 +13,8 @@ export type ServerEvent =
   | { type: "grill"; session: GrillSession }
   | { type: "task"; task: Task }
   | { type: "task_deleted"; task_id: string }
-  | { type: "task_comment"; comment: TaskComment };
+  | { type: "task_comment"; comment: TaskComment }
+  | { type: "issues"; project: string };
 
 type Listener = (e: ServerEvent) => void;
 

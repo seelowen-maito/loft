@@ -10,7 +10,7 @@ final class NeedsYouTests: XCTestCase {
         let l = try fixture()
         XCTAssertEqual(l.version, 1)
         XCTAssertEqual(l.items.first?.type, "permission", "the server's order is kept")
-        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_question", "stuck", "task_failed", "pr_ready", "task_done"])
+        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "task_done"])
         let open = try XCTUnwrap(l.items.first { $0.type == "question" }?.openAction)
         XCTAssertEqual(open.target?.screen, "chat")
         XCTAssertFalse(l.items.first { $0.type == "permission" }!.canDismiss, "permissions can't be dismissed")

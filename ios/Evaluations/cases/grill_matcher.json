@@ -4,303 +4,348 @@
  "cases": [
   {
    "input": "let's move on to the next one",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "skip"
   },
   {
    "input": "can we skip this one please",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "skip"
   },
   {
    "input": "I'd rather not answer that, next",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "skip"
   },
   {
    "input": "vamos pra próxima",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "skip"
   },
   {
    "input": "pode pular essa",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "skip"
   },
   {
    "input": "go back to the previous question",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "back"
   },
   {
    "input": "wait, can we return to the last one",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "back"
   },
   {
    "input": "volta pra pergunta anterior",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "back"
   },
   {
    "input": "let's take a short break",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "pause"
   },
   {
    "input": "hold on, I need a minute",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "pause"
   },
   {
    "input": "dá uma pausa",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "pause"
   },
   {
    "input": "ok let's carry on",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "resume"
   },
   {
    "input": "I'm back, let's continue",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "resume"
   },
   {
    "input": "bora continuar",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "resume"
   },
   {
    "input": "let's stop the interview here",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "end"
   },
   {
    "input": "we're done for today",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "end"
   },
   {
    "input": "stop grill session",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "end"
   },
   {
    "input": "chega por hoje",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "end"
   },
   {
    "input": "pode encerrar a entrevista",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "end"
   },
   {
    "input": "where are we so far",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "summarize"
   },
   {
    "input": "can you recap what we covered",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "summarize"
   },
   {
    "input": "faz um resumo do que falamos",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "summarize"
   },
   {
    "input": "you pick",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "decide"
   },
   {
    "input": "whatever you think is best",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "decide"
   },
   {
    "input": "no preference, your call",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "decide"
   },
   {
    "input": "tanto faz pra mim",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "decide"
   },
   {
    "input": "decide você",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "decide"
   },
   {
    "input": "what was the question again",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "repeat"
   },
   {
    "input": "sorry can you say that again",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "repeat"
   },
   {
    "input": "não entendi a pergunta",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "repeat"
   },
   {
    "input": "yes, but only on the yearly plan",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "no, keep it for enterprise",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "only for yearly customers",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "skip the priority part and give them a faster email response",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "next quarter we can add it",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "stop offering phone support and do chat instead",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "I don't know if it scales, we should test it with ten customers first",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "go back to the old pricing where support was included",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "pause the free trial until support is ready",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "let's continue with what we have today, email only",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "end of the month is fine for launching it",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "repeat customers should get it for free",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "summarize the tickets weekly and send them to the team",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "you decide the price but include it",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "sim, mas só no anual",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "não, deixa pro enterprise",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "pula a parte do telefone e foca no chat",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "volta pro modelo antigo com suporte incluso",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "para de oferecer suporte por telefone",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "a próxima versão pode ter isso",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "definitely, it's the main reason people upgrade",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "maybe, depends on the cost",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "I think yes",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "acho que sim",
-   "context": "O plano Pro deve incluir suporte prioritário?",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
    "expected": "answer"
   },
   {
    "input": "priority support with a four hour response time",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "no idea about the cost, but customers ask for it a lot",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "whatever plan has the most users should get it",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "what if we include it only for teams",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "back in the day we had it and nobody used it",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
   },
   {
    "input": "let's break it down by plan size",
-   "context": "Should the Pro plan include priority support?",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
    "expected": "answer"
+  },
+  {
+   "input": "yes",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
+   "expected": "answer"
+  },
+  {
+   "input": "yes please",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
+   "expected": "answer"
+  },
+  {
+   "input": "yeah, sounds good",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
+   "expected": "answer"
+  },
+  {
+   "input": "sim",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
+   "expected": "answer"
+  },
+  {
+   "input": "isso, pode ser",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
+   "expected": "answer"
+  },
+  {
+   "input": "send it",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
+   "expected": "send"
+  },
+  {
+   "input": "send the round",
+   "context": "Question 2 of 3. Should the Pro plan include priority support? Recommended: Only on yearly.",
+   "expected": "send"
+  },
+  {
+   "input": "manda a rodada",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
+   "expected": "send"
+  },
+  {
+   "input": "envia as respostas",
+   "context": "Question 2 of 3. O plano Pro deve incluir suporte prioritário? Recommended: Só no anual.",
+   "expected": "send"
   }
  ]
 }

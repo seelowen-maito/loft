@@ -40,9 +40,17 @@ pub struct Agent {
     /// Subagents allowed to run at once. None is Claude Code's default; 0 turns subagents off.
     #[serde(default)]
     pub max_subagents: Option<u32>,
-    /// Grill mode (guided interviews). None is the default: on for the Orchestrator only.
+    /// The grill instructions are in its Claude session's context. Cleared when the session is replaced
+    /// or compacted, so the next grill run sends them again.
     #[serde(default)]
-    pub grill: Option<bool>,
+    pub grill_briefed: bool,
+    /// Leads its team (the agents sharing its project): at most one per project.
+    #[serde(default)]
+    pub lead: bool,
+    /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
+    /// the template it came from; agents saved before roles existed get one inferred once at startup.
+    #[serde(default)]
+    pub role: String,
     pub avatar: Avatar,
     pub status: String,
     pub status_text: String,
@@ -274,6 +282,14 @@ CREATE TABLE IF NOT EXISTS needs_you_dismissed (
     item_id TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS published_issues (
+    slug TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(slug, kind, key)
+);
 "#;
 
 fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
@@ -310,8 +326,28 @@ impl Db {
         if !has_position {
             conn.execute("ALTER TABLE agents ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
         }
+        // A grill's status as its own column, so finding the open ones is an indexed lookup instead of
+        // parsing every session. Sessions saved before it get theirs from `data`, once.
+        let has_status: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('grill_sessions') WHERE name = 'status'", [], |r| r.get(0))?;
+        if !has_status {
+            conn.execute("ALTER TABLE grill_sessions ADD COLUMN status TEXT NOT NULL DEFAULT ''", [])?;
+            conn.execute("UPDATE grill_sessions SET status = COALESCE(json_extract(data, '$.status'), '')", [])?;
+        }
+        conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
+        // Agents saved before roles existed get one from their name and title, once; the user can change it.
+        let unroled: Vec<String> = {
+            let mut st = conn.prepare("SELECT data FROM agents")?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().filter(|d| serde_json::from_str::<Value>(d).is_ok_and(|v| v.get("role").is_none())).collect()
+        };
         // Anything left "running" from a previous backend process is stale.
         let db = Db(Arc::new(Mutex::new(conn)));
+        for d in unroled {
+            if let Ok(mut a) = serde_json::from_str::<Agent>(&d) {
+                a.role = crate::planning::infer_role(&a.name, &a.title).into();
+                db.save_agent(&a)?;
+            }
+        }
         for mut a in db.list_agents()? {
             if a.status != "idle" {
                 a.status = "idle".into();
@@ -419,10 +455,19 @@ impl Db {
         Ok(out)
     }
 
+    /// An agent's newest grill session that hasn't ended.
+    pub fn active_grill(&self, agent_id: &str) -> Result<Option<crate::grill::Session>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row("SELECT data FROM grill_sessions WHERE agent_id = ?1 AND status <> 'ended' ORDER BY created_at DESC LIMIT 1", [agent_id], |r| r.get(0))
+            .optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
     /// Grill sessions that haven't ended, for the idle timeouts.
     pub fn open_grills(&self) -> Result<Vec<crate::grill::Session>> {
         let c = self.0.lock().unwrap();
-        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE json_extract(data, '$.status') <> 'ended'")?;
+        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE status <> 'ended'")?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
         for r in rows {
@@ -440,9 +485,24 @@ impl Db {
     pub fn save_grill(&self, s: &crate::grill::Session) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute(
-            "INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at],
+            "INSERT INTO grill_sessions (id, agent_id, data, created_at, status) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data, status = excluded.status",
+            params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at, s.status],
+        )?;
+        Ok(())
+    }
+
+    /// The issue Loft already published on `slug` for this kind (`spec`, …) and key, if any.
+    pub fn published_issue(&self, slug: &str, kind: &str, key: &str) -> Result<Option<i64>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT number FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn record_published_issue(&self, slug: &str, kind: &str, key: &str, number: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO published_issues (slug, kind, key, number, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![slug, kind, key, number, now()],
         )?;
         Ok(())
     }
@@ -505,14 +565,29 @@ impl Db {
         Ok(rows)
     }
 
-    /// "Needs you" item ids already considered for push (last 30 days).
-    pub fn push_seen_ids(&self) -> Result<std::collections::HashSet<String>> {
+    /// Which of these "needs you" item ids were already considered for push.
+    pub fn push_seen_among(&self, ids: &[&str]) -> Result<std::collections::HashSet<String>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let c = self.0.lock().unwrap();
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut st = c.prepare(&format!("SELECT item_id FROM push_seen WHERE item_id IN ({marks})"))?;
+        let rows = st.query_map(rusqlite::params_from_iter(ids), |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Forgets push marks older than 30 days; returns how many.
+    pub fn prune_push_seen(&self) -> Result<usize> {
         let c = self.0.lock().unwrap();
         let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-        c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?;
-        let mut st = c.prepare("SELECT item_id FROM push_seen")?;
-        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(rows.into_iter().collect())
+        Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
+    }
+
+    /// Raw access for tests elsewhere in the crate that need to set up rows directly.
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap()
     }
 
     pub fn mark_push_seen(&self, item_id: &str) -> Result<()> {
@@ -631,6 +706,29 @@ impl Db {
             meta,
             created_at,
         })
+    }
+
+    pub fn get_message(&self, agent_id: &str, id: i64) -> Result<Option<Message>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages WHERE agent_id = ?1 AND id = ?2",
+            params![agent_id, id],
+            message_from_row,
+        )
+        .optional()?)
+    }
+
+    /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or
+    /// it was already sent, so two clicks can't both send it.
+    pub fn mark_team_setup_sent(&self, agent_id: &str, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        let n = c.execute(
+            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.setup.sent_at', ?3)
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.setup') = 'object'
+               AND json_extract(meta, '$.grill.end_card.setup.sent_at') IS NULL",
+            params![agent_id, id, now()],
+        )?;
+        Ok(n == 1)
     }
 
     /// Most recent `limit` messages, returned oldest-first. `before` pages backwards.
@@ -907,6 +1005,52 @@ mod tests {
     }
 
     #[test]
+    fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
+        let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
+        let session = |id: &str, agent: &str, status: &str, at: &str| {
+            serde_json::json!({ "id": id, "agent_id": agent, "topic": id, "status": status, "created_at": at, "updated_at": at })
+        };
+        // A database from before the column: sessions only have their status in `data`.
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE grill_sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);").unwrap();
+            for (id, agent, status, at) in [("old", "a", "paused", "2026-01-01"), ("done", "a", "ended", "2026-01-02"), ("b1", "b", "active", "2026-01-01"), ("b0", "b", "ended", "2026-01-03")] {
+                c.execute("INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, agent, session(id, agent, status, at).to_string(), at]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let statuses: Vec<(String, String)> = {
+            let c = db.0.lock().unwrap();
+            let mut st = c.prepare("SELECT id, status FROM grill_sessions ORDER BY id").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+        assert_eq!(statuses, pairs(&[("b0", "ended"), ("b1", "active"), ("done", "ended"), ("old", "paused")]));
+        // The newest session that hasn't ended, even behind a newer ended one.
+        assert_eq!(db.active_grill("a").unwrap().unwrap().id, "old");
+        assert_eq!(db.active_grill("b").unwrap().unwrap().id, "b1");
+        assert!(db.active_grill("nobody").unwrap().is_none());
+        let mut open: Vec<String> = db.open_grills().unwrap().into_iter().map(|s| s.id).collect();
+        open.sort();
+        assert_eq!(open, ["b1", "old"]);
+        // Saving keeps the column in step with `data`; opening again changes nothing.
+        let mut s = db.active_grill("a").unwrap().unwrap();
+        s.status = "ended".into();
+        db.save_grill(&s).unwrap();
+        assert!(db.active_grill("a").unwrap().is_none());
+        let new: crate::grill::Session = serde_json::from_value(session("new", "a", "preparing", "2026-02-01")).unwrap();
+        db.save_grill(&new).unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.active_grill("a").unwrap().unwrap().id, "new");
+        assert_eq!(db.open_grills().unwrap().len(), 2);
+        drop(db);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    #[test]
     fn roster_order() {
         let db = Db::open(Path::new(":memory:")).unwrap();
         for id in ["a", "b", "c"] {
@@ -921,5 +1065,23 @@ mod tests {
         // New agents land at the bottom.
         db.save_agent(&agent("d")).unwrap();
         assert_eq!(ids(&db), ["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn push_marks_are_looked_up_by_id_and_pruned_after_30_days() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        for id in ["a", "b", "old"] {
+            db.mark_push_seen(id).unwrap();
+        }
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        db.0.lock().unwrap().execute("UPDATE push_seen SET seen_at = ?1 WHERE item_id = 'old'", [&old]).unwrap();
+        let among = |ids: &[&str]| { let mut v: Vec<String> = db.push_seen_among(ids).unwrap().into_iter().collect(); v.sort(); v };
+        assert_eq!(among(&["a", "c", "old"]), ["a", "old"], "only the ids asked about");
+        assert!(among(&[]).is_empty());
+        // Marking again keeps the first time seen.
+        db.mark_push_seen("a").unwrap();
+        assert_eq!(db.prune_push_seen().unwrap(), 1);
+        assert_eq!(among(&["a", "b", "old"]), ["a", "b"]);
+        assert_eq!(db.prune_push_seen().unwrap(), 0);
     }
 }

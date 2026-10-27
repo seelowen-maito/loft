@@ -12,8 +12,6 @@ struct ComposerView: View {
     @Binding var text: String
     let recipient: String
     let isOrchestrator: Bool
-    /// Replaces the usual placeholder (e.g. "Your answer…" while a grill question waits).
-    var placeholder: String?
     /// Set by the parent to start or cancel dictation (the grill's hands-free loop); reset to nil once handled.
     var control: Binding<ComposerControl?> = .constant(nil)
     /// Each new piece of dictated text, without what was typed before dictation started.
@@ -29,7 +27,8 @@ struct ComposerView: View {
     var onVoiceStop: (() -> Void)?
     /// Shows "Attach a task" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
-    let send: (String) -> Void
+    /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
+    let send: (String, Bool) -> Void
 
     private enum Phase: Equatable {
         case idle
@@ -130,7 +129,7 @@ struct ComposerView: View {
                     .accessibilityHint("The agent gets the task with your message")
                     .accessibilityIdentifier("attachTaskButton")
                 }
-                TextField(placeholder ?? (isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…"), text: $text, axis: .vertical)
+                TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
                     .padding(.horizontal, 14)
@@ -546,7 +545,7 @@ struct ComposerView: View {
         }
         VoiceLog.shared.add("sent \(VoiceLog.clip(t))")
         text = ""
-        send(t)
+        send(t, byVoice)
         if byVoice { onVoiceSent?() }
     }
 

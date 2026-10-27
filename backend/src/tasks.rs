@@ -946,7 +946,10 @@ pub(crate) mod tests {
 
     pub(crate) fn state() -> AppState {
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Boot with a temp projects folder so no test writes into the real ~/projects.
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         AppState {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
             cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents") }),
@@ -955,10 +958,14 @@ pub(crate) mod tests {
             repos: Arc::new(Default::default()),
             http: reqwest::Client::new(),
             gh_token: Arc::new(Default::default()),
+            gh_pace: Arc::new(Default::default()),
             update: Arc::new(Mutex::new(Default::default())),
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
             usage: Arc::new(Default::default()),
             system: Arc::new(Default::default()),
+            grill_locks: Arc::new(Default::default()),
+            publish_locks: Arc::new(Default::default()),
+            publish_known: Arc::new(Default::default()),
         }
     }
 

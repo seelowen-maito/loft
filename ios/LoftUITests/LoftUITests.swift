@@ -100,6 +100,7 @@ final class LoftUITests: XCTestCase {
         openQAChat(app)
         XCTAssertTrue(app.staticTexts["Direct · Idle"].appears(timeout: 5))
         XCTAssertTrue(app.textFields["composerField"].exists)
+        XCTAssertTrue(any("runDone", app).label.hasPrefix("Done in 2m 23s · "), "the last run's line, until the next run")
     }
 
     /// The Orchestrator chat: compact task rows, sending, the @ picker, the mic's long press, and no manual grill.
@@ -107,6 +108,11 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         openOrchestratorChat(app)
         XCTAssertTrue(app.staticTexts["Orchestrator · Working"].appears(timeout: 5))
+        // The run line: the time since the run's start (12 minutes ago in the fixture), then the status text.
+        let run = any("workingIndicator", app)
+        XCTAssertTrue(run.appears(timeout: 5))
+        XCTAssertTrue(run.label.hasPrefix("Working: 12m "), run.label)
+        XCTAssertTrue(run.label.hasSuffix("s · Planning the settings work"), run.label)
 
         let brief = app.buttons["Task: Renew the domain"]
         XCTAssertTrue(brief.appears(timeout: 5))
@@ -209,33 +215,99 @@ final class LoftUITests: XCTestCase {
         return app
     }
 
-    /// The interview card: a choice answers it, then Skip, Pause and Resume.
-    func testGrillCardAnswersAndQuickActions() {
-        let app = openGrillChat()
-        let current = any("grillCurrentQuestion", app)
-        XCTAssertTrue(current.appears(timeout: 5))
-        XCTAssertTrue(current.label.contains("Question 3 of 8"))
-        XCTAssertFalse(any("grillChip", app).exists, "no interview mode bar: the card is the interview")
-        XCTAssertTrue(text(containing: "Skipped question 2", app).exists)
-        // Wrapped answer chips get their own rows (they used to overlap the actions under them).
-        for id in ["grillRepeat", "grillSkip", "grillMore"] {
-            XCTAssertFalse(app.buttons["grillChoice-Only on yearly"].frame.intersects(app.buttons[id].frame), "chip overlaps \(id)")
-        }
-        // A choice fills the composer; nothing is sent until Send.
-        app.buttons["grillChoice-Only on yearly"].tap()
-        XCTAssertEqual(composerValue(app), "Only on yearly")
-        app.buttons["sendButton"].tap()
-        let next = app.descendants(matching: .any).matching(identifier: "grillCurrentQuestion")
-            .containing(NSPredicate(format: "label CONTAINS 'Question 4'")).firstMatch
-        XCTAssertTrue(next.appears(timeout: 5), "the next question follows the answer")
+    /// The end-of-planning card: issue links, the missing reviewer, and Clear context leaving the next message unsent.
+    func testEndOfPlanningCard() {
+        let app = openGrillChat(["-fixture-grill-ended"])
+        let clear = app.buttons["endCardClear"]
+        XCTAssertTrue(clear.appears(timeout: 5))
+        XCTAssertTrue(app.buttons["endCardSetup"].exists)
+        // The card is the last thing in the chat: bring it out from under the composer.
+        app.swipeUp()
+        clear.tap()
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
+        let deadline = Date().addingTimeInterval(5)
+        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
+    }
 
-        app.buttons["grillSkip"].tap()
-        XCTAssertTrue(text(containing: "Skipped question 4", app).appears(timeout: 5))
+    /// "Set up the team with loft" sends once: after the tap the card reads "Sent to loft" and can't be tapped again.
+    func testEndOfPlanningCardSendsTheTeamSetupOnce() {
+        let app = openGrillChat(["-fixture-grill-ended"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        app.swipeUp()
+        XCTAssertEqual(setup.label, "Set up the team with loft")
+        setup.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(setup.label, "Sent to loft")
+        XCTAssertFalse(setup.isEnabled)
+    }
+
+    /// A card the web already sent shows as sent on the phone, with nothing left to tap.
+    func testEndOfPlanningCardSentFromTheWeb() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-setup-sent"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        XCTAssertEqual(setup.label, "Sent to loft")
+        XCTAssertFalse(setup.isEnabled)
+    }
+
+    /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
+    /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
+    func testGrillRoundCardsAnswersAndSend() {
+        let app = openGrillChat()
+        XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
+        XCTAssertTrue(any("grillCurrentQuestion", app).exists)
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists)
+        XCTAssertTrue(text(containing: "Recommended: First-time visitors", app).exists, "an earlier round reads back with its recommendations")
+        // Wrapped answer chips get their own rows (they used to overlap the actions under them).
+        for id in ["grillRepeat", "grillSkip"] {
+            XCTAssertFalse(app.buttons["grillChoice-Both"].frame.intersects(app.buttons[id].frame), "chip overlaps \(id)")
+        }
+
+        // Accept on the second card: held, not sent.
+        app.buttons.matching(identifier: "grillAccept").element(boundBy: 1).tap()
+        XCTAssertTrue(any("grillAccepted", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
+
+        // Typed text is a chat message, as on the web: no "Answer question 1…" placeholder, nothing answered, the voice stays.
+        let field = app.textFields["composerField"]
+        XCTAssertFalse((field.placeholderValue ?? "").contains("Answer"), field.placeholderValue ?? "")
+        field.tap()
+        field.typeText("wait, what does upsell mean?")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "wait, what does upsell mean?", app).appears(timeout: 5), "sent as chat")
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists, "the voice didn't move")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists, "nothing was answered")
+
+        // A choice saved on the current card answers it; the voice moves past the accepted one to the third.
+        app.buttons["grillChoice-Both"].firstMatch.tap()
+        app.buttons.matching(identifier: "grillSaveAnswer").firstMatch.tap()
+        XCTAssertTrue(text(containing: "Question 3 of 3", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "2 of 3 answered", app).exists)
+
+        app.buttons["grillSend"].tap()
+        XCTAssertTrue(text(containing: "Answers to round 2", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Round 3", app).appears(timeout: 5), "the next round follows")
+        XCTAssertTrue(text(containing: "Still open from round 2", app).exists || text(containing: "Question 1 of 2", app).exists)
+
         app.buttons["Conversation options"].tap()
         app.buttons["Pause interview"].tap()
-        XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the waiting question shows Resume while paused")
+        XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the open round shows Resume while paused")
         app.buttons["grillResume"].tap()
-        XCTAssertTrue(app.buttons["grillSkip"].appears(timeout: 5))
+        XCTAssertTrue(app.buttons["grillResume"].disappears(timeout: 5))
+    }
+
+    /// A dictated answer (the voice walk-through) still answers the question the voice is on and moves to the next.
+    func testDictatedAnswerDuringARoundAnswersAndMovesOn() {
+        let app = openGrillChat(["-fixture-dictation", "Monthly only"])
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).appears(timeout: 5))
+        let yes = app.buttons["submitPromptYes"]
+        XCTAssertTrue(yes.appears(timeout: 5))
+        yes.tap()
+        XCTAssertTrue(text(containing: "Question 2 of 3", app).appears(timeout: 10), "on to the next question")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
     }
 
     func testUnsureSpokenCommandAsksFirst() {

@@ -24,6 +24,8 @@ pub enum Event {
     System { system: serde_json::Value },
     Grill { session: serde_json::Value },
     TaskComment { comment: serde_json::Value },
+    /// Loft published issues on a project's repo; the Issues tab refetches.
+    Issues { project: String },
     /// The "needs you" list changed: its size, how many are urgent, and the item ids.
     NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
 }
@@ -55,8 +57,8 @@ pub struct Runtime {
     pub running: HashMap<String, Arc<Notify>>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
-    /// agent id -> grill follow-ups (prompt, trigger) waiting for the current run; run quietly after user work
-    pub grill_queued: HashMap<String, Vec<(String, &'static str)>>,
+    /// agent id -> grill prompts waiting for the current run; run quietly after user work
+    pub grill_queued: HashMap<String, Vec<String>>,
     /// agent id -> wake-up for a run that has replied but waits on a Claude Code background task;
     /// new work stops the task so the queue isn't held up behind it
     pub waiting: HashMap<String, Arc<Notify>>,
@@ -81,12 +83,20 @@ pub struct AppState {
     pub repos: Arc<RepoCache>,
     pub http: reqwest::Client,
     pub gh_token: Arc<crate::github::TokenCache>,
+    /// Spaces out write requests to GitHub.
+    pub gh_pace: Arc<crate::github::Pace>,
     pub update: Arc<Mutex<crate::updater::UpdateStatus>>,
     pub settings: Arc<crate::settings::Store>,
     /// Last Claude plan usage reading.
     pub usage: Arc<crate::usage::Cache>,
     /// Latest CPU temperature reading.
     pub system: Arc<crate::system::Cache>,
+    /// Serializes writes to each agent's grill session.
+    pub grill_locks: Arc<crate::grill::Locks>,
+    /// Serializes publishing issues to each GitHub repo.
+    pub publish_locks: Arc<crate::planning::Locks>,
+    /// What publishing already looked up on GitHub: the token's login, repos whose labels exist.
+    pub publish_known: Arc<crate::planning::Known>,
 }
 
 impl AppState {

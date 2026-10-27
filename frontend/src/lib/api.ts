@@ -23,6 +23,10 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
+  /** Leads its project's team (one per project). Wears a captain hat. */
+  lead?: boolean;
+  /** Its part in the end-of-planning team check: "dev", "reviewer" or "" (neither). */
+  role?: string;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;
@@ -113,19 +117,56 @@ export type TaskPlan = {
   progress: { total: number; done: number; in_progress: number; waiting: number; failed: number; todo: number; cancelled: number; percent: number };
 };
 
-/** An interview (grill) the agent is running; `GET /agents/{id}/grill`. */
+/** One question of a grill round, with the user's answer so far. */
+export type GrillQuestion = {
+  id: string;
+  text: string;
+  speak: string;
+  kind: string;
+  options: string[];
+  /** The agent's proposed answer; "yes" accepts it. */
+  recommendation: string;
+  /** discuss: the answer is a comment, not a decision; decided: left to the agent, its recommendation stands; carried: sent unanswered. */
+  state: "open" | "answered" | "discuss" | "decided" | "carried";
+  answer: string | null;
+  /** The answer is the recommendation, accepted as-is. */
+  accepted: boolean;
+  /** Carried over unanswered: the round it was first asked in. */
+  from_round: number | null;
+};
+
+/** An interview (grill) the agent is running, in rounds; `GET /agents/{id}/grill`. */
 export type GrillSession = {
   session_id: string;
   agent_id: string;
   state: "preparing" | "active" | "paused" | "ended";
   end_reason: string | null;
   topic: string;
-  index: number | null;
+  /** The latest round's number, its size and how many of its questions have an answer. */
+  round: number | null;
   total: number | null;
-  answered: number;
-  current: { question_id: string; index: number | null } | null;
+  answered: number | null;
+  /** The latest round was sent; the agent is working on the next one. */
+  waiting: boolean;
+  questions: GrillQuestion[] | null;
   started_at: string;
   updated_at: string;
+};
+
+/** A link to an issue the planning published. */
+export type PlannedIssue = { number: number; title: string; url: string };
+
+/** The end-of-planning card on a grill's final summary (`meta.grill.end_card`). */
+export type EndCard = {
+  repo: string;
+  spec: PlannedIssue | null;
+  tickets: PlannedIssue[];
+  /** Left in the composer after Clear context, never sent by Loft. */
+  next_message: string;
+  /** Roles no agent in the project fills: "dev", "reviewer". */
+  missing_roles: string[];
+  /** The message "Set up the team with loft" sends, when roles are missing; `sent_at` once it was sent. */
+  setup: { agent_id: string; message: string; sent_at?: string } | null;
 };
 
 /** A phone registered for push (`/api/devices`). */
@@ -304,10 +345,52 @@ export type SettingsView = {
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
 export type Usage = { windows: UsageWindow[]; error: string | null };
 
-/** The Mac's hottest CPU die sensor, sampled every 30 s. Null where it can't be read. */
-export type SystemReading = { cpu_temp_c: number | null; level: "nominal" | "warm" | "hot" | null; sampled_at: string | null };
+/** The Mac's hottest CPU die sensor and memory, sampled every 30 s. Null where it can't be read. */
+export type SystemReading = {
+  cpu_temp_c: number | null;
+  level: "nominal" | "warm" | "hot" | null;
+  /** Active + wired + compressed, like Activity Monitor's "Memory Used". */
+  mem_used_bytes: number | null;
+  mem_total_bytes: number | null;
+  /** high at ≥ 80 % used, critical at ≥ 90 %. */
+  mem_level: "nominal" | "high" | "critical" | null;
+  sampled_at: string | null;
+};
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
+
+/** A GitHub issue as the Issues tab lists it. */
+export type Issue = {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  state_reason: string | null;
+  url: string;
+  author: string;
+  labels: { name: string; color: string; description: string | null }[];
+  assignees: { login: string; avatar_url: string }[];
+  comments: number;
+  created_at: string;
+  updated_at: string;
+  sub_issues: { total: number; completed: number };
+  blocked_by: number;
+  blocking: number;
+};
+
+export type IssueLink = { number: number; title: string; state: "open" | "closed"; url: string };
+
+/** One issue with its body, a spec's sub-issues and a ticket's dependencies. */
+export type IssueDetail = Issue & {
+  project: string;
+  repo: string;
+  body: string;
+  sub_issue_list: IssueLink[];
+  blocked_by_list: IssueLink[];
+  blocking_list: IssueLink[];
+};
+
+/** A project's issues. `problem`: it has no GitHub repo; `error`: GitHub turned the request down; `truncated`: more than the pages Loft reads. */
+export type ProjectIssues = { project: string; repo: string | null; problem?: string | null; error?: string; truncated?: boolean; issues: Issue[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -318,6 +401,15 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
+}
+
+/** A grill request's error as text for the user: the 409 codes the server sends when the round was sent or the
+ * interview ended elsewhere. Same list as the app's `LoftStore.grillFailure`. */
+export function grillError(e: unknown) {
+  const m = (e as Error).message;
+  if (m === "grill_closed") return "This interview has already ended.";
+  if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
+  return m;
 }
 
 export type Simulator = { udid: string; name: string; runtime: string };
@@ -342,18 +434,26 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
+  /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
+  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/issues?project=${encodeURIComponent(project)}` : "/issues"),
+  issue: (project: string, n: number) => req<IssueDetail>("GET", `/issues/${n}?project=${encodeURIComponent(project)}`),
+  /** Sends `agent` a chat message with the issue's number and link, which wakes it; it must be on the issue's repo. */
+  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/issues/${n}/send`, { project, agent }),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
   agentsSummary: () => req<AgentSummary[]>("GET", "/agents/summary"),
   createAgent: (a: Partial<Agent>) => req<Agent>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
-  updateAgent: (id: string, a: Partial<Agent>) => req<Agent>("PATCH", `/agents/${id}`, a),
+  updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
   send: (id: string, text: string, images: string[] = [], taskId?: string) =>
     req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, { text, images, ...(taskId ? { meta: { task_id: taskId } } : {}) }),
+  /** "Set up the team with loft" on an end-of-planning card: sends its setup message once. */
+  sendTeamSetup: (id: string, messageId: number) =>
+    req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
   /** Stores a pasted image for the next message; send its `file` in `send`'s images. */
   upload: async (id: string, image: Blob) => {
     const res = await fetch(`/api/agents/${id}/uploads`, { method: "POST", body: image });
@@ -389,8 +489,15 @@ export const api = {
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/tasks/${id}`),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
-  grillCommand: (sessionId: string, command: "pause" | "resume" | "end") =>
-    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, client_id: crypto.randomUUID() }),
+  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
+    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
+  /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
+  /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
+  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
+  /** Asks a Planning agent for a grill; the backend opens the session. */
+  grillStart: (agentId: string, text: string) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),

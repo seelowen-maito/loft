@@ -91,19 +91,20 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
   const [draft, setDraft] = useState<Draft>(initial);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
@@ -111,8 +112,10 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   const save = async () => {
     setSaving(true);
     setErr(null);
+    setNotice(null);
     try {
-      await api.updateAgent(agent.id, draft);
+      const saved = await api.updateAgent(agent.id, draft);
+      setNotice(saved.notice ?? null);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -123,7 +126,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   return (
     <div className="space-y-6 p-5">
       <div className="flex items-center gap-4">
-        <Sticker avatar={agent.avatar} size={88} />
+        <Sticker avatar={agent.avatar} lead={agent.lead} size={88} />
         <div className="space-y-2">
           <button className="btn" onClick={() => api.randomizeAvatar(agent.id)}>
             <Dices className="size-3.5" /> Randomize
@@ -188,6 +191,27 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
+      <Field label="Lead" hint={draft.project.trim() ? `Leads the agents in ${draft.project.trim()} and wears the captain hat. One per project: marking it here moves the mark from any other.` : "Only an agent with a project can lead: set its project first."}>
+        <label className={cx("flex items-center gap-2 text-[12.5px]", draft.project.trim() || draft.lead ? "text-fg" : "text-fg-3")}>
+          <input
+            type="checkbox"
+            checked={draft.lead}
+            disabled={!draft.project.trim() && !draft.lead}
+            onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked }))}
+            className="accent-[var(--color-accent)]"
+          />
+          Leads its team
+        </label>
+      </Field>
+
+      <Field label="Team role" hint="What it does in its project's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
+        <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
+          <option value="">None</option>
+          <option value="dev">Dev: builds the tickets</option>
+          <option value="reviewer">Reviewer: code review, QA or security</option>
+        </select>
+      </Field>
+
       <Field label="Autonomy" hint="How often it wakes up on its own to work on its standing instructions.">
         <div className="flex gap-2">
           <select
@@ -236,6 +260,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </button>
         {dirty && <button className="btn-ghost" onClick={() => setDraft(initial)}>Discard</button>}
         {err && <span className="text-[12px] text-bad">{err}</span>}
+        {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 
       <DangerZone agent={agent} onCleared={onCleared} />

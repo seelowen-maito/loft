@@ -6,8 +6,11 @@ mod db;
 mod devices;
 mod github;
 mod github_inbox;
+mod greenfield;
 mod grill;
+mod issues;
 mod needs_you;
+mod planning;
 mod guard;
 mod mcp;
 mod mentions;
@@ -65,10 +68,14 @@ async fn main() -> anyhow::Result<()> {
         repos: Arc::new(repos::RepoCache::default()),
         http: reqwest::Client::new(),
         gh_token: Arc::new(github::TokenCache::default()),
+        gh_pace: Arc::new(github::Pace::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
         settings: Arc::new(settings::Store::load(&data_dir)?),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
+        grill_locks: Arc::new(grill::Locks::default()),
+        publish_locks: Arc::new(planning::Locks::default()),
+        publish_known: Arc::new(planning::Known::default()),
     };
     setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));
@@ -92,11 +99,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/issues", get(issues::list))
+        .route("/issues/{number}", get(issues::get))
+        .route("/issues/{number}/send", post(issues::send))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
+        .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1)))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
@@ -118,7 +129,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/grill/commands", get(grill::command_catalog))
         .route("/grill/{id}", get(grill::get))
         .route("/grill/{id}/command", post(grill::command))
-        .route("/grill/{id}/undo", post(grill::undo))
         .route("/tasks", get(tasks::list).post(tasks::create_task))
         .route("/tasks/{id}", get(tasks::get).patch(tasks::update).delete(tasks::delete))
         .route("/tasks/{id}/execute", post(tasks::execute_task))

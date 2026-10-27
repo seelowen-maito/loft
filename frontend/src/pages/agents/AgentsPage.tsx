@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ChevronRight, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
+import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, groupByProject, timeAgo } from "../../lib/format";
+import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
 import { Sticker } from "../../components/Sticker";
+import { RunTimer } from "../../components/RunTimer";
 import { Chat } from "./Chat";
 import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
+import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
 const INSPECTOR_KEY = "loft:inspector-hidden";
@@ -18,14 +21,6 @@ const onWideChange = (cb: () => void) => {
   WIDE.addEventListener("change", cb);
   return () => WIDE.removeEventListener("change", cb);
 };
-
-function loadCollapsed(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
 
 export default function AgentsPage() {
   const { id: routeId } = useParams();
@@ -37,17 +32,7 @@ export default function AgentsPage() {
   const [creating, setCreating] = useState(false);
   const [grill, setGrill] = useState<GrillSession | null>(null);
   // Project groups folded away in the roster, remembered per browser.
-  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsed);
-  const toggleGroup = (project: string) =>
-    setCollapsed((c) => {
-      const next = c.includes(project) ? c.filter((p) => p !== project) : [...c, project];
-      try {
-        localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
-      } catch {
-        /* storage unavailable */
-      }
-      return next;
-    });
+  const folded = useCollapsed(COLLAPSED_KEY);
 
   // Inspector: a remembered column on wide screens, an overlay opened on demand on narrow ones.
   const wide = useSyncExternalStore(onWideChange, () => WIDE.matches);
@@ -87,8 +72,12 @@ export default function AgentsPage() {
     api.pullRequests().then(setPrs);
   }, []);
 
-  const selectedId = routeId ?? agents?.[0]?.id ?? null;
+  // `/agents` opens on the last agent viewed in this browser, or the first if it is gone.
+  const selectedId = selectedAgent(routeId, agents);
   const selected = agents?.find((a) => a.id === selectedId) ?? null;
+  useEffect(() => {
+    if (selected) saveLastAgent(selected.id);
+  }, [selected?.id]);
 
   const loadMessages = useCallback(() => {
     if (selectedId) api.messages(selectedId).then(setMessages);
@@ -124,7 +113,8 @@ export default function AgentsPage() {
             break;
           case "message":
             if (e.message.agent_id === selectedId) {
-              setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms : [...ms, e.message]));
+              // A known id is that message updated (an end-of-planning card marked sent).
+              setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms.map((m) => (m.id === e.message.id ? e.message : m)) : [...ms, e.message]));
             }
             break;
           case "pull_request":
@@ -195,26 +185,17 @@ export default function AgentsPage() {
         </div>
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
           {groups.map((g) => {
-            const open = !projects.length || !collapsed.includes(g.project);
+            const open = !projects.length || folded.isOpen(g.project);
             const groupWorking = g.agents.filter((a) => a.running).length;
             const groupPending = g.agents.reduce((n, a) => n + (pendingBy.get(a.id) ?? 0), 0);
             return (
               <div key={g.project} className="space-y-1">
                 {projects.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(g.project)}
-                    aria-expanded={open}
-                    className="flex w-full items-center gap-1.5 rounded-lg px-2.5 pb-0.5 pt-3 text-left text-fg-3 transition hover:text-fg"
-                  >
-                    <ChevronRight className={cx("size-3 shrink-0 transition-transform", open && "rotate-90")} />
-                    <span className="eyebrow truncate">{g.project || "Other"}</span>
-                    <span className="ml-auto flex items-center gap-2 font-mono text-[10.5px]">
-                      {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
-                      {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
-                      <span>{g.agents.length}</span>
-                    </span>
-                  </button>
+                  <ProjectHeader name={g.project || "Other"} open={open} onToggle={() => folded.toggle(g.project)}>
+                    {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
+                    {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
+                    <span>{g.agents.length}</span>
+                  </ProjectHeader>
                 )}
                 {open && g.agents.map((a, i) => {
                   const s = statusOf(a);
@@ -258,13 +239,14 @@ export default function AgentsPage() {
                       )}
                     >
                       <div className="relative">
-                        <Sticker avatar={a.avatar} size={40} />
+                        <Sticker avatar={a.avatar} lead={a.lead} size={40} />
                         <span className={cx("absolute -bottom-0.5 -right-0.5 size-3 rounded-full border-2 border-ink-950", s.dot)} />
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="truncate text-[13.5px]">{a.name}</span>
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
+                          {a.running && <RunTimer startedAt={a.last_run_at} className="ml-auto shrink-0 font-mono text-[10.5px] text-fg-3" />}
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10.5px] text-fg-3">
                           {a.running || a.status === "waiting" ? (

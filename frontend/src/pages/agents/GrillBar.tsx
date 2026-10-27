@@ -1,29 +1,35 @@
 import { useState } from "react";
-import { MessagesSquare, Pause, Play, Square } from "lucide-react";
-import { api, type GrillSession } from "../../lib/api";
+import { MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
+import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
 
-/** The running interview above the composer: where it is, and Pause / Resume / End (the app's buttons, same endpoint). */
+/** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint). */
 export function GrillBar({ session }: { session: GrillSession }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const paused = session.state === "paused";
 
-  const send = async (command: "pause" | "resume" | "end") => {
+  const send = async (command: "send" | "pause" | "resume" | "end") => {
     setBusy(true);
     setError(null);
     try {
       await api.grillCommand(session.session_id, command);
       setConfirming(false);
     } catch (e) {
-      setError((e as Error).message === "grill_closed" ? "This interview has already ended." : (e as Error).message);
+      setError(grillError(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const where = session.index != null && session.total ? `Question ${session.index} of ${session.total}` : `${session.answered} answered`;
+  const answered = session.answered ?? 0;
+  const total = session.total ?? 0;
+  const where =
+    session.round == null ? "Preparing the first round…"
+    : session.waiting ? `Round ${session.round} sent · the agent is preparing the next one`
+    : `Round ${session.round} · ${answered} of ${total} answered`;
+  const pct = total ? Math.round((answered / total) * 100) : 0;
 
   return (
     <>
@@ -33,10 +39,18 @@ export function GrillBar({ session }: { session: GrillSession }) {
           <div className="truncate text-[13px] text-fg">
             {paused ? "Interview paused" : "Interview"} · <span className="text-fg-2">{session.topic}</span>
           </div>
-          <div className="truncate font-mono text-[11px] text-fg-3">
-            {where} · type an answer, or “skip”, “pause”, “stop the interview”
-          </div>
+          <div className="truncate font-mono text-[11px] text-fg-3">{where}</div>
+          {session.round != null && !session.waiting && (
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]" role="progressbar" aria-valuenow={answered} aria-valuemin={0} aria-valuemax={total}>
+              <div className={cx("h-full rounded-full transition-all", paused ? "bg-warn" : "bg-accent")} style={{ width: `${pct}%` }} />
+            </div>
+          )}
         </div>
+        {session.round != null && !session.waiting && (
+          <button className="btn shrink-0" onClick={() => send("send")} disabled={busy} aria-label="Send round" title="Send your answers to the agent">
+            <Send className="size-3" /> <span className="max-md:hidden">Send round</span>
+          </button>
+        )}
         <button className="btn shrink-0" onClick={() => send(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume" : "Pause"} title={paused ? "Resume" : "Pause"}>
           {paused ? <Play className="size-3 fill-current" /> : <Pause className="size-3 fill-current" />} <span className="max-md:hidden">{paused ? "Resume" : "Pause"}</span>
         </button>
@@ -51,8 +65,7 @@ export function GrillBar({ session }: { session: GrillSession }) {
           <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-[15px] font-medium">End the interview?</h3>
             <p className="text-[13px] text-fg-2">
-              The questions stop now.{" "}
-              {session.answered === 0 ? "Nothing has been answered yet" : session.answered === 1 ? "Your answer so far is kept" : `Your ${session.answered} answers so far are kept`}, and the agent writes a summary of what was covered.
+              The rounds stop now. What you sent is kept, and the agent writes a summary of what was covered.
             </p>
             <div className="flex justify-end gap-2">
               <button className="btn-ghost" onClick={() => setConfirming(false)}>

@@ -15,10 +15,11 @@ use crate::state::AppState;
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
-fn check_kinds(kinds: &[String]) -> Result<(), ApiError> {
-    match kinds.iter().find(|k| !KINDS.contains(&k.as_str())) {
+/// The kinds under their current names, or an error naming the first unknown one.
+fn check_kinds(kinds: Vec<String>) -> Result<Vec<String>, ApiError> {
+    match kinds.iter().find(|k| !KINDS.contains(&apns::kind(k))) {
         Some(k) => Err(bad(format!("unknown kind {k}; kinds are {}", KINDS.join(", ")))),
-        None => Ok(()),
+        None => Ok(kinds.iter().map(|k| apns::kind(k).to_string()).collect()),
     }
 }
 
@@ -61,9 +62,7 @@ pub async fn register(State(state): State<AppState>, Json(b): Json<Register>) ->
     if b.platform != "ios" {
         return Err(bad("platform must be ios"));
     }
-    if let Some(k) = &b.kinds {
-        check_kinds(k)?;
-    }
+    let kinds = b.kinds.map(check_kinds).transpose()?;
     check_quiet(&b.quiet_hours)?;
     let existing = state.db.get_device(&token)?;
     let d = Device {
@@ -73,7 +72,7 @@ pub async fn register(State(state): State<AppState>, Json(b): Json<Register>) ->
         bundle_id: b.bundle_id.trim().to_string(),
         name: b.name.trim().chars().take(80).collect(),
         // A refresh without kinds or quiet hours keeps what the device chose before.
-        kinds: b.kinds.or_else(|| existing.as_ref().map(|d| d.kinds.clone())).unwrap_or_else(|| DEFAULT_KINDS.iter().map(|k| k.to_string()).collect()),
+        kinds: kinds.or_else(|| existing.as_ref().map(|d| d.kinds.clone())).unwrap_or_else(|| DEFAULT_KINDS.iter().map(|k| k.to_string()).collect()),
         quiet_hours: b.quiet_hours.or_else(|| existing.as_ref().and_then(|d| d.quiet_hours.clone())),
         created_at: existing.as_ref().map(|d| d.created_at.clone()).unwrap_or_else(now),
         last_seen_at: now(),
@@ -105,8 +104,7 @@ fn some<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<QuietHou
 pub async fn update(State(state): State<AppState>, Path(token): Path<String>, Json(b): Json<Update>) -> ApiResult<Value> {
     let mut d = state.db.get_device(&token.to_lowercase())?.ok_or_else(not_found)?;
     if let Some(k) = b.kinds {
-        check_kinds(&k)?;
-        d.kinds = k;
+        d.kinds = check_kinds(k)?;
     }
     if let Some(q) = b.quiet_hours {
         check_quiet(&q)?;
@@ -233,6 +231,10 @@ mod tests {
         let Json(d) = register(State(st.clone()), reg(&good)).await.unwrap();
         assert_eq!((d["kinds"].clone(), d["quiet_hours"]["start"].clone()), (json!(["permission"]), json!("22:00")));
         assert!(update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["everything"] })).unwrap())).await.is_err());
+        // App builds from before rounds still ask for grill_question; it's stored under the new name.
+        let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission", "grill_question"] })).unwrap())).await.unwrap();
+        assert_eq!(d["kinds"], json!(["permission", "grill_round"]));
+        let _ = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission"] })).unwrap())).await.unwrap();
         let _ = register(State(st.clone()), reg(&gone)).await.unwrap();
 
         // Not set up yet: the test push says so.

@@ -16,6 +16,8 @@ enum APIError: Error, Equatable, LocalizedError {
     /// Writes are off while disconnected, so nothing runs later by surprise.
     case offline
     case cancelled
+    /// An interview's last answer was saved, but sending its round failed (the reason's title).
+    case roundNotSent(String)
 
     var errorDescription: String? { title }
 
@@ -37,6 +39,7 @@ enum APIError: Error, Equatable, LocalizedError {
         case .unsupported(let what): "\(what) needs a newer Loft"
         case .offline: "You're offline"
         case .cancelled: "Cancelled"
+        case .roundNotSent: "Answer saved, but the round wasn't sent"
         }
     }
 
@@ -52,6 +55,7 @@ enum APIError: Error, Equatable, LocalizedError {
         case .unsupported: "Pull the latest Loft on the Mac and restart it."
         case .offline: "Reconnect to change anything. You can still browse what was last loaded."
         case .cancelled: ""
+        case .roundNotSent: "Tap Send round to try again."
         }
     }
 
@@ -60,9 +64,12 @@ enum APIError: Error, Equatable, LocalizedError {
         switch self {
         case .unreachable(let d), .decoding(let d), .invalidURL(let d): "\(title): \(d)"
         case .server(let status, let m): "HTTP \(status): \(m)"
+        case .roundNotSent(let why): "\(title): \(why)"
         default: title
         }
     }
+
+    var isRoundNotSent: Bool { if case .roundNotSent = self { true } else { false } }
 
     static func from(_ error: Error) -> APIError {
         if let e = error as? APIError { return e }

@@ -5,7 +5,8 @@ import Foundation
 /// and nothing else runs straight away; a near miss or a command at the start of a longer sentence
 /// asks first; anything else is an answer.
 enum GrillMatcher {
-    /// What a spoken command does. `repeatQuestion` stays on the phone; "next" is the server's skip.
+    /// What a spoken command does. `repeatQuestion`, skip ("next") and back stay on the phone; "yes" is an answer
+    /// (it accepts the recommendation).
     enum Intent: Hashable {
         case command(GrillCommand)
         case repeatQuestion
@@ -23,26 +24,18 @@ enum GrillMatcher {
         let confidence: Confidence
     }
 
-    /// Built in, so matching works offline and before the server's list loads. The server's list
-    /// (`GET /grill/commands`) is added on top. In priority order for ambiguous near-matches.
-    static let builtIn: [(Intent, [String])] = [
-        (.repeatQuestion, ["repeat", "repeat that", "say that again", "again", "what was the question", "come again",
-                          "repete", "repita", "de novo", "fala de novo", "qual era a pergunta", "nao entendi"]),
-        (.command(.skip), ["skip", "skip it", "skip this", "skip this one", "skip this question", "next", "next question", "pass",
-                          "pula", "pular", "pula essa", "proxima", "proxima pergunta", "passa"]),
-        (.command(.back), ["go back", "back", "previous", "previous question", "last question",
-                          "volta", "voltar", "anterior", "pergunta anterior"]),
-        (.command(.pause), ["pause", "hold on", "wait", "pause the interview",
-                           "pausa", "pausar", "espera", "peraí", "perai"]),
-        (.command(.resume), ["resume", "continue", "carry on", "keep going", "go on",
-                            "continua", "continuar", "retoma", "retomar", "segue"]),
-        (.command(.end), ["stop", "end", "end it", "end the interview", "stop the interview", "i'm finished", "im finished", "that's enough", "thats enough",
-                         "para", "parar", "chega", "encerra", "encerrar", "terminar", "acabou"]),
-        (.command(.summarize), ["summarize", "summarise", "sum up", "recap", "where are we", "summary",
-                               "resume tudo", "resumo", "resume ai", "onde estamos", "faz um resumo"]),
-        (.command(.decide), ["i don't know", "i dont know", "don't know", "dont know", "no idea", "you decide", "your call", "decide for me", "up to you", "you choose",
-                            "nao sei", "sei la", "decide voce", "voce decide", "tanto faz", "escolhe voce", "voce escolhe"]),
+    /// The intents and their keys in the phrase catalog, in priority order for ambiguous near-matches.
+    static let order: [(Intent, String)] = [
+        (.repeatQuestion, "repeat"), (.command(.send), "send"), (.command(.skip), "skip"), (.command(.back), "back"),
+        (.command(.pause), "pause"), (.command(.resume), "resume"), (.command(.end), "end"),
+        (.command(.summarize), "summarize"), (.command(.decide), "decide"),
     ]
+
+    /// The server's catalog as the app ships it (`Resources/grill_phrases.json`, a copy of `GET /grill/commands`
+    /// the backend's tests keep equal), so matching works offline and before the server's list loads.
+    static let bundled: GrillPhrases? = Bundle.main.url(forResource: "grill_phrases", withExtension: "json")
+        .flatMap { try? Data(contentsOf: $0) }
+        .flatMap { try? JSONCoding.decoder.decode(GrillPhrases.self, from: $0) }
 
     /// Words that don't change what was meant at the start or end: "um, skip please" is still skip.
     /// Only trimmed at the ends: "um" is a real word in "faz um resumo".
@@ -51,13 +44,12 @@ enum GrillMatcher {
 
     /// The intent of `text`, or nil when it's an answer.
     static func match(_ text: String, phrases: GrillPhrases? = nil) -> Match? {
-        let words = VoiceText.normalize(text).split(separator: " ").map(String.init)
+        let words = folded(text).split(separator: " ").map(String.init)
         guard !words.isEmpty else { return nil }
-        let fill = fillers.union((phrases?.fillers ?? []).map(VoiceText.normalize))
+        let (table, fill) = tables(phrases)
         let core = Array(words.drop { fill.contains($0) }.reversed().drop { fill.contains($0) }.reversed())
         guard !core.isEmpty else { return nil }
-        let maxWords = phrases?.maxWords ?? 4
-        let table = merged(phrases)
+        let maxWords = phrases?.maxWords ?? bundled?.maxWords ?? 6
 
         // 1. The whole (short) utterance is a command.
         if core.count <= maxWords {
@@ -98,19 +90,34 @@ enum GrillMatcher {
 
     private struct Entry { let intent: Intent; let phrases: Set<String> }
 
-    private static func merged(_ server: GrillPhrases?) -> [Entry] {
-        builtIn.map { intent, list in
-            var all = Set(list.map(VoiceText.normalize))
-            if let server {
-                let key: String
-                switch intent {
-                case .command(let c): key = c.rawValue
-                case .repeatQuestion: key = "repeat"
-                }
-                all.formUnion(server.phrases(forKey: key).map(VoiceText.normalize))
-            }
-            return Entry(intent: intent, phrases: all)
+    /// The bundled catalog and fillers, folded once: `match` runs on every partial speech result.
+    private static let bundledTable: [Entry] = order.map { intent, key in
+        Entry(intent: intent, phrases: Set((bundled?.phrases(forKey: key) ?? []).map(folded)))
+    }
+    private static let bundledFillers: Set<String> = fillers.union((bundled?.fillers ?? []).map(folded))
+
+    /// The last merge with the server's phrases. Keyed on the whole catalog, not its version: two catalogs
+    /// can share one. The app passes the same stored catalog each time, so the `==` is a storage check.
+    private static let lock = NSLock()
+    private static var cache: (server: GrillPhrases, table: [Entry], fillers: Set<String>)?
+
+    /// The bundled catalog plus the server's (an older or newer server may list other phrases), and the fillers.
+    private static func tables(_ server: GrillPhrases?) -> ([Entry], Set<String>) {
+        guard let server else { return (bundledTable, bundledFillers) }
+        lock.lock()
+        defer { lock.unlock() }
+        if let c = cache, c.server == server { return (c.table, c.fillers) }
+        let table = zip(order, bundledTable).map { (o, entry) in
+            Entry(intent: entry.intent, phrases: entry.phrases.union(server.phrases(forKey: o.1).map(folded)))
         }
+        let fill = bundledFillers.union((server.fillers ?? []).map(folded))
+        cache = (server, table, fill)
+        return (table, fill)
+    }
+
+    /// `VoiceText.normalize` without apostrophes, as the server normalises its phrases ("don't" is "dont").
+    private static func folded(_ s: String) -> String {
+        VoiceText.normalize(s).replacingOccurrences(of: "'", with: "")
     }
 
     /// Same number of words, each equal or one edit away (only for words of 4+ letters).

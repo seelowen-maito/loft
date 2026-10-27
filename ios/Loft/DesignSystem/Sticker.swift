@@ -8,14 +8,26 @@ import UIKit
 enum StickerRenderer {
     private static let cache = NSCache<NSString, UIImage>()
 
+    /// Drawn over a Lead's art, inside the sticker's border; the same shapes as the web's `CAPTAIN_HAT`.
+    static let captainHat = ##"<g transform="rotate(-9 50 6)"><path d="M17 3 C15 -11 85 -11 83 3 L75 12 H25 Z" fill="#ffffff"/><path d="M20 6 L25 12 H75 L80 6 Z" fill="#dfe3ec"/><rect x="24" y="10" width="52" height="8" rx="2" fill="#1f2b5e"/><rect x="24" y="12.5" width="52" height="2" fill="#f2b632"/><path d="M24 17 H76 C73 26 27 26 24 17 Z" fill="#17171c"/><circle cx="50" cy="3" r="5.5" fill="#f2b632"/><circle cx="50" cy="3" r="2.4" fill="#1f2b5e"/></g>"##
+
     /// The sticker at `points` wide, or nil if the SVG can't be read (callers fall back to initials).
-    static func image(svg: String, points: CGFloat, scale: CGFloat) -> UIImage? {
-        let key = "\(svg.hashValue)@\(points)x\(scale)" as NSString
+    /// A Lead's sticker wears the captain hat; the agent's own SVG is never changed.
+    static func image(svg: String, points: CGFloat, scale: CGFloat, lead: Bool = false) -> UIImage? {
+        let key = "\(svg.hashValue)@\(points)x\(scale)\(lead ? "+lead" : "")" as NSString
         if let hit = cache.object(forKey: key) { return hit }
-        guard let doc = SVGDocument(svg), doc.drawsSomething else { return nil }
+        guard let art = SVGDocument(svg), art.drawsSomething, let doc = lead ? SVGDocument(withHat(svg)) : art else { return nil }
         let image = sticker(doc, points: points, scale: scale)
         cache.setObject(image, forKey: key)
         return image
+    }
+
+    /// The hat on its own, as an avatar SVG: worn over the initials fallback.
+    static let hatOnly = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">"# + captainHat + "</svg>"
+
+    private static func withHat(_ svg: String) -> String {
+        guard let end = svg.range(of: "</svg>", options: .backwards) else { return svg }
+        return svg.replacingCharacters(in: end, with: captainHat + "</svg>")
     }
 
     /// Same layout as the web: the art's 100 units sit inside a 128-unit canvas (14 each side)
@@ -62,10 +74,11 @@ enum StickerRenderer {
 struct StickerImage: View {
     let svg: String
     let size: CGFloat
+    var lead = false
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        if let image = StickerRenderer.image(svg: svg, points: size, scale: displayScale) {
+        if let image = StickerRenderer.image(svg: svg, points: size, scale: displayScale, lead: lead) {
             Image(uiImage: image).resizable().frame(width: size, height: size)
         }
     }

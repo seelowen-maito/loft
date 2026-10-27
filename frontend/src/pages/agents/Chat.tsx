@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -10,10 +10,15 @@ import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
+import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
+import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
+import { RunIndicator } from "../../components/RunTimer";
+import { lastFinishedRun } from "../../lib/runTimer";
+import { useAutoGrow } from "../../lib/autoGrow";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -73,6 +78,7 @@ const COMMANDS: Command[] = [
   { name: "/clear", description: "Clear the conversation context and start fresh. Memory is kept." },
   { name: "/compact", description: "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary." },
   { name: "/code", description: "Open this agent's workspace folder in VS Code." },
+  { name: "/grill", description: "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it." },
 ];
 
 const SUGGESTIONS = [
@@ -106,6 +112,8 @@ export function Chat({
   // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
   const [dragDepth, setDragDepth] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  useAutoGrow(composer, text, 1);
   const stick = useRef(true);
   const items = useMemo(() => buildItems(messages), [messages]);
   // Everything before the latest /clear is hidden (not deleted) until asked for.
@@ -119,6 +127,7 @@ export function Chat({
   const visible = showEarlier || lastClear < 0 ? items : items.slice(lastClear);
   const hiddenCount = showEarlier || lastClear < 0 ? 0 : lastClear;
   const fresh = visible.every((it) => it.t === "msg" && it.m.kind === "clear");
+  const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
@@ -204,6 +213,16 @@ export function Chat({
     }
   };
 
+  // The end-of-planning card: a fresh session, with the suggested next message waiting in the composer, unsent.
+  // Stable, so a grill event doesn't re-render every memoized MessageRow.
+  const clearWith = useCallback(async (next: string) => {
+    setCmdError(null);
+    await api.resetSession(agent.id);
+    setText(next);
+    stick.current = true;
+    composer.current?.focus();
+  }, [agent.id]);
+
   const compactContext = async (instructions: string) => {
     setCmdError(null);
     try {
@@ -226,11 +245,31 @@ export function Chat({
     }
   };
 
+  const startGrill = async (topic: string) => {
+    setSending(true);
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.grillStart(agent.id, topic ? `Grill me on ${topic}` : "Grill me");
+      setText("");
+    } catch (e) {
+      setCmdError((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  };
+
   const runCommand = async (name: string) => {
     setCmdNote(null);
     if (name === "/clear") return clearContext();
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor();
+    if (name === "/grill") {
+      // Picked from the menu: leave room for the topic; Enter again starts it.
+      setText("/grill ");
+      setCmdNote("Add what to plan, then press Enter.");
+      return;
+    }
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
@@ -287,6 +326,8 @@ export function Chat({
     }
     const compact = /^\/compact(?:\s+([\s\S]*))?$/i.exec(v);
     if (compact) return compactContext(compact[1]?.trim() ?? "");
+    const grillTopic = /^\/grill(?:\s+([\s\S]*))?$/i.exec(v);
+    if (grillTopic) return startGrill(grillTopic[1]?.trim() ?? "");
     if (v.startsWith("/") && !/\s/.test(v)) return runCommand(v.toLowerCase());
     setSending(true);
     setCmdError(null);
@@ -346,7 +387,7 @@ export function Chat({
       )}
       {/* header */}
       <div className="flex items-center gap-4 border-b border-line px-6 py-4 max-md:gap-3 max-md:px-4 max-md:py-3">
-        <Sticker avatar={agent.avatar} size={52} className="max-md:!size-9" />
+        <Sticker avatar={agent.avatar} lead={agent.lead} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
@@ -427,11 +468,13 @@ export function Chat({
               const req = perms.get(it.m.meta?.request_id);
               return req ? <PermissionCard key={it.m.id} req={req} /> : null;
             }
-            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} />;
+            // Only round cards read the session: other rows get null and skip re-rendering on grill events.
+            const session = it.m.meta?.grill?.role === "round" ? grill : null;
+            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} />;
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
-              <Sticker avatar={agent.avatar} size={112} className="animate-rise" />
+              <Sticker avatar={agent.avatar} lead={agent.lead} size={112} className="animate-rise" />
               <div className="mt-5 font-serif text-[30px] leading-tight">Say hello to {agent.name}.</div>
               <p className="mt-2 max-w-md text-[13.5px] text-fg-2">
                 It works inside its own workspace, keeps long-term memory, and asks you before it uses anything it hasn't been granted.
@@ -445,15 +488,10 @@ export function Chat({
               </div>
             </div>
           )}
-          {running && (
-            <div className="flex items-center gap-3 py-2 pl-1">
-              <span className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span key={i} className="size-1.5 animate-pulse-soft rounded-full bg-accent" style={{ animationDelay: `${i * 0.18}s` }} />
-                ))}
-              </span>
-              <span className="font-mono text-[12px] text-fg-2">{agent.status_text || "Working…"}</span>
-            </div>
+          {running ? (
+            <RunIndicator running startedAt={agent.last_run_at} status={agent.status_text} />
+          ) : (
+            lastRun && <RunIndicator running={false} durationMs={lastRun.durationMs} endedAt={lastRun.endedAt} />
           )}
         </div>
       </div>
@@ -517,7 +555,7 @@ export function Chat({
                   >
                     {"agent" in p ? (
                       <>
-                        <Sticker avatar={p.agent.avatar} size={20} />
+                        <Sticker avatar={p.agent.avatar} lead={p.agent.lead} size={20} />
                         <span className="text-[13px]">{p.agent.name}</span>
                         <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
                       </>
@@ -597,6 +635,7 @@ export function Chat({
                 }}
               />
               <textarea
+                ref={composer}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onPaste={(e) => {
@@ -645,13 +684,14 @@ export function Chat({
                     send();
                   }
                 }}
-                rows={Math.min(8, Math.max(1, text.split("\n").length))}
+                rows={1}
                 placeholder={
                   watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                   : running ? `${agent.name} is working. Your message will be delivered next.`
+                  : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
                   : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                 }
-                className="max-h-48 flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"
+                className="flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"
               />
               <button
                 className="btn-primary size-8 justify-center p-0"
@@ -702,7 +742,13 @@ function findAgent(agents: Agent[], key: string | undefined) {
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
 }
 
-function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Agent[] }) {
+const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith }: {
+  m: Message;
+  agent: Agent;
+  agents: Agent[];
+  grill: GrillSession | null;
+  onClearWith: (next: string) => Promise<void>;
+}) {
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -766,6 +812,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
     );
   }
   if (m.kind === "thinking") return <Thinking m={m} />;
+  if (m.meta?.grill?.role === "round") return <GrillRound m={m} agentId={agent.id} session={grill} />;
   if (m.role === "user" && m.meta?.from_agent) {
     const from = findAgent(agents, m.meta.from_agent.id);
     return (
@@ -777,7 +824,7 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
             <MessageTasks m={m} />
           </div>
         </div>
-        {from && <Sticker avatar={from.avatar} size={26} className="mt-5" />}
+        {from && <Sticker avatar={from.avatar} lead={from.lead} size={26} className="mt-5" />}
       </div>
     );
   }
@@ -810,11 +857,19 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
       </div>
     );
   }
+  if (m.meta?.grill?.end_card) {
+    return (
+      <div className="space-y-2">
+        <MessageRow m={{ ...m, meta: { ...m.meta, grill: { ...m.meta.grill, end_card: null } } }} agent={agent} agents={agents} grill={grill} onClearWith={onClearWith} />
+        <EndCard agentId={m.agent_id} messageId={m.id} card={m.meta.grill.end_card} onClear={onClearWith} />
+      </div>
+    );
+  }
   // A mentioned agent's reply, copied into this chat.
   const replier = m.meta?.mention_reply ? findAgent(agents, m.meta.from_agent?.id) : undefined;
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={(replier ?? agent).avatar} size={26} className="mt-0.5" />
+      <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).lead} size={26} className="mt-0.5" />
       <div className={cx("prose-chat min-w-0 flex-1", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (
           <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{replier?.name ?? m.meta.from_agent?.name} · answering your mention</div>
@@ -823,16 +878,16 @@ function MessageRow({ m, agent, agents }: { m: Message; agent: Agent; agents: Ag
       </div>
     </div>
   );
-}
+});
 
 function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Message; agent: Agent; agents: Agent[] }) {
   const to = findAgent(agents, use.meta?.input?.agent);
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={agent.avatar} size={26} className="mt-5" />
+      <Sticker avatar={agent.avatar} lead={agent.lead} size={26} className="mt-5" />
       <div className="flex min-w-0 max-w-[80%] flex-col items-start">
         <div className={cx("mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3", !result && "animate-pulse-soft")}>
-          {agent.name} → {to && <Sticker avatar={to.avatar} size={16} />} {to?.name ?? use.meta?.input?.agent}
+          {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.lead} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
         <div className="whitespace-pre-wrap rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
       </div>

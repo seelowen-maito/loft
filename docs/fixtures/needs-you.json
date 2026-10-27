@@ -1,6 +1,6 @@
 {
   "count": 9,
-  "generated_at": "2026-10-26T10:20:07.289241+00:00",
+  "generated_at": "2026-10-27T01:19:26.682676+00:00",
   "items": [
     {
       "actions": [
@@ -36,17 +36,17 @@
           "kind": "open",
           "label": "Open chat",
           "target": {
-            "agent_id": "55da7486-240c-4420-ae3e-84db45433462",
+            "agent_id": "2faedcf2-704a-4331-a4ba-bbb3a5c64ae9",
             "screen": "chat"
           }
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "id": "2faedcf2-704a-4331-a4ba-bbb3a5c64ae9",
         "name": "Dev"
       },
-      "created_at": "2026-10-26T10:20:07.287387+00:00",
+      "created_at": "2026-10-27T01:19:26.678342+00:00",
       "id": "permission:p1",
       "links": [],
       "pr": null,
@@ -69,14 +69,14 @@
           "kind": "answer",
           "label": "Reply on the task",
           "method": "POST",
-          "path": "/api/tasks/ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc/comments"
+          "path": "/api/tasks/2d15ed20-9fb4-4328-b09a-c0f8504ac5cd/comments"
         },
         {
           "kind": "open",
           "label": "Open task",
           "target": {
             "screen": "task",
-            "task_id": "ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc"
+            "task_id": "2d15ed20-9fb4-4328-b09a-c0f8504ac5cd"
           }
         },
         {
@@ -84,27 +84,27 @@
           "kind": "dismiss",
           "label": "Dismiss",
           "method": "POST",
-          "path": "/api/needs-you/task%3Aea4e59d3-26e0-4c5e-8b3b-3e726cf384cc%3Ablocked/dismiss"
+          "path": "/api/needs-you/task%3A2d15ed20-9fb4-4328-b09a-c0f8504ac5cd%3Ablocked/dismiss"
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "id": "bb00beed-986d-4733-8148-1b0fba0c1c10",
         "name": "QA"
       },
-      "created_at": "2026-10-26T10:20:07.287466+00:00",
-      "id": "task:ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc:blocked",
+      "created_at": "2026-10-27T01:19:26.678429+00:00",
+      "id": "task:2d15ed20-9fb4-4328-b09a-c0f8504ac5cd:blocked",
       "links": [
         {
           "label": "Task",
-          "path": "/tasks/ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc"
+          "path": "/tasks/2d15ed20-9fb4-4328-b09a-c0f8504ac5cd"
         }
       ],
       "pr": null,
       "project": null,
       "reason": "Blocked: Which simulator should I use?",
       "repo": null,
-      "task_id": "ea4e59d3-26e0-4c5e-8b3b-3e726cf384cc",
+      "task_id": "2d15ed20-9fb4-4328-b09a-c0f8504ac5cd",
       "text": "Which simulator should I use?",
       "title": "Run the suite",
       "type": "task_blocked",
@@ -119,13 +119,13 @@
           "kind": "answer",
           "label": "Reply",
           "method": "POST",
-          "path": "/api/agents/55da7486-240c-4420-ae3e-84db45433462/messages"
+          "path": "/api/agents/2faedcf2-704a-4331-a4ba-bbb3a5c64ae9/messages"
         },
         {
           "kind": "open",
           "label": "Open chat",
           "target": {
-            "agent_id": "55da7486-240c-4420-ae3e-84db45433462",
+            "agent_id": "2faedcf2-704a-4331-a4ba-bbb3a5c64ae9",
             "screen": "chat"
           }
         },
@@ -139,10 +139,10 @@
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "id": "2faedcf2-704a-4331-a4ba-bbb3a5c64ae9",
         "name": "Dev"
       },
-      "created_at": "2026-10-26T10:20:07.287877+00:00",
+      "created_at": "2026-10-27T01:19:26.678801+00:00",
       "id": "question:1",
       "links": [],
       "pr": null,
@@ -158,56 +158,30 @@
     {
       "actions": [
         {
-          "body": {
-            "meta": {
-              "grill": {
-                "question_id": "8e263326-b30c-4ecd-8eda-3fd1d8fc3be2",
-                "role": "answer",
-                "session_id": "a30c905e-2f70-4d74-9c50-6ad8fa57859c"
-              }
-            },
-            "text": ""
-          },
-          "kind": "answer",
-          "label": "Answer",
-          "method": "POST",
-          "path": "/api/agents/f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d/messages"
-        },
-        {
-          "body": {
-            "command": "skip",
-            "question_id": "8e263326-b30c-4ecd-8eda-3fd1d8fc3be2"
-          },
-          "kind": "skip",
-          "label": "Skip",
-          "method": "POST",
-          "path": "/api/grill/a30c905e-2f70-4d74-9c50-6ad8fa57859c/command"
-        },
-        {
           "kind": "open",
           "label": "Open chat",
           "target": {
-            "agent_id": "f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d",
+            "agent_id": "249eab93-8b73-403b-9a24-5c7f1a6e41f9",
             "screen": "chat"
           }
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "f9f38c25-d9eb-4fcd-b7f2-ae1303eac48d",
+        "id": "249eab93-8b73-403b-9a24-5c7f1a6e41f9",
         "name": "Orchestrator"
       },
-      "created_at": "2026-10-26T10:20:07.288176+00:00",
-      "id": "grill:a30c905e-2f70-4d74-9c50-6ad8fa57859c:8e263326-b30c-4ecd-8eda-3fd1d8fc3be2",
+      "created_at": "2026-10-27T01:19:26.680133+00:00",
+      "id": "grill:74cf48f7-40aa-4136-96b6-ad7a5ea76f58:1",
       "links": [],
       "pr": null,
       "project": null,
-      "reason": "Question 1",
+      "reason": "Round 1: 0 of 1 answered",
       "repo": null,
       "task_id": null,
-      "text": "Who pays?",
+      "text": "• Who pays?",
       "title": "Orchestrator is interviewing you: Pricing",
-      "type": "grill_question",
+      "type": "grill_round",
       "urgency": 2
     },
     {
@@ -220,7 +194,7 @@
           "kind": "answer",
           "label": "Reply on the task",
           "method": "POST",
-          "path": "/api/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be/comments"
+          "path": "/api/tasks/115f01fb-a015-416b-ad1d-938877c04da8/comments"
         },
         {
           "body": {
@@ -231,14 +205,14 @@
           "kind": "retry",
           "label": "Reopen and send",
           "method": "POST",
-          "path": "/api/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be/comments"
+          "path": "/api/tasks/115f01fb-a015-416b-ad1d-938877c04da8/comments"
         },
         {
           "kind": "open",
           "label": "Open task",
           "target": {
             "screen": "task",
-            "task_id": "cfc9e1e8-e347-494c-b144-eced6e5a00be"
+            "task_id": "115f01fb-a015-416b-ad1d-938877c04da8"
           }
         },
         {
@@ -246,27 +220,27 @@
           "kind": "dismiss",
           "label": "Dismiss",
           "method": "POST",
-          "path": "/api/needs-you/task%3Acfc9e1e8-e347-494c-b144-eced6e5a00be%3Afailed/dismiss"
+          "path": "/api/needs-you/task%3A115f01fb-a015-416b-ad1d-938877c04da8%3Afailed/dismiss"
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "id": "bb00beed-986d-4733-8148-1b0fba0c1c10",
         "name": "QA"
       },
-      "created_at": "2026-10-26T10:20:07.287642+00:00",
-      "id": "task:cfc9e1e8-e347-494c-b144-eced6e5a00be:failed",
+      "created_at": "2026-10-27T01:19:26.678601+00:00",
+      "id": "task:115f01fb-a015-416b-ad1d-938877c04da8:failed",
       "links": [
         {
           "label": "Task",
-          "path": "/tasks/cfc9e1e8-e347-494c-b144-eced6e5a00be"
+          "path": "/tasks/115f01fb-a015-416b-ad1d-938877c04da8"
         }
       ],
       "pr": null,
       "project": null,
       "reason": "Failed: Xcode 27 missing",
       "repo": null,
-      "task_id": "cfc9e1e8-e347-494c-b144-eced6e5a00be",
+      "task_id": "115f01fb-a015-416b-ad1d-938877c04da8",
       "text": "Xcode 27 missing\nmore lines",
       "title": "Fix the build",
       "type": "task_failed",
@@ -300,10 +274,10 @@
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "55da7486-240c-4420-ae3e-84db45433462",
+        "id": "2faedcf2-704a-4331-a4ba-bbb3a5c64ae9",
         "name": "Dev"
       },
-      "created_at": "2026-10-26T10:20:07.288353+00:00",
+      "created_at": "2026-10-27T01:19:26.680422+00:00",
       "id": "pr:pr1:abc",
       "links": [
         {
@@ -351,7 +325,7 @@
       ],
       "age_seconds": 0,
       "agent": null,
-      "created_at": "2026-10-26T10:20:07.288528+00:00",
+      "created_at": "2026-10-27T01:19:26.680572+00:00",
       "id": "ghpr:acme/shop#41:sha41",
       "links": [
         {
@@ -399,7 +373,7 @@
       ],
       "age_seconds": 0,
       "agent": null,
-      "created_at": "2026-10-26T10:20:07.288529+00:00",
+      "created_at": "2026-10-27T01:19:26.680573+00:00",
       "id": "review:acme/api#1800:sha1800",
       "links": [
         {
@@ -439,14 +413,14 @@
           "kind": "answer",
           "label": "Follow up",
           "method": "POST",
-          "path": "/api/tasks/91551c37-56f1-454e-8379-1c5833c44962/comments"
+          "path": "/api/tasks/bb55c88d-928c-4a07-b947-22e075277bdc/comments"
         },
         {
           "kind": "open",
           "label": "Open task",
           "target": {
             "screen": "task",
-            "task_id": "91551c37-56f1-454e-8379-1c5833c44962"
+            "task_id": "bb55c88d-928c-4a07-b947-22e075277bdc"
           }
         },
         {
@@ -454,27 +428,27 @@
           "kind": "dismiss",
           "label": "Dismiss",
           "method": "POST",
-          "path": "/api/needs-you/done%3A91551c37-56f1-454e-8379-1c5833c44962%3A2026-10-26T10%3A20%3A07.287728%2B00%3A00/dismiss"
+          "path": "/api/needs-you/done%3Abb55c88d-928c-4a07-b947-22e075277bdc%3A2026-10-27T01%3A19%3A26.678667%2B00%3A00/dismiss"
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "663edd6b-29a8-4369-bc17-b4c4e3c15d82",
+        "id": "bb00beed-986d-4733-8148-1b0fba0c1c10",
         "name": "QA"
       },
-      "created_at": "2026-10-26T10:20:07.287728+00:00",
-      "id": "done:91551c37-56f1-454e-8379-1c5833c44962:2026-10-26T10:20:07.287728+00:00",
+      "created_at": "2026-10-27T01:19:26.678667+00:00",
+      "id": "done:bb55c88d-928c-4a07-b947-22e075277bdc:2026-10-27T01:19:26.678667+00:00",
       "links": [
         {
           "label": "Task",
-          "path": "/tasks/91551c37-56f1-454e-8379-1c5833c44962"
+          "path": "/tasks/bb55c88d-928c-4a07-b947-22e075277bdc"
         }
       ],
       "pr": null,
       "project": null,
       "reason": "Done: 15 GB after cleanup.",
       "repo": null,
-      "task_id": "91551c37-56f1-454e-8379-1c5833c44962",
+      "task_id": "bb55c88d-928c-4a07-b947-22e075277bdc",
       "text": "**15 GB** after cleanup.",
       "title": "Measure sizes",
       "type": "task_done",

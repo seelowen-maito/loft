@@ -47,7 +47,7 @@ final class PushTests: XCTestCase {
         XCTAssertFalse(r.kinds.contains("pr_ready"))
         XCTAssertTrue(r.kinds.contains("permission"), "on unless turned off")
         // The server's kinds, one to one with the Needs you types (it rejects unknown names).
-        XCTAssertEqual(Set(r.kinds), ["permission", "task_approval", "task_blocked", "task_failed", "question", "grill_question", "stuck"])
+        XCTAssertEqual(Set(r.kinds), ["permission", "task_approval", "task_blocked", "task_failed", "question", "grill_round", "stuck"])
         XCTAssertEqual(r.quietHours?.start, "23:00")
         XCTAssertEqual(r.quietHours?.end, "07:00")
         guard case .object(let o) = r.json else { return XCTFail() }

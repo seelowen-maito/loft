@@ -1,66 +1,62 @@
 import SwiftUI
 
-// "Grill me" interviews render inline in the normal chat: questions are cards in the message
-// stream, the waiting question carries its answer chips and quick actions, commands come back as
-// small status rows, and a one-line chip above the composer says an interview is going.
+// "Grill me" interviews render inline in the normal chat: each round the agent posts is a card in the
+// message stream. The round waiting for answers shows a card per question with its recommendation, Accept,
+// Decide for me and an answer field, and a Send round action; earlier rounds show their questions read-only.
+// Commands come back as small status rows.
 
-/// An interviewer's question. The waiting one shows answer chips and Repeat · Skip · Back · I don't know.
-struct GrillQuestionRow: View {
+/// A round the agent posted (`meta.grill.role == "round"`). The open one is fed by the live session.
+struct GrillRoundCard: View {
     @Environment(LoftStore.self) private var store
-    @Environment(Speaker.self) private var speaker
-    @Environment(\.dynamicTypeSize) private var typeSize
     let message: ChatMessage
     let agent: Agent
-    /// True for the question waiting for an answer.
-    let isCurrent: Bool
-    /// Puts a suggested answer in the composer; the user still taps Send.
-    let choose: (String) -> Void
+    /// The question the voice is on, which carries Repeat · Skip · Back.
+    let currentQuestionId: String?
     let command: (GrillCommand) -> Void
     @State private var confirmEnd = false
 
-    private var g: GrillMeta { message.grill ?? GrillMeta(sessionId: nil, role: .question) }
-    private var paused: Bool { store.openGrill(for: agent.id)?.state == .paused }
-
-    private var caption: String {
-        guard let i = g.index else { return "Question" }
-        return g.total.map { "Question \(i) of \($0)" } ?? "Question \(i)"
-    }
-
-    /// Suggested answers: the agent's, or Yes / No for a yes-no question without any.
-    private var choices: [String] {
-        if let o = g.options, !o.isEmpty { return o }
-        return g.kind == .yesNo ? ["Yes", "No"] : []
+    private var g: GrillMeta { message.grill ?? GrillMeta(sessionId: nil, role: .round) }
+    private var session: GrillSession? { store.openGrill(for: agent.id) }
+    /// This round is the one waiting for answers.
+    private var open: GrillSession? {
+        guard let s = session, s.sessionId == g.sessionId, s.round == g.round, s.hasOpenRound else { return nil }
+        return s
     }
 
     var body: some View {
-        HStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 10) {
-                Label(caption, systemImage: "questionmark.bubble")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                CollapsibleText(text: message.displayContent)
-                    .font(.body.weight(.medium))
-                if isCurrent {
-                    if paused {
-                        pausedRow
-                    } else {
-                        if !choices.isEmpty { choiceChips }
-                        actions
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                Label("Round \(g.round ?? 1)", systemImage: "questionmark.bubble")
+                    .foregroundStyle(open == nil ? Color.secondary : Theme.accent)
+                if let t = g.topic, !t.isEmpty { Text("· \(t)").foregroundStyle(.secondary).lineLimit(1) }
+            }
+            .font(.caption.weight(.semibold))
+            if let s = open, let qs = s.questions {
+                ForEach(Array(qs.enumerated()), id: \.element.id) { i, q in
+                    GrillQuestionCard(question: q, number: i + 1, total: qs.count, sessionId: s.sessionId, language: s.language,
+                                      agent: agent, isCurrent: q.id == currentQuestionId, command: command)
+                }
+                footer(s, qs)
+            } else {
+                ForEach(Array((g.questions ?? []).enumerated()), id: \.element.id) { i, q in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Markdown.render("\(i + 1). \(q.text)")).font(.subheadline)
+                        if !q.recommendation.isEmpty {
+                            Text("Recommended: \(q.recommendation)").font(.footnote).foregroundStyle(.secondary).padding(.leading, 14)
+                        }
                     }
                 }
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Theme.accent.opacity(isCurrent ? 0.45 : 0.15), lineWidth: 1)
-            }
-            Spacer(minLength: typeSize.isAccessibilitySize ? 0 : 24)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Theme.accent.opacity(open == nil ? 0.15 : 0.45), lineWidth: 1)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(caption). \(message.displayContent)\(choices.isEmpty ? "" : ". Suggested answers: " + choices.joined(separator: ", "))")
-        .accessibilityIdentifier(isCurrent ? "grillCurrentQuestion" : "grillQuestion")
+        .accessibilityIdentifier(open == nil ? "grillRound" : "grillOpenRound")
         .confirmationDialog("End the interview?", isPresented: $confirmEnd, titleVisibility: .visible) {
             Button("End", role: .destructive) { command(.end) }
         } message: {
@@ -68,11 +64,144 @@ struct GrillQuestionRow: View {
         }
     }
 
-    private var choiceChips: some View {
+    /// "2 of 3 answered", Send round, and Pause · Summary so far · End; Resume while paused.
+    private func footer(_ s: GrillSession, _ qs: [GrillQuestion]) -> some View {
+        let answered = qs.filter { $0.state != .open }.count
+        return VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            Text("\(answered) of \(qs.count) answered\(answered < qs.count ? ". Unanswered ones come back next round." : "")")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("grillProgress")
+            HStack(spacing: 8) {
+                Button { command(.send) } label: {
+                    Label("Send round", systemImage: "paperplane.fill").frame(minHeight: 32)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!store.canWrite)
+                .accessibilityIdentifier("grillSend")
+                if s.state == .paused {
+                    Button { command(.resume) } label: { Label("Resume", systemImage: "play.fill").frame(minHeight: 32) }
+                        .buttonStyle(.bordered)
+                        .disabled(!store.canWrite)
+                        .accessibilityIdentifier("grillResume")
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    if s.state != .paused {
+                        Button { command(.pause) } label: { Label("Pause", systemImage: "pause") }
+                    }
+                    Button { command(.summarize) } label: { Label("Summary so far", systemImage: "text.alignleft") }
+                    Button(role: .destructive) { confirmEnd = true } label: { Label("End interview", systemImage: "stop") }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3).frame(width: 44, height: 44)
+                }
+                .disabled(!store.canWrite)
+                .accessibilityLabel("More interview actions")
+                .accessibilityIdentifier("grillMore")
+            }
+        }
+    }
+}
+
+/// One question of the open round: the recommendation with Accept and Decide for me, chips for its options, and a
+/// field for any other answer, saved as a decision or as a comment to discuss. The question the voice is on
+/// also has Repeat · Skip · Back.
+struct GrillQuestionCard: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(Speaker.self) private var speaker
+    @Environment(\.dynamicTypeSize) private var typeSize
+    let question: GrillQuestion
+    let number: Int
+    let total: Int
+    let sessionId: String
+    /// The session's language, for the counter and "Recommended" read aloud.
+    let language: String?
+    let agent: Agent
+    let isCurrent: Bool
+    let command: (GrillCommand) -> Void
+    /// A chip tapped on the Talk screen answers at once by voice; in the chat it fills the answer field.
+    var choose: ((String) -> Void)?
+    /// Pause · Summary so far · End on the card itself (the Talk screen, which shows no round footer).
+    var roundActions = false
+    @State private var draft = ""
+    @State private var busy = false
+    @State private var error: APIError?
+
+    private var q: GrillQuestion { question }
+    /// The answer is the user's own words (not the recommendation accepted or left to the agent).
+    private var written: Bool { (q.state == .answered && !q.accepted) || q.state == .discuss }
+    private var saved: Bool { written && q.answer == draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isCurrent {
+                Label("Question \(number) of \(total) · answer by voice or below", systemImage: "waveform")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+            } else if let r = q.fromRound {
+                Text("Still open from round \(r)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            CollapsibleText(text: "\(number). \(q.text)").font(.body.weight(.medium))
+            if !q.recommendation.isEmpty { recommendation }
+            if let o = q.options, !o.isEmpty { chips(o) }
+            answerField
+            if isCurrent { voiceActions }
+            if let error { Text(error.title).font(.footnote).foregroundStyle(Theme.failureInk) }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.accent.opacity(isCurrent ? 0.6 : 0), lineWidth: 1.5)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(isCurrent ? "grillCurrentQuestion" : "grillQuestion")
+        .onAppear { if written { draft = q.answer ?? "" } }
+        // Answers given elsewhere (the web, by voice) show here too.
+        .onChange(of: q.answer) { _, a in if written { draft = a ?? "" } }
+    }
+
+    private var recommendation: some View {
+        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(FlowLayout(spacing: 6))
+        return layout {
+            Label { Text("Recommended: ").foregroundStyle(.secondary) + Text(q.recommendation) } icon: {
+                Image(systemName: "sparkles").foregroundStyle(Theme.accent)
+            }
+            .font(.subheadline)
+            .accessibilityElement(children: .combine)
+            if q.accepted {
+                Label("Accepted", systemImage: "checkmark").font(.footnote.weight(.semibold)).foregroundStyle(.green)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("grillAccepted")
+            } else {
+                Button { answer("Yes") } label: { Label("Accept", systemImage: "checkmark").frame(minHeight: 32) }
+                    .buttonStyle(.bordered)
+                    .disabled(busy || !store.canWrite)
+                    .accessibilityHint("Accepts the recommendation as your answer")
+                    .accessibilityIdentifier("grillAccept")
+            }
+            if q.state == .decided {
+                Label("Left to the agent", systemImage: "dice").font(.footnote.weight(.semibold)).foregroundStyle(.green)
+                    .frame(minHeight: 44)
+            } else {
+                Button { run { try await store.sendGrillCommand(.decide, agentId: agent.id, questionId: q.id) } } label: {
+                    Label("Decide for me", systemImage: "dice").frame(minHeight: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(busy || !store.canWrite)
+                .accessibilityHint("The agent's recommendation becomes the decision")
+                .accessibilityIdentifier("grillDecide")
+            }
+        }
+    }
+
+    private func chips(_ options: [String]) -> some View {
         let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(FlowLayout(spacing: 8))
         return layout {
-            ForEach(choices, id: \.self) { c in
-                Button { choose(c) } label: {
+            ForEach(options, id: \.self) { c in
+                Button { if let choose { choose(c) } else { draft = c } } label: {
                     Text(c)
                         .font(.subheadline)
                         .multilineTextAlignment(.leading)
@@ -83,52 +212,70 @@ struct GrillQuestionRow: View {
                         .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint("Puts this answer in the message field")
+                .accessibilityHint(choose == nil ? "Puts this answer in the field" : "Answers with this")
                 .accessibilityIdentifier("grillChoice-\(c)")
             }
         }
     }
 
-    /// Repeat · Skip · Back · I don't know · More: one row when it fits, else two fixed rows, else a column
-    /// (fixed rows keep the spacing even; a wrapping layout left a tall gap between them).
-    private var actions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 0) { repeatButton; skipButton; backButton; decideButton; moreMenu }
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 0) { repeatButton; skipButton; backButton }
-                HStack(spacing: 0) { decideButton; moreMenu }
+    /// Your own answer, saved as a decision (Return) or as a comment to discuss.
+    private var answerField: some View {
+        HStack(spacing: 6) {
+            TextField(q.accepted || q.state == .decided ? "Or answer differently…" : "Your answer, or a comment…", text: $draft, axis: .vertical)
+                .lineLimit(1...4)
+                .textFieldStyle(.roundedBorder)
+                .submitLabel(.done)
+                .onSubmit { answer(draft) }
+                .accessibilityLabel("Answer to question \(number)")
+                .accessibilityIdentifier("grillAnswerField")
+            let empty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if saved && q.state == .answered {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).frame(width: 44, height: 44)
+                    .accessibilityLabel("Saved")
+            } else {
+                Button { answer(draft) } label: { Image(systemName: "arrow.turn.down.left").frame(width: 44, height: 44) }
+                    .disabled(busy || empty || !store.canWrite)
+                    .accessibilityLabel("Save as your answer")
+                    .accessibilityIdentifier("grillSaveAnswer")
             }
-            VStack(alignment: .leading, spacing: 0) { repeatButton; skipButton; backButton; decideButton; moreMenu }
+            if saved && q.state == .discuss {
+                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.accent).frame(width: 44, height: 44)
+                    .accessibilityLabel("To discuss")
+            } else {
+                Button { answer(draft, discuss: true) } label: { Image(systemName: "bubble.left.and.bubble.right").frame(width: 44, height: 44) }
+                    .disabled(busy || empty || !store.canWrite)
+                    .accessibilityLabel("Discuss instead of deciding")
+                    .accessibilityHint("The agent explains and asks again next round")
+                    .accessibilityIdentifier("grillDiscuss")
+            }
+        }
+    }
+
+    /// Repeat · Skip · Back on the question the voice is on.
+    private var voiceActions: some View {
+        HStack(spacing: 0) {
+            action("Repeat", "speaker.wave.2", id: "grillRepeat", enabled: true) {
+                Task { await speaker.speak(q.spoken(number: number, of: total, language: language)) }
+            }
+            action("Skip", "forward", id: "grillSkip", enabled: store.canWrite) { command(.skip) }
+            action("Back", "backward", id: "grillBack", enabled: number > 1) { command(.back) }
+            if roundActions {
+                Menu {
+                    Button { command(store.openGrill(for: agent.id)?.state == .paused ? .resume : .pause) } label: {
+                        store.openGrill(for: agent.id)?.state == .paused ? Label("Resume", systemImage: "play") : Label("Pause", systemImage: "pause")
+                    }
+                    Button { command(.send) } label: { Label("Send round now", systemImage: "paperplane") }
+                    Button { command(.summarize) } label: { Label("Summary so far", systemImage: "text.alignleft") }
+                    Button(role: .destructive) { command(.end) } label: { Label("End interview", systemImage: "stop") }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle").padding(.horizontal, 10).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .disabled(!store.canWrite)
+                .accessibilityLabel("More interview actions")
+                .accessibilityIdentifier("grillMore")
+            }
         }
         .font(.footnote.weight(.semibold))
-    }
-
-    private var repeatButton: some View {
-        action("Repeat", "speaker.wave.2", id: "grillRepeat", enabled: true) {
-            Task { await speaker.speak(g.speak ?? message.displayContent, messageId: message.id) }
-        }
-    }
-    private var skipButton: some View { action("Skip", "forward", id: "grillSkip", enabled: store.canWrite) { command(.skip) } }
-    private var backButton: some View {
-        action("Back", "backward", id: "grillBack", enabled: store.canWrite && (g.index ?? 1) > 1) { command(.back) }
-    }
-    private var decideButton: some View { action("I don't know", "dice", id: "grillDecide", enabled: store.canWrite) { command(.decide) } }
-
-    private var moreMenu: some View {
-        Menu {
-            Button { command(.pause) } label: { Label("Pause", systemImage: "pause") }
-            Button { command(.summarize) } label: { Label("Summary so far", systemImage: "text.alignleft") }
-            Button(role: .destructive) { confirmEnd = true } label: { Label("End interview", systemImage: "stop") }
-        } label: {
-            Label("More", systemImage: "ellipsis.circle")
-                .foregroundStyle(Theme.accent)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .disabled(!store.canWrite)
-        .accessibilityLabel("More interview actions")
-        .accessibilityIdentifier("grillMore")
     }
 
     private func action(_ title: String, _ symbol: String, id: String, enabled: Bool, _ run: @escaping () -> Void) -> some View {
@@ -143,27 +290,30 @@ struct GrillQuestionRow: View {
         .accessibilityIdentifier(id)
     }
 
-    /// "Paused" is already on the status row and the chip; the card just offers the way back.
-    private var pausedRow: some View {
-        HStack(spacing: 8) {
-            Button { command(.resume) } label: {
-                Label("Resume interview", systemImage: "play.fill").frame(minHeight: 44)
-            }
-            .buttonStyle(.borderless)
-            .disabled(!store.canWrite)
-            .accessibilityIdentifier("grillResume")
+    private func answer(_ text: String, discuss: Bool = false) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        run { try await store.answerGrill(t, questionId: q.id, agentId: agent.id, discuss: discuss) }
+    }
+
+    private func run(_ f: @escaping () async throws -> Void) {
+        busy = true
+        error = nil
+        Task {
+            do { try await f() } catch { self.error = APIError.from(error) }
+            busy = false
         }
-        .font(.footnote.weight(.semibold))
     }
 }
 
-/// "Skipped question 3", "Paused", "Ended": a small centered row, like a divider.
+/// "Question 2 left to the agent", "Paused", "Grill ended": a small centered row, like a divider.
 struct GrillStatusRow: View {
     let message: ChatMessage
 
     private var symbol: String {
         let g = message.grill
         switch g?.command {
+        case .send: return "paperplane"
         case .skip: return "forward"
         case .back: return "backward"
         case .decide: return "dice"
@@ -256,6 +406,7 @@ struct GrillSuggestionBar: View {
     private var question: String {
         switch intent {
         case .repeatQuestion: "Repeat the question?"
+        case .command(.send): "Send the round now?"
         case .command(.skip): "Skip this question?"
         case .command(.back): "Go back to the previous question?"
         case .command(.pause): "Pause the interview?"
@@ -299,5 +450,74 @@ struct GrillSuggestionBar: View {
         }
         .buttonStyle(.borderedProminent)
         .accessibilityIdentifier("grillSuggestionYes")
+    }
+}
+
+/// The end of a planning grill: links to the spec and tickets (they open GitHub), Clear context with the next
+/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`. The
+/// server sends that once and marks the card (`setup.sent_at`), so it shows as sent everywhere and after a restart.
+struct EndCardView: View {
+    @Environment(LoftStore.self) private var store
+    /// The final summary the card is on.
+    let message: ChatMessage
+    let card: EndCard
+    var clearWith: (String) -> Void
+    @State private var sendingSetup = false
+    @State private var setupError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Planning done · \(card.repo)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                if let s = card.spec { issue(s, symbol: "doc.text") }
+                ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
+            }
+            if card.setup != nil {
+                Label("The team has no \(card.missingText) yet.", systemImage: "person.2.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+            HStack(spacing: 8) {
+                Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("endCardClear")
+                if let setup = card.setup {
+                    let sent = setup.sentAt != nil
+                    Button {
+                        sendingSetup = true
+                        setupError = nil
+                        Task {
+                            do { try await store.sendTeamSetup(agentId: message.agentId, messageId: message.id) }
+                            catch { setupError = error.localizedDescription }
+                            sendingSetup = false
+                        }
+                    } label: {
+                        Label(sent ? "Sent to loft" : "Set up the team with loft", systemImage: sent ? "checkmark" : "person.2")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(sent || sendingSetup)
+                    .accessibilityIdentifier("endCardSetup")
+                }
+            }
+            .font(.footnote)
+            if let setupError {
+                Text("Not sent: \(setupError)").font(.caption2).foregroundStyle(.red)
+            }
+            Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func issue(_ i: EndCard.Issue, symbol: String) -> some View {
+        Link(destination: i.url) {
+            Label {
+                Text("#\(i.number) ").foregroundStyle(.secondary) + Text(i.title.isEmpty ? "Untitled" : i.title)
+            } icon: {
+                Image(systemName: symbol)
+            }
+            .font(.footnote)
+        }
     }
 }

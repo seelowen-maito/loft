@@ -18,10 +18,13 @@ use crate::state::AppState;
 
 const LIMIT: usize = 5;
 const WINDOW: Duration = Duration::from_secs(10 * 60);
+/// How often old push marks are pruned (the first tick always prunes).
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Default)]
 pub struct Pusher {
     seeded: bool,
+    pruned_at: Option<Instant>,
     /// device token -> when its recent pushes went out
     sent_at: HashMap<String, VecDeque<Instant>>,
     /// device token -> when it last got a "N more" summary
@@ -53,7 +56,12 @@ fn configured(state: &AppState) -> bool {
 impl Pusher {
     /// Called with the current list every few seconds by the "needs you" watcher.
     pub async fn tick(&mut self, state: &AppState, items: &[PushItem]) {
-        let Ok(seen) = state.db.push_seen_ids() else { return };
+        if self.pruned_at.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
+            self.pruned_at = Some(Instant::now());
+            let _ = state.db.prune_push_seen();
+        }
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        let Ok(seen) = state.db.push_seen_among(&ids) else { return };
         let fresh: Vec<&PushItem> = items.iter().filter(|i| !seen.contains(&i.id)).collect();
         if fresh.is_empty() {
             self.seeded = true;
@@ -73,7 +81,7 @@ impl Pusher {
         for d in &devices {
             let wanted: Vec<&&PushItem> = fresh
                 .iter()
-                .filter(|i| d.kinds.iter().any(|k| k == i.kind))
+                .filter(|i| d.kinds.iter().any(|k| apns::kind(k) == i.kind))
                 .filter(|_| d.quiet_hours.as_ref().is_none_or(|q| !in_quiet(q, now_min)))
                 .collect();
             let mut skipped = 0;
@@ -229,6 +237,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_new_round_is_pushed_once_including_to_devices_that_chose_the_old_kind() {
+        let seen = crate::apns::tests::fake_apns();
+        let st = state();
+        crate::apns::tests::configure(&st);
+        let lead = crate::grill::tests::planner(&st, "Lead");
+        let (now_kind, old_kind) = (format!("{}04", "aa".repeat(31)), format!("{}05", "aa".repeat(31)));
+        device(&st, &now_kind, &["grill_round"], None);
+        device(&st, &old_kind, &["grill_question"], None);
+        let mut p = Pusher::default();
+        tick(&st, &mut p).await;
+
+        let q = serde_json::json!([{ "text": "Who pays?", "speak": "Who pays?", "recommendation": "The team lead" }, { "text": "Trial?", "speak": "Trial?", "recommendation": "No" }]);
+        crate::grill::mcp_call(&st, &lead, "grill_round", &serde_json::json!({ "topic": "Pricing", "questions": q })).unwrap().unwrap();
+        tick(&st, &mut p).await;
+        for token in [&now_kind, &old_kind] {
+            let pushes = got(&seen, token);
+            assert_eq!(pushes.len(), 1, "{token}");
+            let b = &pushes[0].1;
+            assert_eq!((b["type"].clone(), b["aps"]["alert"]["title"].clone(), b["aps"]["alert"]["body"].clone()), (serde_json::json!("grill_round"), serde_json::json!("Lead: round 1"), serde_json::json!("Interview: Pricing")));
+        }
+        // Answering doesn't push again; the next round does.
+        let s = crate::grill::active(&st, &lead.id).unwrap();
+        let tag = serde_json::json!({ "role": "answer", "session_id": s.id, "question_id": s.rounds[0].questions[0].id });
+        crate::grill::on_user_message(&st, &lead, "yes", Some(&tag), serde_json::json!({})).ok().unwrap();
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &now_kind).len(), 1);
+        crate::grill::on_user_message(&st, &lead, "send", None, serde_json::json!({})).ok().unwrap();
+        crate::grill::mcp_call(&st, &lead, "grill_round", &serde_json::json!({ "questions": [] })).unwrap().unwrap();
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &now_kind).last().unwrap().1["aps"]["alert"]["title"], serde_json::json!("Lead: round 2"));
+    }
+
+    #[tokio::test]
     async fn a_burst_becomes_five_pushes_and_one_summary() {
         let seen = crate::apns::tests::fake_apns();
         let st = state();
@@ -250,6 +291,52 @@ mod tests {
         permission(&st, "burst9", &dev.id);
         tick(&st, &mut p).await;
         assert_eq!(got(&seen, &phone).len(), 6);
+    }
+
+    #[tokio::test]
+    async fn only_the_current_items_are_looked_up_and_old_marks_are_pruned_hourly() {
+        let seen = crate::apns::tests::fake_apns();
+        let st = state();
+        crate::apns::tests::configure(&st);
+        let dev = agent(&st, "Dev");
+        let phone = format!("{}06", "dd".repeat(31));
+        device(&st, &phone, crate::apns::DEFAULT_KINDS, None);
+        let age = |id: &str, days: i64| st.db.conn().execute(
+            "UPDATE push_seen SET seen_at = ?1 WHERE item_id = ?2",
+            rusqlite::params![(Utc::now() - chrono::Duration::days(days)).to_rfc3339(), id],
+        ).unwrap();
+        let count = || st.db.conn().query_row("SELECT COUNT(*) FROM push_seen", [], |r| r.get::<_, i64>(0)).unwrap();
+        // Lots of marks for items long gone, one of them past 30 days.
+        for i in 0..200 {
+            st.db.mark_push_seen(&format!("permission:gone{i}")).unwrap();
+        }
+        age("permission:gone0", 31);
+        permission(&st, "waiting", &dev.id);
+        let mut p = Pusher::default();
+        tick(&st, &mut p).await;
+        assert_eq!(count(), 200, "the first tick pruned the old mark and marked the waiting item");
+        assert!(got(&seen, &phone).is_empty());
+
+        // A new item among them: pushed once; the waiting one isn't pushed late.
+        permission(&st, "fresh", &dev.id);
+        tick(&st, &mut p).await;
+        tick(&st, &mut p).await;
+        let pushes = got(&seen, &phone);
+        assert_eq!(pushes.iter().map(|(_, b)| b["needs_you_id"].clone()).collect::<Vec<_>>(), [serde_json::json!("permission:fresh")]);
+
+        // Restarted: what's waiting stays seen.
+        let mut p = Pusher::default();
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &phone).len(), 1);
+
+        // Marks that age within the hour stay until the next hourly prune.
+        age("permission:gone1", 31);
+        tick(&st, &mut p).await;
+        assert_eq!(count(), 201);
+        p.pruned_at = Instant::now().checked_sub(PRUNE_EVERY);
+        tick(&st, &mut p).await;
+        assert_eq!(count(), 200);
+        assert_eq!(got(&seen, &phone).len(), 1, "pruning never re-sends");
     }
 
     #[tokio::test]

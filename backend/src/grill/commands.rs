@@ -8,15 +8,22 @@ use std::sync::LazyLock;
 use serde_json::{Value, json};
 
 /// Bump when a phrase list changes, so clients refresh their cached copy.
-pub const VERSION: &str = "2";
+pub const VERSION: &str = "4";
 /// Longer messages are always answers.
 pub const MAX_WORDS: usize = 6;
 
-/// Commands the server applies.
-pub const COMMANDS: &[&str] = &["skip", "back", "pause", "resume", "end", "summarize", "decide", "repeat"];
+/// Commands clients may send. The server applies all but `CLIENT_ONLY`.
+pub const COMMANDS: &[&str] = &["send", "skip", "back", "pause", "resume", "end", "summarize", "decide", "repeat"];
+/// Stepping through a round's questions one at a time, which only a voice client does.
+pub const CLIENT_ONLY: &[&str] = &["skip", "back", "repeat"];
 
 /// (command, English phrases, Portuguese phrases), already normalised (see `normalize`).
 const PHRASES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "send",
+        &["send", "send it", "send the round", "send round", "send the answers", "send my answers", "submit", "submit the round", "submit answers"],
+        &["envia", "enviar", "envia ai", "envia a rodada", "envia as respostas", "manda", "mandar", "manda ai", "manda a rodada", "manda as respostas"],
+    ),
     (
         "skip",
         &["skip", "skip it", "skip this", "skip this one", "skip question", "skip this question", "pass", "i pass", "next", "next question", "next one", "move on", "go on"],
@@ -30,7 +37,7 @@ const PHRASES: &[(&str, &[&str], &[&str])] = &[
     (
         "pause",
         &["pause", "pause it", "pause the grill", "hold on", "wait", "later", "lets pause"],
-        &["pausa", "pausar", "espera", "espera ai", "depois", "pausa ai", "vamos pausar"],
+        &["pausa", "pausar", "espera", "espera ai", "perai", "depois", "pausa ai", "vamos pausar"],
     ),
     (
         "resume",
@@ -45,7 +52,7 @@ const PHRASES: &[(&str, &[&str], &[&str])] = &[
     (
         "summarize",
         &["summarize", "summarise", "summary", "summary so far", "sum up", "recap", "where are we"],
-        &["resumo", "faz um resumo", "resume ai", "resumo ate agora", "onde estamos", "recapitula"],
+        &["resumo", "faz um resumo", "resume ai", "resume tudo", "resumo ate agora", "onde estamos", "recapitula"],
     ),
     (
         "decide",
@@ -54,8 +61,8 @@ const PHRASES: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "repeat",
-        &["repeat", "repeat that", "repeat the question", "say again", "say that again", "again", "what was the question", "pardon"],
-        &["repete", "repetir", "de novo", "repete a pergunta", "qual era a pergunta", "como"],
+        &["repeat", "repeat that", "repeat the question", "say again", "say that again", "again", "come again", "what was the question", "pardon"],
+        &["repete", "repetir", "repita", "de novo", "fala de novo", "repete a pergunta", "qual era a pergunta", "nao entendi", "como"],
     ),
 ];
 
@@ -314,7 +321,8 @@ pub fn is_start_request(text: &str) -> bool {
     starts(&n) || START_LEAD_INS.iter().map(|l| normalize(l)).any(|l| n.strip_prefix(&format!("{l} ")).is_some_and(starts))
 }
 
-/// `GET /api/grill/commands`: the phrase lists, for on-device matching of spoken commands.
+/// `GET /api/grill/commands`: the phrase lists, for on-device matching of spoken commands. The app bundles a
+/// copy (`ios/Loft/Resources/grill_phrases.json`) so matching works offline; a test keeps the two equal.
 pub fn catalog() -> Value {
     let mut commands = serde_json::Map::new();
     for (cmd, en, pt) in TABLE.iter() {
@@ -325,8 +333,8 @@ pub fn catalog() -> Value {
         "max_words": MAX_WORDS,
         "fillers": FILLERS,
         "lead_ins": LEAD_INS.iter().map(|l| normalize(l)).collect::<Vec<_>>(),
-        // `repeat` re-reads the card on the device; the server re-posts the question for clients without one.
-        "client_only": ["repeat"],
+        // Stepping through a round is done on the device; the server ignores these.
+        "client_only": CLIENT_ONLY,
         "commands": commands,
     })
 }
@@ -338,6 +346,10 @@ mod tests {
     #[test]
     fn whole_short_utterances_are_commands() {
         let cases = [
+            ("Send", "send"),
+            ("send the round", "send"),
+            ("Envia as respostas", "send"),
+            ("pode mandar", "send"),
             ("Skip", "skip"),
             ("skip this one please", "skip"),
             ("Uh, next question.", "skip"),
@@ -409,7 +421,8 @@ mod tests {
             "8 dollars",
             "não sei se vale a pena cobrar por isso",
             "and",   // one edit from "end", but `end` is exact-match only
-            "send",
+            "lend",
+            "Send it by email",
             "\"skip\"",
             "answer: skip",
             "/frobnicate",
@@ -449,5 +462,18 @@ mod tests {
             assert!(c["commands"][cmd]["pt"].as_array().is_some_and(|a| !a.is_empty()));
         }
         assert_eq!(c["max_words"], MAX_WORDS);
+    }
+
+    /// The iOS app's offline copy of `catalog()`, relative to this crate.
+    const BUNDLED: &str = "../ios/Loft/Resources/grill_phrases.json";
+
+    #[test]
+    fn bundled_copy_matches_the_catalog() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLED);
+        if std::env::var_os("UPDATE_GRILL_PHRASES").is_some() {
+            std::fs::write(&path, serde_json::to_string_pretty(&catalog()).unwrap() + "\n").unwrap();
+        }
+        let bundled: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(bundled == catalog(), "{BUNDLED} is out of date: run `UPDATE_GRILL_PHRASES=1 cargo test bundled_copy` in backend/");
     }
 }

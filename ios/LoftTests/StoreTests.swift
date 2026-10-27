@@ -34,6 +34,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func runNow(agentId: String) async throws {}
     func stopRun(agentId: String) async throws {}
     func restartRun(agentId: String) async throws {}
+    func resetSession(agentId: String) async throws {}
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }

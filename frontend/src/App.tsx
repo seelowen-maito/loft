@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router";
-import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Bot, CircleDot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
+import IssuesPage from "./pages/Issues";
 import SettingsPage from "./pages/Settings";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
@@ -79,6 +80,9 @@ export default function App() {
             <NavLink to="/agents" className={tab} aria-label="Agents">
               <Bot className="size-3.5" /> <span className="max-md:hidden">Agents</span>
             </NavLink>
+            <NavLink to="/issues" className={tab} aria-label="Issues">
+              <CircleDot className="size-3.5" /> <span className="max-md:hidden">Issues</span>
+            </NavLink>
             <NavLink to="/tasks" className={tab} aria-label="Tasks">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Tasks</span>
             </NavLink>
@@ -114,6 +118,8 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
+          <Route path="/issues" element={<IssuesPage />} />
+          <Route path="/issues/:project/:number" element={<IssuesPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/tasks/:id" element={<TasksPage />} />
           <Route path="/simulator" element={<SimulatorPage />} />

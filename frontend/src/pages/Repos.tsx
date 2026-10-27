@@ -218,6 +218,7 @@ export default function ReposPage() {
             loading={ghLoading && !allIssues.length}
             empty="No open issues."
             onRepo={setSelected}
+            seeAll="/issues"
           />
         </section>
 
@@ -273,7 +274,7 @@ function Stat({ label, value, sub }: { label: string; value: string | null; sub?
 }
 
 function ItemList({
-  title, icon, items, loading, empty, onRepo,
+  title, icon, items, loading, empty, onRepo, seeAll,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -281,14 +282,22 @@ function ItemList({
   loading: boolean;
   empty: string;
   onRepo: (r: string) => void;
+  seeAll?: string;
 }) {
   return (
-    <div className="panel flex max-h-[380px] flex-col">
+    <div className="panel flex min-w-0 max-h-[380px] flex-col">
       <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
         <div className="flex items-center gap-2 text-[13.5px] text-fg">
           <span className="text-fg-3">{icon}</span> {title}
         </div>
-        <span className="font-mono text-[11px] text-fg-3">{items.length}</span>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[11px] text-fg-3">{items.length}</span>
+          {seeAll && (
+            <Link to={seeAll} className="text-[12px] text-fg-3 hover:text-accent">
+              See all →
+            </Link>
+          )}
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading && (

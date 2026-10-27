@@ -64,17 +64,26 @@ final class GrillMatcherTests: XCTestCase {
         XCTAssertNil(intent("I don't know if Postgres scales for this, but let's try it"), "I don't know inside a sentence is an answer")
         XCTAssertNil(intent("We should go back to the old pricing page and copy the layout"), "no pause mark after the command words")
         XCTAssertNil(intent("Skip the free tier and keep monthly and yearly plans for everyone"))
-        XCTAssertNil(intent("the next one"), "a one-word command counts only as the first word")
+        XCTAssertNil(intent("the next release"), "a one-word command counts only as the first word")
     }
 
     func testServerPhrasesAreAdded() {
-        let p = GrillPhrases(version: "1", maxWords: 4, commands: ["skip": .init(en: ["moving on"], pt: ["bora"])])
+        let p = GrillPhrases(version: "1", maxWords: 4, commands: ["skip": .init(en: ["moving on"], pt: ["partiu"])])
         XCTAssertEqual(GrillMatcher.match("Moving on", phrases: p), .init(intent: .command(.skip), confidence: .sure))
-        XCTAssertEqual(GrillMatcher.match("bora", phrases: p)?.intent, .command(.skip))
+        XCTAssertEqual(GrillMatcher.match("partiu", phrases: p)?.intent, .command(.skip))
         XCTAssertNil(GrillMatcher.match("moving on"), "not built in")
         let withRepeat = GrillPhrases(version: "1", maxWords: 4, fillers: ["bom dia"], clientOnly: ["repeat"],
                                       commands: ["repeat": .init(en: ["once more"], pt: ["outra vez"])])
         XCTAssertEqual(GrillMatcher.match("Outra vez", phrases: withRepeat)?.intent, .repeatQuestion)
+        XCTAssertNil(GrillMatcher.match("Outra vez", phrases: p), "same version, other catalog: not the cached one")
+    }
+
+    func testFillersFromEachCatalogAreTrimmed() {
+        XCTAssertEqual(sure("hey skip"), .command(.skip), "a filler only grill_phrases.json lists")
+        let p = GrillPhrases(version: "1", maxWords: 4, fillers: ["xyz"], commands: [:])
+        XCTAssertEqual(GrillMatcher.match("xyz skip", phrases: p), .init(intent: .command(.skip), confidence: .sure),
+                       "a filler only the server lists")
+        XCTAssertNotEqual(GrillMatcher.match("xyz skip")?.confidence, .sure, "not a filler without the server's catalog")
     }
 
     func testLevenshtein() {

@@ -14,6 +14,9 @@ protocol LoftAPI: Sendable {
     func grillSession(agentId: String) async throws -> GrillSession?
     func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession?
     func grillPhrases() async throws -> GrillPhrases
+    /// "Set up the team with loft" on the end-of-planning card `messageId`: the server sends its setup message
+    /// once and returns the card with `sent_at` (`duplicate` when it was already sent).
+    func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse
     func taskPlan(id: String) async throws -> TaskPlan
     func needsYou() async throws -> NeedsYouList
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws
@@ -26,6 +29,8 @@ protocol LoftAPI: Sendable {
     func stopRun(agentId: String) async throws
     /// Stops the run and keeps the queue; queued messages run next (`run_watchdog`).
     func restartRun(agentId: String) async throws
+    /// Clear context: a fresh Claude session, memory kept.
+    func resetSession(agentId: String) async throws
     func permissions() async throws -> [PermissionRequest]
     func decidePermission(id: String, decision: String) async throws
     func pullRequests() async throws -> [PullRequest]
@@ -171,6 +176,10 @@ struct LiveLoftAPI: LoftAPI {
 
     func grillPhrases() async throws -> GrillPhrases { try await get("/grill/commands") }
 
+    func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
+        try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/team-setup"))
+    }
+
     /// The grill endpoints answer with the session either bare or wrapped as `{ "session": … }`
     /// (`{ "session": null }` when there is none).
     static func decodeGrillSession(_ data: Data) throws -> GrillSession? {
@@ -185,6 +194,7 @@ struct LiveLoftAPI: LoftAPI {
     func runNow(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/run") }
     func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
+    func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
     func permissions() async throws -> [PermissionRequest] { try await get("/permissions") }
 
     func decidePermission(id: String, decision: String) async throws {
@@ -277,6 +287,7 @@ extension LoftAPI {
         throw APIError.unsupported("Grill mode")
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
+    func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
     func taskPlan(id: String) async throws -> TaskPlan { throw APIError.unsupported("Plans") }
     func needsYou() async throws -> NeedsYouList { throw APIError.unsupported("Needs you") }
