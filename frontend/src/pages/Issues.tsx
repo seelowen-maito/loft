@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -51,13 +51,20 @@ export default function IssuesPage() {
     api.issues().then((d) => (setData(d), setError(null))).catch((e) => setError(String(e.message ?? e))).finally(() => setLoading(false));
   }, []);
   useEffect(load, [load]);
+  // A publish touches one project: refetch just its list, or everything if the tab doesn't have it yet.
+  const loaded = useRef(data);
+  loaded.current = data;
+  const reload = useCallback((project: string) => {
+    if (!loaded.current?.projects.some((p) => p.project === project)) return load();
+    api.issues(project).then((d) => setData((cur) => cur && { ...cur, projects: cur.projects.map((p) => (p.project === project ? (d.projects[0] ?? p) : p)) })).catch(load);
+  }, [load]);
   useServerEvents(
     useCallback((e: ServerEvent) => {
       if (e.type === "issues") {
-        load();
-        setPublished((n) => n + 1);
+        reload(e.project);
+        if (e.project === routeProject) setPublished((n) => n + 1);
       }
-    }, [load]),
+    }, [reload, routeProject]),
   );
 
   const visible = useMemo(() => {
@@ -125,6 +132,11 @@ export default function IssuesPage() {
                 <div className="px-2.5 py-1 text-[12.5px] text-fg-3">No {state} issues{query.trim() ? " match" : ""}.</div>
               ) : (
                 p.shown.map((i) => <IssueRow key={i.number} project={p.project} i={i} active={selected?.project === p.project && selected.number === i.number} />)
+              )}
+              {p.truncated && (
+                <div className="px-2.5 py-1 text-[12px] text-fg-3">
+                  Showing the first 1,000 issues and pull requests, open ones first. The rest are on <a href={`https://github.com/${p.repo}/issues`} target="_blank" rel="noreferrer" className="text-accent underline decoration-accent/30 underline-offset-2">GitHub</a>.
+                </div>
               )}
             </section>
           ))}

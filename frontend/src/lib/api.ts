@@ -382,8 +382,8 @@ export type IssueDetail = Issue & {
   blocking_list: IssueLink[];
 };
 
-/** A project's issues. `problem`: it has no GitHub repo; `error`: GitHub turned the request down. */
-export type ProjectIssues = { project: string; repo: string | null; problem?: string | null; error?: string; issues: Issue[] };
+/** A project's issues. `problem`: it has no GitHub repo; `error`: GitHub turned the request down; `truncated`: more than the pages Loft reads. */
+export type ProjectIssues = { project: string; repo: string | null; problem?: string | null; error?: string; truncated?: boolean; issues: Issue[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -418,8 +418,8 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
-  /** Every project's GitHub issues, fetched live; nothing is fetched when `connected` is false. */
-  issues: () => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", "/issues"),
+  /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
+  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/issues?project=${encodeURIComponent(project)}` : "/issues"),
   issue: (project: string, n: number) => req<IssueDetail>("GET", `/issues/${n}?project=${encodeURIComponent(project)}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
