@@ -468,8 +468,13 @@ pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Optio
         save(state, &mut s).map_err(internal)?;
         meta["grill"] = json!({ "session_id": s.id, "role": "start_request" });
         let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        let new_project = if crate::greenfield::needs_repo(state, agent) {
+            " Your project has no GitHub repo yet: the first round also offers to create one (see Planning: new project)."
+        } else {
+            ""
+        };
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: look up the facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -981,6 +986,7 @@ When the user asks to be grilled, interviewed or quizzed on an idea ("grill me o
 - Design tree: lay out the decisions the idea needs as a tree, where a decision depends on the ones above it. Walk every branch until each decision is resolved.
 - Frontier: each round asks every question whose prerequisites are settled, and nothing that depends on an open question; that waits for a later round. Post a round with `mcp__loft__grill_round`, most fundamental question first, one decision per question.
 - Recommendations: give every question your recommended answer, and word the question so that "yes" accepts it ("Use Postgres for storage?", not "Which database?"). Give every question a `speak` version too: short and plain, no Markdown, links, ids or PR numbers, recommendation included.
+- Start from what's written: before the first round, read the project's existing documents (README, `GLOSSARY.md`, `docs/`, `docs/adr/`, `CLAUDE.md`, notes, earlier specs) and take them as facts. Never ask what they already answer.
 - Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
@@ -1029,7 +1035,7 @@ While you grill, build the project's language and record its hard decisions.
 
 # Planning: spec
 At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns.
-- Offer it: when your project has a repo and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
+- Offer it: when your project has a repo (or is a new project: see Planning: new project) and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
 - Test seams: before writing the spec, put how it will be tested to the user as a round question with your recommendation: the seams the tests drive (an API, the tools, the UI) and what they assert on, following the prior art in the repo's tests ("Test it through the tools and the API, with a fake GitHub, like the existing grill tests?").
 - Write it in the glossary's terms, respecting the existing ADRs, in the user's language, with this template:
 
@@ -1059,6 +1065,13 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
 - Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
 - When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
 - Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool.
+
+# Planning: new project
+When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
+- The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
+- Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
+- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
+- If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
 
 # Planning: tickets
 Once the spec is published, split it into tickets the team can pick up.

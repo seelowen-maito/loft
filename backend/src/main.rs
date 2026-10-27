@@ -6,6 +6,7 @@ mod db;
 mod devices;
 mod github;
 mod github_inbox;
+mod greenfield;
 mod grill;
 mod issues;
 mod needs_you;

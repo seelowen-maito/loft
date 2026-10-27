@@ -93,7 +93,11 @@ async fn repo_for(state: &AppState, a: &Agent) -> Result<String, String> {
     if a.project.trim().is_empty() {
         return Err("You have no project, so there is no repo to publish to. Ask the user to set your project in the Config tab.".into());
     }
-    crate::repos::github_repo(state, &a.project).await.map_err(|e| format!("{e}, so there is no GitHub repo to publish to."))
+    crate::repos::github_repo(state, &a.project).await.map_err(|e| {
+        // A new project: the user may have declined the repo earlier in the grill, so it is asked again.
+        let again = if crate::greenfield::needs_repo(state, a) { format!(" {}", crate::greenfield::ASK_AGAIN) } else { String::new() };
+        format!("{e}, so there is no GitHub repo to publish to.{again}")
+    })
 }
 
 /// Creates the labels the repo doesn't have yet; existing ones are left as they are.
@@ -349,13 +353,13 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::tests::{Fake, fake_github, state_with_token};
     use crate::grill::tests::planner;
 
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
-    fn state() -> AppState {
+    pub(crate) fn state() -> AppState {
         let st = state_with_token();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let projects = dir.join("projects");

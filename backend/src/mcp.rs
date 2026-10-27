@@ -21,6 +21,7 @@ fn tools(me: Option<&Agent>) -> Value {
     if me.is_some_and(crate::grill::enabled) {
         all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
         all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
+        all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
     }
     all
 }
@@ -146,7 +147,10 @@ fn tool_error(t: impl Into<String>) -> Value {
 async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
-            None => crate::planning::mcp_call(state, &me, name, &args).await,
+            None => match crate::planning::mcp_call(state, &me, name, &args).await {
+                None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                r => r,
+            },
             r => r,
         } {
             return match r {
