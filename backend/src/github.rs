@@ -47,17 +47,28 @@ fn api_base() -> String {
 }
 
 /// Keeps write requests (POST, PATCH, PUT, DELETE) at least a second apart, as GitHub asks: a burst of
-/// them, like publishing 50 tickets, otherwise trips its secondary rate limit.
-#[derive(Default)]
-pub struct Pace(tokio::sync::Mutex<Option<Instant>>);
+/// them, like publishing 50 tickets, otherwise trips its secondary rate limit. GraphQL queries are
+/// POSTs too but only read, so they aren't paced.
+pub struct Pace {
+    last: tokio::sync::Mutex<Option<Instant>>,
+    gap: Duration,
+}
 
-const WRITE_GAP: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(1) };
+impl Default for Pace {
+    fn default() -> Self {
+        Self::with_gap(if cfg!(test) { Duration::ZERO } else { Duration::from_secs(1) })
+    }
+}
 
 impl Pace {
-    async fn wait(&self, gap: Duration) {
-        let mut last = self.0.lock().await;
+    pub(crate) fn with_gap(gap: Duration) -> Self {
+        Pace { last: Default::default(), gap }
+    }
+
+    async fn wait(&self) {
+        let mut last = self.last.lock().await;
         if let Some(at) = *last {
-            tokio::time::sleep_until((at + gap).into()).await;
+            tokio::time::sleep_until((at + self.gap).into()).await;
         }
         *last = Some(Instant::now());
     }
@@ -86,8 +97,8 @@ fn rate_limit_wait(status: reqwest::StatusCode, headers: &reqwest::header::Heade
 pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
     let mut retried = false;
     loop {
-        if method != reqwest::Method::GET {
-            state.gh_pace.wait(WRITE_GAP).await;
+        if method != reqwest::Method::GET && path != "/graphql" {
+            state.gh_pace.wait().await;
         }
         let mut req = state
             .http
@@ -343,13 +354,28 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn paces_writes_apart() {
-        let pace = Pace::default();
+    async fn paces_writes_but_not_reads() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let gap = Duration::from_millis(300);
+        let st = AppState { gh_pace: Arc::new(Pace::with_gap(gap)), ..st };
+        fake.route("POST", "/repos/octo/paced/issues", 201, json!({ "number": 1 }));
+        fake.route("GET", "/repos/octo/paced/issues", 200, json!([]));
+        fake.route("POST", "/graphql", 200, json!({ "data": {} }));
+
         let start = Instant::now();
         for _ in 0..3 {
-            pace.wait(Duration::from_millis(50)).await;
+            request(&st, reqwest::Method::POST, "/repos/octo/paced/issues", Some(json!({ "title": "A" }))).await.unwrap();
         }
-        assert!(start.elapsed() >= Duration::from_millis(100), "{:?}", start.elapsed());
+        assert!(start.elapsed() >= 2 * gap, "three writes take two gaps: {:?}", start.elapsed());
+
+        // Right after a write, reads and GraphQL queries go straight through.
+        let start = Instant::now();
+        for _ in 0..3 {
+            get(&st, "/repos/octo/paced/issues").await.unwrap();
+            request(&st, reqwest::Method::POST, "/graphql", Some(json!({ "query": "{}" }))).await.unwrap();
+        }
+        assert!(start.elapsed() < gap, "reads aren't paced: {:?}", start.elapsed());
     }
 
     #[test]
