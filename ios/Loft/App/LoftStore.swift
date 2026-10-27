@@ -645,7 +645,13 @@ final class LoftStore {
         moveVoiceOff(questionId, agentId: agentId)
     }
 
-    /// A spoken or typed answer to the question the voice is on; then on to the next one, and after the last
+    /// Whether what the chat composer sends answers the question the voice is on: only a voice turn does.
+    /// Typed text is a chat message even while a round waits, so a side remark is never stored as an answer.
+    func composerAnswers(byVoice: Bool, agentId: String) -> Bool {
+        byVoice && currentGrillQuestion(for: agentId) != nil
+    }
+
+    /// A spoken answer to the question the voice is on; then on to the next one, and after the last
     /// the round is sent. If only the send fails, the answer is kept and the error says so.
     func answerCurrentGrill(_ text: String, agentId: String) async throws {
         guard let q = currentGrillQuestion(for: agentId) else { return await send(text, to: agentId) }

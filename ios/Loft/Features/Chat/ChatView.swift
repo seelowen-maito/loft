@@ -15,7 +15,6 @@ struct ChatView: View {
     private static let page = 60
     @State private var confirmStop = false
     @State private var actionError: APIError?
-    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var confirmEndGrill = false
     // Grill voice loop, all inside this chat: read the question, open the mic, catch spoken commands.
     @State private var composerControl: ComposerControl?
@@ -192,7 +191,6 @@ struct ChatView: View {
                     .accessibilityIdentifier("attachedTask")
                 }
                 ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
-                             placeholder: currentQuestionNumber.map { typeSize.isAccessibilitySize ? "Answer \($0)…" : "Answer question \($0)…" },
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
@@ -200,10 +198,10 @@ struct ChatView: View {
                              startVoice: { Task { await voice.start(agentId: agentId) } },
                              onVoiceSent: continueByVoice,
                              onVoiceStop: stopByVoice,
-                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text in
-                    // While a round waits, what you send answers the question the voice is on (tagged so it can't land
-                    // on another one), and the voice moves on to the next.
-                    if currentQuestion != nil {
+                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text, byVoice in
+                    // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
+                    // on another one) and the voice moves on; typed text is always chat, as on the web.
+                    if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
                         Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
                     } else {
                         quickReply(to: text)

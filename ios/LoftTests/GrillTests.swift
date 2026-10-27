@@ -227,6 +227,24 @@ final class GrillStoreTests: XCTestCase {
         store.deactivate()
     }
 
+    /// Typed text in the composer during a round is chat, as on the web: it answers nothing and the voice stays put.
+    func testTypedTextDuringARoundIsChatNotAnAnswer() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        XCTAssertFalse(store.composerAnswers(byVoice: false, agentId: "orch"), "typed text is chat")
+        XCTAssertTrue(store.composerAnswers(byVoice: true, agentId: "orch"), "a voice turn answers the question the voice is on")
+        await store.send("wait, what does upsell mean?", to: "orch")
+        let m = try XCTUnwrap(store.conversation("orch").last { $0.role == "user" && $0.kind == "text" })
+        XCTAssertEqual(m.content, "wait, what does upsell mean?")
+        XCTAssertNil(m.grill, "a plain chat message, not an answer")
+        XCTAssertTrue(store.pending.isEmpty)
+        XCTAssertEqual(store.openGrill(for: "orch")?.questions?.map(\.state), [.open, .open, .open], "nothing answered")
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q3", "the voice didn't move")
+        XCTAssertTrue(api.grillCommandsSent.isEmpty)
+        store.deactivate()
+    }
+
     func testVoiceStepsThroughTheRoundAndSendsItAfterTheLastAnswer() async throws {
         let api = FixtureAPI(grill: true)
         let store = try await store(api)

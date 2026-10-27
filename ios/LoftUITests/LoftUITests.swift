@@ -224,8 +224,8 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
     }
 
-    /// The open round as cards: Accept holds an answer, the composer answers the question the voice is on and
-    /// moves to the next, Skip moves on, Send round brings the next round, then Pause and Resume.
+    /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
+    /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
     func testGrillRoundCardsAnswersAndSend() {
         let app = openGrillChat()
         XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
@@ -242,11 +242,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("grillAccepted", app).appears(timeout: 5))
         XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
 
-        // The composer answers the first question; the voice moves past the accepted one to the third.
+        // Typed text is a chat message, as on the web: no "Answer question 1…" placeholder, nothing answered, the voice stays.
         let field = app.textFields["composerField"]
+        XCTAssertFalse((field.placeholderValue ?? "").contains("Answer"), field.placeholderValue ?? "")
         field.tap()
-        field.typeText("Monthly only")
+        field.typeText("wait, what does upsell mean?")
         app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "wait, what does upsell mean?", app).appears(timeout: 5), "sent as chat")
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists, "the voice didn't move")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists, "nothing was answered")
+
+        // A choice saved on the current card answers it; the voice moves past the accepted one to the third.
+        app.buttons["grillChoice-Both"].firstMatch.tap()
+        app.buttons.matching(identifier: "grillSaveAnswer").firstMatch.tap()
         XCTAssertTrue(text(containing: "Question 3 of 3", app).appears(timeout: 5))
         XCTAssertTrue(text(containing: "2 of 3 answered", app).exists)
 
@@ -260,6 +268,17 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the open round shows Resume while paused")
         app.buttons["grillResume"].tap()
         XCTAssertTrue(app.buttons["grillResume"].disappears(timeout: 5))
+    }
+
+    /// A dictated answer (the voice walk-through) still answers the question the voice is on and moves to the next.
+    func testDictatedAnswerDuringARoundAnswersAndMovesOn() {
+        let app = openGrillChat(["-fixture-dictation", "Monthly only"])
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).appears(timeout: 5))
+        let yes = app.buttons["submitPromptYes"]
+        XCTAssertTrue(yes.appears(timeout: 5))
+        yes.tap()
+        XCTAssertTrue(text(containing: "Question 2 of 3", app).appears(timeout: 10), "on to the next question")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
     }
 
     func testUnsureSpokenCommandAsksFirst() {
