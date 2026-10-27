@@ -262,18 +262,23 @@ fn owners_named<'a>(text: &str, owners: &'a [String]) -> Vec<&'a String> {
     owners.iter().filter(|o| words.contains(&o.to_lowercase().as_str())).collect()
 }
 
-/// True when the user's own answer asks for a public repo ("public", "público", "públicos") and says
-/// nothing private or negative next to it ("not public", "shouldn't", "privado"), which would make it
-/// unclear. Whole words only: "publicar" and "publica" mean publish, which every yes to the question does.
+/// True when the user's own answer asks for a public repo ("public", "público", "públicos") in a few
+/// words and says nothing private, negative or hedged next to it ("not public", "shouldn't", "privado",
+/// "later"), which would make it unclear: then it stays private and the agent can ask again. Whole words
+/// only: "publicar" and "publica" mean publish, which every yes to the question does.
 fn asks_public(answer: &str) -> bool {
     const PUBLIC: &[&str] = &["public", "publicly", "publico", "publicos"];
-    const NOT: &[&str] = &["not", "no", "never", "nao", "nem", "nunca", "jamais", "nenhum", "sem"];
+    const NOT: &[&str] = &[
+        "not", "no", "never", "without", "non", "nonpublic", "nothing", "none", "nope", "nah", "neither", "nor", "except", "instead", "later",
+        "nao", "nem", "nunca", "jamais", "nenhum", "nenhuma", "nada", "sem", "exceto", "menos", "depois",
+    ];
+    const MAX_WORDS: usize = 8;
     let a = crate::grill::commands::normalize(answer);
     let words: Vec<&str> = a.split_whitespace().collect();
     // Apostrophes are dropped, so "shouldn't" arrives as "shouldnt"; "want" and "different" aren't negations.
     const NT: &[&str] = &["dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent", "shouldnt", "wouldnt", "couldnt", "cant", "cannot", "wont", "mustnt", "neednt", "aint"];
     let negative = |w: &str| NOT.contains(&w) || NT.contains(&w);
-    words.iter().any(|w| PUBLIC.contains(w)) && !words.iter().any(|w| w.starts_with("privat") || w.starts_with("privad") || negative(w))
+    words.len() <= MAX_WORDS && words.iter().any(|w| PUBLIC.contains(w)) && !words.iter().any(|w| w.starts_with("privat") || w.starts_with("privad") || negative(w))
 }
 
 /// The yes has to be to this repo: the question names `<owner>/<name>`. The owner is the one the answer
@@ -686,9 +691,9 @@ mod tests {
         };
 
         // A yes in the user's own words that doesn't say public is a private repo under the question's owner.
+        // End to end for a few; only_the_users_own_words_saying_public_make_a_public_repo has the rest.
         for answer in [
-            "bora", "yes go ahead", "pode", "pode, mas não público", "yes, public? no, keep it private", "sim, publique sem pressa",
-            "sim, pode publicar", "sim, publica", "yes, but it shouldn't be public", "yes, it can't be public", "sim, público jamais", "sim, nenhum público",
+            "bora", "yes go ahead", "pode, mas não público", "sim, pode publicar", "yes, but it shouldn't be public",
         ] {
             let qid = ask(&st, &a, Some(answer), true);
             let err = create(&qid, json!({ "private": false })).await.unwrap_err();
@@ -739,9 +744,20 @@ mod tests {
             let owner = if answer.contains("acme") { "acme" } else { "octo-me" };
             assert_eq!(check_choice(&q(answer), &owners, owner, "gf", false), if answer.contains("não") { Err(format!("The user answered \"{answer}\", which doesn't ask for a public repo: call create_repo without `private: false`, or ask them again if they want it public.")) } else { Ok(()) }, "{answer}");
         }
+        for answer in [
+            "pode", "yes, public? no, keep it private", "sim, publique sem pressa", "sim, publica", "yes, it can't be public", "sim, público jamais",
+            "sim, nenhum público", "yes, without making it public", "yes, keep it non-public", "yes, nothing public", "sim, público depois",
+            "yes, public, I guess, unless the team would rather keep it closed for now",
+        ] {
+            assert!(check_choice(&q(answer), &owners, "octo-me", "gf", false).unwrap_err().contains("which doesn't ask for a public repo"), "{answer}");
+        }
         assert!(check_choice(&q("Sim, acme, privado"), &owners, "acme", "gf", false).is_err(), "an option is private even when picked");
         assert_eq!(check_choice(&q("Sim, acme, privado"), &owners, "acme", "gf", true), Ok(()), "the translated option's owner, private");
         assert!(!asks_public("sim, pode publicar") && !asks_public("publica sim") && !asks_public("yes, public? it isnt"));
+        // Not a yes to begin with, but the public check refuses them on its own too.
+        for answer in ["nope, public is bad", "nah, public later", "yes, nonpublic", "public? neither", "public except docs", "public instead? no"] {
+            assert!(!asks_public(answer), "{answer}");
+        }
     }
 
     #[tokio::test]
