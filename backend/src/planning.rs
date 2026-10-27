@@ -45,10 +45,14 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if !crate::grill::enabled(me) {
         return Some(Err("Planning isn't on for you.".into()));
     }
-    if name == "publish_tickets" {
-        return Some(publish_tickets(state, me, args).await);
-    }
-    Some(publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await)
+    let out = if name == "publish_tickets" {
+        publish_tickets(state, me, args).await
+    } else {
+        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await
+    };
+    // Even a failure can leave issues published, so the Issues tab refetches either way.
+    state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
+    Some(out)
 }
 
 /// Same spec, same key: case and spacing don't make a new one.
@@ -58,18 +62,10 @@ fn key(title: &str) -> String {
 
 /// `owner/repo` from the `origin` of the agent's project folder.
 async fn repo_for(state: &AppState, a: &Agent) -> Result<String, String> {
-    let project = a.project.trim();
-    if project.is_empty() {
+    if a.project.trim().is_empty() {
         return Err("You have no project, so there is no repo to publish to. Ask the user to set your project in the Config tab.".into());
     }
-    let dir = state.settings.boot().projects_dir.join(project);
-    if !dir.join(".git").exists() {
-        return Err(format!("The project folder {} isn't a git repo, so there is no GitHub repo to publish to.", dir.display()));
-    }
-    let remote = crate::repos::git(&dir, &["remote", "get-url", "origin"])
-        .await
-        .map_err(|_| format!("The project {project} has no `origin` remote, so there is no GitHub repo to publish to."))?;
-    crate::repos::github_slug(&remote).ok_or_else(|| format!("The project {project}'s `origin` ({}) isn't on GitHub.", remote.trim()))
+    crate::repos::github_repo(state, &a.project).await.map_err(|e| format!("{e}, so there is no GitHub repo to publish to."))
 }
 
 /// Creates the labels the repo doesn't have yet; existing ones are left as they are.
@@ -371,9 +367,13 @@ mod tests {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "spec-new", Some("git@github.com:octo/spec-new.git"));
         repo(&fake, "octo/spec-new", &["bug", "Ready-For-Agent"], 40);
+        let mut events = st.events.subscribe();
 
         let out = publish(&st, &a, "  Planning   in rounds ").await.unwrap();
         assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40");
+        // The Issues tab hears about it and refetches.
+        let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
+        assert_eq!(ev, json!({ "type": "issues", "project": "spec-new" }));
 
         let labels = posts(&fake, "octo/spec-new", "labels");
         assert_eq!(labels.len(), 1, "only the missing label is created: {labels:?}");

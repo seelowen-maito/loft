@@ -149,6 +149,8 @@ body::after {
 .prose-chat ul { @apply my-2 list-disc pl-5; }
 .prose-chat ol { @apply my-2 list-decimal pl-5; }
 .prose-chat li { @apply my-0.5; }
+.prose-chat ul.contains-task-list { @apply list-none pl-1; }
+.prose-chat .task-list-item input { @apply mr-1.5 align-middle; }
 .prose-chat h1, .prose-chat h2, .prose-chat h3 { @apply mt-3 mb-1 font-medium text-fg; }
 .prose-chat table { @apply my-2 w-full text-[13px]; }
 .prose-chat th, .prose-chat td { @apply border-b border-line px-2 py-1 text-left; }

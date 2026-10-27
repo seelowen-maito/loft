@@ -7,6 +7,7 @@ mod devices;
 mod github;
 mod github_inbox;
 mod grill;
+mod issues;
 mod needs_you;
 mod planning;
 mod guard;
@@ -93,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/issues", get(issues::list))
+        .route("/issues/{number}", get(issues::get))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

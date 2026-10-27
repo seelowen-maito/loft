@@ -136,6 +136,17 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `owner/repo` of a project from its folder's `origin`; the error says what's missing, without a full stop.
+pub async fn github_repo(state: &AppState, project: &str) -> Result<String, String> {
+    let project = project.trim();
+    let dir = state.settings.boot().projects_dir.join(project);
+    if !dir.join(".git").exists() {
+        return Err(format!("The project folder {} isn't a git repo", dir.display()));
+    }
+    let remote = git(&dir, &["remote", "get-url", "origin"]).await.map_err(|_| format!("The project {project} has no `origin` remote"))?;
+    github_slug(&remote).ok_or_else(|| format!("The project {project}'s `origin` ({}) isn't on GitHub", remote.trim()))
+}
+
 /// Parse `owner/repo` from any GitHub remote URL form.
 pub fn github_slug(remote: &str) -> Option<String> {
     let r = remote.trim().trim_end_matches('/').trim_end_matches(".git");
