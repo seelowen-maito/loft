@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loft for iOS</title>
+<meta name="description" content="A native iOS app for loft: agent status, approvals, tasks and chat, with push notifications. Build it yourself from the repo with Xcode.">
+<meta property="og:title" content="loft in your pocket">
+<meta property="og:description" content="A native iOS app for the loft running on your Mac.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+  <symbol id="i-todo" viewBox="0 0 24 24"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-checks" viewBox="0 0 24 24"><path d="M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-house" viewBox="0 0 8 8"><path d="M3 0h2v1H3zM2 1h4v1H2zM1 2h6v1H1zM0 3h8v1H0zM1 4h1v4H1zM6 4h1v4H6zM2 7h4v1H2zM3 5h2v2H3z"/></symbol>
+</svg>
+
+<nav class="site">
+  <div class="wrap">
+    <a class="brand" href="./"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="./#features">Features</a>
+      <a class="hide-sm" href="./#install">Install</a>
+      <a class="hide-sm" href="#setup">Setup</a>
+      <a class="btn" href="https://github.com/seelowen-maito/loft">
+        <svg class="ico" viewBox="0 0 16 16" style="fill:currentColor;stroke:none"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<section id="ios" class="first">
+  <div class="wrap">
+    <div class="feature">
+      <div class="copytext">
+        <span class="exp"><i></i>Experimental</span>
+        <h2 style="margin-top:18px">loft in your <span class="serif">pocket.</span></h2>
+        <p>A native iOS app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's not on the App Store yet, so you build it yourself from the repo with Xcode.</p>
+        <ul>
+          <li>Every agent's status, and a chat with each of them</li>
+          <li>Approve or deny permission requests in one tap</li>
+          <li>Hand off and track tasks, and see what needs you</li>
+          <li>Push notifications when an agent is waiting on you</li>
+          <li>Talk to your agents, and hear the replies read aloud</li>
+        </ul>
+      </div>
+      <div class="phone-wrap" aria-hidden="true">
+        <div class="phone">
+          <div class="screen">
+            <span class="p-time">9:41</span><span class="island"></span>
+            <div class="push">
+              <div class="appicon"><svg viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg></div>
+              <div style="min-width:0;flex:1"><b>Builder needs your approval<time>now</time></b><span>Wants to use Bash</span></div>
+            </div>
+            <div class="p-title">Needs you</div>
+            <div class="p-sub">2 waiting · live</div>
+            <div class="p-item warn">
+              <img src="avatars/builder.svg" alt="">
+              <div style="min-width:0"><b>Builder needs your approval</b><span>Wants to run <code style="font-size:11px">npm test -- sync</code></span>
+                <div class="p-acts"><span class="btn-primary">Allow</span><span class="btn">Deny</span></div>
+              </div>
+            </div>
+            <div class="p-item">
+              <img src="avatars/reviewer.svg" alt="">
+              <div style="min-width:0"><b>Reviewer asked you something</b><span>Merge #42 now, or wait for CI?</span></div>
+            </div>
+            <div class="p-item">
+              <img src="avatars/triage.svg" alt="">
+              <div style="min-width:0"><b>Triage finished a task</b><span>Label last week's issues</span></div>
+            </div>
+            <div class="p-tabs">
+              <span><svg class="ico"><use href="#i-house"/></svg>Overview</span>
+              <span><svg class="ico"><use href="#i-bot"/></svg>Agents</span>
+              <span class="on"><svg class="ico"><use href="#i-shield"/></svg>Needs you</span>
+              <span><svg class="ico"><use href="#i-todo"/></svg>Tasks</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide" id="setup">
+      <div class="center">
+        <div class="eyebrow">Set up the iOS app</div>
+        <h2>Build it, sign it, <span class="serif">get pinged.</span></h2>
+        <p class="sub">About half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
+      </div>
+      <ol>
+        <li class="card g-step">
+          <div class="n">01</div>
+          <div>
+            <h4>Get an Apple developer account</h4>
+            <p>Any Apple ID can sign the app for your own phone. Push notifications and TestFlight need a paid membership.</p>
+            <div class="plans">
+              <div><b>Free Apple ID</b><span class="yes">Runs on your own iPhone</span><br><span class="no">Reinstall every 7 days · no push · no TestFlight</span></div>
+              <div><b>Apple Developer Program</b><span class="yes">Push notifications · TestFlight · builds last a year</span><br><span class="no">US$99 a year</span></div>
+            </div>
+            <ol class="sub-steps">
+              <li>For the paid plan, enroll at <a href="https://developer.apple.com/programs/enroll/">developer.apple.com/programs</a>. Approval can take a day or two.</li>
+              <li>In Xcode, open <b>Settings → Accounts</b>, press <b>+</b> and sign in with that Apple ID.</li>
+              <li>Find your <b>Team ID</b>, 10 characters like <code>ABCDE12345</code>: on <a href="https://developer.apple.com/account">developer.apple.com/account</a> under <b>Membership details</b>. With a free Apple ID, it's the team Xcode shows in <b>Signing &amp; Capabilities</b> once you pick your Personal Team.</li>
+            </ol>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">02</div>
+          <div>
+            <h4>Set up Xcode with your team and app id</h4>
+            <p>Your team and bundle id stay out of the repo, in a local file that git ignores. The bundle id has to be unique on Apple's side, so use a reverse domain of your own.</p>
+<div class="code"><span class="p">$ </span>cd ~/loft/ios
+<span class="p">$ </span>cp Config/Local.xcconfig.example Config/Local.xcconfig</div>
+            <p>Then edit <code>ios/Config/Local.xcconfig</code>:</p>
+<div class="code">LOFT_TEAM_ID = <span class="a">ABCDE12345</span>        <span class="c">// your Team ID from step 1</span>
+LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// your app id</span></div>
+            <ol class="sub-steps">
+              <li>Open <code>ios/Loft.xcodeproj</code> in Xcode (16 or newer). Signing is automatic, so Xcode registers the app id and makes the profiles for you.</li>
+              <li>Plug in your iPhone, choose it as the run destination and press <b>Run</b>.</li>
+              <li>The first time, turn on <b>Settings → Privacy &amp; Security → Developer Mode</b> on the phone. With a free Apple ID, also trust yourself under <b>Settings → General → VPN &amp; Device Management</b>.</li>
+            </ol>
+            <p>Free Apple ID: personal teams can't sign push, so remove <b>Push Notifications</b> and <b>Time Sensitive Notifications</b> under <b>Signing &amp; Capabilities</b> before you build.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">03</div>
+          <div>
+            <h4>Let the phone reach loft</h4>
+            <p>The app talks to loft on your Mac. The easiest way is <a href="https://tailscale.com">Tailscale</a>, which keeps it private to your own devices. Turn on HTTPS certificates in the Tailscale admin console, then on the Mac:</p>
+<div class="code"><span class="p">$ </span>tailscale serve --bg 7420
+<span class="p">$ </span>tailscale serve status   <span class="c"># shows https://your-mac.your-tailnet.ts.net</span></div>
+            <p>Install Tailscale on the iPhone and sign in to the same tailnet. Open loft, enter the <code>https://….ts.net</code> address, tap <b>Test connection</b>, then <b>Save and connect</b>. Don't use <code>tailscale funnel</code>, which makes loft public.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">04</div>
+          <div>
+            <h4>Turn on push notifications</h4>
+            <p>Needs the paid membership. loft sends pushes straight to Apple with your own key, with names and titles only, never message text or tool input.</p>
+            <ol class="sub-steps">
+              <li>On <a href="https://developer.apple.com/account/resources/identifiers/list">developer.apple.com → Identifiers</a>, open your app id (<code>com.yourname.loft</code>), tick <b>Push Notifications</b> and save.</li>
+              <li>Under <b>Keys</b>, press <b>+</b>, name it “loft push”, tick <b>Apple Push Notifications service (APNs)</b>, then register.</li>
+              <li>Download <code>AuthKey_XXXXXXXXXX.p8</code>. Apple lets you download it <b>only once</b>, so keep a copy in your password manager.</li>
+              <li>In loft on the Mac, open <b>Settings → Push notifications</b>, choose the <code>.p8</code> file (the key id is read from its name), enter your Team ID and save. The phone tells loft its bundle id when it signs up for pushes.</li>
+              <li>Run the app on the phone again, allow notifications when it asks, then press <b>Send test push</b> next to your phone in Settings.</li>
+            </ol>
+            <p>The key is stored outside the repo with owner-only access and is never shown to agents. Builds run from Xcode use Apple's sandbox, and TestFlight builds use production. The same key works for both.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">05</div>
+          <div>
+            <h4>Optional: install with TestFlight</h4>
+            <p>Skip the cable and the weekly reinstall. Create the app in <a href="https://appstoreconnect.apple.com">App Store Connect</a> (Apps → + → New App, with your bundle id), then from the repo:</p>
+<div class="code"><span class="p">$ </span>./testflight.sh          <span class="c"># tests, archive, upload</span>
+<span class="p">$ </span>./testflight.sh --fast   <span class="c"># skip the tests</span></div>
+            <p>When the build finishes processing, add yourself under <b>TestFlight → Internal Testing</b>. Stick to internal testers: Apple's review for external testers can't reach a loft on your tailnet.</p>
+          </div>
+        </li>
+      </ol>
+      <p class="guide-note">The app is experimental: expect rough edges. Details are in <a href="https://github.com/seelowen-maito/loft/blob/main/ios/README.md">ios/README.md</a> and <a href="https://github.com/seelowen-maito/loft/blob/main/docs/push.md">docs/push.md</a>.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="./" style="font-size:15px"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div style="display:flex;gap:22px">
+      <a href="https://github.com/seelowen-maito/loft">GitHub</a>
+      <a href="https://github.com/seelowen-maito/loft#readme">README</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
