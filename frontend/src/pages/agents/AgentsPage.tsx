@@ -6,6 +6,7 @@ import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, groupByProject, timeAgo } from "../../lib/format";
 import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
 import { Sticker } from "../../components/Sticker";
+import { RunTimer } from "../../components/RunTimer";
 import { Chat } from "./Chat";
 import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
@@ -240,6 +241,7 @@ export default function AgentsPage() {
                         <div className="flex items-center gap-2">
                           <span className="truncate text-[13.5px]">{a.name}</span>
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
+                          {a.running && <RunTimer startedAt={a.last_run_at} className="ml-auto shrink-0 font-mono text-[10.5px] text-fg-3" />}
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10.5px] text-fg-3">
                           {a.running || a.status === "waiting" ? (
