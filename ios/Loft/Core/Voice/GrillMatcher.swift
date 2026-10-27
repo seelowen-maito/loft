@@ -46,11 +46,10 @@ enum GrillMatcher {
     static func match(_ text: String, phrases: GrillPhrases? = nil) -> Match? {
         let words = folded(text).split(separator: " ").map(String.init)
         guard !words.isEmpty else { return nil }
-        let fill = fillers.union(((phrases?.fillers ?? []) + (bundled?.fillers ?? [])).map(folded))
+        let (table, fill) = tables(phrases)
         let core = Array(words.drop { fill.contains($0) }.reversed().drop { fill.contains($0) }.reversed())
         guard !core.isEmpty else { return nil }
         let maxWords = phrases?.maxWords ?? bundled?.maxWords ?? 6
-        let table = merged(phrases)
 
         // 1. The whole (short) utterance is a command.
         if core.count <= maxWords {
@@ -91,12 +90,29 @@ enum GrillMatcher {
 
     private struct Entry { let intent: Intent; let phrases: Set<String> }
 
-    /// The bundled catalog plus the server's (an older or newer server may list other phrases).
-    private static func merged(_ server: GrillPhrases?) -> [Entry] {
-        order.map { intent, key in
-            let all = (bundled?.phrases(forKey: key) ?? []) + (server?.phrases(forKey: key) ?? [])
-            return Entry(intent: intent, phrases: Set(all.map(folded)))
+    /// The bundled catalog and fillers, folded once: `match` runs on every partial speech result.
+    private static let bundledTable: [Entry] = order.map { intent, key in
+        Entry(intent: intent, phrases: Set((bundled?.phrases(forKey: key) ?? []).map(folded)))
+    }
+    private static let bundledFillers: Set<String> = fillers.union((bundled?.fillers ?? []).map(folded))
+
+    /// The last merge with the server's phrases. Keyed on the whole catalog, not its version: two catalogs
+    /// can share one. The app passes the same stored catalog each time, so the `==` is a storage check.
+    private static let lock = NSLock()
+    private static var cache: (server: GrillPhrases, table: [Entry], fillers: Set<String>)?
+
+    /// The bundled catalog plus the server's (an older or newer server may list other phrases), and the fillers.
+    private static func tables(_ server: GrillPhrases?) -> ([Entry], Set<String>) {
+        guard let server else { return (bundledTable, bundledFillers) }
+        lock.lock()
+        defer { lock.unlock() }
+        if let c = cache, c.server == server { return (c.table, c.fillers) }
+        let table = zip(order, bundledTable).map { (o, entry) in
+            Entry(intent: entry.intent, phrases: entry.phrases.union(server.phrases(forKey: o.1).map(folded)))
         }
+        let fill = bundledFillers.union((server.fillers ?? []).map(folded))
+        cache = (server, table, fill)
+        return (table, fill)
     }
 
     /// `VoiceText.normalize` without apostrophes, as the server normalises its phrases ("don't" is "dont").

@@ -75,6 +75,7 @@ final class GrillMatcherTests: XCTestCase {
         let withRepeat = GrillPhrases(version: "1", maxWords: 4, fillers: ["bom dia"], clientOnly: ["repeat"],
                                       commands: ["repeat": .init(en: ["once more"], pt: ["outra vez"])])
         XCTAssertEqual(GrillMatcher.match("Outra vez", phrases: withRepeat)?.intent, .repeatQuestion)
+        XCTAssertNil(GrillMatcher.match("Outra vez", phrases: p), "same version, other catalog: not the cached one")
     }
 
     func testLevenshtein() {
