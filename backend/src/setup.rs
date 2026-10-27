@@ -63,13 +63,13 @@ When the user is new, or asks you to set things up:
    - Security, daily: exposes a server with tokens
    Skipped: CI (no workflows), Triage (no issues).
 
-   Create these? And your working hours, for quiet hours?
+   Create these?
    ```
    One line per project, one short line per agent; give a reason only when it isn't obvious from the template. One "Skipped" line per project, only if something notable was left out. No closing summary, and no recap of what Loft is (except in your first message, where a short intro is expected).
-6. Only after the user says yes, create the agents with `mcp__loft__create_agent`. Customize each template's instructions for that project: what it is, its stack, how to build and test it, where the important code lives, anything the user told you. Use the template's schedule unless the user asked otherwise, and their working hours as quiet hours. Give each one an `avatar_brief`: one or two sentences on how its sticker should look, drawn from its job, personality and project (a reviewer might be a magnifying glass with a raised eyebrow, a security agent a shield with a padlock, tinted in the project's colors). The new agent draws itself from it.
+6. Only after the user says yes, create the agents with `mcp__loft__create_agent`. Customize each template's instructions for that project: what it is, its stack, how to build and test it, where the important code lives, anything the user told you. Use the template's schedule unless the user asked otherwise. Agents run around the clock: give quiet hours only if the user asks for them. Give each one an `avatar_brief`: one or two sentences on how its sticker should look, drawn from its job, personality and project (a reviewer might be a magnifying glass with a raised eyebrow, a security agent a shield with a padlock, tinted in the project's colors). The new agent draws itself from it.
 7. Confirm in one line per project: the agents created and their schedules. Nothing else.
 
-Remember what the user decided (`mcp__loft__remember`): their working hours, the projects they set up, the ones they turned down and why, so you don't offer the same thing twice.
+Remember what the user decided (`mcp__loft__remember`): any quiet hours they asked for, the projects they set up, the ones they turned down and why, so you don't offer the same thing twice.
 
 ## Rules
 - Never create an agent the user hasn't agreed to. If they agreed to a plan, create exactly that plan.
@@ -130,7 +130,7 @@ Before writing any code:
 4. Show the user the roadmap and ask them to confirm or reorder it.
 
 ## 2. Agree on a rhythm
-Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours, outside their working hours). When they agree, call `mcp__loft__set_schedule` with that interval and their working hours as quiet hours. Until then, don't start work on your own.
+Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours). When they agree, call `mcp__loft__set_schedule` with that interval, and quiet hours only if they ask for them. Until then, don't start work on your own.
 
 ## 3. Build
 On each check-in, and whenever the user asks:
@@ -370,30 +370,67 @@ pub fn template(key: &str) -> Option<&'static Template> {
     TEMPLATES.iter().find(|t| t.key.eq_ignore_ascii_case(key.trim()))
 }
 
-/// Quiet hours for agents a setup creates, unless the user gave theirs: weekdays 09:00–18:00.
-fn default_quiet_hours() -> Vec<QuietWindow> {
+/// The quiet hours agents a setup created used to get unless the user gave theirs: weekdays 09:00–18:00.
+/// Agents now run around the clock unless the user asks for quiet hours.
+fn old_default_quiet_hours() -> Vec<QuietWindow> {
     vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }]
 }
+
+/// `loft`'s display name. Its id stays `LOFT_ID`.
+const LOFT_NAME: &str = "lofty";
+
+/// `loft`'s schedule on a new install: a weekly look for projects that became active since the last setup.
+const LOFT_INTERVAL: i64 = 10080;
+
+/// Lines in `loft`'s instructions from before agents ran around the clock by default, and what replaces them.
+const OLD_QUIET_LINES: &[(&str, &str)] = &[
+    ("   Create these? And your working hours, for quiet hours?", "   Create these?"),
+    (" Use the template's schedule unless the user asked otherwise, and their working hours as quiet hours.", " Use the template's schedule unless the user asked otherwise. Agents run around the clock: give quiet hours only if the user asks for them."),
+    ("Remember what the user decided (`mcp__loft__remember`): their working hours, the projects", "Remember what the user decided (`mcp__loft__remember`): any quiet hours they asked for, the projects"),
+];
 
 /// Make sure `loft` exists. A new one introduces itself and suggests a setup on its first run.
 pub fn ensure_loft(state: &AppState) {
     match state.db.get_agent(LOFT_ID) {
-        Ok(Some(a)) if a.builtin => {}
-        Ok(Some(_)) => {
-            let _ = state.db.update_agent(LOFT_ID, |a| a.builtin = true);
+        Ok(Some(a)) => {
+            // Installs from before the rename, and before `loft` ran through working hours: update them,
+            // unless the user renamed it, set its schedule or edited those lines themselves. Other agents stay as
+            // they are.
+            let rename = a.name == "loft";
+            let unpause = a.interval_minutes == LOFT_INTERVAL && a.quiet_hours == old_default_quiet_hours();
+            let reword = OLD_QUIET_LINES.iter().any(|(old, _)| a.prompt.contains(old));
+            if a.builtin && !rename && !unpause && !reword {
+                return;
+            }
+            let updated = state.db.update_agent(LOFT_ID, |a| {
+                a.builtin = true;
+                if rename {
+                    a.name = LOFT_NAME.into();
+                }
+                if unpause {
+                    a.quiet_hours.clear();
+                    a.next_run_at = None;
+                }
+                for (old, new) in OLD_QUIET_LINES {
+                    a.prompt = a.prompt.replace(old, new);
+                }
+            });
+            if let Ok(Some(a)) = updated {
+                crate::agents::emit_agent(state, &a);
+            }
         }
         Ok(None) => {
             let projects = state.settings.boot().projects_dir.display().to_string();
             let patch = json!({
-                "name": "loft",
+                "name": LOFT_NAME,
                 "title": "Your Loft guide",
                 "personality": LOFT_PERSONALITY,
                 "prompt": LOFT_PROMPT.replace("{projects}", &projects),
                 "model": "sonnet",
-                // A weekly look for projects that became active since the last setup.
-                "interval_minutes": 10080,
+                "interval_minutes": LOFT_INTERVAL,
                 "avatar": { "svg": LOFT_AVATAR.trim() },
-                "quiet_hours": default_quiet_hours(),
+                // Its weekly check-in is light, so it runs through working hours too.
+                "quiet_hours": [],
             });
             let created = crate::api::new_agent(state, LOFT_ID.into(), &patch, None).map_err(|e| e.1).and_then(|_| {
                 state
@@ -440,7 +477,7 @@ pub fn mcp_tools() -> Vec<Value> {
             "description": "Change your own schedule: how often you wake up on your own, and the quiet hours when you don't. The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
             "inputSchema": { "type": "object", "properties": {
                 "interval_minutes": { "type": "integer", "description": "Minutes between check-ins: 0 to stop, otherwise at least 60." },
-                "quiet_hours": { "type": "array", "description": "When check-ins pause, usually the user's working hours. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "When check-ins pause, only if the user asked for them. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -463,7 +500,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "personality": { "type": "string" },
                 "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
                 "interval_minutes": { "type": "integer", "description": "Minutes between scheduled check-ins (0 = only when messaged, otherwise at least 60). Defaults to the template's." },
-                "quiet_hours": { "type": "array", "description": "When scheduled check-ins pause, usually the user's working hours. Defaults to weekdays 09:00–18:00. Pass [] to run around the clock.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "When scheduled check-ins pause, Defaults to none: the agent runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -629,7 +666,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         return Err(format!("interval_minutes must be 0 or at least {MIN_INTERVAL}"));
     }
     let quiet: Vec<QuietWindow> = match args.get("quiet_hours") {
-        None | Some(Value::Null) => default_quiet_hours(),
+        None | Some(Value::Null) => vec![],
         Some(v) => serde_json::from_value(v.clone()).map_err(|_| "quiet_hours must be a list of { days, start, end }".to_string())?,
     };
     // Only these fields: an agent can't hand another agent more tools, MCP servers or a looser permission mode.
@@ -790,7 +827,7 @@ mod tests {
         assert_eq!(a.mcp_servers, json!({}));
         assert_eq!(a.created_by.as_deref(), Some(me.id.as_str()));
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
-        assert_eq!(a.quiet_hours, default_quiet_hours());
+        assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
 
         // Same name in the same project: refused. In another project: fine.
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "work/api" })).await.is_err());
@@ -834,6 +871,43 @@ mod tests {
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Docs"));
     }
 
+    #[test]
+    fn an_existing_loft_is_renamed_and_unpaused_unless_the_user_changed_it() {
+        let st = state();
+        st.rt.lock().unwrap().running.insert(LOFT_ID.into(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        ensure_loft(&st);
+        // As installed before the rename.
+        st.db.update_agent(LOFT_ID, |a| {
+            a.name = "loft".into();
+            a.quiet_hours = old_default_quiet_hours();
+        }).unwrap();
+        ensure_loft(&st);
+        let a = st.db.get_agent(LOFT_ID).unwrap().unwrap();
+        assert_eq!((a.name.as_str(), a.quiet_hours.is_empty()), (LOFT_NAME, true));
+
+        // lofty's instructions saved with the old lines no longer ask for working hours; other agents stay as they are.
+        let old = format!("Intro.\n{}\nOutro.", OLD_QUIET_LINES.iter().map(|(old, _)| *old).collect::<Vec<_>>().join("\n"));
+        let mut dev = agent(&st, "Dev");
+        dev.prompt = old.clone();
+        st.db.save_agent(&dev).unwrap();
+        st.db.update_agent(LOFT_ID, |a| a.prompt = old.clone()).unwrap();
+        ensure_loft(&st);
+        let p = st.db.get_agent(LOFT_ID).unwrap().unwrap().prompt;
+        assert!(!p.contains("working hours") && p.starts_with("Intro.") && p.ends_with("Outro."), "{p}");
+        assert_eq!(st.db.get_agent(&dev.id).unwrap().unwrap().prompt, old);
+        assert!(!LOFT_PROMPT.contains("working hours as quiet hours") && !TEMPLATES.iter().any(|t| t.prompt.contains("working hours as quiet hours")));
+
+        // The user's own name and schedule stay.
+        st.db.update_agent(LOFT_ID, |a| {
+            a.name = "Guide".into();
+            a.interval_minutes = 360;
+            a.quiet_hours = old_default_quiet_hours();
+        }).unwrap();
+        ensure_loft(&st);
+        let a = st.db.get_agent(LOFT_ID).unwrap().unwrap();
+        assert_eq!((a.name.as_str(), a.quiet_hours.clone()), ("Guide", old_default_quiet_hours()));
+    }
+
     #[tokio::test]
     async fn loft_is_built_in_and_cannot_be_deleted() {
         let st = state();
@@ -849,6 +923,8 @@ mod tests {
         assert!(loft.builtin && loft.allowed_tools.contains(&CREATE_RULE.to_string()));
         assert_eq!(loft.avatar.svg, LOFT_AVATAR.trim(), "the house sticker is the default");
         assert!(st.rt.lock().unwrap().queued.get(LOFT_ID).is_some_and(|q| q[0].starts_with("[Loft: first launch]")));
+        assert_eq!(loft.name, LOFT_NAME);
+        assert!(loft.quiet_hours.is_empty(), "runs through working hours by default");
 
         let del = |id: &str| crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::extract::Query(serde_json::from_value(json!({})).unwrap()));
         assert_eq!(del(LOFT_ID).await.err().unwrap().0, axum::http::StatusCode::FORBIDDEN);

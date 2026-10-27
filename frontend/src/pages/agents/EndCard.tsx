@@ -66,12 +66,12 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
               setSent(true);
             })}
           >
-            {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with loft
+            {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with lofty
           </button>
         )}
         {setup && shown && (
           <Link to={`/agents/${setup.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
-            Sent to loft · open its chat
+            Sent to lofty · open its chat
           </Link>
         )}
       </div>
