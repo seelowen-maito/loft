@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -71,14 +71,20 @@ export default function IssuesPage() {
     }, [reload, routeProject]),
   );
 
+  // Filtering up to 1,000 issues per project lags behind typing, so the list follows the query at low priority.
+  const filter = useDeferredValue(query);
   const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = filter.trim().toLowerCase();
     return (data?.projects ?? []).map((p) => ({
       ...p,
       shown: p.issues.filter((i) => i.state === state && (!q || i.title.toLowerCase().includes(q) || `#${i.number}` === q || i.labels.some((l) => l.name.toLowerCase().includes(q)))),
     }));
-  }, [data, query, state]);
-  const count = (s: string) => (data?.projects ?? []).reduce((n, p) => n + p.issues.filter((i) => i.state === s).length, 0);
+  }, [data, filter, state]);
+  const counts = useMemo(() => {
+    const n = { open: 0, closed: 0 };
+    for (const p of data?.projects ?? []) for (const i of p.issues) n[i.state]++;
+    return n;
+  }, [data]);
   const selected = routeProject && routeNumber ? { project: routeProject, number: Number(routeNumber) } : null;
 
   return (
@@ -89,7 +95,7 @@ export default function IssuesPage() {
             <div>
               <div className="eyebrow">Issues</div>
               <div className="mt-1 font-mono text-[11px] text-fg-3">
-                {data ? `${count("open")} open · ${count("closed")} closed · from GitHub` : "loading…"}
+                {data ? `${counts.open} open · ${counts.closed} closed · from GitHub` : "loading…"}
               </div>
             </div>
             <button className="btn-ghost size-8 justify-center p-0" onClick={load} aria-label="Refresh" title="Refresh">
@@ -103,7 +109,7 @@ export default function IssuesPage() {
           <div className="flex gap-1">
             {(["open", "closed"] as const).map((s) => (
               <button key={s} onClick={() => setState(s)} className={cx("chip capitalize", state === s ? "border-line-strong bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
-                <StateIcon state={s} className="size-3" /> {s} {data && <span className="text-fg-3">{count(s)}</span>}
+                <StateIcon state={s} className="size-3" /> {s} {data && <span className="text-fg-3">{counts[s]}</span>}
               </button>
             ))}
           </div>
@@ -137,7 +143,7 @@ export default function IssuesPage() {
                 ) : p.error ? (
                   <div className="mx-2.5 rounded-xl border border-bad/20 bg-bad/[0.05] px-3 py-2 text-[12.5px] text-fg-2">{p.error}</div>
                 ) : data?.connected && !p.shown.length ? (
-                  <div className="px-2.5 py-1 text-[12.5px] text-fg-3">No {state} issues{query.trim() ? " match" : ""}.</div>
+                  <div className="px-2.5 py-1 text-[12.5px] text-fg-3">No {state} issues{filter.trim() ? " match" : ""}.</div>
                 ) : (
                   p.shown.map((i) => <IssueRow key={i.number} project={p.project} i={i} active={selected?.project === p.project && selected.number === i.number} />)
                 )}
@@ -173,7 +179,8 @@ function Notice({ icon: Icon, title, children }: { icon: typeof KeyRound; title:
   );
 }
 
-function IssueRow({ project, i, active }: { project: string; i: Issue; active: boolean }) {
+// Memoized: typing a search or opening an issue would otherwise re-render every row.
+const IssueRow = memo(function IssueRow({ project, i, active }: { project: string; i: Issue; active: boolean }) {
   return (
     <Link to={issuePath(project, i.number)} className={cx("flex gap-2.5 rounded-xl px-2.5 py-2.5 transition", active ? "bg-white/[0.06]" : "hover:bg-white/[0.03]")}>
       <StateIcon state={i.state} className="mt-0.5 size-4 shrink-0" />
@@ -192,7 +199,7 @@ function IssueRow({ project, i, active }: { project: string; i: Issue; active: b
       <Assignees people={i.assignees} />
     </Link>
   );
-}
+});
 
 function IssueView({ project, number, published }: { project: string; number: number; published: number }) {
   const [issue, setIssue] = useState<IssueDetail | null>(null);
