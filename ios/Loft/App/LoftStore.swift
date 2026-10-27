@@ -64,6 +64,8 @@ final class LoftStore {
     private(set) var pending: [PendingMessage] = []
     /// Open or recently ended "grill me" interviews, by agent id.
     private(set) var grillSessions: [String: GrillSession] = [:]
+    /// The question of the open round the voice is on, by agent id (see `currentGrillQuestion`).
+    private(set) var grillVoiceAt: [String: String] = [:]
     /// The server's command phrases for on-device matching; the last list seen is kept for offline use.
     private(set) var grillPhrases: GrillPhrases? = {
         UserDefaults.standard.data(forKey: Prefs.grillPhrases).flatMap { try? JSONCoding.decoder.decode(GrillPhrases.self, from: $0) }
@@ -507,8 +509,8 @@ final class LoftStore {
             let running = a?.running == true || a?.status == "running"
             sawRun = sawRun || running
             let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
-            // A question from an interview comes straight from the server, without a run to wait for.
-            let question = replies.contains { $0.grill?.role == .question }
+            // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.
+            let question = replies.contains { $0.grill?.role == .round }
             // When the run was never seen (its update missed), the reply counts once nothing new has come for 2 s,
             // instead of waiting a fixed 10 s, which was long enough to leave the chat and lose the reading.
             settledTicks = replies.count == lastCount ? settledTicks + 1 : 0
@@ -598,18 +600,18 @@ final class LoftStore {
         grillSessions[agentId].flatMap { $0.isOpen ? $0 : nil }
     }
 
-    /// The question waiting for an answer: the session's current one, else the newest question in the
-    /// session (the session event can arrive before or after the message). Nil once it's answered,
-    /// including an answer still being sent, until the next question arrives.
-    func currentGrillQuestion(for agentId: String) -> ChatMessage? {
-        guard let s = openGrill(for: agentId), let list = messages[agentId] else { return nil }
-        let inSession = list.filter { $0.grill?.sessionId == s.sessionId }
-        let questions = inSession.filter { $0.grill?.role == .question }
-        guard let q = questions.last(where: { $0.grill?.questionId == s.current?.questionId }) ?? questions.last,
-              let qid = q.grill?.questionId else { return nil }
-        let answered = inSession.contains { $0.id > q.id && $0.grill?.role == .answer && $0.grill?.questionId == qid }
-            || pending.contains { $0.agentId == agentId && $0.meta?["grill"]?["question_id"]?.stringValue == qid && !$0.isFailed }
-        return answered ? nil : q
+    /// The question the voice is on in the agent's open round: the one read aloud, which a spoken or typed
+    /// answer in the composer goes to. It starts at the first open question and moves on as answers come in.
+    func currentGrillQuestion(for agentId: String) -> GrillQuestion? {
+        guard let s = openGrill(for: agentId), s.hasOpenRound, let qs = s.questions else { return nil }
+        if let id = grillVoiceAt[agentId], let q = qs.first(where: { $0.id == id }) { return q }
+        return GrillWalk.start(qs).flatMap { id in qs.first { $0.id == id } }
+    }
+
+    /// The chat message of the session's latest round.
+    func grillRoundMessage(for agentId: String) -> ChatMessage? {
+        guard let s = openGrill(for: agentId), let n = s.round else { return nil }
+        return messages[agentId]?.last { $0.grill?.role == .round && $0.grill?.sessionId == s.sessionId && $0.grill?.round == n }
     }
 
     func refreshGrill(_ agentId: String) async {
@@ -626,22 +628,58 @@ final class LoftStore {
         }
     }
 
-    /// Sends an answer tagged with the question it's for, through the normal (retryable) send queue.
-    func answerGrill(_ text: String, to question: ChatMessage) async {
-        guard let q = question.grill, q.role == .question else { return await send(text, to: question.agentId) }
-        await send(text, to: question.agentId, meta: GrillMeta.answer(to: q))
-        await catchUpGrill(question.agentId)
+    /// Holds an answer to one question of the open round; the agent isn't run until the round is sent.
+    /// "Yes" accepts the recommendation; with `discuss`, the text is a comment for the agent, not a decision.
+    func answerGrill(_ text: String, questionId: String, agentId: String, discuss: Bool = false) async throws {
+        let api = try requireWrite()
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard let s = openGrill(for: agentId) else { throw APIError.unsupported("No interview in progress") }
+        _ = try await api.sendMessage(agentId: agentId, text: text, clientId: UUID().uuidString,
+                                      meta: GrillMeta.answer(sessionId: s.sessionId, questionId: questionId, discuss: discuss))
+        await refreshGrill(agentId)
     }
 
-    /// Skip, back, pause, resume, end, summarize or decide. The server confirms with a `status` message.
-    func sendGrillCommand(_ command: GrillCommand, agentId: String) async throws {
+    /// A spoken or typed answer to the question the voice is on; then on to the next one, and after the last
+    /// the round is sent.
+    func answerCurrentGrill(_ text: String, agentId: String) async throws {
+        guard let q = currentGrillQuestion(for: agentId) else { return await send(text, to: agentId) }
+        try await answerGrill(text, questionId: q.id, agentId: agentId)
+        try await stepGrill(from: q.id, agentId: agentId)
+    }
+
+    /// Send the round, pause, resume, end, summarize or decide (`questionId`, else the question the voice is on,
+    /// which then moves on like an answer). Skip and back move the voice through the round on the phone.
+    func sendGrillCommand(_ command: GrillCommand, agentId: String, questionId: String? = nil) async throws {
         let api = try requireWrite()
         guard let s = openGrill(for: agentId) else { throw APIError.unsupported("No interview in progress") }
-        let updated = try await api.grillCommand(sessionId: s.sessionId, command: command,
-                                                 questionId: s.current?.questionId ?? currentGrillQuestion(for: agentId)?.grill?.questionId,
-                                                 clientId: UUID().uuidString)
+        let current = currentGrillQuestion(for: agentId)
+        switch command {
+        case .skip:
+            if let q = current { try await stepGrill(from: q.id, agentId: agentId) }
+            return
+        case .back:
+            if let q = current, let qs = s.questions, let prev = GrillWalk.back(from: q.id, in: qs) { grillVoiceAt[agentId] = prev }
+            return
+        default:
+            break
+        }
+        let target = command == .decide ? (questionId ?? current?.id) : nil
+        let updated = try await api.grillCommand(sessionId: s.sessionId, command: command, questionId: target, clientId: UUID().uuidString)
         if let updated { grillSessions[agentId] = updated }
+        if command == .send { grillVoiceAt[agentId] = nil }
+        // "I don't know" by voice: on to the next question, as after an answer.
+        if command == .decide, questionId == nil, let q = current { try await stepGrill(from: q.id, agentId: agentId) }
         await catchUpGrill(agentId)
+    }
+
+    /// The voice moves to the next open question after `id`, or sends the round after the last one.
+    private func stepGrill(from id: String, agentId: String) async throws {
+        guard let qs = openGrill(for: agentId)?.questions else { return }
+        switch GrillWalk.next(after: id, in: qs) {
+        case .ask(let next): grillVoiceAt[agentId] = next
+        case .send: try await sendGrillCommand(.send, agentId: agentId)
+        }
     }
 
     /// The next question and status rows normally arrive as events; fetch them anyway (it's one small

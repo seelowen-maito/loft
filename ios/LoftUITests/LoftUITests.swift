@@ -209,33 +209,42 @@ final class LoftUITests: XCTestCase {
         return app
     }
 
-    /// The interview card: a choice answers it, then Skip, Pause and Resume.
-    func testGrillCardAnswersAndQuickActions() {
+    /// The open round as cards: Accept holds an answer, the composer answers the question the voice is on and
+    /// moves to the next, Skip moves on, Send round brings the next round, then Pause and Resume.
+    func testGrillRoundCardsAnswersAndSend() {
         let app = openGrillChat()
-        let current = any("grillCurrentQuestion", app)
-        XCTAssertTrue(current.appears(timeout: 5))
-        XCTAssertTrue(current.label.contains("Question 3 of 8"))
-        XCTAssertFalse(any("grillChip", app).exists, "no interview mode bar: the card is the interview")
-        XCTAssertTrue(text(containing: "Skipped question 2", app).exists)
+        XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
+        XCTAssertTrue(any("grillCurrentQuestion", app).exists)
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists)
+        XCTAssertTrue(text(containing: "Recommended: First-time visitors", app).exists, "an earlier round reads back with its recommendations")
         // Wrapped answer chips get their own rows (they used to overlap the actions under them).
-        for id in ["grillRepeat", "grillSkip", "grillMore"] {
-            XCTAssertFalse(app.buttons["grillChoice-Only on yearly"].frame.intersects(app.buttons[id].frame), "chip overlaps \(id)")
+        for id in ["grillRepeat", "grillSkip"] {
+            XCTAssertFalse(app.buttons["grillChoice-Both"].frame.intersects(app.buttons[id].frame), "chip overlaps \(id)")
         }
-        // A choice fills the composer; nothing is sent until Send.
-        app.buttons["grillChoice-Only on yearly"].tap()
-        XCTAssertEqual(composerValue(app), "Only on yearly")
-        app.buttons["sendButton"].tap()
-        let next = app.descendants(matching: .any).matching(identifier: "grillCurrentQuestion")
-            .containing(NSPredicate(format: "label CONTAINS 'Question 4'")).firstMatch
-        XCTAssertTrue(next.appears(timeout: 5), "the next question follows the answer")
 
-        app.buttons["grillSkip"].tap()
-        XCTAssertTrue(text(containing: "Skipped question 4", app).appears(timeout: 5))
+        // Accept on the second card: held, not sent.
+        app.buttons.matching(identifier: "grillAccept").element(boundBy: 1).tap()
+        XCTAssertTrue(any("grillAccepted", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
+
+        // The composer answers the first question; the voice moves past the accepted one to the third.
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("Monthly only")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "Question 3 of 3", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "2 of 3 answered", app).exists)
+
+        app.buttons["grillSend"].tap()
+        XCTAssertTrue(text(containing: "Answers to round 2", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Round 3", app).appears(timeout: 5), "the next round follows")
+        XCTAssertTrue(text(containing: "Still open from round 2", app).exists || text(containing: "Question 1 of 2", app).exists)
+
         app.buttons["Conversation options"].tap()
         app.buttons["Pause interview"].tap()
-        XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the waiting question shows Resume while paused")
+        XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the open round shows Resume while paused")
         app.buttons["grillResume"].tap()
-        XCTAssertTrue(app.buttons["grillSkip"].appears(timeout: 5))
+        XCTAssertTrue(app.buttons["grillResume"].disappears(timeout: 5))
     }
 
     func testUnsureSpokenCommandAsksFirst() {

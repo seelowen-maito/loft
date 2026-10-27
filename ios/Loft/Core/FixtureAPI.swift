@@ -152,44 +152,75 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
-    /// The Orchestrator mid-interview: question 1 answered, 2 skipped, 3 (with options and a link) waiting.
+    /// The Orchestrator mid-interview: round 1 sent with one answer and one question skipped, round 2 waiting
+    /// with that question carried over, one with options and a link, and one more.
     private func addGrill(now: Date) {
         func ago(_ m: Double) -> Date { now.addingTimeInterval(-m * 60) }
-        let sid = "g1"
-        grillState = GrillSession(sessionId: sid, agentId: "orch", state: .active, index: 3, total: 8, topic: "the pricing page",
-                                  startedAt: ago(5), current: .init(questionId: "q3", index: 3))
+        let sid = "g1", topic = "the pricing page"
+        let q1 = GrillQuestion(id: "q1", text: "Who is the pricing page for: people seeing Loft for the first time, or customers comparing plans?",
+                               speak: "Who is the pricing page for: first-time visitors, or customers comparing plans?",
+                               recommendation: "First-time visitors")
+        let q2 = GrillQuestion(id: "q2", text: "Which billing periods should we show?", kind: .singleChoice, options: ["Monthly", "Yearly", "Both"],
+                               recommendation: "Both, with yearly highlighted")
+        let round2 = [
+            GrillQuestion(id: "q3", text: q2.text, kind: .singleChoice, options: q2.options, recommendation: q2.recommendation, fromRound: 1),
+            GrillQuestion(id: "q4", text: "Should the Pro plan include priority support? The current tiers are in [PR #31](https://github.com/Octo/loft/pull/31).",
+                          speak: "Should the Pro plan include priority support?", kind: .singleChoice, options: ["Yes", "No", "Only on yearly"],
+                          recommendation: "Only on yearly"),
+            GrillQuestion(id: "q5", text: "Should there be a free tier?", recommendation: "No: a 14-day trial instead"),
+        ]
+        grillState = GrillSession(sessionId: sid, agentId: "orch", state: .active, topic: topic, startedAt: ago(5),
+                                  round: 2, total: round2.count, answered: 0, waiting: false, questions: round2)
         let script: [(String, String, GrillMeta, Double)] = [
             ("user", "Grill me on the pricing page", GrillMeta(sessionId: nil, role: .startRequest), 5),
-            ("assistant", "Started", GrillMeta(sessionId: sid, role: .status, state: "started"), 4.9),
-            ("assistant", "Who is the pricing page for: people seeing Loft for the first time, or customers comparing plans?",
-             GrillMeta(sessionId: sid, role: .question, questionId: "q1", index: 1, total: 8, topic: "the pricing page", kind: .freeText,
-                       allowFreeText: true, speak: "Who is the pricing page for: first-time visitors, or customers comparing plans?"), 4.8),
-            ("user", "Mostly first-time visitors.", GrillMeta(sessionId: sid, role: .answer, questionId: "q1", index: 1), 4),
-            ("assistant", "Which billing periods should we show?",
-             GrillMeta(sessionId: sid, role: .question, questionId: "q2", index: 2, total: 8, topic: "the pricing page", kind: .singleChoice,
-                       options: ["Monthly", "Yearly", "Both"], allowFreeText: true, speak: "Which billing periods should we show? Monthly, yearly, or both?"), 3.9),
-            ("assistant", "Skipped question 2", GrillMeta(sessionId: sid, role: .status, state: "command", command: .skip), 3),
-            ("assistant", "Should the Pro plan include priority support? The current tiers are in [PR #31](https://github.com/Octo/loft/pull/31).",
-             GrillMeta(sessionId: sid, role: .question, questionId: "q3", index: 3, total: 8, topic: "the pricing page", kind: .singleChoice,
-                       options: ["Yes", "No", "Only on yearly"], allowFreeText: true,
-                       speak: "Should the Pro plan include priority support? Yes, no, or only on yearly?"), 2.9),
+            ("assistant", "Grill started: the pricing page", GrillMeta(sessionId: sid, role: .status, state: "started"), 4.9),
+            ("assistant", Self.roundText(1, [q1, q2]), GrillMeta(sessionId: sid, role: .round, round: 1, topic: topic, questions: [q1, q2]), 4.8),
+            ("user", "Answers to round 1:\n\n1. Yes (First-time visitors)\n2. (no answer)", GrillMeta(sessionId: sid, role: .answers, round: 1), 4),
+            ("assistant", Self.roundText(2, round2), GrillMeta(sessionId: sid, role: .round, round: 2, topic: topic, questions: round2), 2.9),
         ]
         for (i, (role, text, g, minutes)) in script.enumerated() {
             appendGrill(id: 100 + Int64(i), role: role, text: text, g, at: ago(minutes))
         }
     }
 
-    /// Posts the next question in the fixture's queue (called with the lock held).
-    private func advanceGrill() {
-        guard var s = grillState else { return }
-        let n = (s.current?.index ?? 0) + 1
-        let q = ["q4": "What's the one thing a visitor must understand within five seconds?",
-                 "q5": "Should there be a free tier?"]["q\(n)"] ?? "Anything else you'd like to add?"
-        s.current = .init(questionId: "q\(n)", index: n)
-        s.index = n
+    /// A round as the backend writes it, for clients without cards.
+    private static func roundText(_ n: Int, _ qs: [GrillQuestion]) -> String {
+        "**Round \(n)**\n" + qs.enumerated().map { "\n\($0.offset + 1). \($0.element.text)\n   _Recommendation:_ \($0.element.recommendation)" }.joined(separator: "\n")
+    }
+
+    /// Holds an answer in the open round, as the backend does: "yes" accepts the recommendation (lock held).
+    private func recordGrillAnswer(_ text: String, questionId: String, discuss: Bool) {
+        guard var s = grillState, var qs = s.questions, let i = qs.firstIndex(where: { $0.id == questionId }) else { return }
+        let yes = ["yes", "yep", "sure", "ok", "sim", "isso"].contains(VoiceText.normalize(text))
+        qs[i].accepted = !discuss && yes
+        qs[i].answer = qs[i].accepted ? qs[i].recommendation : text
+        qs[i].state = discuss ? .discuss : .answered
+        s.questions = qs
+        s.answered = qs.filter { $0.state != .open }.count
         grillState = s
-        grillMessage(q, GrillMeta(sessionId: s.sessionId, role: .question, questionId: "q\(n)", index: n, total: s.total,
-                                  topic: s.topic, kind: .freeText, allowFreeText: true, speak: q), role: "assistant")
+    }
+
+    /// The round was sent: the answers go in the chat and the next round follows at once, with what was
+    /// left open carried first (lock held).
+    private func sendGrillRound() {
+        guard var s = grillState, let qs = s.questions, let n = s.round else { return }
+        let lines = qs.enumerated().map { i, q in
+            "\(i + 1). " + (q.accepted ? "Yes (\(q.recommendation))" : q.state == .open ? "(no answer)" : (q.answer ?? ""))
+        }
+        grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n"), GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
+        let carried = qs.filter { $0.state == .open }.enumerated().map { i, q in
+            GrillQuestion(id: "r\(n + 1)c\(i)", text: q.text, speak: q.speak, kind: q.kind, options: q.options,
+                          recommendation: q.recommendation, fromRound: q.fromRound ?? n)
+        }
+        let next = carried + [GrillQuestion(id: "r\(n + 1)q", text: "What's the one thing a visitor must understand within five seconds?",
+                                           recommendation: "That Loft runs your agents on your own Mac")]
+        s.round = n + 1
+        s.questions = next
+        s.total = next.count
+        s.answered = 0
+        s.waiting = false
+        grillState = s
+        grillMessage(Self.roundText(n + 1, next), GrillMeta(sessionId: s.sessionId, role: .round, round: n + 1, topic: s.topic, questions: next))
     }
 
     private func grillMessage(_ text: String, _ g: GrillMeta, role: String = "assistant") {
@@ -257,8 +288,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             let m = ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "user", kind: "text", content: text,
                                 meta: .object(tags), createdAt: Date())
             msgs[agentId, default: []].append(m)
-            // An answer to the current question: the next one follows at once, as the backend's queue does.
-            if grill, m.grill?.role == .answer, m.grill?.questionId == grillState?.current?.questionId { advanceGrill() }
+            // An answer to a question of the open round is held, not shown in the chat, as the backend does.
+            if grill, m.grill?.role == .answer, let qid = m.grill?.questionId {
+                msgs[agentId]?.removeLast()
+                recordGrillAnswer(text, questionId: qid, discuss: meta?["grill"]?["discuss"] == .bool(true))
+                return SendMessageResponse(ok: true, queued: false, duplicate: false, message: nil)
+            }
             // `-fixture-replies`: the agent answers half a second later, with no live event (like one missed in a reconnect).
             if m.grill == nil, replies {
                 Task { [weak self] in
@@ -289,25 +324,20 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked { () -> GrillSession? in
             grillCommandsSent.append(command)
             guard var s = grillState, s.sessionId == sessionId else { return nil }
-            let n = s.current?.index ?? 0
             switch command {
-            case .skip:
-                grillMessage("Skipped question \(n)", GrillMeta(sessionId: s.sessionId, role: .status, state: "command", command: .skip))
-                advanceGrill(); s = grillState!
+            case .send:
+                sendGrillRound(); s = grillState!
             case .decide:
-                grillMessage("I'll decide this one: monthly and yearly, with yearly highlighted.",
-                             GrillMeta(sessionId: s.sessionId, role: .status, state: "command", command: .decide))
-                advanceGrill(); s = grillState!
-            case .back:
-                // Like the backend: a status row, then the previous question posted again with its question_id.
-                let prev = max(1, n - 1)
-                grillMessage("Back to question \(prev)", GrillMeta(sessionId: s.sessionId, role: .status, state: "command", command: .back))
-                if let old = msgs["orch"]?.last(where: { $0.grill?.role == .question && $0.grill?.index == prev }), var g = old.grill {
-                    g.repeat = true
-                    grillMessage(old.content, g)
-                    s.current = .init(questionId: g.questionId ?? "q\(prev)", index: prev)
-                    s.index = prev
-                }
+                guard var qs = s.questions, let i = qs.firstIndex(where: { $0.id == questionId }) else { break }
+                qs[i].state = .decided
+                qs[i].answer = qs[i].recommendation
+                s.questions = qs
+                s.answered = qs.filter { $0.state != .open }.count
+                grillMessage("Question \(i + 1) left to the agent: \(qs[i].recommendation)",
+                             GrillMeta(sessionId: s.sessionId, role: .status, questionId: qs[i].id, state: "decided", command: .decide))
+            case .skip, .back:
+                // Stepping through a round is the phone's job; the backend ignores these.
+                break
             case .pause:
                 s.state = .paused
                 grillMessage("Paused", GrillMeta(sessionId: s.sessionId, role: .status, state: "paused"))

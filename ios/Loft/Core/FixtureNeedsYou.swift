@@ -1,6 +1,7 @@
 import Foundation
 
-/// `GET /api/needs-you` for the fixture server: the backend's own fixture (docs/fixtures/needs-you.json in #91),
+/// `GET /api/needs-you` for the fixture server: the backend's own fixture (docs/fixtures/needs-you.json in #91, its grill
+/// item as of rounds),
 /// with the fixture's agents, a stuck item and longer texts for the summaries.
 enum FixtureNeedsYou {
     static let json = #"""
@@ -155,32 +156,6 @@ enum FixtureNeedsYou {
   {
    "actions": [
     {
-     "body": {
-      "meta": {
-       "grill": {
-        "question_id": "5e78bb1b-d407-45d7-b5f7-216bffa2b417",
-        "role": "answer",
-        "session_id": "e877de29-96a2-4220-be37-8f2b75b4a0e6"
-       }
-      },
-      "text": ""
-     },
-     "kind": "answer",
-     "label": "Answer",
-     "method": "POST",
-     "path": "/api/agents/orch/messages"
-    },
-    {
-     "body": {
-      "command": "skip",
-      "question_id": "5e78bb1b-d407-45d7-b5f7-216bffa2b417"
-     },
-     "kind": "skip",
-     "label": "Skip",
-     "method": "POST",
-     "path": "/api/grill/e877de29-96a2-4220-be37-8f2b75b4a0e6/command"
-    },
-    {
      "kind": "open",
      "label": "Open chat",
      "target": {
@@ -195,13 +170,13 @@ enum FixtureNeedsYou {
     "name": "Orchestrator"
    },
    "created_at": "2026-10-23T14:37:36.764637+00:00",
-   "id": "grill:e877de29-96a2-4220-be37-8f2b75b4a0e6:5e78bb1b-d407-45d7-b5f7-216bffa2b417",
+   "id": "grill:e877de29-96a2-4220-be37-8f2b75b4a0e6:1",
    "links": [],
-   "reason": "Question 1",
+   "reason": "Round 1: 0 of 1 answered",
    "task_id": null,
-   "text": "Who pays?",
+   "text": "• Who pays?",
    "title": "Orchestrator is interviewing you: Pricing",
-   "type": "grill_question",
+   "type": "grill_round",
    "urgency": 2
   },
   {

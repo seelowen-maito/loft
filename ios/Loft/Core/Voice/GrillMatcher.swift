@@ -5,7 +5,8 @@ import Foundation
 /// and nothing else runs straight away; a near miss or a command at the start of a longer sentence
 /// asks first; anything else is an answer.
 enum GrillMatcher {
-    /// What a spoken command does. `repeatQuestion` stays on the phone; "next" is the server's skip.
+    /// What a spoken command does. `repeatQuestion`, skip ("next") and back stay on the phone; "yes" is an answer
+    /// (it accepts the recommendation).
     enum Intent: Hashable {
         case command(GrillCommand)
         case repeatQuestion
@@ -28,6 +29,8 @@ enum GrillMatcher {
     static let builtIn: [(Intent, [String])] = [
         (.repeatQuestion, ["repeat", "repeat that", "say that again", "again", "what was the question", "come again",
                           "repete", "repita", "de novo", "fala de novo", "qual era a pergunta", "nao entendi"]),
+        (.command(.send), ["send", "send it", "send the round", "send round", "send my answers", "submit",
+                          "envia", "enviar", "envia a rodada", "manda", "manda a rodada", "manda as respostas"]),
         (.command(.skip), ["skip", "skip it", "skip this", "skip this one", "skip this question", "next", "next question", "pass",
                           "pula", "pular", "pula essa", "proxima", "proxima pergunta", "passa"]),
         (.command(.back), ["go back", "back", "previous", "previous question", "last question",

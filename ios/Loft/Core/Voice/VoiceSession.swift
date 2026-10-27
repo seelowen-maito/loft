@@ -452,10 +452,19 @@ final class VoiceSession {
         guard !text.isEmpty else { return }
         phase = .sending
         let before = store.conversation(agentId).last?.id ?? 0
-        // While the agent's question waits, what you say is its answer (same as typing it in the chat).
+        // While a round waits, what you say answers the question read last (same as typing it in the chat); the next
+        // question of the round is read straight away, and after the last one the round goes out.
         if let q = store.currentGrillQuestion(for: agentId) {
-            VoiceLog.shared.add("talk: sent as the answer to question \(q.grill?.index ?? 0)")
-            await store.answerGrill(text, to: q)
+            VoiceLog.shared.add("talk: sent as the answer to question \(store.openGrill(for: agentId)?.number(of: q.id) ?? 0)")
+            do {
+                try await store.answerCurrentGrill(text, agentId: agentId)
+            } catch {
+                phase = .failed("Not sent: \(APIError.from(error).title). Say it again or answer on the card.")
+                return
+            }
+            if let next = store.currentGrillQuestion(for: agentId), next.id != q.id {
+                return await afterSent(agentId: agentId, before: before, next: next)
+            }
         } else {
             await store.send(text, to: agentId)
         }
@@ -487,24 +496,33 @@ final class VoiceSession {
     }
 
     /// Sent: wait for the answer, read it (or the next interview question), and listen again when hands-free.
-    private func afterSent(agentId: String, before: Int64) async {
+    /// `next`: the next question of the same round, read without waiting for anything.
+    private func afterSent(agentId: String, before: Int64, next: GrillQuestion? = nil) async {
         clearDraft()
         segments = []
         committed = ""
-        VoiceLog.shared.add("talk: waiting for the reply")
-        guard let answer = await store.waitForReply(agentId: agentId, after: before, while: { phase == .sending }) else {
-            VoiceLog.shared.add("talk: stopped waiting for the reply")
-            phase = .idle
-            return
+        var next = next
+        var answer = ""
+        if next == nil {
+            VoiceLog.shared.add("talk: waiting for the reply")
+            guard let r = await store.waitForReply(agentId: agentId, after: before, while: { phase == .sending }) else {
+                VoiceLog.shared.add("talk: stopped waiting for the reply")
+                phase = .idle
+                return
+            }
+            answer = r
+            VoiceLog.shared.add("talk: reply arrived: \(VoiceLog.clip(answer))")
+            // A new round: its first question, once the session has caught up with the round's message.
+            if store.openGrill(for: agentId) != nil { await store.refreshGrill(agentId) }
+            next = store.grillRoundMessage(for: agentId).flatMap { $0.id > before ? store.currentGrillQuestion(for: agentId) : nil }
         }
-        VoiceLog.shared.add("talk: reply arrived: \(VoiceLog.clip(answer))")
-        // The next question is read in its short spoken form, like in the chat; its card shows it, not the reply text.
-        let next = store.currentGrillQuestion(for: agentId).flatMap { $0.id > before ? $0 : nil }
+        // A question is read in its short spoken form with its recommendation, like in the chat; its card shows it.
         reply = next == nil ? answer : nil
-        let spoken = next.map { $0.grill?.speak ?? $0.displayContent } ?? answer
+        let s = store.openGrill(for: agentId)
+        let spoken = next.map { $0.spoken(number: s?.number(of: $0.id) ?? 1, of: s?.questions?.count ?? 1) } ?? answer
         if readReplies {
             phase = .speaking
-            let id = next?.id ?? store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
+            let id = next != nil ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
             VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
             let ended = await speaker.readReply(spoken, messageId: id, isActive: { phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")

@@ -49,7 +49,7 @@ enum PushKind: String, CaseIterable, Identifiable {
         case .permission: ["permission"]
         case .approval: ["task_approval"]
         case .blockedFailed: ["task_blocked", "task_failed"]
-        case .questions: ["question", "grill_question"]
+        case .questions: ["question", "grill_round"]
         case .stuck: ["stuck"]
         case .prReady: ["pr_ready"]
         case .prReview: ["pr_review"]
