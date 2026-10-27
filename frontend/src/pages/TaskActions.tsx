@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { ArrowUp, Check, Link2, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
+import { useAutoGrow } from "../lib/autoGrow";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -172,6 +173,8 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
 /** The comment box under a task's thread. */
 export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   const [text, setText] = useState("");
+  const box = useRef<HTMLTextAreaElement>(null);
+  useAutoGrow(box, text, 2);
   const [send, setSend] = useState(true);
   const [reopen, setReopen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -225,7 +228,8 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
               post();
             }
           }}
-          rows={Math.min(8, Math.max(2, text.split("\n").length))}
+          ref={box}
+          rows={2}
           placeholder={agent && send ? `Comment, or ask ${agent.name} about this task…` : "A note on this task…"}
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
