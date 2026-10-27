@@ -514,14 +514,17 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
 
 /// The whole list, as `GET /api/needs-you` returns it.
 pub fn snapshot(state: &AppState) -> Result<Value, String> {
-    let items = collect(state)?;
-    Ok(json!({
+    collect(state).map(|items| snapshot_of(&items))
+}
+
+fn snapshot_of(items: &[Item]) -> Value {
+    json!({
         "version": 1,
         "count": items.len(),
         "urgent": items.iter().filter(|i| i.urgency >= 2).count(),
         "generated_at": crate::db::now(),
         "items": items.iter().map(to_json).collect::<Vec<_>>(),
-    }))
+    })
 }
 
 /// This holds conversation text, so unlike other reads it is refused to other websites: CORS is
@@ -570,19 +573,23 @@ fn emit_now(state: &AppState) {
     }
 }
 
+/// One tick's push items and snapshot, from a single read of everything.
+fn tick_lists(state: &AppState) -> Result<(Vec<PushItem>, Value), String> {
+    let items = collect(state)?;
+    Ok((items.iter().map(to_push).collect(), snapshot_of(&items)))
+}
+
 /// Tells clients when the list changes (`needs_you` event with the count and ids). Checks every few
-/// seconds instead of on every event: messages stream fast, and the list rarely changes.
+/// seconds instead of on every event: messages stream fast, and the list rarely changes. The list is
+/// built once per tick; push and the event both come from it.
 pub async fn watcher(state: AppState) {
     let mut last = String::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let mut pusher = crate::push::Pusher::default();
     loop {
         tick.tick().await;
-        if let Ok(items) = collect(&state) {
-            let push: Vec<PushItem> = items.iter().map(to_push).collect();
-            pusher.tick(&state, &push).await;
-        }
-        let Ok(v) = snapshot(&state) else { continue };
+        let Ok((push, v)) = tick_lists(&state) else { continue };
+        pusher.tick(&state, &push).await;
         let fp = fingerprint(&v);
         if fp != last {
             emit(&state, &v);
@@ -696,6 +703,17 @@ mod tests {
         let merge = &item(&v, "pr_ready")["actions"][0];
         assert_eq!((merge["path"].clone(), merge["body"]["method"].clone()), (json!("/api/pull-requests/pr1/merge"), json!("squash")));
         assert_eq!(item(&v, "pr_ready")["links"][0]["url"], json!("https://github.com/o/r/pull/7"), "links are kept apart from the text");
+
+        // The watcher reads everything once per tick: its push items and snapshot match separate reads.
+        let (push, once) = tick_lists(&st).unwrap();
+        let shown = |p: &[PushItem]| p.iter().map(|i| json!([i.id, i.kind, i.urgency, i.agent_id, i.task_id, i.title, i.body, i.target])).collect::<Vec<_>>();
+        assert_eq!(shown(&push), shown(&collect(&st).unwrap().iter().map(to_push).collect::<Vec<_>>()));
+        assert_eq!(push.len(), 9);
+        let without_time = |mut v: Value| {
+            v.as_object_mut().unwrap().remove("generated_at");
+            v
+        };
+        assert_eq!(without_time(once), without_time(snapshot(&st).unwrap()));
 
         // Dismissing hides an item until it changes; permission prompts can't be dismissed.
         let done_id = format!("done:{}:{}", done.id, done.completed_at.clone().unwrap());

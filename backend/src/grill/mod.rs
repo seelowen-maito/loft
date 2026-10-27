@@ -135,7 +135,7 @@ pub fn enabled(a: &Agent) -> bool {
 }
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
-    state.db.list_grills(agent_id).ok()?.into_iter().find(|s| s.status != "ended")
+    state.db.active_grill(agent_id).ok()?
 }
 
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.

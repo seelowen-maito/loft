@@ -330,6 +330,14 @@ impl Db {
         if !has_position {
             conn.execute("ALTER TABLE agents ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
         }
+        // A grill's status as its own column, so finding the open ones is an indexed lookup instead of
+        // parsing every session. Sessions saved before it get theirs from `data`, once.
+        let has_status: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('grill_sessions') WHERE name = 'status'", [], |r| r.get(0))?;
+        if !has_status {
+            conn.execute("ALTER TABLE grill_sessions ADD COLUMN status TEXT NOT NULL DEFAULT ''", [])?;
+            conn.execute("UPDATE grill_sessions SET status = COALESCE(json_extract(data, '$.status'), '')", [])?;
+        }
+        conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
         let unroled: Vec<String> = {
             let mut st = conn.prepare("SELECT data FROM agents")?;
@@ -451,10 +459,19 @@ impl Db {
         Ok(out)
     }
 
+    /// An agent's newest grill session that hasn't ended.
+    pub fn active_grill(&self, agent_id: &str) -> Result<Option<crate::grill::Session>> {
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row("SELECT data FROM grill_sessions WHERE agent_id = ?1 AND status <> 'ended' ORDER BY created_at DESC LIMIT 1", [agent_id], |r| r.get(0))
+            .optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
     /// Grill sessions that haven't ended, for the idle timeouts.
     pub fn open_grills(&self) -> Result<Vec<crate::grill::Session>> {
         let c = self.0.lock().unwrap();
-        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE json_extract(data, '$.status') <> 'ended'")?;
+        let mut st = c.prepare("SELECT data FROM grill_sessions WHERE status <> 'ended'")?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
         for r in rows {
@@ -472,9 +489,9 @@ impl Db {
     pub fn save_grill(&self, s: &crate::grill::Session) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute(
-            "INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at],
+            "INSERT INTO grill_sessions (id, agent_id, data, created_at, status) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data, status = excluded.status",
+            params![s.id, s.agent_id, serde_json::to_string(s)?, s.created_at, s.status],
         )?;
         Ok(())
     }
@@ -997,6 +1014,52 @@ mod tests {
         db.save_agent(&a).unwrap();
         let v = serde_json::to_value(db.get_agent("b").unwrap().unwrap()).unwrap();
         assert_eq!((v["planning"].clone(), v.get("grill")), (serde_json::json!(true), None));
+    }
+
+    #[test]
+    fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
+        let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
+        let session = |id: &str, agent: &str, status: &str, at: &str| {
+            serde_json::json!({ "id": id, "agent_id": agent, "topic": id, "status": status, "created_at": at, "updated_at": at })
+        };
+        // A database from before the column: sessions only have their status in `data`.
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE grill_sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);").unwrap();
+            for (id, agent, status, at) in [("old", "a", "paused", "2026-01-01"), ("done", "a", "ended", "2026-01-02"), ("b1", "b", "active", "2026-01-01"), ("b0", "b", "ended", "2026-01-03")] {
+                c.execute("INSERT INTO grill_sessions (id, agent_id, data, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, agent, session(id, agent, status, at).to_string(), at]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let statuses: Vec<(String, String)> = {
+            let c = db.0.lock().unwrap();
+            let mut st = c.prepare("SELECT id, status FROM grill_sessions ORDER BY id").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+        assert_eq!(statuses, pairs(&[("b0", "ended"), ("b1", "active"), ("done", "ended"), ("old", "paused")]));
+        // The newest session that hasn't ended, even behind a newer ended one.
+        assert_eq!(db.active_grill("a").unwrap().unwrap().id, "old");
+        assert_eq!(db.active_grill("b").unwrap().unwrap().id, "b1");
+        assert!(db.active_grill("nobody").unwrap().is_none());
+        let mut open: Vec<String> = db.open_grills().unwrap().into_iter().map(|s| s.id).collect();
+        open.sort();
+        assert_eq!(open, ["b1", "old"]);
+        // Saving keeps the column in step with `data`; opening again changes nothing.
+        let mut s = db.active_grill("a").unwrap().unwrap();
+        s.status = "ended".into();
+        db.save_grill(&s).unwrap();
+        assert!(db.active_grill("a").unwrap().is_none());
+        let new: crate::grill::Session = serde_json::from_value(session("new", "a", "preparing", "2026-02-01")).unwrap();
+        db.save_grill(&new).unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.active_grill("a").unwrap().unwrap().id, "new");
+        assert_eq!(db.open_grills().unwrap().len(), 2);
+        drop(db);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
     }
 
     #[test]
