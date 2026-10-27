@@ -11,7 +11,7 @@ import { Chat } from "./Chat";
 import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
-import { loadLastAgent, openingAgent, saveLastAgent } from "../../lib/lastAgent";
+import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
 const INSPECTOR_KEY = "loft:inspector-hidden";
@@ -73,8 +73,7 @@ export default function AgentsPage() {
   }, []);
 
   // `/agents` opens on the last agent viewed in this browser, or the first if it is gone.
-  const [lastAgent] = useState(loadLastAgent);
-  const selectedId = routeId ?? (agents ? openingAgent(agents, lastAgent) : null);
+  const selectedId = selectedAgent(routeId, agents);
   const selected = agents?.find((a) => a.id === selectedId) ?? null;
   useEffect(() => {
     if (selected) saveLastAgent(selected.id);

@@ -25,3 +25,8 @@ export function saveLastAgent(id: string, storage?: Store) {
 export function openingAgent(agents: { id: string }[], last: string | null): string | null {
   return agents.find((a) => a.id === last)?.id ?? agents[0]?.id ?? null;
 }
+
+/** The agent the page shows: the route's, else the opening one, read from storage now since `/agents` keeps the page mounted. */
+export function selectedAgent(routeId: string | undefined, agents: { id: string }[] | null, storage?: Store): string | null {
+  return routeId ?? (agents ? openingAgent(agents, loadLastAgent(storage)) : null);
+}
