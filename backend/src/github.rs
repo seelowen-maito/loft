@@ -46,24 +46,78 @@ fn api_base() -> String {
     std::env::var("LOFT_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into())
 }
 
+/// Keeps write requests (POST, PATCH, PUT, DELETE) at least a second apart, as GitHub asks: a burst of
+/// them, like publishing 50 tickets, otherwise trips its secondary rate limit.
+#[derive(Default)]
+pub struct Pace(tokio::sync::Mutex<Option<Instant>>);
+
+const WRITE_GAP: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(1) };
+
+impl Pace {
+    async fn wait(&self, gap: Duration) {
+        let mut last = self.0.lock().await;
+        if let Some(at) = *last {
+            tokio::time::sleep_until((at + gap).into()).await;
+        }
+        *last = Some(Instant::now());
+    }
+}
+
+/// The longest a rate-limited request waits for its one retry; a later reset fails the request instead.
+const MAX_WAIT: Duration = Duration::from_secs(120);
+
+/// How long GitHub asks us to wait when it turned a request down for its rate limits, if it did:
+/// `Retry-After`, else until `x-ratelimit-reset` when nothing is left, else a minute for a secondary limit.
+fn rate_limit_wait(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, msg: &str) -> Option<Duration> {
+    if !matches!(status.as_u16(), 403 | 429) {
+        return None;
+    }
+    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+    if let Some(s) = h("retry-after") {
+        return Some(Duration::from_secs(s));
+    }
+    if h("x-ratelimit-remaining") == Some(0) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        return Some(Duration::from_secs(h("x-ratelimit-reset").unwrap_or(now + 60).saturating_sub(now) + 1));
+    }
+    (status.as_u16() == 429 || msg.to_lowercase().contains("rate limit")).then_some(Duration::from_secs(60))
+}
+
 pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
-    let mut req = state
-        .http
-        .request(method, format!("{}{path}", api_base()))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "loft")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(t) = token(state) {
-        req = req.bearer_auth(t);
-    }
-    if let Some(b) = body {
-        req = req.json(&b);
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
-    if !status.is_success() {
+    let mut retried = false;
+    loop {
+        if method != reqwest::Method::GET {
+            state.gh_pace.wait(WRITE_GAP).await;
+        }
+        let mut req = state
+            .http
+            .request(method.clone(), format!("{}{path}", api_base()))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "loft")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(t) = token(state) {
+            req = req.bearer_auth(t);
+        }
+        if let Some(b) = &body {
+            req = req.json(b);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        if status.is_success() {
+            return Ok(body);
+        }
         let msg = body["message"].as_str().unwrap_or("request failed");
+        // Rate limited: wait as long as GitHub asks and try once more.
+        if let Some(wait) = rate_limit_wait(status, &headers, msg) {
+            if !retried && wait <= MAX_WAIT {
+                retried = true;
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            bail!("GitHub {}: {msg} (rate limited, try again in {} s)", status.as_u16(), wait.as_secs().max(1));
+        }
         // 422s say what was wrong in `errors`, e.g. an assignee that can't be assigned.
         let detail: Vec<String> = body["errors"]
             .as_array()
@@ -74,7 +128,6 @@ pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body
         }
         bail!("GitHub {}: {msg} ({})", status.as_u16(), detail.join("; "));
     }
-    Ok(body)
 }
 
 pub async fn get(state: &AppState, path: &str) -> Result<Value> {
@@ -124,6 +177,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct Fake {
         routes: Mutex<HashMap<(String, String), std::collections::VecDeque<(u16, Value)>>>,
+        headers: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
         seen: Mutex<Vec<Seen>>,
     }
 
@@ -136,6 +190,12 @@ pub(crate) mod tests {
         /// Answer `method path` with these replies one request at a time; the last one then repeats.
         pub(crate) fn in_turn(&self, method: &str, path: &str, replies: Vec<(u16, Value)>) {
             self.routes.lock().unwrap().insert((method.into(), path.into()), replies.into());
+        }
+
+        /// Send these response headers with every reply to `method path`.
+        pub(crate) fn with_headers(&self, method: &str, path: &str, headers: &[(&str, &str)]) {
+            let hs = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            self.headers.lock().unwrap().insert((method.into(), path.into()), hs);
         }
 
         /// Requests received whose path starts with `prefix`, oldest first.
@@ -175,9 +235,14 @@ pub(crate) mod tests {
                                 }),
                                 body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                             });
-                            let hit = fake.routes.lock().unwrap().get_mut(&(method.to_string(), uri.path().to_string())).and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() });
+                            let route = (method.to_string(), uri.path().to_string());
+                            let hit = fake.routes.lock().unwrap().get_mut(&route).and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() });
                             let (status, body) = hit.unwrap_or((404, json!({ "message": "Not Found" })));
-                            (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+                            let mut hs = HeaderMap::new();
+                            for (k, v) in fake.headers.lock().unwrap().get(&route).into_iter().flatten() {
+                                hs.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+                            }
+                            (StatusCode::from_u16(status).unwrap(), hs, axum::Json(body))
                         }
                     });
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -241,6 +306,50 @@ pub(crate) mod tests {
 
         let err = get(&st, "/repos/octo/issues-demo/nope").await.unwrap_err();
         assert_eq!(err.to_string(), "GitHub 404: Not Found");
+    }
+
+    #[tokio::test]
+    async fn waits_out_a_rate_limit_once_then_gives_up() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        // Secondary limit: GitHub says when to come back, and the retry goes through.
+        fake.in_turn("POST", "/repos/octo/limited/issues", vec![(403, json!({ "message": "You have exceeded a secondary rate limit." })), (201, json!({ "number": 1 }))]);
+        fake.with_headers("POST", "/repos/octo/limited/issues", &[("retry-after", "0")]);
+        let made = request(&st, reqwest::Method::POST, "/repos/octo/limited/issues", Some(json!({ "title": "A" }))).await.unwrap();
+        assert_eq!(made["number"], 1);
+        let seen = fake.seen("/repos/octo/limited/issues");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].body, json!({ "title": "A" }), "the retry sends the same body");
+
+        // Still limited after the one retry: the error says so.
+        fake.route("GET", "/repos/octo/limited/labels", 429, json!({ "message": "Too Many Requests" }));
+        fake.with_headers("GET", "/repos/octo/limited/labels", &[("retry-after", "0")]);
+        let err = get(&st, "/repos/octo/limited/labels").await.unwrap_err();
+        assert_eq!(err.to_string(), "GitHub 429: Too Many Requests (rate limited, try again in 1 s)");
+        assert_eq!(fake.seen("/repos/octo/limited/labels").len(), 2);
+
+        // The primary limit resets too far off to wait for: no retry.
+        let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 1800;
+        fake.route("GET", "/repos/octo/limited/pulls", 403, json!({ "message": "API rate limit exceeded" }));
+        fake.with_headers("GET", "/repos/octo/limited/pulls", &[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset.to_string())]);
+        let err = get(&st, "/repos/octo/limited/pulls").await.unwrap_err().to_string();
+        assert!(err.starts_with("GitHub 403: API rate limit exceeded (rate limited, try again in 18"), "{err}");
+        assert_eq!(fake.seen("/repos/octo/limited/pulls").len(), 1);
+
+        // A 403 that isn't a rate limit is not retried.
+        fake.route("GET", "/repos/octo/limited/hooks", 403, json!({ "message": "Must have admin rights to Repository." }));
+        assert_eq!(get(&st, "/repos/octo/limited/hooks").await.unwrap_err().to_string(), "GitHub 403: Must have admin rights to Repository.");
+        assert_eq!(fake.seen("/repos/octo/limited/hooks").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn paces_writes_apart() {
+        let pace = Pace::default();
+        let start = Instant::now();
+        for _ in 0..3 {
+            pace.wait(Duration::from_millis(50)).await;
+        }
+        assert!(start.elapsed() >= Duration::from_millis(100), "{:?}", start.elapsed());
     }
 
     #[test]

@@ -68,12 +68,14 @@ async fn main() -> anyhow::Result<()> {
         repos: Arc::new(repos::RepoCache::default()),
         http: reqwest::Client::new(),
         gh_token: Arc::new(github::TokenCache::default()),
+        gh_pace: Arc::new(github::Pace::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
         settings: Arc::new(settings::Store::load(&data_dir)?),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
         grill_locks: Arc::new(grill::Locks::default()),
         publish_locks: Arc::new(planning::Locks::default()),
+        publish_known: Arc::new(planning::Known::default()),
     };
     setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));

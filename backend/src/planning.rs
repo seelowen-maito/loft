@@ -120,6 +120,14 @@ impl Locks {
     }
 }
 
+/// Lookups every publish and retry would otherwise repeat: the login of each token, and the repos
+/// whose labels are known to exist.
+#[derive(Default)]
+pub struct Known {
+    logins: Mutex<HashMap<String, String>>,
+    labelled: Mutex<std::collections::HashSet<String>>,
+}
+
 /// Same spec, same key: case and spacing don't make a new one.
 fn key(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
@@ -139,6 +147,9 @@ async fn repo_for(state: &AppState, a: &Agent) -> Result<String, String> {
 
 /// Creates the labels the repo doesn't have yet; existing ones are left as they are.
 async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
+    if state.publish_known.labelled.lock().unwrap_or_else(|e| e.into_inner()).contains(slug) {
+        return Ok(());
+    }
     let have = crate::github::get(state, &format!("/repos/{slug}/labels?per_page=100")).await.map_err(|e| format!("Couldn't read the labels of {slug}: {e}"))?;
     let have: Vec<String> = have.as_array().map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).map(str::to_lowercase).collect()).unwrap_or_default();
     for (name, color, description) in LABELS {
@@ -153,6 +164,7 @@ async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
             Ok(_) => {}
         }
     }
+    state.publish_known.labelled.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.into());
     Ok(())
 }
 
@@ -165,8 +177,14 @@ fn connected(state: &AppState) -> Result<(), String> {
 
 /// The login of the token's user: everything Loft publishes is assigned to them.
 async fn login(state: &AppState) -> Result<String, String> {
+    let token = crate::github::token(state).unwrap_or_default();
+    if let Some(l) = state.publish_known.logins.lock().unwrap_or_else(|e| e.into_inner()).get(&token) {
+        return Ok(l.clone());
+    }
     let me_gh = crate::github::get(state, "/user").await.map_err(|e| format!("Couldn't read the GitHub user of Loft's token: {e}"))?;
-    Ok(me_gh["login"].as_str().ok_or("GitHub didn't say who the token belongs to.")?.to_string())
+    let l = me_gh["login"].as_str().ok_or("GitHub didn't say who the token belongs to.")?.to_string();
+    state.publish_known.logins.lock().unwrap_or_else(|e| e.into_inner()).insert(token, l.clone());
+    Ok(l)
 }
 
 /// The reply, the repo and the spec published (or already there).
@@ -395,7 +413,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::github::tests::{Fake, fake_github, state_with_token};
+    use crate::github::tests::{Fake, fake_github, own_fake, state_with_token};
     use crate::grill::tests::planner;
 
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
@@ -481,7 +499,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_retry_after_a_failure_creates_nothing_twice() {
-        let (fake, st) = (fake_github(), state());
+        let st = state();
+        let fake = own_fake(&st);
         let a = planner_on(&st, "spec-partial", Some("git@github.com:octo/spec-partial.git"));
         repo(&fake, "octo/spec-partial", &[], 3);
 
@@ -491,11 +510,12 @@ pub(crate) mod tests {
         assert_eq!(err, "GitHub rejected the spec on octo/spec-partial: GitHub 422: Validation Failed (could not add assignee)");
         assert_eq!(posts(&fake, "octo/spec-partial", "labels").len(), 2);
 
-        // The retry finds the labels in place and creates the spec once.
-        fake.route("GET", "/repos/octo/spec-partial/labels", 200, json!([{ "name": "spec" }, { "name": "ready-for-agent" }]));
+        // The retry knows the labels and the login already, and creates the spec once.
         fake.route("POST", "/repos/octo/spec-partial/issues", 201, json!({ "number": 3 }));
         assert!(publish(&st, &a, "Specs").await.unwrap().starts_with("Published the spec as #3"));
         assert_eq!(posts(&fake, "octo/spec-partial", "labels").len(), 2);
+        assert_eq!(fake.seen("/repos/octo/spec-partial/labels?").len(), 1, "labels are read once");
+        assert_eq!(fake.seen("/user").len(), 1, "the login is read once");
         assert_eq!(posts(&fake, "octo/spec-partial", "issues").len(), 2, "one refused, one created");
     }
 

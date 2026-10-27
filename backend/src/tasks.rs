@@ -958,12 +958,14 @@ pub(crate) mod tests {
             repos: Arc::new(Default::default()),
             http: reqwest::Client::new(),
             gh_token: Arc::new(Default::default()),
+            gh_pace: Arc::new(Default::default()),
             update: Arc::new(Mutex::new(Default::default())),
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
             usage: Arc::new(Default::default()),
             system: Arc::new(Default::default()),
             grill_locks: Arc::new(Default::default()),
             publish_locks: Arc::new(Default::default()),
+            publish_known: Arc::new(Default::default()),
         }
     }
 

@@ -83,6 +83,8 @@ pub struct AppState {
     pub repos: Arc<RepoCache>,
     pub http: reqwest::Client,
     pub gh_token: Arc<crate::github::TokenCache>,
+    /// Spaces out write requests to GitHub.
+    pub gh_pace: Arc<crate::github::Pace>,
     pub update: Arc<Mutex<crate::updater::UpdateStatus>>,
     pub settings: Arc<crate::settings::Store>,
     /// Last Claude plan usage reading.
@@ -93,6 +95,8 @@ pub struct AppState {
     pub grill_locks: Arc<crate::grill::Locks>,
     /// Serializes publishing issues to each GitHub repo.
     pub publish_locks: Arc<crate::planning::Locks>,
+    /// What publishing already looked up on GitHub: the token's login, repos whose labels exist.
+    pub publish_known: Arc<crate::planning::Known>,
 }
 
 impl AppState {
