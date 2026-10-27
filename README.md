@@ -86,7 +86,7 @@ tailscale serve --bg 7420
 
 With Tailscale, dev servers that agents start are linked by this machine's tailnet name instead of `localhost`.
 
-The `ios/` folder has a native iPhone app for agent status, approvals, tasks and chat, over the same address. See [ios/README.md](ios/README.md).
+The `ios/` folder has a native iPhone app (experimental) for agent status, approvals, tasks and chat, over the same address. You build it yourself with Xcode: the [setup guide](https://seelowen-maito.github.io/loft/#iphone) covers the Apple account, signing with your team and bundle id, and push notifications. More in [ios/README.md](ios/README.md).
 
 ## How agents run
 
