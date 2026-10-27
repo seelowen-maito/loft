@@ -456,6 +456,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "name": { "type": "string", "description": "Short name, unique within the project. Defaults to the template's." },
                 "title": { "type": "string" },
+                "lead": { "type": "boolean", "description": "Make it its project's Lead (taking the mark from any other agent there). Defaults to the template's: on for \"lead\", off otherwise." },
                 "role": { "type": "string", "enum": ["dev", "reviewer", ""], "description": "Its role in the end-of-planning team check: \"dev\" builds the tickets, \"reviewer\" reviews them (code review, QA, security). Defaults to the template's; set it when writing an agent from scratch." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
@@ -642,7 +643,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "quiet_hours": quiet,
         "avatar_brief": s("avatar_brief"),
         "planning": tpl.is_some_and(|t| t.planning),
-        "lead": tpl.is_some_and(|t| t.lead),
+        "lead": args["lead"].as_bool().unwrap_or_else(|| tpl.is_some_and(|t| t.lead)),
         "role": Some(s("role")).filter(|r| !r.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.role.to_string())),
     });
 
@@ -997,6 +998,25 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         assert!(!st.db.get_agent(&first.id).unwrap().unwrap().lead);
         let err = create_agent(&st, &me, &json!({ "template": "lead", "name": "Loner" })).await.unwrap_err();
         assert!(err.starts_with("Only an agent with a project can be Lead"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn lead_option_overrides_the_template_s() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        let lead = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap().lead;
+        let out = create_agent(&st, &me, &json!({ "template": "dev", "name": "Boss", "project": "homebase", "lead": true })).await.unwrap();
+        assert!(out.contains("It is the project's Lead."), "{out}");
+        assert!(lead("Boss"));
+        create_agent(&st, &me, &json!({ "template": "lead", "name": "Helper", "project": "garden", "lead": false })).await.unwrap();
+        assert!(!lead("Helper"));
+        // Without `lead`, only the lead template makes a Lead.
+        create_agent(&st, &me, &json!({ "template": "reviewer", "project": "garden" })).await.unwrap();
+        create_agent(&st, &me, &json!({ "name": "Notes", "prompt": "Tidy my notes.", "project": "garden" })).await.unwrap();
+        assert!(!lead("Reviewer") && !lead("Notes"));
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "garden" })).await.unwrap();
+        assert!(lead("Lead"));
     }
 
     #[tokio::test]
