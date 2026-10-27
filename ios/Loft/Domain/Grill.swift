@@ -88,6 +88,32 @@ struct GrillQuestion: Codable, Hashable, Identifiable {
     }
 }
 
+/// The end of a planning grill: the spec and tickets it published, the message Clear context leaves in the
+/// composer, and the roles the project's team lacks, with the message that asks `loft` to fill them.
+struct EndCard: Codable, Hashable {
+    struct Issue: Codable, Hashable {
+        var number: Int
+        var title: String
+        var url: URL
+    }
+    struct Setup: Codable, Hashable {
+        var agentId: String
+        var message: String
+    }
+    var repo: String
+    var spec: Issue?
+    var tickets: [Issue]
+    var nextMessage: String
+    /// "dev", "reviewer".
+    var missingRoles: [String]
+    var setup: Setup?
+
+    /// "Dev or reviewer", as in "The team has no Dev or reviewer yet."
+    var missingText: String {
+        missingRoles.map { $0 == "dev" ? "Dev" : $0 }.joined(separator: " or ")
+    }
+}
+
 /// `meta.grill` on a chat message. Fields are optional because each role uses a different subset.
 struct GrillMeta: Codable, Hashable {
     var sessionId: String?
@@ -107,10 +133,12 @@ struct GrillMeta: Codable, Hashable {
     var final: Bool?
     /// Where the notes file was written in the agent's workspace (an agent without a repo).
     var notesPath: String?
+    /// The end-of-planning card, on the final summary of a grill that published a spec or tickets.
+    var endCard: EndCard?
 
     init(sessionId: String?, role: GrillRole, round: Int? = nil, topic: String? = nil, questions: [GrillQuestion]? = nil,
          questionId: String? = nil, state: String? = nil, command: GrillCommand? = nil, endReason: String? = nil,
-         taggedMessageId: Int64? = nil, final: Bool? = nil, notesPath: String? = nil) {
+         taggedMessageId: Int64? = nil, final: Bool? = nil, notesPath: String? = nil, endCard: EndCard? = nil) {
         self.sessionId = sessionId
         self.role = role
         self.round = round
@@ -123,6 +151,7 @@ struct GrillMeta: Codable, Hashable {
         self.taggedMessageId = taggedMessageId
         self.final = final
         self.notesPath = notesPath
+        self.endCard = endCard
     }
 
     /// Unknown roles, kinds or commands from a newer server decode as nil rather than failing the message.
@@ -143,6 +172,7 @@ struct GrillMeta: Codable, Hashable {
         taggedMessageId = try? c.decode(Int64.self, forKey: .taggedMessageId)
         final = try? c.decode(Bool.self, forKey: .final)
         notesPath = try? c.decode(String.self, forKey: .notesPath)
+        endCard = try? c.decode(EndCard.self, forKey: .endCard)
     }
 
     /// The tag an answer carries, so it lands on the question it was given for. With `discuss`, the text is a

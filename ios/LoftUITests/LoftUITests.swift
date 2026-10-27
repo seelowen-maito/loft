@@ -209,6 +209,21 @@ final class LoftUITests: XCTestCase {
         return app
     }
 
+    /// The end-of-planning card: issue links, the missing reviewer, and Clear context leaving the next message unsent.
+    func testEndOfPlanningCard() {
+        let app = openGrillChat(["-fixture-grill-ended"])
+        let clear = app.buttons["endCardClear"]
+        XCTAssertTrue(clear.appears(timeout: 5))
+        XCTAssertTrue(app.buttons["endCardSetup"].exists)
+        // The card is the last thing in the chat: bring it out from under the composer.
+        app.swipeUp()
+        clear.tap()
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
+        let deadline = Date().addingTimeInterval(5)
+        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
+    }
+
     /// The open round as cards: Accept holds an answer, the composer answers the question the voice is on and
     /// moves to the next, Skip moves on, Send round brings the next round, then Pause and Resume.
     func testGrillRoundCardsAnswersAndSend() {

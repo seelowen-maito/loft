@@ -12,6 +12,7 @@ import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
 import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
+import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
@@ -108,6 +109,7 @@ export function Chat({
   // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
   const [dragDepth, setDragDepth] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
   const items = useMemo(() => buildItems(messages), [messages]);
   // Everything before the latest /clear is hidden (not deleted) until asked for.
@@ -204,6 +206,15 @@ export function Chat({
     } catch (e) {
       setCmdError((e as Error).message);
     }
+  };
+
+  // The end-of-planning card: a fresh session, with the suggested next message waiting in the composer, unsent.
+  const clearWith = async (next: string) => {
+    setCmdError(null);
+    await api.resetSession(agent.id);
+    setText(next);
+    stick.current = true;
+    composer.current?.focus();
   };
 
   const compactContext = async (instructions: string) => {
@@ -455,7 +466,7 @@ export function Chat({
               const req = perms.get(it.m.meta?.request_id);
               return req ? <PermissionCard key={it.m.id} req={req} /> : null;
             }
-            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={grill} />;
+            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={grill} onClearWith={clearWith} />;
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
@@ -625,6 +636,7 @@ export function Chat({
                 }}
               />
               <textarea
+                ref={composer}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onPaste={(e) => {
@@ -731,7 +743,13 @@ function findAgent(agents: Agent[], key: string | undefined) {
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
 }
 
-function MessageRow({ m, agent, agents, grill }: { m: Message; agent: Agent; agents: Agent[]; grill: GrillSession | null }) {
+function MessageRow({ m, agent, agents, grill, onClearWith }: {
+  m: Message;
+  agent: Agent;
+  agents: Agent[];
+  grill: GrillSession | null;
+  onClearWith: (next: string) => Promise<void>;
+}) {
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -837,6 +855,14 @@ function MessageRow({ m, agent, agents, grill }: { m: Message; agent: Agent; age
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
         {m.meta?.mentioned_in && <div className="font-mono text-[10.5px] text-fg-3">mentioned in {m.meta.mentioned_in.name}'s chat</div>}
+      </div>
+    );
+  }
+  if (m.meta?.grill?.end_card) {
+    return (
+      <div className="space-y-2">
+        <MessageRow m={{ ...m, meta: { ...m.meta, grill: { ...m.meta.grill, end_card: null } } }} agent={agent} agents={agents} grill={grill} onClearWith={onClearWith} />
+        <EndCard card={m.meta.grill.end_card} onClear={onClearWith} />
       </div>
     );
   }

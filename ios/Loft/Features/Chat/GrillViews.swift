@@ -450,3 +450,59 @@ struct GrillSuggestionBar: View {
         .accessibilityIdentifier("grillSuggestionYes")
     }
 }
+
+/// The end of a planning grill: links to the spec and tickets (they open GitHub), Clear context with the next
+/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`.
+struct EndCardView: View {
+    @Environment(LoftStore.self) private var store
+    let card: EndCard
+    var clearWith: (String) -> Void
+    @State private var sentSetup = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Planning done · \(card.repo)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                if let s = card.spec { issue(s, symbol: "doc.text") }
+                ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
+            }
+            if card.setup != nil {
+                Label("The team has no \(card.missingText) yet.", systemImage: "person.2.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+            HStack(spacing: 8) {
+                Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("endCardClear")
+                if let setup = card.setup {
+                    Button {
+                        sentSetup = true
+                        Task { await store.send(setup.message, to: setup.agentId) }
+                    } label: {
+                        Label(sentSetup ? "Sent to loft" : "Set up the team with loft", systemImage: sentSetup ? "checkmark" : "person.2")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(sentSetup)
+                    .accessibilityIdentifier("endCardSetup")
+                }
+            }
+            .font(.footnote)
+            Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func issue(_ i: EndCard.Issue, symbol: String) -> some View {
+        Link(destination: i.url) {
+            Label {
+                Text("#\(i.number) ").foregroundStyle(.secondary) + Text(i.title.isEmpty ? "Untitled" : i.title)
+            } icon: {
+                Image(systemName: symbol)
+            }
+            .font(.footnote)
+        }
+    }
+}

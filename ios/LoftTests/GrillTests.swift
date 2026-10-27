@@ -58,6 +58,20 @@ final class GrillDecodingTests: XCTestCase {
         XCTAssertEqual(sum.grill?.role, .summary)
         XCTAssertEqual(sum.grill?.final, true)
         XCTAssertEqual(sum.grill?.notesPath, "notes/grill-pricing.md")
+        XCTAssertNil(sum.grill?.endCard)
+    }
+
+    func testEndCard() throws {
+        let m = try message(#"{"id": 12, "agent_id": "a", "role": "assistant", "kind": "text", "content": "Rounds it is.", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"session_id": "g1", "role": "summary", "final": true, "end_card": {"repo": "octo/x", "spec": {"number": 40, "title": "Rounds", "url": "https://github.com/octo/x/issues/40"}, "tickets": [{"number": 41, "title": "Store", "url": "https://github.com/octo/x/issues/41"}], "next_message": "Implement spec #40: hand the ready tickets to the team", "missing_roles": ["dev", "reviewer"], "setup": {"agent_id": "loft", "message": "Set up the team"}}}}}"#)
+        let card = try XCTUnwrap(m.grill?.endCard)
+        XCTAssertEqual(card.spec?.number, 40)
+        XCTAssertEqual(card.tickets.map(\.url.absoluteString), ["https://github.com/octo/x/issues/41"])
+        XCTAssertEqual(card.nextMessage, "Implement spec #40: hand the ready tickets to the team")
+        XCTAssertEqual(card.setup?.agentId, "loft")
+        XCTAssertEqual(card.missingText, "Dev or reviewer")
+        // A full team: no setup button.
+        let full = try message(#"{"id": 13, "agent_id": "a", "role": "assistant", "kind": "text", "content": "x", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"role": "summary", "final": true, "end_card": {"repo": "octo/x", "spec": null, "tickets": [], "next_message": "Implement ticket #5", "missing_roles": [], "setup": null}}}}"#)
+        XCTAssertNil(full.grill?.endCard?.setup)
     }
 
     func testSessionWithAnswerStates() throws {

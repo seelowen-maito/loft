@@ -4,7 +4,14 @@
 use serde_json::{Value, json};
 
 use crate::db::Agent;
+use crate::grill::IssueLink;
 use crate::state::AppState;
+
+/// The roles a team needs to implement a plan, and the words in an agent's name or title that mark one.
+const ROLES: &[(&str, &[&str])] = &[
+    ("dev", &["dev", "developer", "engineer", "programmer", "coder", "desenvolvedor", "desenvolvedora"]),
+    ("reviewer", &["reviewer", "review", "revisor", "revisora"]),
+];
 
 /// Labels publishing relies on: name, color, description. Created when the repo lacks them.
 const LABELS: &[(&str, &str, &str)] = &[
@@ -46,13 +53,34 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
         return Some(Err("Planning isn't on for you.".into()));
     }
     let out = if name == "publish_tickets" {
-        publish_tickets(state, me, args).await
+        publish_tickets(state, me, args).await.map(|(msg, slug, spec, tickets)| {
+            crate::grill::record_published(state, &me.id, &slug, spec.map(|number| IssueLink { number, title: String::new() }), tickets);
+            msg
+        })
     } else {
-        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await
+        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await.map(|(msg, slug, spec)| {
+            crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
+            msg
+        })
     };
     // Even a failure can leave issues published, so the Issues tab refetches either way.
     state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
     Some(out)
+}
+
+/// The team check: the roles no agent in `project` fills, going by their names and titles ("Dev",
+/// "Feature developer", "Code reviewer").
+pub fn missing_roles(state: &AppState, project: &str) -> Vec<&'static str> {
+    let project = project.trim();
+    let team: Vec<Vec<String>> = state
+        .db
+        .list_agents()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !project.is_empty() && a.project.trim() == project)
+        .map(|a| format!("{} {}", a.name, a.title).to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect())
+        .collect();
+    ROLES.iter().filter(|(_, words)| !team.iter().any(|ws| ws.iter().any(|w| words.contains(&w.as_str())))).map(|(role, _)| *role).collect()
 }
 
 /// Same spec, same key: case and spacing don't make a new one.
@@ -100,7 +128,8 @@ async fn login(state: &AppState) -> Result<String, String> {
     Ok(me_gh["login"].as_str().ok_or("GitHub didn't say who the token belongs to.")?.to_string())
 }
 
-async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> Result<String, String> {
+/// The reply, the repo and the spec published (or already there).
+async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> Result<(String, String, IssueLink), String> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() || body.trim().is_empty() {
         return Err("title and body are required".into());
@@ -111,7 +140,10 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     let slug = repo_for(state, me).await?;
     connected(state)?;
     let k = key(&title);
-    let already = |n: i64| format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed.");
+    let already = |n: i64| {
+        let msg = format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed.");
+        (msg, slug.clone(), IssueLink { number: n, title: title.clone() })
+    };
     if let Ok(Some(n)) = state.db.published_issue(&slug, "spec", &k) {
         return Ok(already(n));
     }
@@ -136,7 +168,8 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     .map_err(|e| format!("GitHub rejected the spec on {slug}: {e}"))?;
     let n = made["number"].as_i64().ok_or("GitHub created the spec but didn't return its number.")?;
     state.db.record_published_issue(&slug, "spec", &k, n).map_err(|e| e.to_string())?;
-    Ok(format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}"))
+    let msg = format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}");
+    Ok((msg, slug, IssueLink { number: n, title }))
 }
 
 struct Ticket {
@@ -213,7 +246,8 @@ async fn issue_id(state: &AppState, slug: &str, n: i64, known: Option<i64>) -> R
     v["id"].as_i64().ok_or_else(|| format!("GitHub didn't return the id of #{n} on {slug}."))
 }
 
-async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+/// The reply, the repo, the spec and the tickets published (or already there), in publishing order.
+async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(String, String, Option<i64>, Vec<IssueLink>), String> {
     let ts = tickets_in(args)?;
     let spec = args["spec"].as_i64();
     if spec.is_none() && ts.len() > 1 {
@@ -237,6 +271,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
     let mut lines = vec![];
+    let mut links = vec![];
     let mut fresh = 0;
     for &i in &order {
         let t = &ts[i];
@@ -299,6 +334,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             state.db.record_published_issue(&slug, "blocked_by", &dk, bn).map_err(|e| e.to_string())?;
         }
         made[i] = Some((n, id));
+        links.push(IssueLink { number: n, title: t.title.clone() });
         let by = if blockers.is_empty() { String::new() } else { format!(", blocked by {}", blockers.join(", ")) };
         let was = if new { "" } else { ", already published" };
         lines.push(format!("- #{n} {}{by}{was}: https://github.com/{slug}/issues/{n}", t.title));
@@ -308,7 +344,8 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
         (None, _) => "Published a standalone ticket".to_string(),
     };
     let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already published." } else { "" };
-    Ok(format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n")))
+    let msg = format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n"));
+    Ok((msg, slug, spec, links))
 }
 
 #[cfg(test)]
@@ -684,5 +721,94 @@ mod tests {
         ] {
             assert!(p.contains(want), "missing {want}");
         }
+    }
+
+    /// The summary message `grill_end` just posted.
+    fn summary(st: &AppState, a: &Agent) -> crate::db::Message {
+        st.db.list_messages(&a.id, 50, None).unwrap().into_iter().rev().find(|m| m.meta["grill"]["final"] == true).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_grill_that_published_ends_with_the_card() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/card-team";
+        let a = planner_on(&st, "card-team", Some("git@github.com:octo/card-team.git"));
+        tickets_repo(&fake, slug, 40, &[40, 41, 42]);
+        // The team has a reviewer but no developer.
+        let mut rev = crate::tasks::tests::agent(&st, "Checker");
+        (rev.project, rev.title) = ("card-team".into(), "Code reviewer".into());
+        st.db.save_agent(&rev).unwrap();
+
+        crate::grill::tests::round(&st, &a, &["Turn this into a spec and tickets?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Planning in rounds").await.unwrap();
+        publish_tickets(&st, &a, Some(40), vec![ticket("API", &["Store"]), ticket("Store", &[])]).await.unwrap();
+        // A retry adds nothing to the card.
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!([{ "number": 41, "id": 4100, "title": "Store" }, { "number": 42, "id": 4200, "title": "API" }]));
+        publish_tickets(&st, &a, Some(40), vec![ticket("API", &["Store"]), ticket("Store", &[])]).await.unwrap();
+
+        let out = crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Rounds it is." })).unwrap().unwrap();
+        assert!(out.contains("end-of-planning card"), "{out}");
+        let m = summary(&st, &a);
+        assert_eq!(m.content, "Rounds it is.");
+        assert_eq!(m.meta["grill"]["end_card"], json!({
+            "repo": slug,
+            "spec": { "number": 40, "title": "Planning in rounds", "url": "https://github.com/octo/card-team/issues/40" },
+            "tickets": [
+                { "number": 41, "title": "Store", "url": "https://github.com/octo/card-team/issues/41" },
+                { "number": 42, "title": "API", "url": "https://github.com/octo/card-team/issues/42" },
+            ],
+            "next_message": "Implement spec #40: hand the ready tickets to the team",
+            "missing_roles": ["dev"],
+            "setup": {
+                "agent_id": "loft",
+                "message": format!("Set up the team for the card-team project: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
+            },
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_full_team_gets_no_setup_button_and_an_unpublished_grill_no_card() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "card-full", Some("git@github.com:octo/card-full.git"));
+        tickets_repo(&fake, "octo/card-full", 7, &[7]);
+        for (name, title) in [("Dev", "Feature developer"), ("Reviewer", "")] {
+            let mut x = crate::tasks::tests::agent(&st, name);
+            x.project = " card-full ".into();
+            x.title = title.into();
+            st.db.save_agent(&x).unwrap();
+        }
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Rounds").await.unwrap();
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let card = &summary(&st, &a).meta["grill"]["end_card"];
+        assert_eq!((&card["missing_roles"], &card["setup"], &card["tickets"]), (&json!([]), &Value::Null, &json!([])));
+        assert_eq!(card["next_message"], "Implement spec #7: hand the ready tickets to the team");
+
+        // A grill that stopped before publishing ends with the summary only.
+        crate::grill::tests::round(&st, &a, &["Another?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Nothing published." })).unwrap().unwrap();
+        assert_eq!(summary(&st, &a).meta["grill"]["end_card"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn the_team_check_goes_by_the_project_names_and_titles() {
+        let st = state();
+        let add = |name: &str, title: &str, project: &str| {
+            let mut x = crate::tasks::tests::agent(&st, name);
+            (x.title, x.project) = (title.into(), project.into());
+            st.db.save_agent(&x).unwrap();
+        };
+        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"]);
+        add("Lead", "Team lead", "team-a");
+        add("Dev", "", "team-b");
+        add("Devious", "Docs writer", "team-a");
+        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"], "other projects and partial words don't count");
+        add("Ana", "Desenvolvedora", "team-a");
+        add("Loft Reviewer", "", "team-a");
+        assert!(missing_roles(&st, "team-a").is_empty());
+        assert_eq!(missing_roles(&st, " "), ["dev", "reviewer"], "no project, no team");
     }
 }

@@ -14,7 +14,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private var msgs: [String: [ChatMessage]]
     private var perms: [PermissionRequest]
     private var nextId: Int64 = 1000
-    /// `-fixture-grill`: the server supports grill mode and the Orchestrator is mid-interview.
+    /// `-fixture-grill`: the server supports grill mode and the Orchestrator is mid-interview (`-fixture-grill-ended`: just done).
     private let grill: Bool
     private var grillState: GrillSession?
     /// Commands the app sent, for UI tests to check.
@@ -139,6 +139,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                               reason: nil, rule: "Bash(xcodebuild *)", status: "pending", createdAt: ago(4)),
         ]
         if self.grill { addGrill(now: now) }
+        // `-fixture-grill-ended`: the interview is over and its end-of-planning card is in the chat.
+        if self.grill, args.contains("-fixture-grill-ended"), var s = grillState {
+            endGrill(&s)
+            grillState = s
+        }
         if args.contains("-fixture-risky-permission") {
             // A request the explainer has to flag: it pushes to main over the network.
             perms.append(PermissionRequest(id: "p2", agentId: "be", source: "prompt", toolName: "Bash", input: ["command": "git push origin main"],
@@ -235,6 +240,18 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         s.waiting = false
         grillState = s
         grillMessage(Self.roundText(n + 1, next), GrillMeta(sessionId: s.sessionId, role: .round, round: n + 1, topic: s.topic, questions: next))
+    }
+
+    /// Ends the interview with a summary and the end-of-planning card: a spec, two tickets, no reviewer on the team.
+    private func endGrill(_ s: inout GrillSession) {
+        s.state = .ended
+        grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
+        let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/octo/site/issues/\(n)")!) }
+        let card = EndCard(repo: "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
+                           nextMessage: "Implement spec #40: hand the ready tickets to the team", missingRoles: ["reviewer"],
+                           setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet."))
+        grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
+                     GrillMeta(sessionId: s.sessionId, role: .summary, final: true, endCard: card), role: "assistant")
     }
 
     private func grillMessage(_ text: String, _ g: GrillMeta, role: String = "assistant") {
@@ -373,10 +390,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 grillMessage("**So far:** the page is for new visitors, and pricing stays monthly + yearly.",
                              GrillMeta(sessionId: s.sessionId, role: .summary, final: false), role: "assistant")
             case .end:
-                s.state = .ended
-                grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
-                grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
-                             GrillMeta(sessionId: s.sessionId, role: .summary, final: true), role: "assistant")
+                endGrill(&s)
             }
             grillState = s
             return s
@@ -455,6 +469,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func unregisterDevice(token: String) async throws { try check() }
     func testPush(token: String) async throws { try check() }
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
+
+    func resetSession(agentId: String) async throws { try check() }
 
     func restartRun(agentId: String) async throws {
         try check()

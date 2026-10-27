@@ -560,6 +560,10 @@ async fn list_projects(state: &AppState, limit: usize) -> String {
 }
 
 async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    // Planning ends with a team check, and its fix goes through `loft`: a planner never builds the team itself.
+    if me.planning && !me.builtin {
+        return Err("Planning agents don't create agents: that stays with loft. Leave it to the end-of-planning card's \"Set up the team with loft\" button, or tell the user to ask loft.".into());
+    }
     let s = |k: &str| args[k].as_str().unwrap_or("").trim().to_string();
     let tpl = match s("template") {
         k if k.is_empty() => None,
@@ -728,6 +732,18 @@ async fn set_schedule(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
 mod tests {
     use super::*;
     use crate::tasks::tests::{agent, state};
+
+    #[tokio::test]
+    async fn a_planning_agent_never_creates_agents() {
+        let st = state();
+        let mut lead = agent(&st, "Lead");
+        (lead.planning, lead.lead, lead.project) = (true, true, "homebase".into());
+        lead.allowed_tools.push(CREATE_RULE.into());
+        st.db.save_agent(&lead).unwrap();
+        let err = create_agent(&st, &lead, &json!({ "template": "dev", "project": "homebase" })).await.unwrap_err();
+        assert!(err.starts_with("Planning agents don't create agents: that stays with loft."), "{err}");
+        assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Dev"));
+    }
 
     #[tokio::test]
     async fn loft_creates_an_agent_from_a_template_with_default_tools_only() {

@@ -29,6 +29,9 @@ const MAX_RECOMMENDATION: usize = 500;
 const MAX_OPTIONS: usize = 6;
 const MAX_OPTION: usize = 60;
 const MAX_ANSWER: usize = 4000;
+/// Context size, in tokens, near the end of the smart zone (about 100k, past which models get noticeably
+/// worse): a round sent beyond it, before the tickets are published, has the agent suggest `/compact`.
+pub const COMPACT_AT: u64 = 80_000;
 /// Before the grill's last call: the glossary and ADRs written along the way go up as one PR.
 const DOCS_PR_STEP: &str = "if your docs branch has commits, push it and open its one PR with `gh pr create` (pass its URL as `docs_pr`; with no commits, open no PR), then ";
 
@@ -65,6 +68,26 @@ pub struct Session {
     /// `client_id`s of recent commands, so a retried request isn't applied twice.
     #[serde(default)]
     pub seen_commands: Vec<String>,
+    /// The spec and tickets published while this grill ran, for the end-of-planning card.
+    #[serde(default)]
+    pub published: Option<Published>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Published {
+    /// `owner/repo` they were published on.
+    pub repo: String,
+    #[serde(default)]
+    pub spec: Option<IssueLink>,
+    #[serde(default)]
+    pub tickets: Vec<IssueLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueLink {
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +136,60 @@ pub fn enabled(a: &Agent) -> bool {
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.list_grills(agent_id).ok()?.into_iter().find(|s| s.status != "ended")
+}
+
+/// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
+pub fn record_published(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
+    let Some(mut s) = active(state, agent_id) else { return };
+    let p = s.published.get_or_insert_with(Default::default);
+    if p.repo != repo {
+        *p = Published { repo: repo.into(), ..Default::default() };
+    }
+    if let Some(sp) = spec {
+        // Publishing tickets names the spec by number only: keep the title publish_spec gave.
+        if p.spec.as_ref().is_none_or(|old| old.number != sp.number || !sp.title.is_empty()) {
+            p.spec = Some(sp);
+        }
+    }
+    for t in tickets {
+        if !p.tickets.iter().any(|o| o.number == t.number) {
+            p.tickets.push(t);
+        }
+    }
+    let _ = save(state, &mut s);
+}
+
+/// The end-of-planning card for a grill that published something: links to the spec and tickets, the
+/// suggested next message for the composer after clearing context, and the roles the team lacks.
+fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
+    let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
+    let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": format!("https://github.com/{}/issues/{}", p.repo, i.number) });
+    let next = match (&p.spec, p.tickets.as_slice()) {
+        (Some(sp), _) => say(s, &format!("Implement spec #{}: hand the ready tickets to the team", sp.number), &format!("Implemente a spec #{}: entregue os tickets prontos ao time", sp.number)),
+        (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
+        (None, _) => say(s, "Implement the ready tickets: hand them to the team", "Implemente os tickets prontos: entregue-os ao time"),
+    };
+    let missing = crate::planning::missing_roles(state, &me.project);
+    let setup = (!missing.is_empty()).then(|| {
+        let roles = missing.iter().map(|r| if *r == "dev" { "Dev" } else { "reviewer" }).collect::<Vec<_>>().join(" or ");
+        let plan = match (&p.spec, p.tickets.first()) {
+            (Some(sp), _) => format!("spec #{}: https://github.com/{}/issues/{}", sp.number, p.repo, sp.number),
+            (None, Some(t)) => format!("ticket #{}: https://github.com/{}/issues/{}", t.number, p.repo, t.number),
+            (None, None) => unreachable!("a card has a spec or a ticket"),
+        };
+        json!({
+            "agent_id": crate::setup::LOFT_ID,
+            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.project.trim(), me.name),
+        })
+    });
+    Some(json!({
+        "repo": p.repo,
+        "spec": p.spec.as_ref().map(link),
+        "tickets": p.tickets.iter().map(link).collect::<Vec<_>>(),
+        "next_message": next,
+        "missing_roles": missing,
+        "setup": setup,
+    }))
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -295,6 +372,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         lang: "en".into(),
         summarized: false,
         seen_commands: vec![],
+        published: None,
     }
 }
 
@@ -336,10 +414,19 @@ fn transcript(s: &Session) -> String {
     if out.is_empty() { "(no rounds yet)".into() } else { out.join("\n\n") }
 }
 
-/// The run after the user sends a round.
-fn round_prompt(s: &Session, r: &Round) -> String {
+/// The run after the user sends a round. `context` is the agent's context size in tokens, if known.
+fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
+    // A long grill fills the context: before the spec is written on a degraded one, suggest compacting.
+    let ticketed = s.published.as_ref().is_some_and(|p| !p.tickets.is_empty());
+    let compact = match context {
+        Some(n) if n >= COMPACT_AT && !ticketed => format!(
+            "Your context holds about {}k tokens, near the end of the smart zone, and the tickets aren't published yet. Before anything else, write one short line to the user, in their language, suggesting they type `/compact` before the spec and tickets are written. Apart from that line, follow the steps below.\n\n",
+            n / 1000
+        ),
+        _ => String::new(),
+    };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\nUpdate your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -489,7 +576,8 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
                 meta["grill"]["tagged_message_id"] = json!(id);
             }
             add_msg(state, &s.agent_id, None, "user", "text", &text, meta);
-            wake = Some(round_prompt(s, &r));
+            let context = state.db.get_agent(&s.agent_id).ok().flatten().and_then(|a| a.context_tokens);
+            wake = Some(round_prompt(s, &r, context));
         }
         "decide" => {
             let r = open_round_mut(s).ok_or_else(closed)?;
@@ -863,7 +951,8 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 Some(url) if !summary.contains(url.as_str()) => format!("{summary}\n\n{}: {url}", say(&s, "Docs PR", "PR de docs")),
                 _ => summary.to_string(),
             };
-            add_msg(state, &me.id, None, "assistant", "text", &content, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path, "docs_pr": docs_pr } }));
+            let card = end_card(state, me, &s);
+            add_msg(state, &me.id, None, "assistant", "text", &content, json!({ "grill": { "session_id": s.id, "role": "summary", "final": true, "notes_path": s.notes_path, "docs_pr": docs_pr, "end_card": card } }));
             s.summarized = true;
             if s.status == "ended" {
                 save(state, &mut s)?;
@@ -871,8 +960,9 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 finish(state, &mut s, "done")?;
             }
             Ok(format!(
-                "Grill ended; the summary is in the chat{}. End your turn now without any reply text.",
-                s.notes_path.as_deref().map(|p| format!(" and the full record is in `{p}` in your workspace")).unwrap_or_default()
+                "Grill ended; the summary is in the chat{}{}. End your turn now without any reply text.",
+                s.notes_path.as_deref().map(|p| format!(" and the full record is in `{p}` in your workspace")).unwrap_or_default(),
+                if card.is_some() { ", with the end-of-planning card (spec and ticket links, Clear context, and the team check)" } else { "" }
             ))
         }
         _ => Err(format!("unknown tool {name}")),
@@ -994,6 +1084,11 @@ Once the spec is published, split it into tickets the team can pick up.
 
 - Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`.
 
+# Planning: the end
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
+- When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line.
+
 # Planning: direct requests
 When the user asks for an issue or a plan without a grill ("create an issue for X"):
 - Never start a grill unasked. Ask at most one short question in normal chat when something essential is missing; otherwise go ahead with sensible choices.
@@ -1020,7 +1115,7 @@ pub(crate) mod tests {
         a
     }
 
-    fn round(st: &AppState, a: &Agent, qs: &[&str]) -> Result<String, String> {
+    pub(crate) fn round(st: &AppState, a: &Agent, qs: &[&str]) -> Result<String, String> {
         mcp_call(st, a, "grill_round", &json!({ "topic": "Pricing", "questions": qs.iter().map(|t| q(t)).collect::<Vec<_>>() })).unwrap()
     }
 
@@ -1029,7 +1124,7 @@ pub(crate) mod tests {
         on_user_message(st, a, text, Some(&json!({ "role": "answer", "session_id": s.id, "question_id": qid })), json!({})).unwrap()
     }
 
-    fn send(st: &AppState, a: &Agent) -> Option<String> {
+    pub(crate) fn send(st: &AppState, a: &Agent) -> Option<String> {
         let mut s = active(st, &a.id).unwrap();
         apply_command(st, &mut s, "send", None, None).unwrap()
     }
@@ -1484,5 +1579,26 @@ pub(crate) mod tests {
         mcp_call(&st, &o, "grill_end", &json!({ "summary": "Nothing settled." })).unwrap().unwrap();
         let summary = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["final"] == true).unwrap();
         assert_eq!((summary.content.as_str(), summary.meta["grill"]["docs_pr"].clone()), ("Nothing settled.", Value::Null));
+    }
+
+    #[tokio::test]
+    async fn a_round_sent_near_the_smart_zone_limit_suggests_compact_until_the_tickets_are_out() {
+        let st = state();
+        let mut o = planner(&st, "Orchestrator");
+        round(&st, &o, &["Who pays?"]).unwrap();
+        o.context_tokens = Some(COMPACT_AT - 1);
+        st.db.save_agent(&o).unwrap();
+        assert!(!send(&st, &o).unwrap().contains("/compact"), "below the limit, no suggestion");
+
+        round(&st, &o, &["Monthly?"]).unwrap();
+        o.context_tokens = Some(COMPACT_AT + 12_000);
+        st.db.save_agent(&o).unwrap();
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains("about 92k tokens") && wake.contains("suggesting they type `/compact`"), "{wake}");
+
+        // Once the tickets are published, the spec is written: no point compacting for it.
+        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into() }), vec![IssueLink { number: 5, title: "Plans".into() }]);
+        round(&st, &o, &["Annual too?"]).unwrap();
+        assert!(!send(&st, &o).unwrap().contains("/compact"));
     }
 }

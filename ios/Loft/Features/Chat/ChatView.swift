@@ -101,7 +101,7 @@ struct ChatView: View {
                             .padding(.top, 40)
                     }
                     ForEach(items) { item in
-                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand).id(item.id)
+                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith).id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
                         PendingBubble(message: p).id(p.id)
@@ -534,6 +534,16 @@ extension ChatView {
         }
     }
 
+    /// The end-of-planning card's Clear context: a fresh session, with the next message waiting in the composer, unsent.
+    fileprivate func clearWith(_ next: String) {
+        Task {
+            do {
+                try await store.resetSession(agentId)
+                draft = next
+            } catch { actionError = APIError.from(error) }
+        }
+    }
+
     fileprivate func grillCommand(_ c: GrillCommand) {
         if c == .end { interviewEnded() }
         Task {
@@ -595,6 +605,7 @@ private struct ChatItemView: View {
     let agent: Agent
     var currentQuestionId: String?
     var command: (GrillCommand) -> Void = { _ in }
+    var clearWith: (String) -> Void = { _ in }
 
     var body: some View {
         switch item {
@@ -608,6 +619,7 @@ private struct ChatItemView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.accent)
                 MessageBubble(message: m, agent: agent)
+                if let card = m.grill?.endCard { EndCardView(card: card, clearWith: clearWith) }
             }
         case .message(let m): MessageBubble(message: m, agent: agent)
         case .tools(_, let calls): ToolGroup(calls: calls)

@@ -774,6 +774,7 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
+    func resetSession(_ agentId: String) async throws { try await requireWrite().resetSession(agentId: agentId) }
 
     @discardableResult
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {

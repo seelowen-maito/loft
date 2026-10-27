@@ -153,6 +153,22 @@ export type GrillSession = {
   updated_at: string;
 };
 
+/** A link to an issue the planning published. */
+export type PlannedIssue = { number: number; title: string; url: string };
+
+/** The end-of-planning card on a grill's final summary (`meta.grill.end_card`). */
+export type EndCard = {
+  repo: string;
+  spec: PlannedIssue | null;
+  tickets: PlannedIssue[];
+  /** Left in the composer after Clear context, never sent by Loft. */
+  next_message: string;
+  /** Roles no agent in the project fills: "dev", "reviewer". */
+  missing_roles: string[];
+  /** The message "Set up the team with loft" sends, when roles are missing. */
+  setup: { agent_id: string; message: string } | null;
+};
+
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
   token: string;
