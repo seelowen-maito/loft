@@ -40,11 +40,11 @@ pub struct Agent {
     /// Subagents allowed to run at once. None is Claude Code's default; 0 turns subagents off.
     #[serde(default)]
     pub max_subagents: Option<u32>,
-    /// Planning: the grill (guided interviews) and its tools. Off by default. Read from the old
-    /// optional `grill` flag when that is all an agent has, so an explicit setting carries over.
-    #[serde(default, alias = "grill", deserialize_with = "null_is_false")]
-    pub planning: bool,
-    /// Leads its team (the agents sharing its project): at most one per project, always with Planning.
+    /// The grill instructions are in its Claude session's context. Cleared when the session is replaced
+    /// or compacted, so the next grill run sends them again.
+    #[serde(default)]
+    pub grill_briefed: bool,
+    /// Leads its team (the agents sharing its project): at most one per project.
     #[serde(default)]
     pub lead: bool,
     /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
@@ -68,10 +68,6 @@ pub struct Agent {
     /// The agent that created this one, if an agent did. None when the user did.
     #[serde(default)]
     pub created_by: Option<String>,
-}
-
-fn null_is_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.
@@ -1006,29 +1002,6 @@ mod tests {
             "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn an_explicit_old_grill_flag_becomes_planning() {
-        let with = |grill: Option<serde_json::Value>| {
-            let mut v = serde_json::to_value(agent("a")).unwrap();
-            v.as_object_mut().unwrap().remove("planning");
-            if let Some(g) = grill {
-                v["grill"] = g;
-            }
-            serde_json::from_value::<Agent>(v).unwrap().planning
-        };
-        assert!(with(Some(true.into())));
-        assert!(!with(Some(false.into())));
-        assert!(!with(Some(serde_json::Value::Null)), "unset meant the Orchestrator name rule, now off");
-        assert!(!with(None));
-        // Saved again, it is stored as `planning` only.
-        let db = Db::open(Path::new(":memory:")).unwrap();
-        let mut a = agent("b");
-        a.planning = true;
-        db.save_agent(&a).unwrap();
-        let v = serde_json::to_value(db.get_agent("b").unwrap().unwrap()).unwrap();
-        assert_eq!((v["planning"].clone(), v.get("grill")), (serde_json::json!(true), None));
     }
 
     #[test]

@@ -23,9 +23,7 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** Planning: it can grill the user (guided interviews). Off by default. */
-  planning: boolean;
-  /** Leads its project's team (one per project); implies Planning. Wears a captain hat. */
+  /** Leads its project's team (one per project). Wears a captain hat. */
   lead?: boolean;
   /** Its part in the end-of-planning team check: "dev", "reviewer" or "" (neither). */
   role?: string;

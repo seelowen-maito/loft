@@ -215,7 +215,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Interviews")
                 } footer: {
-                    Text("When an agent with Planning grills you, it asks in rounds. Each question is read with its recommendation in your chosen voice and, with hands-free on, the mic opens for your answer. Say “yes” to accept the recommendation, or “skip”, “back”, “repeat” or “I don't know” any time; the round is sent after its last question. Spoken answers follow “When you stop talking” above.")
+                    Text("When an agent grills you, it asks in rounds. Each question is read with its recommendation in your chosen voice and, with hands-free on, the mic opens for your answer. Say “yes” to accept the recommendation, or “skip”, “back”, “repeat” or “I don't know” any time; the round is sent after its last question. Spoken answers follow “When you stop talking” above.")
                 }
             }
 

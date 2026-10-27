@@ -203,9 +203,6 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
             v => Some(v.as_u64().filter(|n| *n <= 20).ok_or_else(|| bad("max_subagents must be null or 0-20"))? as u32),
         };
     }
-    if let Some(v) = p.get("planning") {
-        a.planning = v.as_bool().ok_or_else(|| bad("planning must be true or false"))?;
-    }
     if let Some(v) = p.get("lead") {
         a.lead = v.as_bool().ok_or_else(|| bad("lead must be true or false"))?;
     }
@@ -261,8 +258,6 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         if a.project.trim().is_empty() {
             return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
         }
-        // A Lead can always plan.
-        a.planning = true;
     }
     Ok(())
 }
@@ -321,7 +316,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         permission_mode: "auto".into(),
         subagent_model: String::new(),
         max_subagents: None,
-        planning: false,
+        grill_briefed: false,
         lead: false,
         role: String::new(),
         avatar: Avatar::generate(&id),
@@ -536,6 +531,7 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
     let a = state.db.update_agent(&id, |a| {
         a.session_id = None;
         a.context_tokens = None;
+        a.grill_briefed = false;
     })?.ok_or_else(not_found)?;
     let m = state.db.add_message(&id, None, "system", "clear", "Context cleared. Long-term memory carries over.", json!({}))?;
     state.emit(Event::Message { message: json!(m) });
@@ -854,20 +850,12 @@ mod tests {
     use super::{apply_patch, is_plain_id};
 
     #[test]
-    fn planning_is_off_by_default_and_set_through_the_patch() {
+    fn the_role_is_set_through_the_patch() {
         let st = crate::tasks::tests::state();
-        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Orchestrator" }), None).unwrap();
-        assert!(!a.planning, "no name rule");
-        apply_patch(&mut a, &serde_json::json!({ "planning": true })).unwrap();
-        assert!(a.planning);
-        apply_patch(&mut a, &serde_json::json!({ "name": "Planner" })).unwrap();
-        assert!(a.planning, "untouched when not in the patch");
-        assert!(apply_patch(&mut a, &serde_json::json!({ "planning": null })).is_err());
+        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Planner" }), None).unwrap();
         apply_patch(&mut a, &serde_json::json!({ "role": "reviewer" })).unwrap();
         assert_eq!(a.role, "reviewer");
         assert!(apply_patch(&mut a, &serde_json::json!({ "role": "qa" })).is_err());
-        apply_patch(&mut a, &serde_json::json!({ "planning": false })).unwrap();
-        assert!(!a.planning);
     }
 
     async fn patch(st: &crate::state::AppState, id: &str, p: serde_json::Value) -> Result<serde_json::Value, super::ApiError> {
@@ -876,7 +864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_lead_per_project_and_a_lead_always_plans() {
+    async fn one_lead_per_project() {
         use crate::tasks::tests::{agent, state};
         let st = state();
         let mut ids = vec![];
@@ -888,18 +876,15 @@ mod tests {
         }
         let get = |i: usize| st.db.get_agent(&ids[i]).unwrap().unwrap();
 
-        // Lead turns Planning on, and stays on while Lead.
         let v = patch(&st, &ids[0], serde_json::json!({ "lead": true })).await.unwrap();
-        assert_eq!((v["lead"].clone(), v["planning"].clone(), v.get("notice")), (true.into(), true.into(), None));
-        patch(&st, &ids[0], serde_json::json!({ "planning": false })).await.unwrap();
-        assert!(get(0).planning, "a Lead always plans");
+        assert_eq!((v["lead"].clone(), v.get("notice")), (true.into(), None));
         patch(&st, &ids[2], serde_json::json!({ "lead": true })).await.unwrap();
 
         // A second Lead in the same project moves the mark; other projects keep theirs.
         let v = patch(&st, &ids[1], serde_json::json!({ "lead": true })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
         assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
-        assert!(!get(0).lead && get(0).planning, "the old Lead keeps Planning");
+        assert!(!get(0).lead);
         assert!(get(1).lead && get(2).lead);
 
         // No project, no Lead: neither setting it nor clearing the Lead's project.

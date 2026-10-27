@@ -246,10 +246,6 @@ export function Chat({
   };
 
   const startGrill = async (topic: string) => {
-    if (!agent.planning) {
-      setCmdError(`Planning is off for ${agent.name}. Turn it on in the Config tab to be grilled.`);
-      return;
-    }
     setSending(true);
     setCmdError(null);
     stick.current = true;

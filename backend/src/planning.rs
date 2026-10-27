@@ -44,16 +44,20 @@ pub fn mcp_tools() -> Vec<Value> {
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Titles of the tickets in this list that must land before this one." }
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
+    }), json!({
+        "name": "planning_guide",
+        "description": "The templates and rules for a spec and its tickets. Call it before writing either outside a grill (a grill's instructions already include them).",
+        "inputSchema": { "type": "object", "properties": {} }
     })]
 }
 
 /// Handle the planning tools. None when `name` isn't one of them.
 pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Option<Result<String, String>> {
+    if name == "planning_guide" {
+        return Some(Ok(format!("{}\n\n{}", crate::grill::SPEC, crate::grill::TICKETS)));
+    }
     if name != "publish_spec" && name != "publish_tickets" {
         return None;
-    }
-    if !crate::grill::enabled(me) {
-        return Some(Err("Planning isn't on for you.".into()));
     }
     let out = if name == "publish_tickets" {
         publish_tickets(state, me, args).await
@@ -580,12 +584,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_planning_prompt_offers_the_spec_and_asks_the_seams() {
-        let st = state();
-        let p = crate::grill::prompt_section(&planner(&st, "spec-prompt"));
+        let p = crate::grill::brief();
         for want in ["Turn this into a spec and tickets?", "Test seams", "round question", "## Problem Statement", "## Testing Decisions", "## Out of Scope", "mcp__loft__publish_spec"] {
             assert!(p.contains(want), "missing {want}");
         }
-        assert!(crate::grill::prompt_section(&crate::tasks::tests::agent(&st, "spec-none")).is_empty());
     }
 
     #[tokio::test]
@@ -606,10 +608,6 @@ pub(crate) mod tests {
         s.github_token = String::new();
         st.settings.save(s).unwrap();
         assert!(publish(&st, &a, "X").await.unwrap_err().starts_with("GitHub isn't connected"));
-
-        let mut plain = crate::tasks::tests::agent(&st, "spec-plain");
-        plain.project = "spec-gitlab".into();
-        assert_eq!(publish(&st, &plain, "X").await.unwrap_err(), "Planning isn't on for you.");
     }
 
     /// A repo with both labels and spec #spec, whose issue creations answer these numbers in turn (id = number * 100).
@@ -798,22 +796,26 @@ pub(crate) mod tests {
         assert_eq!(err(vec![ticket("A", &["Z"])], Some(1)).await, "\"A\" is blocked by \"Z\", which isn't one of these tickets");
         assert_eq!(err(vec![ticket("A", &["A"])], Some(1)).await, "\"A\" can't block itself");
         assert_eq!(err(vec![ticket("A", &["B"]), ticket("B", &["A"]), ticket("C", &[])], Some(1)).await, "these tickets block each other in a loop: \"A\", \"B\"");
-
-        let mut plain = crate::tasks::tests::agent(&st, "tickets-plain");
-        plain.project = "tickets-bad".into();
-        assert_eq!(publish_tickets(&st, &plain, None, vec![ticket("A", &[])]).await.unwrap_err(), "Planning isn't on for you.");
     }
 
     #[test]
     fn the_planning_prompt_slices_tickets_and_covers_direct_requests() {
-        let st = state();
-        let p = crate::grill::prompt_section(&planner(&st, "tickets-prompt"));
-        for want in [
-            "Publish these N tickets?", "Vertical slices", "tracer bullet", "expand–contract", "## Acceptance criteria", "mcp__loft__publish_tickets",
-            "# Planning: direct requests", "Never start a grill unasked", "at most one short question", "/grill", "single standalone ticket",
-        ] {
+        let p = crate::grill::brief();
+        for want in ["Publish these N tickets?", "Vertical slices", "tracer bullet", "expand–contract", "## Acceptance criteria", "mcp__loft__publish_tickets"] {
             assert!(p.contains(want), "missing {want}");
         }
+        let always = crate::grill::prompt_section();
+        for want in ["# Planning: direct requests", "Never start a grill unasked", "at most one short question", "/grill", "single standalone ticket", "mcp__loft__planning_guide"] {
+            assert!(always.contains(want), "missing {want}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_planning_guide_gives_the_spec_and_ticket_templates() {
+        let st = state();
+        let a = crate::tasks::tests::agent(&st, "guide");
+        let g = mcp_call(&st, &a, "planning_guide", &json!({})).await.unwrap().unwrap();
+        assert!(g.contains("## Problem Statement") && g.contains("## Acceptance criteria") && !g.contains("# Planning: grilling"), "{g}");
     }
 
     /// The summary message `grill_end` just posted.

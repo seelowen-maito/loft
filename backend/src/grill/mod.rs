@@ -132,11 +132,6 @@ pub struct Question {
     pub from_round: Option<u32>,
 }
 
-/// Grill mode is part of Planning, which is switched on per agent.
-pub fn enabled(a: &Agent) -> bool {
-    a.planning
-}
-
 /// One lock per agent, held around every load, change and save of its grill session. Writers (answers
 /// from the web and the phone, commands, the agent's tools, publishing, the sweeper) would otherwise
 /// overwrite each other's changes to the session blob.
@@ -483,12 +478,10 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
     let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
     let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
 
-    // A new request typed while an interview is open replaces it rather than being taken as an answer.
-    let typed_start = role.is_empty() && enabled(agent) && active(state, &agent.id).is_some() && commands::is_start_request(text);
+    // "Grill me…" typed (the web composer, old app builds) starts a grill like /grill does, and replaces an
+    // open one rather than being taken as an answer.
+    let typed_start = role.is_empty() && commands::is_start_request(text);
     if role == "start_request" || typed_start {
-        if !enabled(agent) {
-            return Ok(Routed::Normal(meta));
-        }
         let mut s = match active(state, &agent.id) {
             Some(s) if s.status == "preparing" => s,
             Some(mut old) => {
@@ -895,9 +888,6 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
     if !name.starts_with("grill_") {
         return None;
     }
-    if !enabled(me) {
-        return Some(Err("Planning isn't on for you.".into()));
-    }
     Some(locked(state, &me.id, || match name {
         "grill_round" => {
             let mut qs = parse_questions(&args["questions"])?;
@@ -1023,18 +1013,29 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
     }))
 }
 
-/// The system-prompt section for agents with Planning on.
-pub fn prompt_section(a: &Agent) -> &'static str {
-    if !enabled(a) {
-        return "";
-    }
+/// The system-prompt section every agent gets: what Planning overrides and what to do with a direct
+/// request for issues. The grill's own instructions come with the grill (`brief`).
+pub fn prompt_section() -> &'static str {
     r#"
 
 # Planning: precedence
-The Planning sections below override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). Your standing instructions still set your role, your team and how work is implemented.
+Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). Your standing instructions still set your role, your team and how work is implemented.
+
+# Planning: direct requests
+When the user asks for an issue or a plan without a grill ("create an issue for X"):
+- Never start a grill unasked. Ask at most one short question in normal chat when something essential is missing; otherwise go ahead with sensible choices.
+- Before writing a spec or tickets, call `mcp__loft__planning_guide` for their templates and rules, and follow it.
+- One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
+- Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
+- When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: type `/grill <topic>` and I'll grill you on it."). Only the user starts a grill: Loft then sends you its instructions.
+- Work the user sends you as a task stays a task: don't open issues for it."#
+}
+
+/// What a grill needs the agent to know, sent with the first grill run in a context (see `with_brief`).
+const BRIEF: &str = r#"[Loft: Planning instructions for this grill. Follow them until the grill ends.]
 
 # Planning: grilling
-When the user asks to be grilled, interviewed or quizzed on an idea ("grill me on this", "/grill", "me sabatina", "me entrevista sobre isso"), interview them relentlessly until you share an understanding of what to build, instead of replying normally.
+The user asked to be grilled on an idea: interview them relentlessly until you share an understanding of what to build, instead of replying normally.
 - Design tree: lay out the decisions the idea needs as a tree, where a decision depends on the ones above it. Walk every branch until each decision is resolved.
 - Frontier: each round asks every question whose prerequisites are settled, and nothing that depends on an open question; that waits for a later round. Post a round with `mcp__loft__grill_round`, most fundamental question first, one decision per question.
 - Recommendations: give every question your recommended answer, and word the question so that "yes" accepts it ("Use Postgres for storage?", not "Which database?"). Give every question a `speak` version too: short and plain, no Markdown, links, ids or PR numbers, recommendation included.
@@ -1085,7 +1086,24 @@ While you grill, build the project's language and record its hard decisions.
 - If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
 - One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
 
-# Planning: spec
+{SPEC}
+
+# Planning: new project
+When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
+- The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
+- Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
+- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
+- If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
+
+{TICKETS}
+
+# Planning: the end
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
+- When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
+
+/// The spec and ticket rules, in the brief and from `planning_guide` for a direct request.
+pub const SPEC: &str = r#"# Planning: spec
 At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns.
 - Offer it: when your project has a repo (or is a new project: see Planning: new project) and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
 - Test seams: before writing the spec, put how it will be tested to the user as a round question with your recommendation: the seams the tests drive (an API, the tools, the UI) and what they assert on, following the prior art in the repo's tests ("Test it through the tools and the API, with a fake GitHub, like the existing grill tests?").
@@ -1116,16 +1134,8 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
 
 - Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
 - When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
-- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool.
-
-# Planning: new project
-When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
-- The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
-- Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
-- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
-- If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
-
-# Planning: tickets
+- Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#;
+pub const TICKETS: &str = r#"# Planning: tickets
 Once the spec is published, split it into tickets the team can pick up.
 - Vertical slices: each ticket is a thin tracer bullet through every layer it touches (data, API, UI, tests), verifiable on its own. Never one ticket per layer; prefer several thin slices to one thick one.
 - Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
@@ -1147,20 +1157,22 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`.
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
-# Planning: the end
-- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
-- Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
-- When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line.
+/// The grill instructions in full.
+pub fn brief() -> String {
+    BRIEF.replace("{SPEC}", SPEC).replace("{TICKETS}", TICKETS)
+}
 
-# Planning: direct requests
-When the user asks for an issue or a plan without a grill ("create an issue for X"):
-- Never start a grill unasked. Ask at most one short question in normal chat when something essential is missing; otherwise go ahead with sensible choices.
-- One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
-- Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
-- When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: want me to grill you on it with /grill?") and do what the user says.
-- Work the user sends you as a task stays a task: don't open issues for it."#
+/// `prompt` for a grill run, with the brief in front unless this context already has it. A new
+/// session, `/clear` and a compaction (`grill_briefed` cleared) each lose it.
+pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
+    let mut fresh = false;
+    let _ = state.db.update_agent(agent_id, |a| {
+        fresh = !a.grill_briefed;
+        a.grill_briefed = true;
+    });
+    if fresh { format!("{}\n\n{prompt}", brief()) } else { prompt }
 }
 
 #[cfg(test)]
@@ -1172,12 +1184,9 @@ pub(crate) mod tests {
         json!({ "text": text, "speak": text, "recommendation": format!("rec for {text}") })
     }
 
-    /// A saved agent with Planning on.
+    /// A saved agent, ready to grill.
     pub(crate) fn planner(st: &AppState, name: &str) -> Agent {
-        let mut a = agent(st, name);
-        a.planning = true;
-        st.db.save_agent(&a).unwrap();
-        a
+        agent(st, name)
     }
 
     pub(crate) fn round(st: &AppState, a: &Agent, qs: &[&str]) -> Result<String, String> {
@@ -1255,24 +1264,11 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn only_agents_with_planning_can_grill() {
+    async fn every_agent_can_grill() {
         let st = state();
-        // The old name rule is gone: an "Orchestrator" without Planning is an ordinary agent.
-        let mut o = agent(&st, "Orchestrator");
-        assert!(!enabled(&o) && prompt_section(&o).is_empty());
-        assert_eq!(mcp_call(&st, &o, "grill_round", &json!({ "topic": "Pricing", "questions": [q("Who pays?")] })), Some(Err("Planning isn't on for you.".into())));
-        assert_eq!(mcp_call(&st, &o, "grill_state", &json!({})), Some(Err("Planning isn't on for you.".into())));
+        let o = agent(&st, "Anyone");
+        assert!(brief().contains("# Planning: grilling") && !prompt_section().contains("# Planning: grilling"));
         assert_eq!(mcp_call(&st, &o, "remember", &json!({})), None);
-        // A start request, tagged or typed, is delivered as a normal message and opens nothing.
-        for grill in [Some(json!({ "role": "start_request" })), None] {
-            let r = on_user_message(&st, &o, "grill me on pricing", grill.as_ref(), json!({})).unwrap();
-            assert!(matches!(r, Routed::Normal(_)));
-        }
-        assert!(active(&st, &o.id).is_none());
-
-        o.planning = true;
-        st.db.save_agent(&o).unwrap();
-        assert!(enabled(&o) && prompt_section(&o).contains("# Planning: grilling"));
         let r = on_user_message(&st, &o, "grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).unwrap();
         assert!(matches!(r, Routed::Handled { .. }));
         assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
@@ -1515,8 +1511,6 @@ pub(crate) mod tests {
         assert_eq!((old.status.as_str(), old.end_reason.as_deref()), ("ended", Some("superseded")));
         assert!(old.rounds[0].questions[0].answer.is_none());
         assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
-        // An agent without Planning treats the request as plain chat.
-        assert!(matches!(on_user_message(&st, &agent(&st, "Helper"), "Grill me", Some(&start), json!({})).unwrap(), Routed::Normal(_)));
     }
 
     #[test]
@@ -1644,9 +1638,33 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_planning_prompt_teaches_domain_modeling_and_the_docs_formats() {
+    fn the_brief_goes_with_the_first_grill_run_and_again_once_the_context_lost_it() {
         let st = state();
-        let p = prompt_section(&planner(&st, "Lead"));
+        let o = planner(&st, "Lead");
+        let first = with_brief(&st, &o.id, "round 1".into());
+        assert!(first.starts_with("[Loft: Planning instructions for this grill.") && first.ends_with("\n\nround 1"), "{first}");
+        assert_eq!(with_brief(&st, &o.id, "round 2".into()), "round 2", "the context already has it");
+        // A compaction or a cleared session clears the mark.
+        st.db.update_agent(&o.id, |a| a.grill_briefed = false).unwrap();
+        assert!(with_brief(&st, &o.id, "round 3".into()).contains("# Planning: grilling"));
+    }
+
+    #[test]
+    fn typing_grill_me_starts_a_grill_like_the_command() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        let Routed::Handled { message, wake } = on_user_message(&st, &o, "Grill me on pricing", None, json!({})).unwrap() else { panic!() };
+        assert_eq!(message.unwrap().meta["grill"]["role"], json!("start_request"));
+        assert!(wake.unwrap().contains("grill_round"));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        // Mentioning a grill later on is ordinary chat.
+        let other = planner(&st, "Dev");
+        assert!(matches!(on_user_message(&st, &other, "We should grill the users first", None, json!({})).unwrap(), Routed::Normal(_)));
+    }
+
+    #[test]
+    fn the_planning_prompt_teaches_domain_modeling_and_the_docs_formats() {
+        let p = brief();
         for want in [
             "# Planning: docs",
             "Domain modeling",

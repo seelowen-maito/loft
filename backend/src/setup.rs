@@ -99,7 +99,7 @@ pub struct Template {
     pub model: &'static str,
     /// Default schedule, in minutes. 0: it only runs when messaged until it sets its own (`set_schedule`).
     pub interval_minutes: i64,
-    /// Planning on (the grill in rounds and its `grill_*` tools), for agents that start by asking the user questions.
+    /// Starts by grilling the user (an interview in rounds) as soon as it is created.
     pub planning: bool,
     /// Created as its project's Lead (taking the mark from any other agent there).
     pub lead: bool,
@@ -584,8 +584,9 @@ async fn list_projects(state: &AppState, limit: usize) -> String {
 }
 
 async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
-    // Planning ends with a team check, and its fix goes through `loft`: a planner never builds the team itself.
-    if me.planning && !me.builtin {
+    // Planning ends with a team check, and its fix goes through `loft`: a Lead, or an agent grilling the
+    // user, never builds the team itself.
+    if (me.lead || crate::grill::active(state, &me.id).is_some()) && !me.builtin {
         return Err("Planning agents don't create agents: that stays with loft. Leave it to the end-of-planning card's \"Set up the team with loft\" button, or tell the user to ask loft.".into());
     }
     let s = |k: &str| args[k].as_str().unwrap_or("").trim().to_string();
@@ -642,7 +643,6 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "interval_minutes": interval,
         "quiet_hours": quiet,
         "avatar_brief": s("avatar_brief"),
-        "planning": tpl.is_some_and(|t| t.planning),
         "lead": args["lead"].as_bool().unwrap_or_else(|| tpl.is_some_and(|t| t.lead)),
         "role": Some(s("role")).filter(|r| !r.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.role.to_string())),
     });
@@ -762,7 +762,7 @@ mod tests {
     async fn a_planning_agent_never_creates_agents() {
         let st = state();
         let mut lead = agent(&st, "Lead");
-        (lead.planning, lead.lead, lead.project) = (true, true, "homebase".into());
+        (lead.lead, lead.project) = (true, "homebase".into());
         lead.allowed_tools.push(CREATE_RULE.into());
         st.db.save_agent(&lead).unwrap();
         let err = create_agent(&st, &lead, &json!({ "template": "dev", "project": "homebase" })).await.unwrap_err();
@@ -893,8 +893,7 @@ mod tests {
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
-        assert_eq!((a.interval_minutes, a.planning, a.role.as_str()), (0, true, "dev"));
-        assert!(crate::grill::enabled(&a));
+        assert_eq!((a.interval_minutes, a.role.as_str()), (0, "dev"));
         // The avatar run started; the interview is queued right behind it, as a quiet grill run.
         let g = st.rt.lock().unwrap().grill_queued.get(&a.id).cloned().unwrap_or_default();
         assert!(g.len() == 1 && g[0].starts_with("[Loft: you were just created by loft]") && g[0].contains("grill_round"), "{g:?}");
@@ -905,7 +904,6 @@ mod tests {
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
         assert_eq!(r.role, "reviewer");
-        assert!(!r.planning);
         assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
     }
 
@@ -991,7 +989,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let out = create_agent(&st, &me, &json!({ "template": "lead", "project": "homebase" })).await.unwrap();
         assert!(out.contains("It is the project's Lead."), "{out}");
         let first = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Lead").unwrap();
-        assert!(first.lead && first.planning && first.interval_minutes == 0);
+        assert!(first.lead && first.interval_minutes == 0);
         // A second one in the same project takes the mark; without a project it can't be created.
         let out = create_agent(&st, &me, &json!({ "template": "lead", "name": "Captain", "project": "homebase" })).await.unwrap();
         assert!(out.contains("It is the project's Lead now (moved from Lead)."), "{out}");
@@ -1038,11 +1036,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let t = template("lead").unwrap();
         assert_eq!((t.name, t.title, t.model, t.planning, t.lead), ("Lead", "Team lead", "opus", true, true));
 
-        // Planning's rules win over standing instructions on specs and tickets; agents without it don't get them.
+        // Planning's rules win over standing instructions on specs and tickets.
         let sys = crate::agents::system_prompt(&st, &lead);
         assert!(sys.contains(&lead.prompt));
-        assert!(sys.contains("# Planning: precedence\nThe Planning sections below override your standing instructions on how specs and tickets are written, labelled, linked and published"), "{sys}");
-        let plain = agent(&st, "lead-plain");
-        assert!(!crate::agents::system_prompt(&st, &plain).contains("# Planning: precedence"));
+        assert!(sys.contains("# Planning: precedence\nLoft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published"), "{sys}");
     }
 }

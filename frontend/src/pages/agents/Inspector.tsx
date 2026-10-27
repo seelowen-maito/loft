@@ -91,13 +91,13 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "planning" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, planning: agent.planning ?? false, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
@@ -191,20 +191,13 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Planning" hint="Lets it grill you on an idea, in rounds of questions that each come with a recommendation. Start one with /grill or “grill me”. Without it, that's an ordinary message.">
-        <label className="flex items-center gap-2 text-[12.5px] text-fg">
-          <input type="checkbox" checked={draft.planning || draft.lead} disabled={draft.lead} onChange={(e) => set("planning", e.target.checked)} className="accent-[var(--color-accent)]" />
-          Can plan with you{draft.lead && <span className="text-fg-3">(a Lead always can)</span>}
-        </label>
-      </Field>
-
       <Field label="Lead" hint={draft.project.trim() ? `Leads the agents in ${draft.project.trim()} and wears the captain hat. One per project: marking it here moves the mark from any other.` : "Only an agent with a project can lead: set its project first."}>
         <label className={cx("flex items-center gap-2 text-[12.5px]", draft.project.trim() || draft.lead ? "text-fg" : "text-fg-3")}>
           <input
             type="checkbox"
             checked={draft.lead}
             disabled={!draft.project.trim() && !draft.lead}
-            onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked, planning: e.target.checked || d.planning }))}
+            onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked }))}
             className="accent-[var(--color-accent)]"
           />
           Leads its team

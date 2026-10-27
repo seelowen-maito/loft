@@ -43,9 +43,6 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "preview_new_repo" && name != "create_repo" {
         return None;
     }
-    if !crate::grill::enabled(me) {
-        return Some(Err("Planning isn't on for you.".into()));
-    }
     Some(if name == "preview_new_repo" { preview(state, me).await } else { create(state, me, args).await })
 }
 
@@ -601,10 +598,6 @@ mod tests {
         let waiting = ask(&st, &a, Some("yes"), false);
         assert!(call(&st, &a, "create_repo", json!({ "question_id": waiting })).await.unwrap_err().starts_with("The user hasn't sent that round yet"));
         assert!(!dir.join(".git").exists());
-
-        let mut plain = crate::tasks::tests::agent(&st, "gf-plain");
-        plain.project = "gf-no".into();
-        assert_eq!(call(&st, &plain, "preview_new_repo", json!({})).await.unwrap_err(), "Planning isn't on for you.");
     }
 
     #[tokio::test]
@@ -788,8 +781,7 @@ mod tests {
 
     #[test]
     fn the_planning_prompt_covers_a_new_project() {
-        let st = state();
-        let p = crate::grill::prompt_section(&planner(&st, "gf-prompt"));
+        let p = crate::grill::brief();
         for want in [
             "# Planning: new project", "Create the GitHub repo `<owner>/<project>` and publish this folder?", "mcp__loft__preview_new_repo", "mcp__loft__create_repo",
             "never write into it", "ask the question again", "read the project's existing documents",

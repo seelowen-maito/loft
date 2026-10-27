@@ -14,15 +14,13 @@ use crate::avatar::Avatar;
 use crate::db::Agent;
 use crate::state::{AppState, Event};
 
-fn tools(me: Option<&Agent>) -> Value {
+fn tools() -> Value {
     let mut all = base_tools();
     all.as_array_mut().unwrap().extend(crate::tasks::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::setup::mcp_tools());
-    if me.is_some_and(crate::grill::enabled) {
-        all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
-        all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
-        all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
-    }
+    all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
     all
 }
 
@@ -373,7 +371,7 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
             "instructions": "Loft: your memory, status, avatar, and permission tools."
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools(state.db.get_agent(&agent_id).ok().flatten().as_ref()) }),
+        "tools/list" => json!({ "tools": tools() }),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));

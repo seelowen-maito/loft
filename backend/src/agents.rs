@@ -376,7 +376,7 @@ Use `mcp__loft__remember` for durable facts worth keeping: user preferences, dec
 Be concise in chat. Lead with the answer or the result. When you finish a task, say what you did and where the output lives."#,
         name = a.name,
         subagents = subagents,
-        grill = crate::grill::prompt_section(a),
+        grill = crate::grill::prompt_section(),
         title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
@@ -488,6 +488,9 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
         let mut prompt = prompt;
         let mut trigger = trigger;
         loop {
+            if trigger == "grill" {
+                prompt = crate::grill::with_brief(&state, &agent_id, prompt);
+            }
             if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
@@ -680,6 +683,7 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
                 if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
                     a.session_id = None;
                     a.context_tokens = None;
+                    a.grill_briefed = false;
                 }) {
                     emit_agent(state, &a);
                 }
@@ -837,6 +841,8 @@ async fn run_process(
                         "trigger": m["trigger"], "pre_tokens": m["pre_tokens"], "post_tokens": m["post_tokens"],
                     }));
                     set_context_tokens(state, agent_id, m["post_tokens"].as_u64());
+                    // The summary may have dropped the grill instructions: the next grill run resends them.
+                    state.db.update_agent(agent_id, |a| a.grill_briefed = false)?;
                 }
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
@@ -1124,7 +1130,6 @@ mod tests {
     fn every_agent_is_told_to_use_the_project_s_glossary_and_adrs() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        assert!(!a.planning);
         let p = system_prompt(&st, &a);
         assert!(p.contains("`GLOSSARY.md`") && p.contains("`docs/adr/`"), "{p}");
     }

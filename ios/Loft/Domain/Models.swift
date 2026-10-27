@@ -25,8 +25,6 @@ struct Agent: Codable, Identifiable, Hashable {
     var prompt: String?
     /// The agent's sticker: a 100x100 SVG drawing (older servers don't send it).
     var avatar: Avatar?
-    /// Planning: it can run "grill me" interviews (nil from older servers).
-    var planning: Bool? = nil
     /// Leads its project's team; it wears a captain hat (nil from older servers).
     var lead: Bool? = nil
     /// When Claude last produced anything in the current run; nil when not running (servers with `run_watchdog`).
