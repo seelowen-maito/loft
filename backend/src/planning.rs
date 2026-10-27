@@ -1,6 +1,9 @@
 //! Publishing a plan as GitHub issues: Loft itself creates them with the user's token, on the repo
 //! of the agent's project, and records what it published so a retry never creates a second one.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use axum::Json;
 use axum::extract::{Path, State};
 use serde_json::{Value, json};
@@ -105,6 +108,18 @@ pub fn infer_role(name: &str, title: &str) -> &'static str {
     }
 }
 
+/// One lock per repo, held for a whole publish: the check for what is already published and the
+/// create are several awaits apart, so two overlapping calls (two planners on one project, parallel
+/// tool calls, a retry while a slow run is still going) would otherwise both create the same issue.
+#[derive(Default)]
+pub struct Locks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl Locks {
+    fn of(&self, slug: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(slug.into()).or_default().clone()
+    }
+}
+
 /// Same spec, same key: case and spacing don't make a new one.
 fn key(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
@@ -164,6 +179,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
         return Err(format!("the title is at most {MAX_TITLE} characters"));
     }
     let slug = repo_for(state, me).await?;
+    let _held = state.publish_locks.of(&slug).lock_owned().await;
     connected(state)?;
     let k = key(&title);
     let already = |n: i64| {
@@ -282,6 +298,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     }
     let order = blockers_first(&ts)?;
     let slug = repo_for(state, me).await?;
+    let _held = state.publish_locks.of(&slug).lock_owned().await;
     connected(state)?;
     let login = login(state).await?;
     ensure_labels(state, &slug).await?;
@@ -500,6 +517,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_publishes_of_one_spec_create_it_once() {
+        let (fake, st) = (fake_github(), state());
+        // Two planners on one repo, both publishing the same spec at once.
+        let a = planner_on(&st, "spec-race", Some("git@github.com:octo/spec-race.git"));
+        let b = planner_on(&st, "spec-race-too", Some("https://github.com/octo/spec-race"));
+        repo(&fake, "octo/spec-race", &["spec", "ready-for-agent"], 7);
+
+        let (x, y) = tokio::join!(publish(&st, &a, "Rounds"), publish(&st, &b, "rounds"));
+        assert_eq!(posts(&fake, "octo/spec-race", "issues").len(), 1, "{x:?} / {y:?}");
+        assert!([x.unwrap(), y.unwrap()].iter().any(|o| o.contains("already published")));
+    }
+
+    #[tokio::test]
     async fn a_label_github_says_already_exists_counts_as_there() {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "spec-many-labels", Some("git@github.com:octo/spec-many-labels.git"));
@@ -639,6 +669,22 @@ pub(crate) mod tests {
         assert_eq!(posts(&fake, slug, "issues").len(), 4);
         assert_eq!(posts(&fake, slug, "issues/9/sub_issues").len(), 3);
         assert_eq!(posts(&fake, slug, "issues/12/dependencies/blocked_by").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn overlapping_publishes_of_the_same_tickets_create_them_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-race";
+        let a = planner_on(&st, "tickets-race", Some("git@github.com:octo/tickets-race.git"));
+        tickets_repo(&fake, slug, 20, &[21, 22, 23, 24]);
+        let tickets = || vec![ticket("Store", &[]), ticket("API", &["Store"])];
+
+        // A retry that arrives while the first call is still publishing.
+        let (x, y) = tokio::join!(publish_tickets(&st, &a, Some(20), tickets()), publish_tickets(&st, &a, Some(20), tickets()));
+        assert_eq!(posts(&fake, slug, "issues").len(), 2, "{x:?} / {y:?}");
+        assert_eq!(posts(&fake, slug, "issues/20/sub_issues").len(), 2);
+        assert_eq!(posts(&fake, slug, "issues/22/dependencies/blocked_by").len(), 1);
+        assert!([x.unwrap(), y.unwrap()].iter().any(|o| o.ends_with("every ticket was already published.")));
     }
 
     #[tokio::test]

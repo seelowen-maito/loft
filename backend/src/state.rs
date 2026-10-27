@@ -91,6 +91,8 @@ pub struct AppState {
     pub system: Arc<crate::system::Cache>,
     /// Serializes writes to each agent's grill session.
     pub grill_locks: Arc<crate::grill::Locks>,
+    /// Serializes publishing issues to each GitHub repo.
+    pub publish_locks: Arc<crate::planning::Locks>,
 }
 
 impl AppState {

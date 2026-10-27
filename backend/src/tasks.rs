@@ -963,6 +963,7 @@ pub(crate) mod tests {
             usage: Arc::new(Default::default()),
             system: Arc::new(Default::default()),
             grill_locks: Arc::new(Default::default()),
+            publish_locks: Arc::new(Default::default()),
         }
     }
 
