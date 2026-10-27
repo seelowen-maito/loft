@@ -50,10 +50,7 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
         return Some(Err("Planning isn't on for you.".into()));
     }
     let out = if name == "publish_tickets" {
-        publish_tickets(state, me, args).await.map(|(msg, slug, spec, tickets)| {
-            crate::grill::record_published(state, &me.id, &slug, spec.map(|number| IssueLink { number, title: String::new() }), tickets);
-            msg
-        })
+        publish_tickets(state, me, args).await
     } else {
         publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await.map(|(msg, slug, spec)| {
             crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
@@ -254,8 +251,9 @@ async fn issue_id(state: &AppState, slug: &str, n: i64, known: Option<i64>) -> R
     v["id"].as_i64().ok_or_else(|| format!("GitHub didn't return the id of #{n} on {slug}."))
 }
 
-/// The reply, the repo, the spec and the tickets published (or already there), in publishing order.
-async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(String, String, Option<i64>, Vec<IssueLink>), String> {
+/// Publishes the tickets, noting each one on the running grill as soon as it's on GitHub, so the
+/// end-of-planning card lists it even if a later step fails and the grill ends without a retry.
+async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
     let ts = tickets_in(args)?;
     let spec = args["spec"].as_i64();
     if spec.is_none() && ts.len() > 1 {
@@ -279,7 +277,6 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
     let mut lines = vec![];
-    let mut links = vec![];
     let mut fresh = 0;
     for &i in &order {
         let t = &ts[i];
@@ -308,6 +305,8 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(
             fresh += 1;
             (n, Some(id), true)
         };
+        let spec_link = spec.map(|number| IssueLink { number, title: String::new() });
+        crate::grill::record_published(state, &me.id, &slug, spec_link, vec![IssueLink { number: n, title: t.title.clone() }]);
         if let Some(s) = spec {
             let lk = format!("{s}/{n}");
             if !matches!(state.db.published_issue(&slug, "sub_issue", &lk), Ok(Some(_))) {
@@ -342,7 +341,6 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(
             state.db.record_published_issue(&slug, "blocked_by", &dk, bn).map_err(|e| e.to_string())?;
         }
         made[i] = Some((n, id));
-        links.push(IssueLink { number: n, title: t.title.clone() });
         let by = if blockers.is_empty() { String::new() } else { format!(", blocked by {}", blockers.join(", ")) };
         let was = if new { "" } else { ", already published" };
         lines.push(format!("- #{n} {}{by}{was}: https://github.com/{slug}/issues/{n}", t.title));
@@ -353,7 +351,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<(
     };
     let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already published." } else { "" };
     let msg = format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n"));
-    Ok((msg, slug, spec, links))
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -773,6 +771,47 @@ pub(crate) mod tests {
                 "message": format!("Set up the team for the card-team project: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
             },
         }));
+    }
+
+    #[tokio::test]
+    async fn the_card_lists_tickets_published_before_a_failure() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/card-partial";
+        let a = planner_on(&st, "card-partial", Some("git@github.com:octo/card-partial.git"));
+        tickets_repo(&fake, slug, 30, &[30]);
+        // First goes up; Second is created but its sub-issue link fails; Third is never reached.
+        fake.in_turn("POST", &format!("/repos/{slug}/issues/30/sub_issues"), vec![(201, json!({})), (500, json!({ "message": "Server Error" }))]);
+        fake.route("POST", &format!("/repos/{slug}/issues/32/dependencies/blocked_by"), 201, json!({}));
+        let tickets = || vec![ticket("First", &[]), ticket("Second", &["First"]), ticket("Third", &["Second"])];
+        let numbers = |card: &Value| card["tickets"].as_array().unwrap().iter().map(|t| t["number"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Partial").await.unwrap();
+        fake.in_turn("POST", &format!("/repos/{slug}/issues"), vec![(201, json!({ "number": 31, "id": 3100 })), (201, json!({ "number": 32, "id": 3200 }))]);
+        let err = publish_tickets(&st, &a, Some(30), tickets()).await.unwrap_err();
+        assert!(err.starts_with("Couldn't make #32 a sub-issue of spec #30"), "{err}");
+
+        // The agent ends the grill without retrying: the card still lists both tickets that exist.
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Stopped." })).unwrap().unwrap();
+        let card = &summary(&st, &a).meta["grill"]["end_card"];
+        assert_eq!(card["spec"]["title"], "Partial");
+        assert_eq!(card["tickets"][1], json!({ "number": 32, "title": "Second", "url": "https://github.com/octo/card-partial/issues/32" }));
+        assert_eq!(numbers(card), [31, 32]);
+
+        // A retry in the next grill creates Third only, and its card lists each ticket once.
+        crate::grill::tests::round(&st, &a, &["Finish?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        fake.route("GET", &format!("/repos/{slug}/issues/30/sub_issues"), 200, json!([{ "number": 31, "id": 3100, "title": "First" }]));
+        fake.route("POST", &format!("/repos/{slug}/issues/30/sub_issues"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/issues/32"), 200, json!({ "number": 32, "id": 3200, "title": "Second" }));
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 33, "id": 3300 }));
+        fake.route("POST", &format!("/repos/{slug}/issues/33/dependencies/blocked_by"), 201, json!({}));
+        publish_tickets(&st, &a, Some(30), tickets()).await.unwrap();
+        publish_tickets(&st, &a, Some(30), tickets()).await.unwrap();
+        assert_eq!(posts(&fake, slug, "issues").iter().map(|i| i["title"].as_str().unwrap()).collect::<Vec<_>>(), ["Partial", "First", "Second", "Third"]);
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        assert_eq!(numbers(&summary(&st, &a).meta["grill"]["end_card"]), [31, 32, 33]);
     }
 
     #[tokio::test]
