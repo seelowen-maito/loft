@@ -1,10 +1,10 @@
 import Foundation
 
 /// The app's full readings (phrase matcher first, then the model), as the evaluation measures them, with the
-/// server's phrase list as the app gets it (`grill_phrases.json`, from `GET /api/grill/commands`).
+/// server's phrase list as the app ships it (`Resources/grill_phrases.json`, a copy of `GET /api/grill/commands`).
 enum Pipelines {
     static let phrases: GrillPhrases? = {
-        let url = URL(fileURLWithPath: "grill_phrases.json")
+        let url = URL(fileURLWithPath: "../Loft/Resources/grill_phrases.json")
         guard let data = try? Data(contentsOf: url) else { return nil }
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
