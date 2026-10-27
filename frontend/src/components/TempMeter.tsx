@@ -23,10 +23,10 @@ export function TempMeter({ live }: { live: boolean }) {
       {used != null && total != null && (
         <span
           className={cx("flex items-center gap-1 font-mono text-[11px] tabular-nums", memTone(r.mem_level))}
-          title={`Memory used ${(used / 2 ** 30).toFixed(1)} of ${gb(total)} GB (${Math.round((used / total) * 100)} %), sampled every 30 s`}
+          title={`Memory used ${(used / 2 ** 30).toFixed(1)} of ${gb(total)} GB, sampled every 30 s`}
         >
           <MemoryStick className="size-3.5" />
-          RAM {gb(used)}/{gb(total)} GB
+          RAM {Math.round((used / total) * 100)}%
         </span>
       )}
       {r.cpu_temp_c != null && (
