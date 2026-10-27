@@ -255,27 +255,52 @@ fn check_yes(state: &AppState, me: &Agent, qid: &str) -> Result<Question, String
     Ok(q.clone())
 }
 
-/// The yes has to be to this repo: the question names `<owner>/<name>`. A picked option or the accepted
-/// recommendation ("Yes, private under acme") fixes the owner it names and a private repo; only an answer
-/// the user wrote themselves can ask for something else, such as a public repo.
+/// The owners named in `text` as whole words: "acme" in "Sim, acme, privado", not in "acme-labs".
+fn owners_named<'a>(text: &str, owners: &'a [String]) -> Vec<&'a String> {
+    let text = text.to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).collect();
+    owners.iter().filter(|o| words.contains(&o.to_lowercase().as_str())).collect()
+}
+
+/// True when the user's own answer asks for a public repo ("public", "público", "pública") and says
+/// nothing private or negative next to it ("not public", "privado"), which would make it unclear.
+fn asks_public(answer: &str) -> bool {
+    const NOT: &[&str] = &["not", "no", "dont", "never", "nao", "nem", "nunca", "sem"];
+    let a = crate::grill::commands::normalize(answer);
+    let words: Vec<&str> = a.split_whitespace().collect();
+    words.iter().any(|w| w.starts_with("public")) && !words.iter().any(|w| w.starts_with("privat") || w.starts_with("privad") || NOT.contains(w))
+}
+
+/// The yes has to be to this repo: the question names `<owner>/<name>`. The owner is the one the answer
+/// names (a picked option, the accepted recommendation or the user's own words), wherever it stands in
+/// it, or else the one in the question. A repo is public only when the user wrote so themselves.
 fn check_choice(q: &Question, owners: &[String], owner: &str, name: &str, private: bool) -> Result<(), String> {
     let text = q.text.to_lowercase();
-    if !owners.iter().any(|o| text.contains(&format!("{o}/{name}").to_lowercase())) {
+    let slugs: Vec<&str> = text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/'))).map(|w| w.trim_end_matches('.')).collect();
+    let asked: Vec<&String> = owners.iter().filter(|o| slugs.contains(&format!("{o}/{name}").to_lowercase().as_str())).collect();
+    if asked.is_empty() {
         return Err(format!(
             "That question doesn't name the repo `<owner>/{name}`, so it isn't a yes to creating it. Ask the question from `mcp__loft__preview_new_repo` (with the new name, if the user wants another one) and pass its id after their yes."
         ));
     }
     let n = crate::grill::commands::normalize;
-    let picked = if q.accepted { Some(q.recommendation.as_str()) } else { q.answer.as_deref().filter(|a| q.options.iter().any(|o| n(o) == n(a))) };
-    let Some(picked) = picked else { return Ok(()) };
-    if !private {
-        return Err(format!("The user chose \"{picked}\", which is a private repo: call create_repo without `private: false`."));
+    let answer = if q.accepted { q.recommendation.clone() } else { q.answer.clone().unwrap_or_default() };
+    let own_words = !q.accepted && !q.options.iter().any(|o| n(o) == n(&answer));
+    if !private && !(own_words && asks_public(&answer)) {
+        return Err(format!("The user answered \"{answer}\", which doesn't ask for a public repo: call create_repo without `private: false`, or ask them again if they want it public."));
     }
-    let named = owners.iter().filter(|o| n(picked).ends_with(&n(o))).max_by_key(|o| o.len());
-    match named {
-        Some(o) if !o.eq_ignore_ascii_case(owner) => Err(format!("The user chose \"{picked}\": create it under {o}, not {owner}.")),
-        _ => Ok(()),
+    let chosen = match (owners_named(&answer, owners).as_slice(), asked.as_slice()) {
+        ([o], _) | ([], [o]) => *o,
+        ([], _) => return Err(format!("The question names more than one owner and the user's answer (\"{answer}\") none: ask them again which one.")),
+        (named, _) => {
+            let named: Vec<&str> = named.iter().map(|o| o.as_str()).collect();
+            return Err(format!("The user's answer (\"{answer}\") names more than one owner ({}): ask them again which one.", named.join(", ")));
+        }
+    };
+    if !chosen.eq_ignore_ascii_case(owner) {
+        return Err(format!("The user answered \"{answer}\": create it under {chosen}, not {owner}."));
     }
+    Ok(())
 }
 
 /// Runs git in the project folder with Loft's token for github.com, passed in the environment so it
@@ -617,10 +642,10 @@ mod tests {
 
         // A picked option fixes its owner and a private repo.
         let acme = ask(&st, &a, Some("Yes, private under acme"), true);
-        assert_eq!(create(&acme, json!({})).await.unwrap_err(), "The user chose \"Yes, private under acme\": create it under acme, not octo-me.");
-        assert_eq!(create(&acme, json!({ "owner": "acme", "private": false })).await.unwrap_err(), "The user chose \"Yes, private under acme\", which is a private repo: call create_repo without `private: false`.");
+        assert_eq!(create(&acme, json!({})).await.unwrap_err(), "The user answered \"Yes, private under acme\": create it under acme, not octo-me.");
+        assert_eq!(create(&acme, json!({ "owner": "acme", "private": false })).await.unwrap_err(), "The user answered \"Yes, private under acme\", which doesn't ask for a public repo: call create_repo without `private: false`, or ask them again if they want it public.");
         let accepted = ask(&st, &a, Some("yes"), true);
-        assert!(create(&accepted, json!({ "private": false })).await.unwrap_err().contains("which is a private repo"));
+        assert!(create(&accepted, json!({ "private": false })).await.unwrap_err().contains("which doesn't ask for a public repo"));
         assert!(create(&accepted, json!({ "owner": "open-org" })).await.unwrap_err().ends_with("create it under octo-me, not open-org."));
 
         // A comment to discuss is no yes either.
@@ -640,6 +665,60 @@ mod tests {
         assert!(out.starts_with("Created the public GitHub repo open-org/gf-bind and pushed the project folder (5 files"), "{out}");
         assert_eq!(creations(&fake, "/orgs/open-org/repos", "gf-bind"), [json!({ "name": "gf-bind", "private": false })]);
         assert_eq!(pushed(&r), [".env", ".env.example", ".gitignore", "app.js", "certs/server.pem"]);
+    }
+
+    #[tokio::test]
+    async fn a_free_text_yes_stays_private_and_a_translated_option_fixes_the_owner_it_names() {
+        let (fake, st) = (fake_github(), state());
+        owners_on(&fake);
+        let (a, dir) = new_project(&st, "gf-odd", &[("app.js", "1")]);
+        let r = remote(&st, "gf-odd");
+        fake.route("POST", "/orgs/acme/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/acme/gf-odd", "private": true }));
+        let create = |qid: &str, args: Value| {
+            let (st, a) = (st.clone(), a.clone());
+            let mut args = args;
+            args["question_id"] = json!(qid);
+            async move { call(&st, &a, "create_repo", args).await }
+        };
+
+        // A yes in the user's own words that doesn't say public is a private repo under the question's owner.
+        for answer in ["bora", "yes go ahead", "pode", "pode, mas não público", "yes, public? no, keep it private", "sim, publique sem pressa"] {
+            let qid = ask(&st, &a, Some(answer), true);
+            let err = create(&qid, json!({ "private": false })).await.unwrap_err();
+            assert!(err.contains("which doesn't ask for a public repo"), "{answer}: {err}");
+        }
+        let bora = ask(&st, &a, Some("bora"), true);
+        assert!(create(&bora, json!({ "owner": "acme" })).await.unwrap_err().ends_with("create it under octo-me, not acme."));
+        // Owners match as whole words: "acme-labs" isn't acme, so the question's owner stands.
+        let labs = ask(&st, &a, Some("yes, under acme-labs"), true);
+        assert!(create(&labs, json!({ "owner": "acme" })).await.unwrap_err().ends_with("create it under octo-me, not acme."));
+        let two = ask(&st, &a, Some("yes, acme or open-org"), true);
+        assert!(create(&two, json!({ "owner": "acme" })).await.unwrap_err().contains("names more than one owner (acme, open-org)"));
+
+        // An option translated with the owner in the middle still fixes that owner, and a private repo.
+        let translated = |answer: Option<&str>| {
+            let options: Vec<String> = ["octo-me", "acme", "open-org"].iter().map(|o| format!("Sim, {o}, privado")).chain(["Não, agora não".to_string()]).collect();
+            let q = json!({ "text": "Criar o repositório `octo-me/gf-odd` no GitHub e publicar esta pasta?", "speak": "Criar?", "recommendation": "Sim, octo-me, privado", "kind": "single_choice", "options": options });
+            ask_q(&st, &a, q, answer, true)
+        };
+        let no = translated(Some("Não, agora não"));
+        assert!(create(&no, json!({})).await.unwrap_err().starts_with("The user didn't say yes"));
+        let nao = ask(&st, &a, Some("não, ainda não"), true);
+        assert!(create(&nao, json!({})).await.unwrap_err().starts_with("The user didn't say yes"));
+        let acme = translated(Some("Sim, acme, privado"));
+        assert_eq!(create(&acme, json!({})).await.unwrap_err(), "The user answered \"Sim, acme, privado\": create it under acme, not octo-me.");
+        assert!(create(&acme, json!({ "owner": "open-org" })).await.unwrap_err().ends_with("create it under acme, not open-org."));
+        assert!(create(&acme, json!({ "owner": "acme", "private": false })).await.unwrap_err().contains("which doesn't ask for a public repo"));
+        let recommended = translated(Some("yes"));
+        assert!(create(&recommended, json!({ "owner": "acme" })).await.unwrap_err().ends_with("create it under octo-me, not acme."));
+        assert!(!dir.join(".git").exists(), "nothing was written");
+        for path in ["/user/repos", "/orgs/acme/repos", "/orgs/open-org/repos"] {
+            assert!(creations(&fake, path, "gf-odd").is_empty(), "nothing created on {path}");
+        }
+
+        let out = create(&acme, json!({ "owner": "acme" })).await.unwrap();
+        assert!(out.starts_with("Created the private GitHub repo acme/gf-odd"), "{out}");
+        assert_eq!(creations(&fake, "/orgs/acme/repos", "gf-odd"), [json!({ "name": "gf-odd", "private": true })]);
     }
 
     #[tokio::test]
