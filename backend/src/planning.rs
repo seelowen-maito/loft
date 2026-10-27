@@ -236,6 +236,35 @@ mod tests {
         assert_eq!(fake.seen("/repos/octo/spec-lost/issues?").len(), 1, "the second retry trusts Loft's record");
     }
 
+    #[tokio::test]
+    async fn a_label_github_says_already_exists_counts_as_there() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-many-labels", Some("git@github.com:octo/spec-many-labels.git"));
+        // `spec` lies beyond the first page of labels, so creating it is refused as a duplicate.
+        repo(&fake, "octo/spec-many-labels", &["ready-for-agent"], 12);
+        fake.route("POST", "/repos/octo/spec-many-labels/labels", 422, json!({
+            "message": "Validation Failed", "errors": [{ "resource": "Label", "code": "already_exists", "field": "name" }],
+        }));
+
+        let out = publish(&st, &a, "Many labels").await.unwrap();
+        assert!(out.starts_with("Published the spec as #12"), "{out}");
+        assert_eq!(posts(&fake, "octo/spec-many-labels", "labels").len(), 1);
+        assert_eq!(posts(&fake, "octo/spec-many-labels", "issues").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_token_github_turns_down_is_explained() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-bad-token", Some("git@github.com:octo/spec-bad-token.git"));
+        // `/user` is shared by every test on the fake, so the 401 comes from this repo's labels.
+        repo(&fake, "octo/spec-bad-token", &[], 1);
+        fake.route("GET", "/repos/octo/spec-bad-token/labels", 401, json!({ "message": "Bad credentials" }));
+
+        let err = publish(&st, &a, "Bad token").await.unwrap_err();
+        assert_eq!(err, "Couldn't read the labels of octo/spec-bad-token: GitHub 401: Bad credentials");
+        assert!(posts(&fake, "octo/spec-bad-token", "issues").is_empty());
+    }
+
     #[test]
     fn the_planning_prompt_offers_the_spec_and_asks_the_seams() {
         let st = state();
