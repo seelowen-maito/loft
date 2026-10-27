@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, CornerDownLeft, MessageCircle, Send, Sparkles, Wand2 } from "lucide-react";
-import { api, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
+import { api, grillError, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
 import { cx } from "../../lib/format";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
@@ -26,7 +26,7 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
     try {
       await api.grillCommand(session.session_id, "send");
     } catch (e) {
-      setError(message(e));
+      setError(grillError(e));
     } finally {
       setBusy(false);
     }
@@ -68,13 +68,6 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
   );
 }
 
-function message(e: unknown) {
-  const m = (e as Error).message;
-  if (m === "grill_closed") return "This interview has already ended.";
-  if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
-  return m;
-}
-
 /** One question of the open round: the recommendation with Accept or Decide for me, and a field for any
  * other answer, saved as a decision or as a comment to discuss. */
 function QuestionCard({ n, q, agentId, sessionId }: { n: number; q: GrillQuestion; agentId: string; sessionId: string }) {
@@ -93,7 +86,7 @@ function QuestionCard({ n, q, agentId, sessionId }: { n: number; q: GrillQuestio
     try {
       await f();
     } catch (e) {
-      setError(message(e));
+      setError(grillError(e));
     } finally {
       setBusy(false);
     }

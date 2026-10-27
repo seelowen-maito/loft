@@ -396,6 +396,15 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return data as T;
 }
 
+/** A grill request's error as text for the user: the 409 codes the server sends when the round was sent or the
+ * interview ended elsewhere. Same list as the app's `LoftStore.grillFailure`. */
+export function grillError(e: unknown) {
+  const m = (e as Error).message;
+  if (m === "grill_closed") return "This interview has already ended.";
+  if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
+  return m;
+}
+
 export type Simulator = { udid: string; name: string; runtime: string };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =

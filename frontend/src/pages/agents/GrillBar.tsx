@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
-import { api, type GrillSession } from "../../lib/api";
+import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
 
 /** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint). */
@@ -17,8 +17,7 @@ export function GrillBar({ session }: { session: GrillSession }) {
       await api.grillCommand(session.session_id, command);
       setConfirming(false);
     } catch (e) {
-      const m = (e as Error).message;
-      setError(m === "grill_closed" ? "This interview has already ended." : m === "round_closed" ? "This round was already sent." : m);
+      setError(grillError(e));
     } finally {
       setBusy(false);
     }

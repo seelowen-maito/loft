@@ -680,6 +680,7 @@ final class LoftStore {
     }
 
     /// The round was sent or the interview ended elsewhere (the web, a timeout): catch up, and say so plainly.
+    /// Same codes and text as the web's `grillError` (frontend/src/lib/api.ts).
     private func grillFailure(_ error: Error, agentId: String) async -> APIError {
         let e = APIError.from(error)
         guard case .server(409, let m) = e else { return e }
