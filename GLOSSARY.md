@@ -28,6 +28,10 @@ _Avoid_: Session, turn, job
 A unit of work in Loft, shaped like a GitHub issue (title, markdown description, labels, owner, open or closed) plus what Loft adds: an optional agent, an execution status and a thread. Loft is the default home of a task; GitHub is optional. A task in a project with a repo mirrors a GitHub issue and shares its comments with it.
 _Avoid_: Job, issue (when you mean the Loft item)
 
+**Mirror**:
+Keeping a task and its GitHub issue in step: shared fields and comments go both ways, and GitHub wins on conflict. Loft-only fields (agent, execution status, priority, due date) never leave Loft.
+_Avoid_: Sync (too loose), import
+
 ## Planning
 
 **Planning**:
