@@ -215,7 +215,7 @@ pub struct SendTo {
 }
 
 /// Sends an agent a chat message with the issue's number and link, which wakes it. Only an agent whose
-/// project is on the issue's repo (any project folder of it); no labels or assignees change.
+/// project is on the issue's repo (any project folder of it, matched ignoring case as GitHub does); no labels or assignees change.
 pub async fn send(State(state): State<AppState>, Path(number): Path<i64>, Json(s): Json<SendTo>) -> ApiResult<Value> {
     let project = s.project.trim();
     if !projects(&state)?.iter().any(|p| p == project) {
@@ -227,7 +227,7 @@ pub async fn send(State(state): State<AppState>, Path(number): Path<i64>, Json(s
     }
     let repo = crate::repos::github_repo(&state, project).await.map_err(bad)?;
     match crate::repos::github_repo(&state, &agent.project).await {
-        Ok(r) if r == repo => {}
+        Ok(r) if r.eq_ignore_ascii_case(&repo) => {}
         Ok(r) => return Err(bad(format!("{} works on {r}, not {repo}.", agent.name))),
         Err(e) => return Err(bad(format!("{} isn't on {repo}: {e}.", agent.name))),
     }
@@ -481,6 +481,7 @@ mod tests {
         project(&st, "issues-send", Some("git@github.com:octo/issues-send.git"));
         project(&st, "issues-send-copy", Some("https://github.com/octo/issues-send"));
         project(&st, "issues-send-other", Some("https://github.com/octo/elsewhere"));
+        project(&st, "issues-send-cased", Some("https://github.com/Octo/Issues-Send"));
         project(&st, "issues-send-folderless", None);
         let mut i = issue(51, "Send to agent");
         i["html_url"] = json!("https://github.com/octo/issues-send/issues/51");
@@ -496,6 +497,11 @@ mod tests {
         assert_eq!((&v["queued"], &v["message"]["role"], &v["message"]["content"]), (&json!(true), &json!("user"), &json!(text)));
         assert_eq!(st.db.list_messages(&dev, 10, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), [text]);
         assert_eq!(st.rt.lock().unwrap().queued[&dev], [text], "it wakes on it");
+
+        // GitHub repo names ignore case.
+        let cased = id("issues-send-cased");
+        st.rt.lock().unwrap().running.insert(cased.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        assert_eq!(to(cased.clone()).await.unwrap().0["message"]["content"], json!(text));
 
         let err = to(id("issues-send-other")).await.unwrap_err();
         assert_eq!(err.1, "issues-send-other-dev works on octo/elsewhere, not octo/issues-send.");

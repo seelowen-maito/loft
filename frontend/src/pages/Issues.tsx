@@ -161,7 +161,7 @@ export default function IssuesPage() {
       </aside>
       <section className={cx("min-h-0 overflow-y-auto", !selected && "max-lg:hidden")}>
         {selected ? (
-          <IssueView key={`${selected.project}#${selected.number}`} project={selected.project} number={selected.number} published={published} projects={data?.projects ?? []} />
+          <IssueView key={`${selected.project}#${selected.number}`} project={selected.project} number={selected.number} published={published} projects={data?.projects ?? null} />
         ) : (
           <div className="flex h-full items-center justify-center text-[13px] text-fg-3">Pick an issue to read it.</div>
         )}
@@ -203,7 +203,7 @@ const IssueRow = memo(function IssueRow({ project, i, active }: { project: strin
   );
 });
 
-function IssueView({ project, number, published, projects }: { project: string; number: number; published: number; projects: ProjectIssues[] }) {
+function IssueView({ project, number, published, projects }: { project: string; number: number; published: number; projects: ProjectIssues[] | null }) {
   const [issue, setIssue] = useState<IssueDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -270,7 +270,7 @@ function IssueView({ project, number, published, projects }: { project: string; 
 }
 
 /** "Send to agent": a picker of the agents on the issue's repo; picking one messages it the issue's number and link. */
-function SendToAgent({ issue, projects }: { issue: IssueDetail; projects: ProjectIssues[] }) {
+function SendToAgent({ issue, projects }: { issue: IssueDetail; projects: ProjectIssues[] | null }) {
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [open, setOpen] = useState(false);
   const [sending, setSending] = useState<string | null>(null);
@@ -284,7 +284,7 @@ function SendToAgent({ issue, projects }: { issue: IssueDetail; projects: Projec
     document.addEventListener("mousedown", away);
     return () => document.removeEventListener("mousedown", away);
   }, [open]);
-  const on = agents && agentsOnRepo(agents, projects, issue.repo);
+  const on = agentsOnRepo(agents, projects, issue.repo);
 
   const pick = (a: Agent) => {
     setSending(a.id);
