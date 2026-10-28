@@ -317,6 +317,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     .map_err(|e| format!("GitHub rejected the spec on {slug}: {e}"))?;
     let n = made["number"].as_i64().ok_or("GitHub created the spec but didn't return its number.")?;
     state.db.record_published_issue(&slug, "spec", &k, n).map_err(|e| e.to_string())?;
+    crate::mirror::bring_in(state, me.project.trim(), &slug, &made);
     let msg = format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}");
     Ok((msg, slug, IssueLink { number: n, title, id: String::new() }))
 }
@@ -433,6 +434,8 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     let scope = spec.map_or("standalone".to_string(), |s| format!("#{s}"));
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
+    // GitHub's answer for each ticket created now, to bring it in without reading it again.
+    let mut created: HashMap<i64, Value> = HashMap::new();
     let mut lines = vec![];
     let mut fresh = 0;
     for &i in &order {
@@ -460,6 +463,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             };
             state.db.record_published_issue(&slug, "ticket", &k, n).map_err(|e| e.to_string())?;
             fresh += 1;
+            created.insert(n, v);
             (n, Some(id), true)
         };
         let spec_link = spec.map(|number| IssueLink { number, title: String::new(), id: String::new() });
@@ -502,6 +506,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
         let was = if new { "" } else { ", already published" };
         lines.push(format!("- #{n} {}{by}{was}: https://github.com/{slug}/issues/{n}", t.title));
     }
+    loft_issues_for(state, me, &slug, spec, &ts, &order, &made, &created).await;
     let head = match (spec, ts.len()) {
         (Some(s), c) => format!("Published {c} ticket{} as sub-issues of spec #{s}, blockers first", if c == 1 { "" } else { "s" }),
         (None, _) => "Published a standalone ticket".to_string(),
@@ -509,6 +514,41 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already published." } else { "" };
     let msg = format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n"));
     Ok(msg)
+}
+
+/// The published tickets as Loft issues right away, as in a project without a repo: linked to their
+/// GitHub issues, ready and unassigned, under the spec's Loft issue, depending on their blockers'. A
+/// ticket that already has its Loft issue (a retry) is left as it is.
+#[allow(clippy::too_many_arguments)]
+async fn loft_issues_for(state: &AppState, me: &Agent, slug: &str, spec: Option<i64>, ts: &[Ticket], order: &[usize], made: &[Option<(i64, Option<i64>)>], created: &HashMap<i64, Value>) {
+    let project = me.project.trim();
+    let bring = |n: i64| async move {
+        let i = match created.get(&n) {
+            Some(i) => i.clone(),
+            None => crate::github::get(state, &format!("/repos/{slug}/issues/{n}")).await.ok()?,
+        };
+        crate::mirror::bring_in(state, project, slug, &i)
+    };
+    let parent = match spec {
+        Some(s) => bring(s).await.map(|(t, _)| t.id),
+        None => None,
+    };
+    let mut ids: HashMap<usize, String> = HashMap::new();
+    for &i in order {
+        let Some((n, _)) = made[i] else { continue };
+        let Some((mut t, new)) = bring(n).await else { continue };
+        ids.insert(i, t.id.clone());
+        if !new {
+            continue;
+        }
+        t.status = "ready".into();
+        t.created_by = me.id.clone();
+        t.parent_id = parent.clone();
+        t.depends_on = ts[i].blocked_by.iter().filter_map(|b| ids.get(b).cloned()).collect();
+        if state.db.save_task(&t).is_ok() {
+            crate::tasks::emit(state, &t);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +806,58 @@ pub(crate) mod tests {
         assert!(fake.seen("/").is_empty(), "no GitHub request at all: {:?}", fake.seen("/"));
     }
 
+    /// What GitHub answers to creating issue #n.
+    fn created(slug: &str, n: i64, title: &str, label: &str) -> Value {
+        json!({
+            "number": n, "id": n * 100, "title": title, "body": format!("## What to build\n\n{title}."), "state": "open",
+            "html_url": format!("https://github.com/{slug}/issues/{n}"), "updated_at": "2026-10-28T10:00:00Z",
+            "labels": [{ "name": label }], "assignees": [{ "login": "octo-me" }],
+        })
+    }
+
+    #[tokio::test]
+    async fn published_tickets_become_linked_loft_issues_right_away() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/tickets-loft";
+        let a = planner_on(&st, "tickets-loft", Some("https://github.com/octo/tickets-loft"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 0);
+        fake.in_turn("POST", &format!("/repos/{slug}/issues"), vec![
+            (201, created(slug, 40, "Offline mode", "spec")),
+            (201, created(slug, 41, "Store", "ready-for-agent")),
+            (201, created(slug, 42, "UI", "ready-for-agent")),
+        ]);
+        fake.route("GET", &format!("/repos/{slug}/issues/40"), 200, created(slug, 40, "Offline mode", "spec"));
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/issues/40/sub_issues"), 201, json!({}));
+        fake.route("POST", &format!("/repos/{slug}/issues/42/dependencies/blocked_by"), 201, json!({}));
+
+        publish(&st, &a, "Offline mode").await.unwrap();
+        publish_tickets(&st, &a, Some(40), vec![ticket("UI", &["Store"]), ticket("Store", &[])]).await.unwrap();
+        let by = |n: i64| st.db.list_tasks().unwrap().into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)).unwrap();
+        let (spec, store, ui) = (by(40), by(41), by(42));
+        for t in [&store, &ui] {
+            assert_eq!((t.status.as_str(), t.agent_id.as_deref(), t.parent_id.as_deref(), t.created_by.as_str()), ("ready", None, Some(spec.id.as_str()), a.id.as_str()));
+            assert_eq!((t.labels.as_slice(), t.project.as_str()), (&["ready-for-agent".to_string()][..], "tickets-loft"));
+        }
+        assert_eq!(ui.depends_on, std::slice::from_ref(&store.id));
+        assert_eq!(spec.labels, ["spec"]);
+
+        // A retry makes no second Loft issue.
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!([created(slug, 41, "Store", "ready-for-agent"), created(slug, 42, "UI", "ready-for-agent")]));
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, created(slug, 41, "Store", "ready-for-agent"));
+        fake.route("GET", &format!("/repos/{slug}/issues/42"), 200, created(slug, 42, "UI", "ready-for-agent"));
+        publish_tickets(&st, &a, Some(40), vec![ticket("UI", &["Store"]), ticket("Store", &[])]).await.unwrap();
+        assert_eq!(st.db.list_tasks().unwrap().len(), 3);
+
+        // The Lead hands one to an agent: a Loft-only change, so nothing is written to GitHub.
+        let dev = crate::tasks::tests::agent(&st, "Dev");
+        let writes_before = fake.seen("/repos/").iter().filter(|r| r.method != "GET").count();
+        let Json(v) = crate::tasks::update(State(st.clone()), Path(store.id.clone()), Json(json!({ "agent_id": dev.id }))).await.unwrap();
+        assert_eq!(v["agent_id"], json!(dev.id));
+        assert_eq!(fake.seen("/repos/").iter().filter(|r| r.method != "GET").count(), writes_before);
+    }
+
     #[tokio::test]
     async fn with_a_repo_the_plan_still_goes_to_github() {
         let (fake, st) = (fake_github(), state());
@@ -947,7 +1039,8 @@ pub(crate) mod tests {
         assert!(out.contains("- #21 Only, already published:"), "{out}");
         assert_eq!(posts(&fake, slug, "issues").len(), 1);
         assert_eq!(posts(&fake, slug, "issues/20/sub_issues"), [json!({ "sub_issue_id": 2100 }), json!({ "sub_issue_id": 2100 })]);
-        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/21")).len(), 1);
+        // Read twice: once for the id the link needs, once to bring #21 in as a Loft issue (#74).
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/21")).len(), 2);
     }
 
     #[tokio::test]

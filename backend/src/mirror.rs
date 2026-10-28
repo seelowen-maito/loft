@@ -295,6 +295,16 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
     }
 }
 
+/// Brings GitHub issue `i` in now (Planning just published it): the Loft issue that mirrors it, and
+/// whether it was made just now rather than already there.
+pub(crate) fn bring_in(state: &AppState, project: &str, repo: &str, i: &Value) -> Option<(Task, bool)> {
+    let mut report = Report::default();
+    apply(state, project, repo, i, &mut report);
+    let n = i["number"].as_i64()?;
+    let t = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n))?;
+    Some((t, report.created > 0))
+}
+
 /// A linked issue that left GitHub (deleted, or moved to another repo). A Loft issue the mirror made
 /// and nobody touched goes with it; any other stays, unlinked, as a Loft-only issue with a note why.
 async fn reconcile(state: &AppState, mut t: Task, what: &str, report: &mut Report) {
