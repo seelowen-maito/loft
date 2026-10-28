@@ -189,10 +189,13 @@ pub mod tests {
         .unwrap();
         write(&dir, "aaaa-1", &[&format!(r#"{{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{{"content":{wrapped}}}}}"#)]);
         write(&dir, "bbbb-2", &[r#"{"type":"user","timestamp":"2026-10-21T09:00:00Z","message":{"content":"[Message from agent is how they start]"}}"#]);
+        write(&dir, "cccc-3", &[r#"{"type":"user","timestamp":"2026-10-22T09:00:00Z","message":{"content":"[Message from agent Loft Reviewer (id 8158), not from the user]\nRound 1 failed.\n\n[Your replies in this chat are seen by the user, not by Loft Reviewer. To answer Loft Reviewer, call `mcp__loft__message_agent` with agent \"8158\".]"}}"#]);
         let from_agent = find(&dir, "aaaa-1").unwrap();
         assert_eq!(from_agent.from_agent.as_deref(), Some("Loft Lead"));
         assert!(from_agent.first_message.starts_with("#100 passed review. Next: #101 xxx"), "{}", from_agent.first_message);
         assert_eq!(from_agent.first_message.chars().count(), 300, "cut after the wrapper is gone");
+        let short = find(&dir, "cccc-3").unwrap();
+        assert_eq!((short.from_agent.as_deref(), short.first_message.as_str()), (Some("Loft Reviewer"), "Round 1 failed."), "without the reply hint");
         let from_user = find(&dir, "bbbb-2").unwrap();
         assert_eq!((from_user.from_agent, from_user.first_message.as_str()), (None, "[Message from agent is how they start]"));
     }
