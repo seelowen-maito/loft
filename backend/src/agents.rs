@@ -1281,11 +1281,17 @@ pub(crate) mod tests {
     /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
 /// "busy" never replies, "slow" replays an empty result first, "crash" exits without one and "garbled"
-    /// writes output that isn't text, which fails the run.
+    /// writes output that isn't text, which fails the run. "stale" with --resume answers like a session
+    /// claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
+case "$prompt $*" in *stale*--resume*)
+  chmod -x "$0"
+  echo 'No conversation found with session ID: s1' >&2
+  exit 1;;
+esac
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac

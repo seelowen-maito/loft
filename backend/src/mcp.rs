@@ -691,6 +691,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_session_that_never_acted_on_the_prompt_keeps_its_fyis() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        run(&st, &to, "first").await;
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        // The resumed claude has the prompt but no session; the fresh retry can't start.
+        let n = prompts(&st, &to).len();
+        enqueue(&st, &to.id, Some("stale".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        assert!(prompts(&st, &to)[n].contains("Merged #12"));
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+        let bin = st.settings.get().claude_bin;
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let p = run(&st, &to, "again").await;
+        assert!(p.contains("Merged #12"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
