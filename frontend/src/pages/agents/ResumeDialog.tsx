@@ -73,7 +73,10 @@ export function ResumeDialog({ agentId, running, onClose }: { agentId: string; r
                       <span className={cx("ml-auto font-mono tabular-nums", contextWarns(s.context_tokens) && "text-warn")}>context {fmtNum(s.context_tokens)}</span>
                     )}
                   </span>
-                  <span className="mt-0.5 line-clamp-2 block text-[13px] text-fg">{s.first_message}</span>
+                  <span className="mt-0.5 line-clamp-2 block text-[13px] text-fg">
+                    {s.from_agent && <span className="text-fg-3">{s.from_agent}: </span>}
+                    {s.first_message}
+                  </span>
                 </span>
               </button>
             );

@@ -13,6 +13,9 @@ pub struct PastSession {
     /// When its first message was sent (RFC 3339).
     pub started_at: String,
     pub first_message: String,
+    /// The agent that sent the first message, when it was another agent's (`first_message` is then that
+    /// message, without Loft's wrapper).
+    pub from_agent: Option<String>,
     /// Tokens in context at its end: what resuming it writes back into the prompt cache.
     pub context_tokens: Option<u64>,
 }
@@ -80,7 +83,21 @@ fn read(file: &Path) -> Option<PastSession> {
         }
         context = context_step(&ev).unwrap_or(context);
     }
-    Some(PastSession { id, started_at: started_at?, first_message: first_message?, context_tokens: context })
+    let text: String = first_message?;
+    let (from_agent, first_message) = match from_agent(&text) {
+        Some((name, body)) => (Some(name.to_string()), body),
+        None => (None, text.as_str()),
+    };
+    let first_message = first_message.chars().take(300).collect();
+    Some(PastSession { id, started_at: started_at?, first_message, from_agent, context_tokens: context })
+}
+
+/// A message from another agent, as `agents::message_from_agent` wraps it: the sender's name and the message.
+fn from_agent(text: &str) -> Option<(&str, &str)> {
+    let (head, body) = text.strip_prefix("[Message from agent ")?.split_once(", not from the user]\n")?;
+    let name = head.rsplit_once(" (id ")?.0;
+    let body = body.rsplit_once("\n\n[Your replies in this chat are seen by the user").map_or(body, |(b, _)| b);
+    Some((name, body.trim()))
 }
 
 /// A user message's text: a plain string, or its first text block.
@@ -91,7 +108,7 @@ fn text_of(content: &Value) -> Option<String> {
         _ => return None,
     };
     let s = s.trim();
-    (!s.is_empty()).then(|| s.chars().take(300).collect())
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 /// Context size after one transcript event, if it says: the last main-thread reply's input, or the compacted
@@ -160,6 +177,24 @@ pub mod tests {
         assert_eq!(s[1].first_message, "Fix the login bug");
         assert_eq!(s[1].context_tokens, Some(42010), "the main thread's last reply, not a subagent's");
         assert!(list(&dir.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_session_another_agent_started_shows_the_sender_and_its_message() {
+        let dir = tmp();
+        let wrapped = serde_json::to_string(&format!(
+            "[Message from agent Loft Lead (id c682), not from the user]\n#100 passed review. Next: #101 {}\n\n[Your replies in this chat are seen by the user, not by Loft Lead. To answer Loft Lead, call `mcp__loft__message_agent` with agent \"c682\".]",
+            "x".repeat(400),
+        ))
+        .unwrap();
+        write(&dir, "aaaa-1", &[&format!(r#"{{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{{"content":{wrapped}}}}}"#)]);
+        write(&dir, "bbbb-2", &[r#"{"type":"user","timestamp":"2026-10-21T09:00:00Z","message":{"content":"[Message from agent is how they start]"}}"#]);
+        let from_agent = find(&dir, "aaaa-1").unwrap();
+        assert_eq!(from_agent.from_agent.as_deref(), Some("Loft Lead"));
+        assert!(from_agent.first_message.starts_with("#100 passed review. Next: #101 xxx"), "{}", from_agent.first_message);
+        assert_eq!(from_agent.first_message.chars().count(), 300, "cut after the wrapper is gone");
+        let from_user = find(&dir, "bbbb-2").unwrap();
+        assert_eq!((from_user.from_agent, from_user.first_message.as_str()), (None, "[Message from agent is how they start]"));
     }
 
     #[test]

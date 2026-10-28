@@ -66,6 +66,8 @@ export type PastSession = {
   id: string;
   started_at: string;
   first_message: string;
+  /** The agent that sent `first_message`, when another agent started the Session. */
+  from_agent: string | null;
   context_tokens: number | null;
 };
 
