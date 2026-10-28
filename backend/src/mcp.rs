@@ -25,9 +25,11 @@ const ACKS: &[&str] = &[
     "ok", "okay", "k", "kk", "alright", "all right", "sure", "cool", "great", "perfect", "nice", "awesome", "all good",
     "got it", "gotcha", "understood", "noted", "roger", "roger that", "ack", "acknowledged", "copy", "copy that",
     "will do", "sounds good", "sounds great", "makes sense", "on it", "no problem", "np",
-    "standing by", "waiting", "will wait", "wait", "waiting for your next", "ready for the next", "ready when you are",
-    "let me know", "if you need anything", "if you need anything else",
-    "i", "im", "ill", "and", "will", "be", "here", "me", "you", "your", "next", "task", "message", "instructions", "step", "then",
+    // Waiting and standing by only as whole phrases: a bare "wait" or "next" is an instruction.
+    "standing by", "waiting", "waiting for you", "waiting for your next", "waiting for your next task", "waiting for your next message",
+    "waiting for your next instructions", "ill wait", "i will wait", "will wait", "ill be here", "i will be here", "im here",
+    "im on it", "ill do it", "ready for the next", "ready for the next task", "ready for the next one", "ready for your next task",
+    "ready when you are", "let me know", "if you need anything", "if you need anything else", "and",
 ];
 
 /// Whether `text` is only an acknowledgement, matched as plain words: no model call.
@@ -360,7 +362,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             let rules = state.settings.get().messaging_rules;
             if rules && only_acknowledges(&body, &to.name) {
                 return tool_error(format!(
-                    "Not sent: this message only acknowledges (thanks, ok, got it, standing by…), and {} doesn't need it. Send a message only when it carries a finding, report, verdict or request; otherwise send nothing.",
+                    "Not sent: this message only acknowledges (thanks, ok, got it, standing by…), and {} doesn't need it. Send a message only when it carries a finding, report, verdict or request; otherwise send nothing. If it answers a question, say what you decided.",
                     to.name
                 ));
             }
@@ -638,7 +640,7 @@ mod tests {
     async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
-        for text in ["Thanks!", "ok 👍", "Got it, standing by.", "Thank you so much, Worker!", "👍", "Noted. Waiting for your next task.", "Sounds good, will do", "I’ll wait", "Roger that 🫡"] {
+        for text in ["Thanks!", "ok 👍", "Got it, standing by.", "Thank you so much, Worker!", "👍", "Noted. Waiting for your next task.", "Sounds good, will do", "I’ll wait", "Roger that 🫡", "Thanks, I'm on it. Waiting for your next instructions.", "ok, ready for the next one"] {
             for kind in ["fyi", "needs_action"] {
                 let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": kind })).await;
                 let err = r["content"][0]["text"].as_str().unwrap();
@@ -655,7 +657,7 @@ mod tests {
     async fn a_message_with_substance_goes_through_even_with_thanks() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
-        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12"];
+        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
         for text in texts {
             let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
