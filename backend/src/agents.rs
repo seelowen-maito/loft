@@ -779,7 +779,7 @@ async fn run_process(
     })? {
         emit_agent(state, &a);
     }
-    run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some() }));
+    run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
     let mut cmd = build_command(state, &agent, resume);
@@ -1196,7 +1196,7 @@ mod tests {
 
     /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
-/// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error.
+/// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -1218,8 +1218,10 @@ esac
 case "$prompt" in *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"started"}]}}'
-echo '{"type":"result","subtype":"success","result":"started","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+reply=started
+case "$prompt" in *ask*) reply='Which one?';; esac
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$reply"'"}]}}'
+echo '{"type":"result","subtype":"success","result":"'"$reply"'","num_turns":1,"session_id":"s1","total_cost_usd":0}'
 case "$prompt" in *linger*|*hang*)
   trap 'kill $!; echo yes > terminated; exit 143' TERM
   sleep 600 &
@@ -1526,5 +1528,20 @@ esac
         stop(&st, &a.id);
         idle(&st, &a.id).await;
         assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_run_the_user_started_asks_them_something() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let asked = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "question");
+        message_from_agent(&st, &lead, &a, "ask");
+        idle(&st, &a.id).await;
+        assert_eq!(st.db.list_messages(&a.id, 50, None).unwrap().iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone()), Some("Which one?".into()));
+        assert!(!asked(&st), "an agent started the run");
+
+        let _ = send(&st, &a.id, "ask").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(asked(&st));
     }
 }

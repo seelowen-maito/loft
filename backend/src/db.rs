@@ -735,6 +735,17 @@ impl Db {
         .optional()?)
     }
 
+    /// The `run_start` marker of run `run_id`: its meta says what started the run.
+    pub fn run_start(&self, agent_id: &str, run_id: &str) -> Result<Option<Message>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages WHERE agent_id = ?1 AND run_id = ?2 AND kind = 'run_start' ORDER BY id LIMIT 1",
+            params![agent_id, run_id],
+            message_from_row,
+        )
+        .optional()?)
+    }
+
     /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or
     /// it was already sent, so two clicks can't both send it.
     pub fn mark_team_setup_sent(&self, agent_id: &str, id: i64) -> Result<bool> {
