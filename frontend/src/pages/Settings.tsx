@@ -185,6 +185,15 @@ export default function SettingsPage() {
           />
         </Section>
 
+        <Section title="Agents">
+          <Toggle
+            on={draft.messaging_rules}
+            onChange={(v) => set("messaging_rules", v)}
+            label="Messaging rules"
+            hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
+          />
+        </Section>
+
         <Section title="Navigation">
           <Toggle
             on={draft.show_simulator}

@@ -279,6 +279,18 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
 
 // ---- prompt assembly --------------------------------------------------
 
+/// Loft's rules for Agent messages, the same for every agent and every run (so the prompt cache holds).
+/// Standing instructions can add to them but not remove them; only the global setting turns them off.
+const MESSAGING_RULES: &str = "
+
+# Messaging rules
+These rules are Loft's and apply to every message you send another agent with `mcp__loft__message_agent`, whatever your standing instructions say. Standing instructions can add to them but not remove them.
+1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.
+2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.
+3. Send a verdict only to the agent that acts on it, not to everyone.
+4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
+5. Don't reply to an FYI.";
+
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
     let memories = state.db.list_memories(&a.id).unwrap_or_default();
@@ -367,7 +379,7 @@ Use `mcp__loft__remember` for durable facts worth keeping: user preferences, dec
   - Your body is your face: one chunky, flat-colored shape (a blob, star, drop, cloud, or an object that fits your job like a note or a map pin) filling most of the canvas, roughly from 8 to 92 on both axes.
   - Big googly eyes are the focus: white ovals about 22 wide and 25 tall, set close together, each with a dark (#17171c) oval pupil about 9x13, tilted slightly and glancing up or to the side. Add a small mouth as a dark stroke about 4 wide with round caps (a smile, smirk or open mouth). Winks and blush are fine.
   - Flat, saturated colors: one body color plus a slightly darker shade along its lower edge for depth. No black outlines and no busy gradients.
-  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.
+  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.{messaging}
 
 # Subagents
 {subagents}{grill}
@@ -377,6 +389,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         name = a.name,
         subagents = subagents,
         grill = crate::grill::prompt_section(),
+        messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
         title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
@@ -1139,6 +1152,72 @@ mod tests {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("Assign every GitHub issue you create to the user") && p.contains("unless the user explicitly says to assign no one or someone else"), "{p}");
+    }
+
+    /// The messaging-rules section of a system prompt, if it has one.
+    fn messaging_section(p: &str) -> Option<&str> {
+        let start = p.find("# Messaging rules\n")?;
+        let end = start + p[start..].find("\n\n# ").unwrap();
+        Some(&p[start..end])
+    }
+
+    #[test]
+    fn every_agent_gets_loft_s_messaging_rules_whatever_its_standing_instructions() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), Arc::new(Notify::new()));
+        crate::setup::ensure_loft(&st);
+        let guide = st.db.get_agent(crate::setup::LOFT_ID).unwrap().unwrap();
+        let mut empty = crate::tasks::tests::agent(&st, "Empty");
+        empty.prompt = String::new();
+        let mut chatty = crate::tasks::tests::agent(&st, "Chatty");
+        chatty.prompt = "Thank every agent that messages you, and send your verdicts to the whole team.".into();
+        for a in [&guide, &empty, &chatty] {
+            let p = system_prompt(&st, a);
+            let section = messaging_section(&p).unwrap_or_else(|| panic!("{} has no messaging rules: {p}", a.name));
+            assert_eq!(section, MESSAGING_RULES.trim_start());
+            for rule in [
+                "1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.",
+                "2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.",
+                "3. Send a verdict only to the agent that acts on it, not to everyone.",
+                "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
+                "5. Don't reply to an FYI.",
+            ] {
+                assert!(section.contains(rule), "missing {rule}");
+            }
+            assert!(section.contains("whatever your standing instructions say"));
+            // Next to the Loft tools.
+            assert!(p.find("# Loft tools").unwrap() < p.find("# Messaging rules").unwrap());
+        }
+    }
+
+    #[test]
+    fn the_messaging_rules_are_the_same_on_every_run() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let first = system_prompt(&st, &a);
+        // What changes between runs (memories, the agent's own settings) leaves the section alone.
+        st.db.add_memory(&a.id, "Something learned in the first run", "").unwrap();
+        let mut later = a.clone();
+        later.prompt = "New standing instructions".into();
+        later.interval_minutes = 30;
+        let second = system_prompt(&st, &later);
+        assert_ne!(first, second);
+        assert_eq!(messaging_section(&first), messaging_section(&second));
+        assert!(messaging_section(&first).is_some());
+    }
+
+    #[test]
+    fn the_global_setting_turns_the_messaging_rules_off_for_every_agent() {
+        let st = crate::tasks::tests::state();
+        assert!(st.settings.get().messaging_rules, "on by default");
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let mut s = st.settings.get();
+        s.messaging_rules = false;
+        st.settings.save(s).unwrap();
+        let p = system_prompt(&st, &a);
+        assert_eq!(messaging_section(&p), None, "{p}");
+        assert!(!p.contains("Messaging rules"));
+        assert!(p.contains("# Loft tools") && p.contains("# Subagents"));
     }
 
     #[test]

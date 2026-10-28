@@ -22,6 +22,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
     pub show_simulator: bool,
+    /// Give every agent Loft's messaging rules (see `agents::MESSAGING_RULES`). On by default.
+    pub messaging_rules: bool,
     pub push: Push,
 }
 
@@ -54,6 +56,7 @@ impl Default for Settings {
             github_token: String::new(),
             auto_update: false,
             show_simulator: false,
+            messaging_rules: true,
             push: Push::default(),
         }
     }

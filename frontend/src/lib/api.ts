@@ -330,6 +330,7 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
+  messaging_rules: boolean;
 };
 
 export type SettingsView = {
