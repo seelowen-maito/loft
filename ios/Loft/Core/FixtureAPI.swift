@@ -56,7 +56,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil) -> Agent {
             Agent(id: id, name: name, title: nil, project: project, model: "opus", effort: nil, permissionMode: "auto",
                   intervalMinutes: 60, status: status, statusText: text, running: running, lastRunAt: ago(last),
-                  nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil)
+                  nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil,
+                  sessionId: ctx == nil ? nil : "s-\(id)")
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
@@ -509,8 +510,58 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func testPush(token: String) async throws { try check() }
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
 
-    func resetSession(agentId: String) async throws { try check() }
+    func resetSession(agentId: String) async throws {
+        try check()
+        locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { return }
+            agentList[i].sessionId = nil
+            agentList[i].contextTokens = nil
+            nextId += 1
+            msgs[agentId, default: []].append(ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "system", kind: "clear",
+                                                          content: "Context cleared.", meta: nil, createdAt: Date()))
+        }
+    }
     func compact(agentId: String) async throws { try check() }
+
+    /// Every agent's Sessions: its first one, then two older ones, the oldest started by the Orchestrator.
+    func sessions(agentId: String) async throws -> PastSessions {
+        try check()
+        return locked { PastSessions(sessions: Self.pastSessions(agentId), current: agentList.first { $0.id == agentId }?.sessionId) }
+    }
+
+    private static func pastSessions(_ agentId: String) -> [PastSession] {
+        let now = Date()
+        return [
+            PastSession(id: "s-\(agentId)", startedAt: now.addingTimeInterval(-3600), firstMessage: "Fix the login bug",
+                        fromAgent: nil, contextTokens: 12_000),
+            PastSession(id: "s-\(agentId)-old", startedAt: now.addingTimeInterval(-3 * 86_400), firstMessage: "Run the smoke tests on the settings page",
+                        fromAgent: nil, contextTokens: 48_000),
+            PastSession(id: "s-\(agentId)-older", startedAt: now.addingTimeInterval(-9 * 86_400), firstMessage: "Check the login flow before the release",
+                        fromAgent: "Orchestrator", contextTokens: 96_000),
+        ]
+    }
+
+    func resumeSession(agentId: String, sessionId: String) async throws -> Agent {
+        try check()
+        return try locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { throw APIError.server(status: 404, message: "Not Found") }
+            if agentList[i].running == true {
+                throw APIError.server(status: 409, message: "Agent is working. Stop it before resuming a Session.")
+            }
+            if agentList[i].sessionId == sessionId { throw APIError.server(status: 400, message: "That's already the agent's Session.") }
+            guard let s = Self.pastSessions(agentId).first(where: { $0.id == sessionId }) else {
+                throw APIError.server(status: 404, message: "No such Session in this agent's transcripts.")
+            }
+            agentList[i].sessionId = s.id
+            agentList[i].contextTokens = s.contextTokens
+            nextId += 1
+            let started = s.startedAt.ISO8601Format()
+            msgs[agentId, default: []].append(ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "system", kind: "resume",
+                                                          content: "Resumed the Session from \(started.prefix(10)).",
+                                                          meta: .object(["session_id": .string(s.id), "started_at": .string(started)]), createdAt: Date()))
+            return agentList[i]
+        }
+    }
 
     func restartRun(agentId: String) async throws {
         try check()

@@ -33,6 +33,10 @@ protocol LoftAPI: Sendable {
     func resetSession(agentId: String) async throws
     /// Compact: Claude summarizes the Session so later runs carry less. Fails while the agent works.
     func compact(agentId: String) async throws
+    /// The agent's past Sessions, newest first.
+    func sessions(agentId: String) async throws -> PastSessions
+    /// Makes a past Session the agent's own: its next run resumes it. Fails while the agent works.
+    func resumeSession(agentId: String, sessionId: String) async throws -> Agent
     func permissions() async throws -> [PermissionRequest]
     func decidePermission(id: String, decision: String) async throws
     func pullRequests() async throws -> [PullRequest]
@@ -198,6 +202,10 @@ struct LiveLoftAPI: LoftAPI {
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
     func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
     func compact(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/compact", body: .object(["instructions": .string("")])) }
+    func sessions(agentId: String) async throws -> PastSessions { try await get("/agents/\(agentId)/sessions") }
+    func resumeSession(agentId: String, sessionId: String) async throws -> Agent {
+        try decode(Agent.self, try await send("POST", "/agents/\(agentId)/resume-session", body: ["session_id": .string(sessionId)]))
+    }
     func permissions() async throws -> [PermissionRequest] { try await get("/permissions") }
 
     func decidePermission(id: String, decision: String) async throws {

@@ -41,6 +41,8 @@ struct ChatView: View {
     /// A task picked in "Attach a task", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
     @State private var pickingTask = false
+    /// "Resume a session" in the context menu: the agent's past Sessions.
+    @State private var resuming = false
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
@@ -226,9 +228,7 @@ struct ChatView: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-            if let ctx = agent.contextTokens {
-                ToolbarItem(placement: .topBarTrailing) { contextMenu(ctx, running: state == .working || agent.running == true) }
-            }
+            ToolbarItem(placement: .topBarTrailing) { contextMenu(agent, running: state == .working || agent.running == true) }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
@@ -314,6 +314,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
+        .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
             let replies = await OnDeviceFeatures.chatReplies(to: m.displayContent)
@@ -537,24 +538,35 @@ extension ChatView {
         }
     }
 
-    /// The context size: amber from 80k, and a tap offers Compact and Clear for the Session, like the web.
-    fileprivate func contextMenu(_ tokens: Int, running: Bool) -> some View {
-        Menu {
+    /// The context size: amber from 80k, and a tap offers Compact, Clear and Resume for the Session, like the web.
+    /// With no Session (as after Clear) it reads "no session" and offers only Resume.
+    fileprivate func contextMenu(_ agent: Agent, running: Bool) -> some View {
+        // Older servers don't send the Session id; a known size still means there is one.
+        let session = agent.sessionId != nil || agent.contextTokens != nil
+        return Menu {
             if running { Text("Stop the agent first.") }
-            Button { sessionAction { try await store.compact(agentId) } } label: {
-                Label("Compact", systemImage: "arrow.down.right.and.arrow.up.left")
-                Text("Summarize the conversation so later runs carry less.")
+            if session {
+                Button { sessionAction { try await store.compact(agentId) } } label: {
+                    Label("Compact", systemImage: "arrow.down.right.and.arrow.up.left")
+                    Text("Summarize the conversation so later runs carry less.")
+                }
+                .disabled(running)
+                .accessibilityIdentifier("contextCompact")
+                Button { sessionAction { try await store.resetSession(agentId) } } label: {
+                    Label("Clear", systemImage: "arrow.counterclockwise")
+                    Text("Start a fresh Session. Memory is kept.")
+                }
+                .disabled(running)
+                .accessibilityIdentifier("contextClear")
+            }
+            Button { resuming = true } label: {
+                Label("Resume a session", systemImage: "clock.arrow.circlepath")
+                Text("Go back to one of this agent's past sessions.")
             }
             .disabled(running)
-            .accessibilityIdentifier("contextCompact")
-            Button { sessionAction { try await store.resetSession(agentId) } } label: {
-                Label("Clear", systemImage: "arrow.counterclockwise")
-                Text("Start a fresh Session. Memory is kept.")
-            }
-            .disabled(running)
-            .accessibilityIdentifier("contextClear")
+            .accessibilityIdentifier("contextResume")
         } label: {
-            ContextChip(tokens: tokens)
+            ContextChip(tokens: agent.contextTokens, session: session)
         }
         .accessibilityIdentifier("contextMenu")
     }
@@ -620,7 +632,7 @@ enum ChatItem: Identifiable, Hashable {
                 flush()
                 out.append(.divider(id: m.id, text: "Conversation compacted", date: m.createdAt))
             case "resume":
-                // From the web's /resume: the log goes on, nothing reloads.
+                // From Resume a session (here or the web's /resume): the log goes on, nothing reloads.
                 flush()
                 out.append(.divider(id: m.id, text: resumeText(m), date: m.createdAt))
             default:

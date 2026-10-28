@@ -401,6 +401,54 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["Stop the agent first."].firstMatch.exists)
     }
 
+    /// "Resume a session" in the context menu (#106): the past Sessions, newest first with the current one not
+    /// pickable; picking one shows the Resumed marker. After Clear the header reads "no session" and still offers
+    /// Resume; while the agent works it's off, with "Stop the agent first.".
+    func testContextMenuResumesASession() {
+        let app = launch()
+        openQAChat(app)
+        let menu = app.buttons["contextMenu"]
+        XCTAssertTrue(menu.appears(timeout: 5))
+        menu.tap()
+        let resume = app.buttons["contextResume"]
+        XCTAssertTrue(resume.appears(timeout: 3))
+        resume.tap()
+
+        let current = app.buttons["pastSession-s-qa"]
+        let old = app.buttons["pastSession-s-qa-old"]
+        let older = app.buttons["pastSession-s-qa-older"]
+        XCTAssertTrue(old.appears(timeout: 5))
+        XCTAssertFalse(current.isEnabled, "the current Session")
+        XCTAssertTrue(current.frame.minY < old.frame.minY && old.frame.minY < older.frame.minY, "newest first")
+        XCTAssertTrue(old.label.contains("Run the smoke tests on the settings page"))
+        XCTAssertTrue(older.label.contains("Orchestrator: "), "another agent's Session names it")
+        old.tap()
+        XCTAssertTrue(old.disappears(timeout: 3))
+        let day = Date().addingTimeInterval(-3 * 86_400).formatted(date: .abbreviated, time: .omitted)
+        XCTAssertTrue(text(containing: "Resumed the Session from \(day)", app).appears(timeout: 5))
+        XCTAssertEqual(any("contextChip", app).label, "Context 48k tokens", "the resumed Session's size")
+
+        menu.tap()
+        app.buttons["contextClear"].tap()
+        XCTAssertTrue(any("contextChipNone", app).appears(timeout: 5), "no session")
+        menu.tap()
+        XCTAssertTrue(resume.appears(timeout: 3))
+        XCTAssertFalse(app.buttons["contextCompact"].exists, "nothing to compact")
+        XCTAssertFalse(app.buttons["contextClear"].exists)
+        resume.tap()
+        XCTAssertTrue(old.appears(timeout: 5))
+        XCTAssertTrue(current.isEnabled, "no current Session after Clear")
+        app.buttons["Cancel"].tap()
+
+        back(app)
+        back(app)
+        openOrchestratorChat(app)
+        menu.tap()
+        XCTAssertTrue(resume.appears(timeout: 3))
+        XCTAssertFalse(resume.isEnabled, "the Orchestrator is working")
+        XCTAssertTrue(app.descendants(matching: .any)["Stop the agent first."].firstMatch.exists)
+    }
+
     func testInstantAcknowledgementAfterSending() {
         // QA Agent is idle, so the row comes from the send, not from a run already in progress.
         let app = launch(["-fixture-dictation", "Run the smoke tests, send it now"])

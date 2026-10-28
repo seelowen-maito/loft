@@ -32,6 +32,24 @@ struct Agent: Codable, Identifiable, Hashable {
     /// Background tasks the agent is waiting on after it already replied (e.g. "Run the QA suite").
     var waitingOn: [String]? = nil
     var waitingSince: Date? = nil
+    /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
+    var sessionId: String? = nil
+}
+
+/// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
+struct PastSession: Codable, Identifiable, Hashable {
+    let id: String
+    var startedAt: Date
+    var firstMessage: String
+    /// The agent that sent `firstMessage`, when another agent started the Session.
+    var fromAgent: String?
+    var contextTokens: Int?
+}
+
+/// An agent's past Sessions, newest first, and which one is its Session now.
+struct PastSessions: Codable, Hashable {
+    var sessions: [PastSession]
+    var current: String?
 }
 
 struct Avatar: Codable, Hashable {
@@ -44,7 +62,7 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     var runId: String?
     /// user | assistant | system
     var role: String
-    /// text | thinking | tool_use | tool_result | permission | error | notice | run_start | run_end | clear | compact
+    /// text | thinking | tool_use | tool_result | permission | error | notice | run_start | run_end | clear | compact | resume
     var kind: String
     var content: String
     var meta: JSONValue?
