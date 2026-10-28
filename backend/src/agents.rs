@@ -1310,6 +1310,41 @@ esac
         assert!(memory_parts(&st, &a.id)[1].contains("short replies"), "the memory index is built afresh");
     }
 
+    /// A transcripts folder holding one past Session, and that Session's id.
+    fn past_session() -> (std::path::PathBuf, String) {
+        let dir = crate::sessions::tests::tmp();
+        let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        crate::sessions::tests::write(&dir, past, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#]);
+        (dir, past.into())
+    }
+
+    #[tokio::test]
+    async fn resuming_a_past_session_drops_the_queued_messages() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        {
+            let mut rt = st.rt.lock().unwrap();
+            rt.queued.insert(a.id.clone(), vec!["deploy to staging".into()]);
+            rt.grill_queued.insert(a.id.clone(), vec!["[Loft: grill round]".into()]);
+        }
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past).await.unwrap();
+        let rt = st.rt.lock().unwrap();
+        assert!(rt.queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.queued.get(&a.id));
+        assert!(rt.grill_queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.grill_queued.get(&a.id));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_past_session_briefs_the_next_grill_again() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Lead");
+        assert!(crate::grill::with_brief(&st, &a.id, "round 1".into()).contains("# Planning: grilling"));
+        assert_eq!(crate::grill::with_brief(&st, &a.id, "round 2".into()), "round 2", "briefed in this Session");
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past).await.unwrap();
+        assert!(crate::grill::with_brief(&st, &a.id, "round 3".into()).contains("# Planning: grilling"), "the resumed Session never had it");
+    }
+
     #[test]
     fn memory_index_lists_titles_newest_first_and_never_bodies() {
         let st = crate::tasks::tests::state();
