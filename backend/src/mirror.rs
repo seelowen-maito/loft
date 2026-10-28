@@ -144,6 +144,10 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
         apply(state, project, repo, i, report);
     }
+    // After every issue is in, so a link to one listed later still resolves.
+    for i in open.iter().filter(|i| i.get("pull_request").is_none()) {
+        links_from_github(state, repo, i).await;
+    }
     // Linked issues GitHub still had open last time but didn't list now: ask about each one.
     let gone: Vec<Task> = linked(state, repo).into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.state == "open" && !seen.contains(&g.number))).collect();
     for t in gone {
@@ -175,9 +179,13 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
         return Ok(());
     };
     let mut newest = since.clone();
-    for i in v.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()) {
+    let changed: Vec<&Value> = v.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).collect();
+    for i in &changed {
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
         apply(state, project, repo, i, report);
+    }
+    for i in &changed {
+        links_from_github(state, repo, i).await;
     }
     // `since` is inclusive, so the newest issue comes back each time: the answer only changes, and the
     // ETag with it, when something new does. Keep the URL (and ETag) until then.
@@ -214,6 +222,7 @@ fn link(repo: &str, i: &Value) -> GithubLink {
     GithubLink {
         repo: repo.into(),
         number,
+        id: i["id"].as_i64().unwrap_or(0),
         url: i["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{repo}/issues/{number}")),
         state: i["state"].as_str().unwrap_or("open").to_string(),
         updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
@@ -337,7 +346,8 @@ fn patch(before: &Task, after: &Task) -> Value {
 pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
     let Some(g) = after.github.clone() else { return };
     let body = patch(before, after);
-    if body.as_object().is_none_or(|o| o.is_empty()) {
+    let fields = body.as_object().is_some_and(|o| !o.is_empty());
+    if !fields && !links_changed(before, after) {
         return;
     }
     let cursor = state.mirror.cursor(&g.repo);
@@ -347,18 +357,20 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
         let now_there = crate::github::get(state, &path).await?;
         if now_there["updated_at"].as_str().is_some_and(|u| u != g.updated_at) {
             apply(state, &after.project, &g.repo, &now_there, &mut Report::default());
+            links_from_github(state, &g.repo, &now_there).await;
             if let Ok(Some(t)) = state.db.get_task(&after.id) {
                 crate::tasks::log_status(state, &t, FROM_GITHUB, &format!("GitHub #{} changed meanwhile: its version wins", g.number));
             }
             return Ok(());
         }
-        let v = crate::github::request(state, reqwest::Method::PATCH, &path, Some(body)).await?;
-        // Remember what GitHub says now, so the next poll doesn't take Loft's own write for a change.
-        if let Ok(Some(mut t)) = state.db.get_task(&after.id) {
-            t.github = Some(link(&g.repo, &v));
-            if state.db.save_task(&t).is_ok() {
-                crate::tasks::emit(state, &t);
-            }
+        if fields {
+            crate::github::request(state, reqwest::Method::PATCH, &path, Some(body)).await?;
+        }
+        let mut touched = vec![g.number];
+        touched.extend(links_to_github(state, &g, &now_there, before, after).await?);
+        // Remember what GitHub says now, so the next poll (or edit) doesn't take Loft's own write for a change.
+        for n in touched {
+            refresh_link(state, &g.repo, n).await;
         }
         anyhow::Ok(())
     }
@@ -371,12 +383,114 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
 
 /// `write_through` without waiting, for callers that can't await. Nothing to write, or no runtime: nothing spawned.
 pub fn spawn_write_through(state: &AppState, before: Task, after: Task) {
-    if after.github.is_none() || patch(&before, &after).as_object().is_none_or(|o| o.is_empty()) {
+    if after.github.is_none() || (patch(&before, &after).as_object().is_none_or(|o| o.is_empty()) && !links_changed(&before, &after)) {
         return;
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
     let state = state.clone();
     rt.spawn(async move { write_through(&state, &before, &after).await });
+}
+
+fn links_changed(before: &Task, after: &Task) -> bool {
+    before.depends_on != after.depends_on || before.parent_id != after.parent_id
+}
+
+/// The GitHub link of Loft issue `id`, when it mirrors an issue of `repo`.
+fn link_of(state: &AppState, id: &str, repo: &str) -> Option<GithubLink> {
+    state.db.get_task(id).ok().flatten()?.github.filter(|g| g.repo.eq_ignore_ascii_case(repo))
+}
+
+/// Loft's dependency and parent changes as GitHub blocking links and sub-issues. Links to Loft-only
+/// issues stay in Loft. The issue numbers whose links changed, besides this one.
+async fn links_to_github(state: &AppState, g: &GithubLink, now_there: &Value, before: &Task, after: &Task) -> anyhow::Result<Vec<i64>> {
+    use reqwest::Method;
+    let (repo, n) = (&g.repo, g.number);
+    let me = now_there["id"].as_i64().unwrap_or(g.id);
+    for d in after.depends_on.iter().filter(|d| !before.depends_on.contains(d)) {
+        if let Some(b) = link_of(state, d, repo) {
+            crate::github::request(state, Method::POST, &format!("/repos/{repo}/issues/{n}/dependencies/blocked_by"), Some(json!({ "issue_id": b.id }))).await?;
+        }
+    }
+    for d in before.depends_on.iter().filter(|d| !after.depends_on.contains(d)) {
+        if let Some(b) = link_of(state, d, repo) {
+            crate::github::request(state, Method::DELETE, &format!("/repos/{repo}/issues/{n}/dependencies/blocked_by/{}", b.id), None).await?;
+        }
+    }
+    let mut parents = vec![];
+    if before.parent_id != after.parent_id {
+        if let Some(p) = before.parent_id.as_deref().and_then(|p| link_of(state, p, repo)) {
+            crate::github::request(state, Method::DELETE, &format!("/repos/{repo}/issues/{}/sub_issue", p.number), Some(json!({ "sub_issue_id": me }))).await?;
+            parents.push(p.number);
+        }
+        if let Some(p) = after.parent_id.as_deref().and_then(|p| link_of(state, p, repo)) {
+            crate::github::request(state, Method::POST, &format!("/repos/{repo}/issues/{}/sub_issues", p.number), Some(json!({ "sub_issue_id": me, "replace_parent": true }))).await?;
+            parents.push(p.number);
+        }
+    }
+    Ok(parents)
+}
+
+/// Reads issue #n again and keeps GitHub's `updated_at` (and state) on the Loft issue that mirrors it.
+async fn refresh_link(state: &AppState, repo: &str, n: i64) {
+    let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await else { return };
+    if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
+        t.github = Some(link(repo, &v));
+        if state.db.save_task(&t).is_ok() {
+            crate::tasks::emit(state, &t);
+        }
+    }
+}
+
+/// GitHub's blocking links and sub-issues of issue `i` onto the Loft issues that mirror them. Only
+/// read when GitHub says the issue has some, or Loft has some to drop. Links to issues Loft doesn't
+/// mirror, and Loft's links to Loft-only issues, are left alone.
+async fn links_from_github(state: &AppState, repo: &str, i: &Value) {
+    let Some(n) = i["number"].as_i64() else { return };
+    let all = linked(state, repo);
+    let Some(mut t) = all.iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)).cloned() else { return };
+    let number_of = |id: &str| all.iter().find(|x| x.id == id).and_then(|x| x.github.as_ref().map(|g| g.number));
+    let by_number = |n: i64| all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == n)).map(|x| x.id.clone());
+    let numbers = |v: Value| v.as_array().into_iter().flatten().filter_map(|x| x["number"].as_i64()).collect::<Vec<_>>();
+
+    let blocked = i["issue_dependencies_summary"]["total_blocked_by"].as_i64().or(i["issue_dependencies_summary"]["blocked_by"].as_i64()).unwrap_or(0);
+    if blocked > 0 || t.depends_on.iter().any(|d| number_of(d).is_some()) {
+        match crate::github::get(state, &format!("/repos/{repo}/issues/{n}/dependencies/blocked_by?per_page=100")).await {
+            Ok(v) => {
+                let mut deps: Vec<String> = t.depends_on.iter().filter(|d| number_of(d).is_none()).cloned().collect();
+                deps.extend(numbers(v).into_iter().filter_map(by_number).filter(|d| *d != t.id));
+                if deps != t.depends_on {
+                    t.depends_on = deps;
+                    t.updated_at = now();
+                    if state.db.save_task(&t).is_ok() {
+                        crate::tasks::emit(state, &t);
+                        crate::tasks::log_status(state, &t, FROM_GITHUB, "Dependencies changed on GitHub");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("mirror {repo}#{n} blocked_by: {e}"),
+        }
+    }
+    let subs = i["sub_issues_summary"]["total"].as_i64().unwrap_or(0);
+    let children: Vec<&Task> = all.iter().filter(|x| x.parent_id.as_deref() == Some(&t.id)).collect();
+    if subs > 0 || !children.is_empty() {
+        match crate::github::get(state, &format!("/repos/{repo}/issues/{n}/sub_issues?per_page=100")).await {
+            Ok(v) => {
+                let now_children: Vec<String> = numbers(v).into_iter().filter_map(by_number).filter(|c| *c != t.id).collect();
+                for x in all.iter().filter(|x| now_children.contains(&x.id) != (x.parent_id.as_deref() == Some(&t.id))) {
+                    let mut x = x.clone();
+                    let joining = now_children.contains(&x.id);
+                    x.parent_id = joining.then(|| t.id.clone());
+                    x.updated_at = now();
+                    if state.db.save_task(&x).is_ok() {
+                        crate::tasks::emit(state, &x);
+                        let what = if joining { format!("Made a sub-issue of #{n} on GitHub") } else { format!("No longer a sub-issue of #{n} on GitHub") };
+                        crate::tasks::log_status(state, &x, FROM_GITHUB, &what);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("mirror {repo}#{n} sub_issues: {e}"),
+        }
+    }
 }
 
 /// Percent-encodes a timestamp for a query string (`+` and `:` in RFC 3339).
@@ -419,7 +533,7 @@ mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!((&t["title"], &t["description"], &t["labels"], &t["owner"]), (&json!("Retry cap"), &json!("Body of Retry cap"), &json!(["bug"]), &json!("octo-dev")));
         assert_eq!((&t["project"], &t["status"], &t["state"], &t["created_by"]), (&json!("mir-open"), &json!("inbox"), &json!("open"), &json!("github")));
-        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z" }));
+        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z" }));
         let thread = st.db.list_task_comments(t["id"].as_str().unwrap(), 10, None).unwrap();
         assert_eq!(thread[0].text, "Mirrored from GitHub #1");
 
@@ -554,7 +668,11 @@ mod tests {
         let fake = own_fake(&st);
         let repo = "octo/wt-edit";
         let id = one_mirrored(&st, &fake, "wt-edit", repo, "2026-10-02T00:00:00Z").await;
-        fake.route("GET", "/repos/octo/wt-edit/issues/1", 200, gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z"));
+        // Read before writing (unchanged), then again after, as GitHub has it now.
+        fake.in_turn("GET", "/repos/octo/wt-edit/issues/1", vec![
+            (200, gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z")),
+            (200, gh(repo, 1, "Retry cap at 5", "open", "2026-10-04T00:00:00Z")),
+        ]);
         fake.route("PATCH", "/repos/octo/wt-edit/issues/1", 200, gh(repo, 1, "Retry cap at 5", "open", "2026-10-04T00:00:00Z"));
 
         let edit = json!({ "title": "Retry cap at 5", "labels": ["bug", "sync"], "owner": "pedro", "priority": "high", "due_at": "2026-11-01T00:00:00Z", "description": "Body of Retry cap" });
@@ -656,6 +774,88 @@ mod tests {
         let r = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "owner": "nobody-here" }))).await;
         assert!(r.is_ok());
         assert!(st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("Couldn't update GitHub #1: GitHub 422")));
+    }
+
+
+    /// Mirrors #1, #2 and #3 of `repo` (database ids 100, 200, 300); their Loft ids by number.
+    async fn three_mirrored(st: &AppState, fake: &crate::github::tests::Fake, name: &str, repo: &str, first: Value) -> HashMap<i64, String> {
+        project(st, name, Some(&format!("https://github.com/{repo}")));
+        let at = "2026-10-02T00:00:00Z";
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([first, gh(repo, 2, "Two", "open", at), gh(repo, 3, "Three", "open", at)]));
+        sync_project(st, name, true).await.unwrap();
+        mirrored(st, repo).iter().map(|t| (t["github"]["number"].as_i64().unwrap(), t["id"].as_str().unwrap().to_string())).collect()
+    }
+
+    fn writes(fake: &crate::github::tests::Fake, repo: &str) -> Vec<(String, String, Value)> {
+        fake.seen(&format!("/repos/{repo}/")).into_iter().filter(|r| r.method != "GET").map(|r| (r.method, r.path, r.body)).collect()
+    }
+
+    #[tokio::test]
+    async fn a_dependency_or_subtask_added_in_loft_becomes_a_github_link() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/ln-out";
+        let at = "2026-10-02T00:00:00Z";
+        let ids = three_mirrored(&st, &fake, "ln-out", repo, gh(repo, 1, "One", "open", at)).await;
+        for n in [1, 3] {
+            fake.route("GET", &format!("/repos/{repo}/issues/{n}"), 200, gh(repo, n, ["", "One", "", "Three"][n as usize], "open", at));
+        }
+        for (m, path) in [("POST", "/repos/octo/ln-out/issues/1/dependencies/blocked_by"), ("DELETE", "/repos/octo/ln-out/issues/1/dependencies/blocked_by/200"), ("POST", "/repos/octo/ln-out/issues/1/sub_issues"), ("DELETE", "/repos/octo/ln-out/issues/1/sub_issue")] {
+            fake.route(m, path, 200, json!({}));
+        }
+        let up = |id: &String, p: Value| crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(p));
+        let (local, _) = crate::tasks::create(&st, &json!({ "title": "Loft only", "project": "ln-out" }), "user").unwrap();
+
+        let _ = up(&ids[&1], json!({ "depends_on": [ids[&2], local.id] })).await.unwrap();
+        let _ = up(&ids[&3], json!({ "parent_id": ids[&1] })).await.unwrap();
+        let _ = up(&ids[&1], json!({ "depends_on": [local.id] })).await.unwrap();
+        let _ = up(&ids[&3], json!({ "parent_id": null })).await.unwrap();
+        assert_eq!(writes(&fake, repo), [
+            ("POST".into(), "/repos/octo/ln-out/issues/1/dependencies/blocked_by".into(), json!({ "issue_id": 200 })),
+            ("POST".into(), "/repos/octo/ln-out/issues/1/sub_issues".into(), json!({ "sub_issue_id": 300, "replace_parent": true })),
+            ("DELETE".into(), "/repos/octo/ln-out/issues/1/dependencies/blocked_by/200".into(), Value::Null),
+            ("DELETE".into(), "/repos/octo/ln-out/issues/1/sub_issue".into(), json!({ "sub_issue_id": 300 })),
+        ], "the link to the Loft-only issue stays in Loft");
+    }
+
+    #[tokio::test]
+    async fn a_link_made_on_github_appears_in_loft_after_a_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/ln-in";
+        let mut one = gh(repo, 1, "One", "open", "2026-10-02T00:00:00Z");
+        one["issue_dependencies_summary"] = json!({ "blocked_by": 1, "total_blocked_by": 1 });
+        one["sub_issues_summary"] = json!({ "total": 1, "completed": 0 });
+        fake.in_turn("GET", "/repos/octo/ln-in/issues/1/dependencies/blocked_by", vec![(200, json!([{ "number": 2, "id": 200 }, { "number": 99, "id": 9900 }])), (200, json!([]))]);
+        fake.in_turn("GET", "/repos/octo/ln-in/issues/1/sub_issues", vec![(200, json!([{ "number": 3, "id": 300 }])), (200, json!([]))]);
+        let ids = three_mirrored(&st, &fake, "ln-in", repo, one).await;
+        let get = |n: i64| st.db.get_task(&ids[&n]).unwrap().unwrap();
+        assert_eq!(get(1).depends_on, [ids[&2].clone()], "#99 isn't mirrored, so it's left out");
+        assert_eq!(get(3).parent_id.as_deref(), Some(ids[&1].as_str()));
+
+        // Both links removed on GitHub: the next poll that sees #1 change drops them.
+        fake.route("GET", "/repos/octo/ln-in/issues", 200, json!([gh(repo, 1, "One", "open", "2026-10-03T00:00:00Z")]));
+        sync_project(&st, "ln-in", false).await.unwrap();
+        assert!(get(1).depends_on.is_empty());
+        assert_eq!(get(3).parent_id, None);
+        assert!(writes(&fake, repo).is_empty(), "following GitHub writes nothing back");
+    }
+
+    #[tokio::test]
+    async fn on_a_link_conflict_github_wins() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/ln-conflict";
+        let ids = three_mirrored(&st, &fake, "ln-conflict", repo, gh(repo, 1, "One", "open", "2026-10-02T00:00:00Z")).await;
+        // Meanwhile on GitHub, #1 got #3 as its blocker.
+        let mut now_there = gh(repo, 1, "One", "open", "2026-10-05T00:00:00Z");
+        now_there["issue_dependencies_summary"] = json!({ "blocked_by": 1, "total_blocked_by": 1 });
+        fake.route("GET", "/repos/octo/ln-conflict/issues/1", 200, now_there);
+        fake.route("GET", "/repos/octo/ln-conflict/issues/1/dependencies/blocked_by", 200, json!([{ "number": 3, "id": 300 }]));
+
+        let _ = crate::tasks::update(State(st.clone()), axum::extract::Path(ids[&1].clone()), Json(json!({ "depends_on": [ids[&2]] }))).await.unwrap();
+        assert!(writes(&fake, repo).is_empty(), "Loft's link isn't written over GitHub's change");
+        assert_eq!(st.db.get_task(&ids[&1]).unwrap().unwrap().depends_on, [ids[&3].clone()]);
     }
 
 }

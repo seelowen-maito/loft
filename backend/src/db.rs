@@ -221,6 +221,8 @@ pub struct GithubLink {
     /// owner/name
     pub repo: String,
     pub number: i64,
+    /// GitHub's database id of the issue, which sub-issue and dependency links take.
+    pub id: i64,
     pub url: String,
     /// open | closed, as GitHub last said.
     pub state: String,
