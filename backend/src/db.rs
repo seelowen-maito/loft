@@ -1193,6 +1193,26 @@ mod tests {
     }
 
     #[test]
+    fn restored_fyis_go_back_ahead_of_newer_ones_and_leave_with_their_agent() {
+        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        db.save_agent(&agent("a")).unwrap();
+        db.add_pending_fyi("a", "first").unwrap();
+        db.add_pending_fyi("a", "second").unwrap();
+        let taken = db.take_pending_fyis("a").unwrap();
+        // One arrives while the run that took them fails.
+        db.add_pending_fyi("a", "third").unwrap();
+        db.restore_pending_fyis("a", &taken).unwrap();
+        let prompts = |v: Vec<(i64, String)>| v.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+        assert_eq!(prompts(db.take_pending_fyis("a").unwrap()), ["first", "second", "third"]);
+
+        db.add_pending_fyi("a", "fourth").unwrap();
+        db.delete_agent("a").unwrap();
+        assert_eq!(db.count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
         let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
         let session = |id: &str, agent: &str, status: &str, at: &str| {

@@ -567,7 +567,7 @@ mod tests {
             agents::fyi_from_agent(&st, &from, &to, &format!("Note number {i}."));
         }
         let p = run(&st, &to, "go").await;
-        assert!(p.starts_with("[5 older FYIs from agents were left out."), "{p}");
+        assert!(p.starts_with("[5 older FYIs from agents were left out; the newest 20 follow.]\n\n"), "{p}");
         let at = |i: usize| p.find(&format!("Note number {i}.")).unwrap_or_else(|| panic!("note {i}: {p}"));
         assert!((1..=5).all(|i| !p.contains(&format!("Note number {i}."))), "{p}");
         assert!((6..25).all(|i| at(i) < at(i + 1)) && p.ends_with("go"), "{p}");

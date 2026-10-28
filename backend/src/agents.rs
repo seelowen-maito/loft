@@ -483,7 +483,7 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     let _ = state.db.add_pending_fyi(&to.id, &prompt);
 }
 
-/// The most FYIs put in front of one prompt; older ones are only counted (they are still in the chat).
+/// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
 
 /// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
@@ -495,7 +495,7 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
     let skip = fyis.len().saturating_sub(MAX_FYIS_PER_PROMPT);
     let mut parts: Vec<String> = vec![];
     if skip > 0 {
-        parts.push(format!("[{skip} older FYIs from agents were left out. They are in your chat if you need them.]"));
+        parts.push(format!("[{skip} older FYIs from agents were left out; the newest {MAX_FYIS_PER_PROMPT} follow.]"));
     }
     parts.extend(fyis[skip..].iter().map(|(_, p)| p.clone()));
     parts.push(prompt.to_string());
