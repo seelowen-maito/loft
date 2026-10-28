@@ -47,6 +47,7 @@ pub type ApiResult<T> = Result<Json<T>, ApiError>;
 fn agent_json(state: &AppState, a: &Agent) -> Value {
     let mut v = serde_json::to_value(a).unwrap();
     agents::run_fields(state, &a.id, &mut v);
+    v["unread_reply"] = json!(a.unread_reply());
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
     v
 }
@@ -328,6 +329,8 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         next_run_at: None,
         total_cost_usd: 0.0,
         created_at: now(),
+        replied_at: None,
+        read_at: None,
         builtin: false,
         created_by,
     };
@@ -480,6 +483,12 @@ pub async fn run_now(State(state): State<AppState>, Path(id): Path<String>) -> A
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/agents/{id}/read`: the user has seen this agent's chat; clears its Unread reply everywhere.
+pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let a = agents::mark_read(&state, &id)?.ok_or_else(not_found)?;
+    Ok(Json(agent_json(&state, &a)))
+}
+
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {
@@ -526,6 +535,7 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
     {
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(&id);
+        rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
     }
     let a = state.db.update_agent(&id, |a| {

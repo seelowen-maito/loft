@@ -68,6 +68,23 @@ pub struct Agent {
     /// The agent that created this one, if an agent did. None when the user did.
     #[serde(default)]
     pub created_by: Option<String>,
+    /// When the last run the user started (by a message or a schedule) ended with a reply or an error.
+    #[serde(default)]
+    pub replied_at: Option<String>,
+    /// The user's read mark: they have seen its chat up to here, in any client.
+    #[serde(default)]
+    pub read_at: Option<String>,
+}
+
+impl Agent {
+    /// An Unread reply: a run the user started ended after their read mark.
+    pub fn unread_reply(&self) -> bool {
+        let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+        match (at(&self.replied_at), at(&self.read_at)) {
+            (Some(r), Some(read)) => r > read,
+            (r, _) => r.is_some(),
+        }
+    }
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.

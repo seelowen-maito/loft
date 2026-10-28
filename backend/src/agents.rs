@@ -49,6 +49,7 @@ pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
 pub fn emit_agent(state: &AppState, a: &Agent) {
     let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
     run_fields(state, &a.id, &mut v);
+    v["unread_reply"] = json!(a.unread_reply());
     state.emit(Event::AgentUpdated { agent: v });
 }
 
@@ -62,6 +63,22 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["last_output_at"] = json!(info.map(|i| &i.last_output_at));
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
+}
+
+/// A run the user started has ended with a reply or an error: the agent has an Unread reply.
+fn mark_replied(state: &AppState, agent_id: &str) {
+    if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.replied_at = Some(now())) {
+        emit_agent(state, &a);
+    }
+}
+
+/// The user has seen the agent's chat: clear its Unread reply in every client.
+pub fn mark_read(state: &AppState, agent_id: &str) -> Result<Option<Agent>> {
+    let a = state.db.update_agent(agent_id, |a| a.read_at = Some(now()))?;
+    if let Some(a) = &a {
+        emit_agent(state, a);
+    }
+    Ok(a)
 }
 
 pub fn is_running(state: &AppState, agent_id: &str) -> bool {
@@ -405,15 +422,17 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) }
     });
+    // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
+    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
-    start(state, agent_id, prompt, trigger);
+    start(state, agent_id, prompt, trigger, for_user);
     msg
 }
 
 /// Run the agent with `prompt` (queued behind a running run) without recording a user message.
 /// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees).
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
-    start(state, agent_id, Some(prompt), trigger);
+    start(state, agent_id, Some(prompt), trigger, false);
 }
 
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
@@ -422,7 +441,7 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
         "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, title, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
         brief = brief.trim()
     );
-    start(state, agent_id, Some(prompt), "avatar");
+    start(state, agent_id, Some(prompt), "avatar", false);
 }
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors.
@@ -437,7 +456,7 @@ fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, rol
 /// shown as a user message; the `compact` marker it produces is.
 pub fn compact(state: &AppState, agent_id: &str, instructions: &str) {
     let cmd = if instructions.is_empty() { "/compact".to_string() } else { format!("/compact {instructions}") };
-    start(state, agent_id, Some(cmd), "compact");
+    start(state, agent_id, Some(cmd), "compact", false);
 }
 
 /// Deliver a message from one agent to another. It shows in the recipient's chat
@@ -455,10 +474,11 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
         name = from.name,
         id = from.id,
     );
-    start(state, &to.id, Some(prompt), "agent");
+    start(state, &to.id, Some(prompt), "agent", false);
 }
 
-fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str) {
+/// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
+fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -472,6 +492,9 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
+                if for_user {
+                    rt.queued_for_user.insert(agent_id.to_string());
+                }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
                 w.notify_one();
@@ -487,13 +510,17 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
     tokio::spawn(async move {
         let mut prompt = prompt;
         let mut trigger = trigger;
+        let mut for_user = for_user;
         loop {
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
+            if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, for_user, kill.clone()).await {
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
+                if for_user {
+                    mark_replied(&state, &agent_id);
+                }
             }
             let next = {
                 let mut rt = state.rt.lock().unwrap();
@@ -503,9 +530,10 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                         if let Some(g) = g {
                             rt.grill_queued.insert(agent_id.clone(), g);
                         }
-                        Some((q.join("\n\n"), "user"))
+                        let u = rt.queued_for_user.remove(&agent_id);
+                        Some((q.join("\n\n"), "user", u))
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill")),
+                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
                     _ => {
                         rt.running.remove(&agent_id);
                         None
@@ -513,9 +541,10 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 }
             };
             match next {
-                Some((p, t)) => {
+                Some((p, t, u)) => {
                     prompt = p;
                     trigger = t;
+                    for_user = u;
                 }
                 None => break,
             }
@@ -672,10 +701,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd
 }
 
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, kill: Arc<Notify>) -> Result<()> {
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>) -> Result<()> {
     let mut resume = true;
     loop {
-        match run_process(state, agent_id, prompt, trigger, kill.clone(), resume).await? {
+        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume).await? {
             RunOutcome::Done => return Ok(()),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
@@ -716,6 +745,7 @@ async fn run_process(
     agent_id: &str,
     prompt: &str,
     trigger: &str,
+    for_user: bool,
     kill: Arc<Notify>,
     resume: bool,
 ) -> Result<RunOutcome> {
@@ -1052,6 +1082,9 @@ async fn run_process(
     }
     let (st, text) = if !killed && !got_result { ("error", "Last run failed") } else { ("idle", "") };
     set_status(state, agent_id, st, text);
+    if for_user && !quiet && (!last_text.is_empty() || run_error.is_some()) {
+        mark_replied(state, agent_id);
+    }
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
     }
@@ -1158,7 +1191,7 @@ mod tests {
 
     /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
-/// "busy" never replies, "slow" replays an empty result first.
+/// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -1172,6 +1205,10 @@ esac
 case "$prompt" in *slow*)
   echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
   sleep 1;;
+esac
+case "$prompt" in *fail*)
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+  exit 1;;
 esac
 case "$prompt" in *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
@@ -1376,5 +1413,85 @@ esac
         assert!(ws.join("terminated").exists());
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
         assert_eq!((a.status.as_str(), a.session_id.as_deref()), ("idle", Some("s1")));
+    }
+
+    fn unread(st: &AppState, id: &str) -> bool {
+        st.db.get_agent(id).unwrap().unwrap().unread_reply()
+    }
+
+    fn send(st: &AppState, id: &str, text: &str) -> impl std::future::Future<Output = crate::api::ApiResult<Value>> {
+        crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap()))
+    }
+
+    async fn idle(st: &AppState, id: &str) {
+        until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_to_the_user_is_unread_until_marked_read_everywhere() {
+        let (st, a) = fake_claude_state();
+        assert!(!unread(&st, &a.id));
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let got = crate::api::get_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(got["unread_reply"], json!(true));
+
+        let mut events = st.events.subscribe();
+        let r = crate::api::mark_read(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(r["unread_reply"], json!(false));
+        let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
+        assert_eq!((ev["type"].clone(), ev["agent"]["id"].clone(), ev["agent"]["unread_reply"].clone()), (json!("agent_updated"), json!(a.id), json!(false)), "other browsers hear about it");
+        assert!(crate::api::mark_read(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errors_and_scheduled_runs_leave_an_unread_reply() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "fail").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content == "boom"));
+        assert!(unread(&st, &a.id), "an error answers the user too");
+
+        let b = crate::tasks::tests::agent(&st, "Scheduled");
+        enqueue(&st, &b.id, None, "schedule");
+        idle(&st, &b.id).await;
+        assert!(unread(&st, &b.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runs_started_only_by_agents_leave_none() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "status?");
+        idle(&st, &a.id).await;
+        assert!(!unread(&st, &a.id), "a direct message from an agent");
+
+        // Queued while the agent is busy: it runs next with trigger "user", but no message of the user's started it.
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        message_from_agent(&st, &lead, &a, "and this");
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("and this"));
+        assert!(!unread(&st, &a.id), "an agent's message queued behind a run");
+
+        design_avatar(&st, &a.id, "a fox");
+        idle(&st, &a.id).await;
+        wake(&st, &a.id, "[Loft: grill] next round".into(), "grill");
+        idle(&st, &a.id).await;
+        assert!(!unread(&st, &a.id), "avatar and grill runs are quiet");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_run_mixing_the_users_message_and_an_agents_counts() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        message_from_agent(&st, &lead, &a, "from the lead");
+        let _ = send(&st, &a.id, "from me").await.ok().unwrap();
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(unread(&st, &a.id));
     }
 }

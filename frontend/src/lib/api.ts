@@ -48,6 +48,8 @@ export type Agent = {
   /** Background tasks the agent waits on after it has replied, and since when. */
   waiting_on?: string[];
   waiting_since?: string | null;
+  /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
+  unread_reply?: boolean;
 };
 
 export type Message = {
@@ -466,6 +468,8 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** The user has seen this chat: clears its Unread reply in every browser. */
+  markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/tasks"),
   task: (id: string) => req<Task>("GET", `/tasks/${id}`),

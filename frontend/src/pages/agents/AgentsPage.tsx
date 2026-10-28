@@ -12,6 +12,7 @@ import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
+import { shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
 const INSPECTOR_KEY = "loft:inspector-hidden";
@@ -20,6 +21,10 @@ const WIDE = window.matchMedia("(min-width: 80rem)");
 const onWideChange = (cb: () => void) => {
   WIDE.addEventListener("change", cb);
   return () => WIDE.removeEventListener("change", cb);
+};
+const onVisibilityChange = (cb: () => void) => {
+  document.addEventListener("visibilitychange", cb);
+  return () => document.removeEventListener("visibilitychange", cb);
 };
 
 export default function AgentsPage() {
@@ -78,6 +83,14 @@ export default function AgentsPage() {
   useEffect(() => {
     if (selected) saveLastAgent(selected.id);
   }, [selected?.id]);
+
+  // Seeing the open chat clears its Unread reply, also when the tab comes back or a reply lands while both hold.
+  const visible = useSyncExternalStore(onVisibilityChange, () => document.visibilityState === "visible");
+  useEffect(() => {
+    if (!shouldMarkRead(selected, selectedId, visible)) return;
+    setAgents((as) => as?.map((a) => (a.id === selectedId ? { ...a, unread_reply: false } : a)) ?? as);
+    api.markRead(selectedId!).catch(() => {});
+  }, [selected?.unread_reply, selectedId, visible]);
 
   const loadMessages = useCallback(() => {
     if (selectedId) api.messages(selectedId).then(setMessages);
@@ -245,6 +258,7 @@ export default function AgentsPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="truncate text-[13.5px]">{a.name}</span>
+                          {showsUnreadDot(a, selectedId) && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label="Unread reply" title="Unread reply" />}
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
                           {a.running && <RunTimer startedAt={a.last_run_at} className="ml-auto shrink-0 font-mono text-[10.5px] text-fg-3" />}
                         </div>
