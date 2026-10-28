@@ -546,11 +546,13 @@ extension ChatView {
                 Text("Summarize the conversation so later runs carry less.")
             }
             .disabled(running)
+            .accessibilityIdentifier("contextCompact")
             Button { sessionAction { try await store.resetSession(agentId) } } label: {
                 Label("Clear", systemImage: "arrow.counterclockwise")
                 Text("Start a fresh Session. Memory is kept.")
             }
             .disabled(running)
+            .accessibilityIdentifier("contextClear")
         } label: {
             ContextChip(tokens: tokens)
         }

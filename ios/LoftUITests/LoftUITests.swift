@@ -31,10 +31,21 @@ final class LoftUITests: XCTestCase {
 
     private func openQAChat(_ app: XCUIApplication) {
         app.tabBars.buttons["Agents"].tap()
-        let row = app.buttons["agentRow-QA Agent"].firstMatch
-        XCTAssertTrue(row.appears(timeout: 5))
-        row.tap()
+        openAgent("QA Agent", app)
         app.buttons["chatWithAgent"].tap()
+    }
+
+    /// Taps an agent's row in the Agents list, first scrolling it clear of the floating tab bar: on smaller
+    /// phones the last rows sit under it, and a tap there lands on the tab bar.
+    private func openAgent(_ name: String, _ app: XCUIApplication) {
+        let row = app.buttons["agentRow-\(name)"].firstMatch
+        XCTAssertTrue(row.appears(timeout: 5))
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<4 where row.frame.maxY > bar.frame.minY - 8 {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -200)))
+        }
+        row.tap()
     }
 
     private func composerValue(_ app: XCUIApplication) -> String? { app.textFields["composerField"].value as? String }
@@ -92,7 +103,7 @@ final class LoftUITests: XCTestCase {
         let warning = any("contextChipOver", app)
         XCTAssertTrue(warning.appears(timeout: 5))
         XCTAssertTrue(warning.label.hasSuffix("past the 80k smart zone"))
-        app.buttons["agentRow-Backend Agent"].firstMatch.tap()
+        openAgent("Backend Agent", app)
         XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Implement backend endpoints"].exists)
         back(app)
@@ -360,6 +371,36 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(any("submitPrompt", app).exists, "no question after an explicit send")
     }
 
+    /// The chat header's context size: neutral under 80k, amber from it, and a menu with Compact and Clear that
+    /// only works while the agent is idle. The 80k rule itself is StatsTests.testContextWarnsFrom80k.
+    func testContextMenuCompactsAndClears() {
+        let app = launch()
+        openQAChat(app)
+        let menu = app.buttons["contextMenu"]
+        XCTAssertTrue(menu.appears(timeout: 5))
+        XCTAssertTrue(any("contextChip", app).exists, "12k is neutral")
+        menu.tap()
+        let compact = app.buttons["contextCompact"]
+        XCTAssertTrue(compact.appears(timeout: 3))
+        XCTAssertTrue(compact.isEnabled)
+        XCTAssertTrue(app.buttons["contextClear"].isEnabled)
+        compact.tap()
+        XCTAssertTrue(compact.disappears(timeout: 3))
+        XCTAssertFalse(app.alerts.firstMatch.exists, "compacting went through")
+
+        back(app)
+        back(app)
+        openOrchestratorChat(app)
+        XCTAssertTrue(menu.appears(timeout: 5))
+        XCTAssertTrue(any("contextChipOver", app).exists, "182k warns")
+        menu.tap()
+        XCTAssertTrue(compact.appears(timeout: 3))
+        XCTAssertFalse(compact.isEnabled, "the Orchestrator is working")
+        XCTAssertFalse(app.buttons["contextClear"].isEnabled)
+        // A menu shows its plain text as a disabled item, not a static text.
+        XCTAssertTrue(app.descendants(matching: .any)["Stop the agent first."].firstMatch.exists)
+    }
+
     func testInstantAcknowledgementAfterSending() {
         // QA Agent is idle, so the row comes from the send, not from a run already in progress.
         let app = launch(["-fixture-dictation", "Run the smoke tests, send it now"])
@@ -473,9 +514,7 @@ final class LoftUITests: XCTestCase {
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
         let app = launch(["-fixture-risky-permission", "-fixture-explain", "Sends your commits to the main branch on GitHub."])
         app.tabBars.buttons["Agents"].tap()
-        let row = app.buttons["agentRow-Backend Agent"].firstMatch
-        XCTAssertTrue(row.appears(timeout: 5))
-        row.tap()
+        openAgent("Backend Agent", app)
         app.buttons["chatWithAgent"].tap()
         let risks = any("permissionRisks", app)
         XCTAssertTrue(risks.appears(timeout: 5), "the risks show without asking")
