@@ -650,10 +650,15 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
     let deliver = b.send && agent.is_some();
     let mut meta = client_id.map_or(json!({}), |c| json!({ "client_id": c }));
     meta["private"] = json!(!deliver);
+    let who = mentioned(&state, "user", text);
+    if !who.is_empty() {
+        meta["mentions"] = json!(who.iter().map(|a| a.id.clone()).collect::<Vec<_>>());
+    }
     if let (true, Some(a)) = (deliver, &agent) {
         meta["to_agent"] = json!(a.id);
     }
     let c = log(&state, &t, "user", "comment", text, meta).ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the comment".into()))?;
+    deliver_mentions(&state, &t, &c, &who, deliver.then_some(t.agent_id.as_deref()).flatten());
     let mut queued = false;
     if let (true, Some(a)) = (deliver, &agent) {
         queued = is_running(&state, &a.id);
@@ -885,7 +890,26 @@ pub fn mcp_tools() -> Vec<Value> {
 fn involved(state: &AppState, t: &Task, me: &Agent) -> bool {
     t.agent_id.as_deref() == Some(&me.id)
         || t.created_by == me.id
+        // An agent @mentioned in the thread is on the issue too, so it can answer there.
+        || state.db.list_task_comments(&t.id, 500, None).unwrap_or_default().iter().any(|c| c.meta["mentions"].as_array().is_some_and(|m| m.iter().any(|id| id == &me.id)))
         || t.parent_id.as_deref().and_then(|p| state.db.get_task(p).ok().flatten()).is_some_and(|p| p.agent_id.as_deref() == Some(&me.id) || p.created_by == me.id)
+}
+
+/// The agents a thread comment by `author` @mentions, for its `meta.mentions`.
+fn mentioned(state: &AppState, author: &str, text: &str) -> Vec<Agent> {
+    let agents = state.db.list_agents().unwrap_or_default();
+    crate::mentions::parse(text, &agents, author).0.into_iter().cloned().collect()
+}
+
+/// Hands a thread comment to each agent it @mentions (but `skip`, who already got it), tagged with the
+/// issue, the way a user comment reaches the issue's agent. Nothing waits for GitHub approval for this.
+fn deliver_mentions(state: &AppState, t: &Task, c: &TaskComment, who: &[Agent], skip: Option<&str>) {
+    let from = if c.author == "user" { String::new() } else { format!("{} wrote: ", c.meta["author_name"].as_str().unwrap_or("An agent")) };
+    for a in who.iter().filter(|a| Some(a.id.as_str()) != skip) {
+        agents::add_msg(state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{from}{}", t.id, t.title, c.text), json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id }));
+        // A mention wakes the agent like a user comment does; who wrote it is in the prompt.
+        agents::wake(state, &a.id, comment_prompt(t, &format!("{from}{}", c.text)), "user");
+    }
 }
 
 /// The prompt an agent gets for a comment on its task.
@@ -983,8 +1007,12 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             if text.trim().is_empty() {
                 return Err("text is empty".to_string());
             }
-            log(state, &t, &me.id, "comment", text.trim(), json!({})).ok_or("Couldn't save the comment.")?;
-            Ok(format!("Commented on task {}.", t.id))
+            let who = mentioned(state, &me.id, text.trim());
+            let meta = if who.is_empty() { json!({}) } else { json!({ "mentions": who.iter().map(|a| a.id.clone()).collect::<Vec<_>>() }) };
+            let c = log(state, &t, &me.id, "comment", text.trim(), meta).ok_or("Couldn't save the comment.")?;
+            deliver_mentions(state, &t, &c, &who, None);
+            let to = if who.is_empty() { String::new() } else { format!(" and sent it to {}", who.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")) };
+            Ok(format!("Commented on task {}{to}.", t.id))
         })(),
         "update_issue" => (|| {
             let mut t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
@@ -1171,6 +1199,43 @@ pub(crate) mod tests {
         assert_eq!(r["delivered_to"], Value::Null);
         assert!(!queued(&st, &a).contains("Remember to ask Tom"));
         assert_eq!(st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap().meta["private"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn an_at_mention_in_the_thread_reaches_that_agent_who_can_answer_there() {
+        let st = crate::issues::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        let (worker, reviewer, stranger) = (agent(&st, "Worker"), agent(&st, "Reviewer"), agent(&st, "Stranger"));
+        for a in [&worker, &reviewer, &stranger] {
+            busy(&st, a);
+        }
+        // A mirrored issue, so it's also clear a mention doesn't wait for GitHub approval.
+        let (mut t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": worker.id }), "user").unwrap();
+        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into() });
+        st.db.save_task(&t).unwrap();
+
+        // You mention the reviewer in a private note: it reaches the reviewer, tagged with the issue, and not the worker.
+        let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("@Reviewer can you check the session cookie?", false, false)).await.unwrap();
+        assert_eq!(r["delivered_to"], Value::Null);
+        let q = queued(&st, &reviewer);
+        assert!(q.starts_with(&format!("[Comment on task {} “Fix login”", t.id)) && q.contains("@Reviewer can you check the session cookie?"), "{q}");
+        assert!(!queued(&st, &worker).contains("session cookie"));
+        let m = st.db.list_messages(&reviewer.id, 10, None).unwrap().into_iter().last().unwrap();
+        assert_eq!((m.meta["task_id"].clone(), m.meta["task_role"].clone()), (json!(t.id), json!("comment")));
+        let c = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
+        assert_eq!((&c.meta["mentions"], &c.meta["github"]["state"]), (&json!([reviewer.id]), &json!("pending")), "in Loft now, waiting for GitHub");
+
+        // The reviewer answers on the issue, mentioning the worker: it lands in the thread and reaches the worker.
+        let none = |k: &str| Err::<Agent, _>(k.to_string());
+        let out = mcp_call(&st, &reviewer, "comment_issue", &json!({ "id": t.id, "text": "Looks fine. @Worker ship it" }), none).unwrap().unwrap();
+        assert!(out.ends_with("and sent it to Worker."), "{out}");
+        let last = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
+        assert_eq!((last.author.as_str(), last.text.as_str()), (reviewer.id.as_str(), "Looks fine. @Worker ship it"));
+        assert!(queued(&st, &worker).contains("Reviewer wrote: Looks fine. @Worker ship it"), "{}", queued(&st, &worker));
+
+        // Someone neither on it nor mentioned is refused.
+        assert!(mcp_call(&st, &stranger, "comment_issue", &json!({ "id": t.id, "text": "hi" }), none).unwrap().is_err());
+        assert!(fake.seen("/").is_empty(), "mentions never go to GitHub on their own");
     }
 
     #[tokio::test]
