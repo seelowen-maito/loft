@@ -1570,6 +1570,41 @@ esac
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn restarting_runs_whats_queued_as_whoever_sent_it() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let asked = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "question");
+        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        // My run is restarted with only an agent's message queued: that message runs next, as the agent's.
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &a.id)).await;
+        message_from_agent(&st, &lead, &a, "ask");
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(!std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(!unread(&st, &a.id) && !asked(&st), "only an agent sent the queued message");
+
+        // My message is queued: it still counts.
+        let b = crate::tasks::tests::agent(&st, "Mine");
+        message_from_agent(&st, &lead, &b, "busy");
+        until("the run to start", 10, || running(&st, &b.id)).await;
+        let _ = send(&st, &b.id, "hello").await.ok().unwrap();
+        restart(&st, &b.id).await;
+        idle(&st, &b.id).await;
+        assert!(unread(&st, &b.id), "my queued message");
+
+        // Mine and an agent's queued together: still counts.
+        let c = crate::tasks::tests::agent(&st, "Mixed");
+        message_from_agent(&st, &lead, &c, "busy");
+        until("the run to start", 10, || running(&st, &c.id)).await;
+        message_from_agent(&st, &lead, &c, "hello");
+        let _ = send(&st, &c.id, "hello").await.ok().unwrap();
+        restart(&st, &c.id).await;
+        idle(&st, &c.id).await;
+        assert!(unread(&st, &c.id), "my message among the queued ones");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn only_a_run_the_user_started_asks_them_something() {
         let (st, a) = fake_claude_state();
         let lead = crate::tasks::tests::agent(&st, "Lead");
