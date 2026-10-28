@@ -94,11 +94,13 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
             pr.gone = false;
             // Checks change without the PR changing, so they're read until they settle on its head.
             let settled = pr.checks_sha == pr.head_sha && pr.checks["pending"].as_i64() == Some(0);
-            if pr.state == "open" && !pr.head_sha.is_empty() && !settled {
-                if let Ok(c) = checks(state, &pr.slug, &pr.head_sha).await {
-                    pr.checks = c;
-                    pr.checks_sha = pr.head_sha.clone();
-                }
+            if pr.state == "open"
+                && !pr.head_sha.is_empty()
+                && !settled
+                && let Ok(c) = checks(state, &pr.slug, &pr.head_sha).await
+            {
+                pr.checks = c;
+                pr.checks_sha = pr.head_sha.clone();
             }
         }
         // Paused for the rate limit: nothing went out, so the card keeps what it had.
