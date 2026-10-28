@@ -381,7 +381,7 @@ The user usually reads this chat from another device, where `localhost` doesn't 
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
 {mem_block}
 
-Read a memory's full body with `mcp__loft__recall` when its title looks relevant; it searches titles and bodies. Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Give each memory a one-line title and a short, self-contained body. Use `mcp__loft__forget` to remove stale ones.
+Read a memory's full body with `mcp__loft__recall` when its title looks relevant; it searches titles and bodies. Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Give each memory a one-line title and a short, self-contained body. When a fact changes or a memory already covers it, rewrite that memory with `mcp__loft__update` instead of saving a near-copy. Use `mcp__loft__forget` to remove stale ones.
 
 # Loft tools
 - `mcp__loft__set_status`: a short, live, present-tense line shown next to your avatar (e.g. "Reading CI logs for the API"). Update it when you start a distinct phase of work.
@@ -584,6 +584,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
         n if n.starts_with("mcp__loft__") => match &n[15..] {
             "remember" => "Saving a memory".into(),
             "recall" => "Searching memory".into(),
+            "update" => "Updating a memory".into(),
             "forget" => "Forgetting a memory".into(),
             "set_avatar" => "Redrawing avatar".into(),
             "get_avatar" => "Looking in the mirror".into(),

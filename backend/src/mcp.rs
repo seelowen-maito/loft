@@ -28,7 +28,7 @@ fn base_tools() -> Value {
     json!([
         {
             "name": "remember",
-            "description": "Save a durable long-term memory. It persists across conversations and session resets. Its title goes in your system prompt's memory index from your next session; the body is read with recall.",
+            "description": "Save a durable long-term memory. It persists across conversations and session resets. Its title goes in your system prompt's memory index from your next session; the body is read with recall. First check your memory index (and recall): if a memory already covers this fact, change it with update instead of saving a near-copy.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string", "description": "One line that says what the memory is about, under 80 chars." },
                 "content": { "type": "string", "description": "The body: the fact to remember, short and self-contained." },
@@ -41,6 +41,15 @@ fn base_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" }
             } }
+        },
+        {
+            "name": "update",
+            "description": "Rewrite a memory in place by its id (the #number), so a fact that changes (a status, a decision) stays one memory. Pass a new title, a new body, or both; what you omit stays.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "title": { "type": "string", "description": "New one-line title, under 80 chars." },
+                "content": { "type": "string", "description": "New body, short and self-contained." }
+            }, "required": ["id"] }
         },
         {
             "name": "forget",
@@ -204,6 +213,32 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         .collect::<Vec<_>>()
                         .join("\n\n"),
                 ),
+                Err(e) => tool_error(e.to_string()),
+            }
+        }
+        "update" => {
+            let Some(id) = args["id"].as_i64().or_else(|| s("id").trim_start_matches('#').parse().ok()) else {
+                return tool_error("id is required");
+            };
+            let (title, content) = (args["title"].as_str().map(str::trim), args["content"].as_str().map(str::trim));
+            if title.is_none() && content.is_none() {
+                return tool_error("pass a new title, a new content, or both");
+            }
+            if title.is_some_and(str::is_empty) {
+                return tool_error("title can't be empty; omit it to keep the current one");
+            }
+            if title.is_some_and(|t| t.contains('\n')) {
+                return tool_error("title must be one line; put the details in content");
+            }
+            if content.is_some_and(str::is_empty) {
+                return tool_error("content can't be empty; omit it to keep the current one, or use forget");
+            }
+            match state.db.update_memory(agent_id, id, title, content) {
+                Ok(Some(m)) => {
+                    state.emit(Event::Memory { agent_id: agent_id.into() });
+                    text(format!("Updated memory #{}", m.id))
+                }
+                Ok(None) => tool_error("No memory with that id."),
                 Err(e) => tool_error(e.to_string()),
             }
         }
@@ -440,5 +475,41 @@ mod tests {
         let all = recall("").await;
         assert!(all.contains("staging first.") && all.contains("Friday mornings."), "{all}");
         assert_eq!(recall("nothing like it").await, "No matching memories.");
+    }
+
+    #[tokio::test]
+    async fn update_rewrites_only_that_memory_and_only_the_given_parts() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let b = crate::tasks::tests::agent(&st, "Other");
+        let status = st.db.add_memory(&a.id, "Release status", "Release is in QA.", "").unwrap();
+        let other = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "").unwrap();
+        let theirs = st.db.add_memory(&b.id, "Theirs", "Not yours.", "").unwrap();
+
+        let r = call_tool(&st, &a.id, "update", json!({ "id": status.id, "content": "Release shipped on Friday." })).await;
+        assert_eq!(said(&r), (format!("Updated memory #{}", status.id).as_str(), false));
+        let r = call_tool(&st, &a.id, "update", json!({ "id": format!("#{}", status.id), "title": " Release shipped " })).await;
+        assert!(!said(&r).1);
+        let ms = st.db.list_memories(&a.id).unwrap();
+        assert_eq!(ms.len(), 2);
+        assert_eq!((ms[0].id, ms[0].title.as_str(), ms[0].content.as_str()), (status.id, "Release shipped", "Release shipped on Friday."));
+        assert_eq!((ms[1].title.as_str(), ms[1].content.as_str()), (other.title.as_str(), other.content.as_str()));
+
+        for bad in [
+            json!({ "id": 9999, "title": "x" }),
+            json!({ "id": theirs.id, "title": "Mine now" }),
+            json!({ "id": status.id }),
+            json!({ "id": status.id, "title": " " }),
+            json!({ "id": status.id, "title": "Two\nlines" }),
+            json!({ "id": status.id, "content": "" }),
+            json!({ "title": "No id" }),
+        ] {
+            let r = call_tool(&st, &a.id, "update", bad.clone()).await;
+            assert!(said(&r).1, "{bad}");
+        }
+        let r = call_tool(&st, &a.id, "update", json!({ "id": theirs.id, "title": "Mine now" })).await;
+        assert_eq!(said(&r).0, "No memory with that id.");
+        assert_eq!(st.db.list_memories(&b.id).unwrap()[0].title, "Theirs");
+        assert_eq!(st.db.list_memories(&a.id).unwrap()[0].title, "Release shipped");
     }
 }

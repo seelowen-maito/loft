@@ -822,6 +822,24 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Rewrites the title and/or body of one of the agent's memories; `None` keeps that part.
+    /// Returns `None` when the agent has no memory with that id.
+    pub fn update_memory(&self, agent_id: &str, id: i64, title: Option<&str>, content: Option<&str>) -> Result<Option<Memory>> {
+        let c = self.0.lock().unwrap();
+        let n = c.execute(
+            "UPDATE memories SET title = coalesce(?3, title), content = coalesce(?4, content) WHERE agent_id = ?1 AND id = ?2",
+            params![agent_id, id, title, content],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(
+            "SELECT id, agent_id, title, content, tags, created_at FROM memories WHERE id = ?1",
+            [id],
+            memory_from_row,
+        )?))
+    }
+
     pub fn delete_memory(&self, agent_id: &str, id: i64) -> Result<bool> {
         let c = self.0.lock().unwrap();
         Ok(c.execute("DELETE FROM memories WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])? > 0)
