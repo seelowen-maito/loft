@@ -409,8 +409,8 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
           <span className="text-fg-2">{name}</span>
           <span>· {c.kind === "note" ? "progress note" : "comment"}</span>
           {c.meta.private && <span className="text-warn">· private</span>}
-          {gh === "pending" && <span className="text-warn">· not on GitHub yet</span>}
-          {gh === "posted" && <span className="text-good">· on GitHub</span>}
+          {gh === "pending" && <span className="text-warn">· not on GitHub yet{c.meta.github?.auto ? " (auto-approved, posting)" : ""}</span>}
+          {gh === "posted" && <span className="text-good">· on GitHub{c.meta.github?.auto ? ", auto-approved" : ""}</span>}
           {gh === "kept" && <span>· kept in Loft</span>}
           {gh === "from_github" && <span>· from GitHub</span>}
           <span>· {when}</span>
@@ -418,7 +418,7 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
         <div className="prose-chat text-[13.5px]">
           <Markdown remarkPlugins={[remarkGfm]}>{c.text}</Markdown>
         </div>
-        {gh === "pending" && <Approval c={c} />}
+        {gh === "pending" && !c.meta.github?.auto && <Approval c={c} />}
       </div>
     </li>
   );

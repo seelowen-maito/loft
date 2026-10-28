@@ -33,7 +33,7 @@ pub(crate) struct Item {
     /// 3 blocks an agent now · 2 waiting for your answer · 1 worth a look · 0 to review
     urgency: u8,
     agent: Option<(String, String)>,
-    task_id: Option<String>,
+    pub(crate) task_id: Option<String>,
     title: String,
     reason: String,
     text: String,
@@ -254,7 +254,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     }
 
     // Comments on mirrored issues waiting to go to GitHub. Nobody is blocked, so it's worth a look, not urgent.
-    for c in state.db.task_comments_on_github("pending").map_err(e)? {
+    // Auto-approved ones are on their way and need nobody.
+    for c in state.db.task_comments_on_github("pending").map_err(e)?.into_iter().filter(|c| c.meta["github"]["auto"] != true) {
         let Some(t) = tasks.iter().find(|t| t.id == c.task_id) else { continue };
         let Some(g) = &t.github else { continue };
         let who = if c.author == "user" { "Your".to_string() } else { format!("{}'s", c.meta["author_name"].as_str().unwrap_or("An agent")) };

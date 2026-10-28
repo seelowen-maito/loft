@@ -109,7 +109,7 @@ export type TaskComment = {
   meta: {
     author_name?: string; status?: string; summary?: string; error?: string; private?: boolean; to_agent?: string; client_id?: string;
     /** On a mirrored issue: pending (waits for your approval), posted, kept (in Loft only), or from_github. */
-    github?: { state: "pending" | "posted" | "kept" | "from_github"; comment_id?: number };
+    github?: { state: "pending" | "posted" | "kept" | "from_github"; comment_id?: number; auto?: boolean };
   };
   created_at: string;
 };
@@ -346,7 +346,13 @@ export type Settings = {
   show_simulator: boolean;
   /** Projects whose new Loft issues are published to GitHub as they're made. */
   auto_publish: string[];
+  /** Per project: ask (every comment waits for approval), own (yours go straight) or all. */
+  comment_approval: Record<string, ApprovalMode>;
+  /** The mode of projects not in comment_approval. */
+  comment_approval_default: ApprovalMode;
 };
+
+export type ApprovalMode = "ask" | "own" | "all";
 
 export type SettingsView = {
   settings: Settings;

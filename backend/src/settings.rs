@@ -24,7 +24,20 @@ pub struct Settings {
     pub show_simulator: bool,
     /// Projects whose new Loft issues are published to GitHub as they're made. Off (empty) by default.
     pub auto_publish: Vec<String>,
+    /// When comments on mirrored issues go to GitHub, per project: `ask` (every one waits for approval),
+    /// `own` (yours go straight, agents' wait) or `all` (everything goes straight).
+    pub comment_approval: std::collections::HashMap<String, String>,
+    /// The mode of a project not in `comment_approval`.
+    pub comment_approval_default: String,
     pub push: Push,
+}
+
+impl Settings {
+    /// The comment approval mode of `project`: its own, else the default; anything unknown asks.
+    pub fn approval_mode(&self, project: &str) -> &str {
+        let m = self.comment_approval.get(project.trim()).unwrap_or(&self.comment_approval_default);
+        if matches!(m.as_str(), "own" | "all") { m } else { "ask" }
+    }
 }
 
 /// APNs push. Not secret: the key itself is a file only the user can read (see apns.rs).
@@ -57,6 +70,8 @@ impl Default for Settings {
             auto_update: false,
             show_simulator: false,
             auto_publish: vec![],
+            comment_approval: Default::default(),
+            comment_approval_default: "ask".into(),
             push: Push::default(),
         }
     }

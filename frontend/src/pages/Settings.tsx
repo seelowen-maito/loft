@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type Settings, type SettingsView } from "../lib/api";
+import { api, type ApprovalMode, type Settings, type SettingsView } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { cx } from "../lib/format";
@@ -34,6 +34,20 @@ export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (
         {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
       </span>
     </button>
+  );
+}
+
+const MODES: { value: ApprovalMode; label: string }[] = [
+  { value: "ask", label: "Ask for every comment" },
+  { value: "own", label: "Auto-approve my own comments" },
+  { value: "all", label: "Auto-approve everything" },
+];
+
+function ModeSelect({ value, onChange }: { value: ApprovalMode; onChange: (m: ApprovalMode) => void }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value as ApprovalMode)} className="input">
+      {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+    </select>
   );
 }
 
@@ -190,19 +204,29 @@ export default function SettingsPage() {
         </Section>
 
         <Section title="GitHub issues">
+          <Field label="Comments going to GitHub" hint="For projects without their own choice below. Every comment on a GitHub issue waits for your approval unless this says otherwise.">
+            <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
+          </Field>
           {repos === null ? (
             <div className="skeleton h-10 rounded-xl" />
           ) : repos.length === 0 ? (
             <p className="text-[12.5px] text-fg-3">No project has a GitHub repo yet. Loft issues in projects without one stay in Loft.</p>
           ) : (
             repos.map((r) => (
-              <Toggle
-                key={r.name}
-                on={draft.auto_publish.includes(r.name)}
-                onChange={(v) => set("auto_publish", v ? [...draft.auto_publish, r.name] : draft.auto_publish.filter((p) => p !== r.name))}
-                label={`Publish new Loft issues in ${r.name}`}
-                hint={`Each new Loft issue becomes an issue on ${r.github} right away. Off: it stays in Loft until you press Publish to GitHub.`}
-              />
+              <div key={r.name} className="space-y-3 border-t border-line pt-4">
+                <Toggle
+                  on={draft.auto_publish.includes(r.name)}
+                  onChange={(v) => set("auto_publish", v ? [...draft.auto_publish, r.name] : draft.auto_publish.filter((p) => p !== r.name))}
+                  label={`Publish new Loft issues in ${r.name}`}
+                  hint={`Each new Loft issue becomes an issue on ${r.github} right away. Off: it stays in Loft until you press Publish to GitHub.`}
+                />
+                <Field label={`Comments on ${r.github}`}>
+                  <ModeSelect
+                    value={draft.comment_approval[r.name] ?? draft.comment_approval_default}
+                    onChange={(m) => set("comment_approval", { ...draft.comment_approval, [r.name]: m })}
+                  />
+                </Field>
+              </div>
             ))
           )}
         </Section>
