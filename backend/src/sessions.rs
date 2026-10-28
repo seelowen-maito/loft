@@ -164,11 +164,15 @@ pub mod tests {
 
     #[test]
     fn find_only_reads_transcripts_in_the_folder() {
-        let dir = tmp();
-        write(&dir, "aaaa-1", &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"hi"}}"#]);
+        let root = tmp();
+        let (dir, other) = (root.join("agent"), root.join("other-agent"));
+        let hi = [r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"hi"}}"#];
+        write(&dir, "aaaa-1", &hi);
+        // Another workspace's real transcript, one `..` away.
+        write(&other, "cccc-2", &hi);
         assert_eq!(find(&dir, "aaaa-1").unwrap().first_message, "hi");
         assert!(find(&dir, "bbbb").is_none());
-        assert!(find(&dir, "../aaaa-1").is_none());
+        assert!(find(&dir, "../other-agent/cccc-2").is_none(), "no reading another folder's transcript");
         assert!(find(&dir, "").is_none());
     }
 
