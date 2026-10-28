@@ -73,7 +73,7 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
 - **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `npm` and `cargo` on `PATH`.
-- **Messaging rules**: on by default. Every agent's instructions include Loft's rules for messaging other agents: send only findings, reports, verdicts and requests, never thanks or waiting notes, and send a verdict only to the agent that acts on it; and mark each message needs action or FYI. Turn off to leave messaging to each agent's own instructions: every message then wakes its recipient.
+- **Messaging rules**: on by default. Every agent's instructions include Loft's rules for messaging other agents: send only findings, reports, verdicts and requests, never thanks or waiting notes, and send a verdict only to the agent that acts on it; and mark each message needs action or FYI. A message that only acknowledges ("Thanks!", "Got it, standing by.") is refused and not delivered. Turn off to leave messaging to each agent's own instructions: every message then wakes its recipient.
 
 ### Use it from other devices
 

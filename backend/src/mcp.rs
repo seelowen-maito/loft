@@ -17,6 +17,36 @@ use crate::state::{AppState, Event};
 /// The two kinds of Agent message, as `message_agent` explains them to the sender.
 const KINDS: &str = "`needs_action` when the recipient must act now (review, fix, decide, or tell the user something they must act on): it wakes them, right away or after their current run. `fyi` when they only need to know: it shows in their chat at once but doesn't wake them; they read it at the start of their next run and don't reply to it.";
 
+/// Words and phrases that only acknowledge. A message made of nothing else (plus
+/// punctuation, emoji and the recipient's name) carries nothing the recipient needs.
+const ACKS: &[&str] = &[
+    "thanks", "thank you", "thx", "ty", "tysm", "cheers", "much appreciated", "appreciated", "appreciate it",
+    "so much", "very much", "a lot", "again", "for the update", "for the review", "for the heads up", "for letting me know",
+    "ok", "okay", "k", "kk", "alright", "all right", "sure", "cool", "great", "perfect", "nice", "awesome", "all good",
+    "got it", "gotcha", "understood", "noted", "roger", "roger that", "ack", "acknowledged", "copy", "copy that",
+    "will do", "sounds good", "sounds great", "makes sense", "on it", "no problem", "np",
+    "standing by", "waiting", "will wait", "wait", "waiting for your next", "ready for the next", "ready when you are",
+    "let me know", "if you need anything", "if you need anything else",
+    "i", "im", "ill", "and", "will", "be", "here", "me", "you", "your", "next", "task", "message", "instructions", "step", "then",
+];
+
+/// Whether `text` is only an acknowledgement, matched as plain words: no model call.
+fn only_acknowledges(text: &str, to: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase().replace(['\'', '\u{2019}'], "").split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+    };
+    let mut phrases: Vec<Vec<String>> = ACKS.iter().map(|p| words(p)).chain([words(to)]).filter(|p| !p.is_empty()).collect();
+    phrases.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let (text, mut i) = (words(text), 0);
+    while i < text.len() {
+        match phrases.iter().find(|p| text[i..].starts_with(p)) {
+            Some(p) => i += p.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
 fn tools(state: &AppState) -> Value {
     let mut all = base_tools();
     // With the messaging rules off, every message wakes its recipient, so the kind is optional.
@@ -327,8 +357,15 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             let Ok(Some(from)) = state.db.get_agent(agent_id) else {
                 return tool_error("agent not found");
             };
+            let rules = state.settings.get().messaging_rules;
+            if rules && only_acknowledges(&body, &to.name) {
+                return tool_error(format!(
+                    "Not sent: this message only acknowledges (thanks, ok, got it, standing by…), and {} doesn't need it. Send a message only when it carries a finding, report, verdict or request; otherwise send nothing.",
+                    to.name
+                ));
+            }
             // With the messaging rules off, every message wakes its recipient, as before kinds existed.
-            let fyi = match (state.settings.get().messaging_rules, s("kind").as_str()) {
+            let fyi = match (rules, s("kind").as_str()) {
                 (false, _) | (true, "needs_action") => false,
                 (true, "fyi") => true,
                 (true, "") => return tool_error(format!("Not sent: kind is required. Use {KINDS}")),
@@ -595,5 +632,45 @@ mod tests {
         st.settings.save(s).unwrap();
         let p = run(&st, &to, "again").await;
         assert!(p.contains("Merged #12"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        for text in ["Thanks!", "ok 👍", "Got it, standing by.", "Thank you so much, Worker!", "👍", "Noted. Waiting for your next task.", "Sounds good, will do", "I’ll wait", "Roger that 🫡"] {
+            for kind in ["fyi", "needs_action"] {
+                let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": kind })).await;
+                let err = r["content"][0]["text"].as_str().unwrap();
+                assert_eq!(r["isError"], json!(true), "{text}");
+                assert!(err.starts_with("Not sent: this message only acknowledges") && err.contains("finding, report, verdict or request"), "{err}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let a = st.db.get_agent(&to.id).unwrap().unwrap();
+        assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && a.pending_fyis.is_empty() && !is_running(&st, &to.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_with_substance_goes_through_even_with_thanks() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12"];
+        for text in texts {
+            let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
+            assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
+        }
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), texts.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_the_global_setting_off_nothing_is_refused() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        rules_off(&st);
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "Thanks!" })).await;
+        assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        assert!(prompts(&st, &to)[0].contains("Thanks!"));
     }
 }
