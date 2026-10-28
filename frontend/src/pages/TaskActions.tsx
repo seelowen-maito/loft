@@ -189,7 +189,7 @@ export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Age
           <p className="text-[13px] text-fg-2">It's removed with its thread. Subtasks stay, without a parent. This can't be undone.</p>
           <div className="flex justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
-            <button className="btn-primary" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate("/tasks"); })}>Delete</button>
+            <button className="btn-primary" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/tasks", search: window.location.search }); })}>Delete</button>
           </div>
           {error && <div className="text-[12px] text-bad">{error}</div>}
         </Modal>
@@ -347,7 +347,7 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
       const t = await api.createTask({ title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim(), agent_id: agentId || null, priority, project });
       if (agentId && start) await api.runTask(t.id);
       onClose();
-      navigate(`/tasks/${t.id}`);
+      navigate({ pathname: `/tasks/${t.id}`, search: window.location.search });
     } catch (e) {
       setError((e as Error).message);
     } finally {
