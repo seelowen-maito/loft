@@ -24,6 +24,10 @@ _Avoid_: Orchestrator, manager, planner
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Agent message**:
+A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
+_Avoid_: Ping, DM, hand-off
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
