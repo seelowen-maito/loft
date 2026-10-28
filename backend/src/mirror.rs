@@ -147,6 +147,7 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
     // After every issue is in, so a link to one listed later still resolves.
     for i in open.iter().filter(|i| i.get("pull_request").is_none()) {
         links_from_github(state, repo, i).await;
+        comments_from_github(state, repo, i).await;
     }
     // Linked issues GitHub still had open last time but didn't list now: ask about each one.
     let gone: Vec<Task> = linked(state, repo).into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.state == "open" && !seen.contains(&g.number))).collect();
@@ -186,6 +187,7 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
     }
     for i in &changed {
         links_from_github(state, repo, i).await;
+        comments_from_github(state, repo, i).await;
     }
     // `since` is inclusive, so the newest issue comes back each time: the answer only changes, and the
     // ETag with it, when something new does. Keep the URL (and ETag) until then.
@@ -370,6 +372,95 @@ pub fn auto_publish(state: &AppState, t: &Task) {
             tracing::warn!("auto-publish {id}: {e}");
         }
     });
+}
+
+/// GitHub's comments on issue `i` into the Loft thread, each once (by its GitHub comment id), when
+/// GitHub counts more than the thread has. Loft's own approved comments carry their id, so they aren't
+/// brought back as new ones.
+async fn comments_from_github(state: &AppState, repo: &str, i: &Value) {
+    let Some(n) = i["number"].as_i64() else { return };
+    let Some(t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) else { return };
+    let known = state.db.github_comment_ids(&t.id).unwrap_or_default();
+    if i["comments"].as_i64().unwrap_or(0) <= known.len() as i64 {
+        return;
+    }
+    let cs = match crate::github::get(state, &format!("/repos/{repo}/issues/{n}/comments?per_page=100")).await {
+        Ok(v) => v,
+        Err(e) => return tracing::warn!("mirror {repo}#{n} comments: {e}"),
+    };
+    for c in cs.as_array().into_iter().flatten() {
+        let Some(id) = c["id"].as_i64() else { continue };
+        if known.contains(&id) {
+            continue;
+        }
+        let login = c["user"]["login"].as_str().unwrap_or("someone");
+        let body: String = c["body"].as_str().unwrap_or("").chars().take(4000).collect();
+        let meta = json!({ "author_name": login, "github": { "state": "from_github", "comment_id": id } });
+        if let Ok(c) = state.db.add_task_comment(&t.id, FROM_GITHUB, "comment", &body, meta) {
+            state.emit(crate::state::Event::TaskComment { comment: json!(c) });
+        }
+    }
+}
+
+/// The comment `cid` on Loft issue `id`, and the issue, when the issue is on GitHub.
+fn comment_on(state: &AppState, id: &str, cid: i64) -> Result<(Task, crate::db::TaskComment, GithubLink), String> {
+    let c = state.db.get_task_comment(cid).map_err(|e| e.to_string())?.filter(|c| c.task_id == id).ok_or("No such comment on this Loft issue.")?;
+    let t = state.db.get_task(id).map_err(|e| e.to_string())?.ok_or("No Loft issue with that id.")?;
+    let g = t.github.clone().ok_or("This Loft issue isn't on GitHub, so its comments stay in Loft.")?;
+    if c.meta["github"]["state"].is_null() || c.meta["github"]["state"] == "from_github" {
+        return Err("That entry isn't a Loft comment waiting for GitHub.".into());
+    }
+    Ok((t, c, g))
+}
+
+fn save_comment(state: &AppState, c: &mut crate::db::TaskComment, text: &str, github: Value) -> Result<(), String> {
+    c.text = text.to_string();
+    c.meta["github"] = github;
+    state.db.update_task_comment(c.id, &c.text, &c.meta).map_err(|e| e.to_string())?;
+    state.emit(crate::state::Event::TaskComment { comment: json!(c) });
+    Ok(())
+}
+
+/// Approve: posts the comment (with `text` instead, when the user edited it) on the GitHub issue from
+/// the user's account, an agent's with its name in bold. Approving one already posted posts nothing.
+pub async fn approve(state: &AppState, id: &str, cid: i64, text: Option<&str>) -> Result<crate::db::TaskComment, String> {
+    let (_, _, g) = comment_on(state, id, cid)?;
+    let cursor = state.mirror.cursor(&g.repo);
+    let _held = cursor.lock().await;
+    let (_, mut c, _) = comment_on(state, id, cid)?;
+    if c.meta["github"]["state"] == "posted" {
+        return Ok(c);
+    }
+    let text = text.map(str::trim).filter(|t| !t.is_empty()).map_or_else(|| c.text.clone(), str::to_string);
+    let body = if c.author == "user" { text.clone() } else { format!("**{}**\n\n{text}", c.meta["author_name"].as_str().unwrap_or("An agent")) };
+    let v = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{}/comments", g.repo, g.number), Some(json!({ "body": body })))
+        .await
+        .map_err(|e| format!("GitHub turned the comment down: {e}"))?;
+    save_comment(state, &mut c, &text, json!({ "state": "posted", "comment_id": v["id"] }))?;
+    Ok(c)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ApproveBody {
+    text: Option<String>,
+}
+
+/// `POST /api/issues/{id}/comments/{cid}/approve`, optionally `{text}`: the edited text to post.
+pub async fn approve_route(State(state): State<AppState>, axum::extract::Path((id, cid)): axum::extract::Path<(String, i64)>, body: Option<Json<ApproveBody>>) -> Result<Json<Value>, ApiError> {
+    let text = body.and_then(|b| b.0.text);
+    approve(&state, &id, cid, text.as_deref()).await.map(|c| Json(json!(c))).map_err(crate::api::bad)
+}
+
+/// `POST /api/issues/{id}/comments/{cid}/keep`: Keep in Loft. The comment stays in the thread and is never posted.
+pub async fn keep_route(State(state): State<AppState>, axum::extract::Path((id, cid)): axum::extract::Path<(String, i64)>) -> Result<Json<Value>, ApiError> {
+    let (_, mut c, _) = comment_on(&state, &id, cid).map_err(crate::api::bad)?;
+    if c.meta["github"]["state"] == "posted" {
+        return Err(crate::api::bad("It's already on GitHub."));
+    }
+    let text = c.text.clone();
+    save_comment(&state, &mut c, &text, json!({ "state": "kept" })).map_err(crate::api::bad)?;
+    Ok(Json(json!(c)))
 }
 
 /// A linked issue that left GitHub (deleted, or moved to another repo). A Loft issue the mirror made
@@ -1001,6 +1092,62 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(st.db.get_task(&plain.id).unwrap().unwrap().github.is_none());
         assert_eq!(fake.seen("/repos/").len(), 1, "only the one auto-published issue");
+    }
+
+
+    #[tokio::test]
+    async fn comments_wait_for_approval_and_github_comments_arrive_once() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cm-flow";
+        let id = one_mirrored(&st, &fake, "cm-flow", repo, "2026-10-02T00:00:00Z").await;
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let _ = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "agent_id": a.id }))).await.unwrap();
+        fake.in_turn("POST", "/repos/octo/cm-flow/issues/1/comments", vec![(201, json!({ "id": 901 })), (201, json!({ "id": 902 }))]);
+        let comment_posts = || fake.seen("/repos/octo/cm-flow/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
+
+        // Yours and an agent's: in the thread at once, not on GitHub yet, both in Needs you. The agent isn't blocked.
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ship it Friday", "send": false })).unwrap();
+        let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
+        let out = crate::tasks::mcp_call(&st, &a, "comment_issue", &json!({ "id": id, "text": "Done with the cap" }), |k: &str| Err(k.to_string())).unwrap();
+        assert!(out.is_ok(), "{out:?}");
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        let mine = thread.iter().find(|c| c.text == "Ship it Friday").unwrap().clone();
+        let theirs = thread.iter().find(|c| c.text == "Done with the cap").unwrap().clone();
+        assert_eq!((&mine.meta["github"], &theirs.meta["github"]), (&json!({ "state": "pending" }), &json!({ "state": "pending" })));
+        assert!(thread.iter().filter(|c| c.kind == "status").all(|c| c.meta["github"].is_null()), "status entries never wait for GitHub");
+        let items = crate::needs_you::collect(&st).unwrap();
+        let waiting: Vec<_> = items.iter().filter(|i| i.kind == "comment_approval").collect();
+        assert_eq!(waiting.len(), 2);
+        assert!(comment_posts().is_empty(), "nothing on GitHub until approved");
+
+        // Approve the agent's with edited text: posted once, its name in bold.
+        let c = approve(&st, &id, theirs.id, Some("Done with the retry cap")).await.unwrap();
+        assert_eq!((c.text.as_str(), &c.meta["github"]), ("Done with the retry cap", &json!({ "state": "posted", "comment_id": 901 })));
+        approve(&st, &id, theirs.id, None).await.unwrap();
+        // Keep yours in Loft: never posted.
+        let Json(kept) = keep_route(State(st.clone()), axum::extract::Path((id.clone(), mine.id))).await.unwrap();
+        assert_eq!(kept["meta"]["github"]["state"], "kept");
+        assert_eq!(comment_posts(), [json!({ "body": "**Builder**\n\nDone with the retry cap" })]);
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "comment_approval"));
+        // A status entry can't be approved.
+        let status = thread.iter().find(|c| c.kind == "status").unwrap();
+        assert!(approve(&st, &id, status.id, None).await.is_err());
+
+        // GitHub has Pedro's comment and the one Loft posted: only Pedro's is added, and only once.
+        let mut changed = gh(repo, 1, "Retry cap", "open", "2026-10-06T00:00:00Z");
+        changed["comments"] = json!(2);
+        fake.route("GET", "/repos/octo/cm-flow/issues", 200, json!([changed]));
+        fake.route("GET", "/repos/octo/cm-flow/issues/1/comments", 200, json!([
+            { "id": 901, "user": { "login": "octo-me" }, "body": "**Builder**\n\nDone with the retry cap" },
+            { "id": 500, "user": { "login": "pedro" }, "body": "Looks good" },
+        ]));
+        sync_project(&st, "cm-flow", true).await.unwrap();
+        sync_project(&st, "cm-flow", true).await.unwrap();
+        let from_gh: Vec<_> = st.db.list_task_comments(&id, 50, None).unwrap().into_iter().filter(|c| c.author == FROM_GITHUB && c.kind == "comment").collect();
+        assert_eq!(from_gh.len(), 1);
+        assert_eq!((from_gh[0].text.as_str(), &from_gh[0].meta["author_name"]), ("Looks good", &json!("pedro")));
+        assert_eq!(comment_posts().len(), 1, "a GitHub comment never goes back to GitHub");
     }
 
 }

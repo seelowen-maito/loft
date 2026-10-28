@@ -106,7 +106,11 @@ export type TaskComment = {
   author: string;
   kind: "comment" | "note" | "status";
   text: string;
-  meta: { author_name?: string; status?: string; summary?: string; error?: string; private?: boolean; to_agent?: string; client_id?: string };
+  meta: {
+    author_name?: string; status?: string; summary?: string; error?: string; private?: boolean; to_agent?: string; client_id?: string;
+    /** On a mirrored issue: pending (waits for your approval), posted, kept (in Loft only), or from_github. */
+    github?: { state: "pending" | "posted" | "kept" | "from_github"; comment_id?: number };
+  };
   created_at: string;
 };
 
@@ -504,6 +508,9 @@ export const api = {
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
   /** Publish to GitHub: creates the GitHub issue for a Loft-only issue and links them. */
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
+  /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
+  approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
+  keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
   grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>

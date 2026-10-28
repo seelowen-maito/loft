@@ -241,7 +241,8 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
     useCallback(
       (e: ServerEvent) => {
         if (e.type === "task_comment" && e.comment.task_id === t.id)
-          setThread((th) => (th && !th.some((c) => c.id === e.comment.id) ? [...th, e.comment] : th));
+          // A comment approved or kept comes back with its new GitHub state: replace it in place.
+          setThread((th) => (!th ? th : th.some((c) => c.id === e.comment.id) ? th.map((c) => (c.id === e.comment.id ? e.comment : c)) : [...th, e.comment]));
       },
       [t.id],
     ),
@@ -373,6 +374,7 @@ function TaskLinks({ title, tasks }: { title: string; tasks: Task[] }) {
 
 function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   const name = c.author === "user" ? "You" : agent?.name ?? c.meta.author_name ?? "Agent";
+  const gh = c.meta.github?.state;
   const when = new Date(c.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   if (c.kind === "status") {
     const extra = c.meta.summary || c.meta.error;
@@ -394,19 +396,63 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   }
   return (
     <li className="flex gap-3">
-      {agent ? <Sticker avatar={agent.avatar} lead={agent.lead} size={26} /> : <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-accent/15 font-mono text-[11px] text-accent">you</span>}
+      {agent ? (
+        <Sticker avatar={agent.avatar} lead={agent.lead} size={26} />
+      ) : c.author === "github" ? (
+        <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-white/[0.08] font-mono text-[10px] text-fg-2">gh</span>
+      ) : (
+        <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-accent/15 font-mono text-[11px] text-accent">you</span>
+      )}
       <div className={cx("min-w-0 flex-1 rounded-xl border px-3 py-2", c.kind === "note" ? "border-line bg-transparent" : "border-line-strong bg-ink-850")}>
         <div className="mb-1 flex items-center gap-1.5 font-mono text-[10.5px] text-fg-3">
           {c.kind === "note" && <NotebookPen className="size-3" />}
           <span className="text-fg-2">{name}</span>
           <span>· {c.kind === "note" ? "progress note" : "comment"}</span>
           {c.meta.private && <span className="text-warn">· private</span>}
+          {gh === "pending" && <span className="text-warn">· not on GitHub yet</span>}
+          {gh === "posted" && <span className="text-good">· on GitHub</span>}
+          {gh === "kept" && <span>· kept in Loft</span>}
+          {gh === "from_github" && <span>· from GitHub</span>}
           <span>· {when}</span>
         </div>
         <div className="prose-chat text-[13.5px]">
           <Markdown remarkPlugins={[remarkGfm]}>{c.text}</Markdown>
         </div>
+        {gh === "pending" && <Approval c={c} />}
       </div>
     </li>
+  );
+}
+
+/** Approve (optionally after editing) or Keep in Loft, for a comment waiting to go to GitHub. */
+function Approval({ c }: { c: TaskComment }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-2 space-y-2 border-t border-line pt-2">
+      {editing !== null && (
+        <textarea value={editing} onChange={(e) => setEditing(e.target.value)} rows={3} aria-label="Text to post" className="w-full resize-y rounded-lg border border-line-strong bg-ink-900 px-2.5 py-1.5 text-[13px] outline-none" />
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <button className="btn-primary" disabled={busy} onClick={() => run(() => api.approveComment(c.task_id, c.id, editing ?? undefined))}>
+          {editing === null ? "Approve" : "Post edited"}
+        </button>
+        {editing === null && <button className="btn" disabled={busy} onClick={() => setEditing(c.text)}>Edit first</button>}
+        <button className="btn-ghost" disabled={busy} onClick={() => run(() => api.keepComment(c.task_id, c.id))}>Keep in Loft</button>
+        {error && <span className="text-[12px] text-bad">{error}</span>}
+      </div>
+    </div>
   );
 }

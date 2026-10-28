@@ -29,7 +29,7 @@ const MAX_TEXT: usize = 2000;
 
 pub(crate) struct Item {
     id: String,
-    kind: &'static str,
+    pub(crate) kind: &'static str,
     /// 3 blocks an agent now · 2 waiting for your answer · 1 worth a look · 0 to review
     urgency: u8,
     agent: Option<(String, String)>,
@@ -248,6 +248,35 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 },
                 t.title.clone(),
             ),
+            project: (!t.project.is_empty()).then(|| t.project.clone()),
+            pr: None,
+        });
+    }
+
+    // Comments on mirrored issues waiting to go to GitHub. Nobody is blocked, so it's worth a look, not urgent.
+    for c in state.db.task_comments_on_github("pending").map_err(e)? {
+        let Some(t) = tasks.iter().find(|t| t.id == c.task_id) else { continue };
+        let Some(g) = &t.github else { continue };
+        let who = if c.author == "user" { "Your".to_string() } else { format!("{}'s", c.meta["author_name"].as_str().unwrap_or("An agent")) };
+        let base = format!("/api/issues/{}/comments/{}", t.id, c.id);
+        items.push(Item {
+            id: format!("comment:{}", c.id),
+            kind: "comment_approval",
+            urgency: 1,
+            agent: (c.author != "user").then(|| name(&c.author)).flatten(),
+            task_id: Some(t.id.clone()),
+            title: text(&format!("{who} comment on {}", t.title), MAX_TITLE),
+            reason: text(&format!("Not on GitHub yet: approve to post it on {}#{}.", g.repo, g.number), MAX_REASON),
+            text: text(&c.text, MAX_TEXT),
+            created_at: c.created_at.clone(),
+            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            actions: vec![
+                action("approve", "Approve", "POST", format!("{base}/approve"), json!({})),
+                action("answer", "Edit and approve", "POST", format!("{base}/approve"), json!({ "text": c.text })),
+                action("deny", "Keep in Loft", "POST", format!("{base}/keep"), json!({})),
+                open_task(&t.id),
+            ],
+            push: ("A comment waits for your approval".to_string(), t.title.clone()),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             pr: None,
         });

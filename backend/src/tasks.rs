@@ -46,6 +46,11 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     if author != "user" {
         meta["author_name"] = json!(who(state, author));
     }
+    // A comment on a mirrored issue waits for the user's approval before it reaches GitHub (mirror.rs).
+    // Progress notes and status entries stay in Loft.
+    if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB {
+        meta["github"] = json!({ "state": "pending" });
+    }
     match state.db.add_task_comment(&t.id, author, kind, &clip(text, MAX_COMMENT), meta) {
         Ok(c) => {
             state.emit(Event::TaskComment { comment: json!(c) });
@@ -360,6 +365,8 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/comments", at_get(list_comments).post(add_comment))
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
+        .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
+        .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
 }
 
 #[derive(Deserialize)]

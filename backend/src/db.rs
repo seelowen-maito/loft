@@ -612,6 +612,39 @@ impl Db {
         Ok(TaskComment { id: c.last_insert_rowid(), task_id: task_id.into(), author: author.into(), kind: kind.into(), text: text.into(), meta, created_at })
     }
 
+    /// Thread entries by a query on their columns: `WHERE {filter}` with `args`, oldest first.
+    fn task_comments_where(&self, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<TaskComment>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(&format!("SELECT id, task_id, author, kind, text, meta, created_at FROM task_comments WHERE {filter} ORDER BY id"))?;
+        let rows = st
+            .query_map(args, |r| {
+                let meta: String = r.get(5)?;
+                Ok(TaskComment { id: r.get(0)?, task_id: r.get(1)?, author: r.get(2)?, kind: r.get(3)?, text: r.get(4)?, meta: serde_json::from_str(&meta).unwrap_or(Value::Null), created_at: r.get(6)? })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_task_comment(&self, id: i64) -> Result<Option<TaskComment>> {
+        Ok(self.task_comments_where("id = ?1", &[&id])?.pop())
+    }
+
+    /// Comments whose GitHub state (`meta.github.state`) is this, across every thread: one read.
+    pub fn task_comments_on_github(&self, github_state: &str) -> Result<Vec<TaskComment>> {
+        self.task_comments_where("json_extract(meta, '$.github.state') = ?1", &[&github_state])
+    }
+
+    /// GitHub comment ids already in a thread, so a GitHub comment is added once and Loft's own aren't echoed.
+    pub fn github_comment_ids(&self, task_id: &str) -> Result<Vec<i64>> {
+        Ok(self.task_comments_where("task_id = ?1 AND json_extract(meta, '$.github.comment_id') IS NOT NULL", &[&task_id])?.iter().filter_map(|c| c.meta["github"]["comment_id"].as_i64()).collect())
+    }
+
+    pub fn update_task_comment(&self, id: i64, text: &str, meta: &Value) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE task_comments SET text = ?2, meta = ?3 WHERE id = ?1", params![id, text, meta.to_string()])?;
+        Ok(())
+    }
+
     /// The newest `limit` entries (older than `before`, an id, when paging), oldest first.
     pub fn list_task_comments(&self, task_id: &str, limit: i64, before: Option<i64>) -> Result<Vec<TaskComment>> {
         let c = self.0.lock().unwrap();
