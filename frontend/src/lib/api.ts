@@ -354,6 +354,13 @@ export type Settings = {
 
 export type ApprovalMode = "ask" | "own" | "all";
 
+/** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
+export type MirrorSync = {
+  connected: boolean;
+  projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
+  skipped: { project: string; reason: string }[];
+};
+
 export type SettingsView = {
   settings: Settings;
   github_token_set: boolean;
@@ -453,7 +460,7 @@ export const api = {
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
-  syncIssues: () => req<{ connected: boolean; projects: { project: string; repo: string; error?: string }[] }>("POST", "/issues/sync", {}),
+  syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
