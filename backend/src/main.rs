@@ -8,7 +8,6 @@ mod github;
 mod github_inbox;
 mod greenfield;
 mod grill;
-mod issues;
 mod needs_you;
 mod planning;
 mod guard;
@@ -102,10 +101,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
-        // A project's GitHub issues, read live. `/issues` is the Loft issues list now.
-        .route("/github/issues", get(issues::list))
-        .route("/github/issues/{number}", get(issues::get))
-        .route("/github/issues/{number}/send", post(issues::send))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

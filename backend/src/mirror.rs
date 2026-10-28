@@ -65,12 +65,21 @@ pub struct Report {
     pub error: Option<String>,
 }
 
+/// The projects the agents belong to, A–Z (case-insensitive), each once.
+pub(crate) fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
+    let mut ps: Vec<String> = state.db.list_agents()?.iter().map(|a| a.project.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    ps.sort();
+    ps.dedup();
+    ps.sort_by_key(|p| p.to_lowercase());
+    Ok(ps)
+}
+
 /// Polls every project's repo; the first round and every `FULL_EVERY`th are full reads.
 pub async fn poller(state: AppState) {
     let mut round: u64 = 0;
     loop {
         let full = round.is_multiple_of(FULL_EVERY);
-        for p in crate::issues::projects(&state).unwrap_or_default() {
+        for p in projects(&state).unwrap_or_default() {
             let _ = sync_project(&state, &p, full).await;
         }
         round += 1;
@@ -95,7 +104,7 @@ pub struct SyncBody {
 /// `POST /api/issues/sync`: a full read now, of one project or all; what the list does on open and refresh.
 pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>>) -> Result<Json<Value>, ApiError> {
     let wanted = body.and_then(|b| b.0.project).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-    let projects = crate::issues::projects(&state)?;
+    let projects = projects(&state)?;
     if let Some(p) = &wanted
         && !projects.contains(p)
     {
@@ -679,10 +688,36 @@ fn url_encode(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::tests::own_fake;
-    use crate::issues::tests::{project, state};
+    use crate::github::tests::state_with_token;
+
+    /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
+    pub(crate) fn state() -> AppState {
+        let st = state_with_token();
+        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects, "github_token": "test-token" }).to_string()).unwrap();
+        AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st }
+    }
+
+    /// An agent on `project`, whose folder is a git repo with this `origin` (none: not a repo at all).
+    pub(crate) fn project(st: &AppState, project: &str, origin: Option<&str>) {
+        let mut a = crate::tasks::tests::agent(st, &format!("{project}-dev"));
+        a.project = project.into();
+        st.db.save_agent(&a).unwrap();
+        let Some(o) = origin else { return };
+        let dir = st.settings.boot().projects_dir.join(project);
+        assert!(dir.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        if !o.is_empty() {
+            git(&["remote", "add", "origin", o]);
+        }
+    }
 
     fn gh(repo: &str, n: i64, title: &str, state: &str, updated: &str) -> Value {
         json!({
