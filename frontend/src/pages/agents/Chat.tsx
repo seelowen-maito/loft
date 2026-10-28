@@ -5,13 +5,14 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtNum, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
+import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
 import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
+import { ContextSize } from "./ContextSize";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
@@ -396,7 +397,7 @@ export function Chat({
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
             <StatusPill agent={agent} />
-            {/* Schedule and context size are details: on a phone the status line gets the room. */}
+            {/* The schedule is a detail: on a phone the status line gets the room. The context size stays, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
@@ -405,12 +406,7 @@ export function Chat({
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
             {agent.context_tokens != null && (
-              <span
-                className={cx("shrink-0 font-mono text-[11px] tabular-nums max-md:hidden", agent.context_tokens >= 200_000 ? "text-warn" : "text-fg-3")}
-                title={`${agent.context_tokens.toLocaleString()} tokens in context as of the last reply. Every turn resends it, so a big context uses your limits faster; /compact shrinks it.`}
-              >
-                context {fmtNum(agent.context_tokens)}
-              </span>
+              <ContextSize tokens={agent.context_tokens} running={running} onCompact={() => compactContext("")} onClear={clearContext} />
             )}
           </div>
         </div>
