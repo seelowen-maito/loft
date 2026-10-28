@@ -43,11 +43,11 @@ The agent's proposed answer to a question in a round, which the user can accept 
 _Avoid_: Default, suggestion
 
 **Spec**:
-A GitHub issue labelled `spec` that describes a feature from the user's perspective, written from a grill.
+An issue labelled `spec` that describes a feature from the user's perspective, written from a grill: on GitHub, or a Loft issue when the project has no GitHub repo.
 _Avoid_: PRD, plan, design doc
 
 **Ticket**:
-A GitHub issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with native blocking links to the tickets it waits on.
+An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
 
 **Owner**:

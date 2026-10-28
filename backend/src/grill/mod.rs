@@ -88,9 +88,13 @@ pub struct Published {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueLink {
+    /// The GitHub issue number; for a plan saved in Loft (no repo), the position in the plan, from 1.
     pub number: i64,
     #[serde(default)]
     pub title: String,
+    /// The Loft issue, for a plan saved in Loft instead of on GitHub.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,8 +188,11 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 /// suggested next message for the composer after clearing context, and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
-    let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": format!("https://github.com/{}/issues/{}", p.repo, i.number) });
+    // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
+    let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
+    let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
     let next = match (&p.spec, p.tickets.as_slice()) {
+        _ if p.repo.is_empty() => say(s, "Implement the plan: hand its ready Loft issues to the team", "Implemente o plano: entregue as issues prontas do Loft ao time"),
         (Some(sp), _) => say(s, &format!("Implement spec #{}: hand the ready tickets to the team", sp.number), &format!("Implemente a spec #{}: entregue os tickets prontos ao time", sp.number)),
         (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
         (None, _) => say(s, "Implement the ready tickets: hand them to the team", "Implemente os tickets prontos: entregue-os ao time"),
@@ -194,8 +201,9 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let setup = (!missing.is_empty()).then(|| {
         let roles = missing.iter().map(|r| if *r == "dev" { "Dev" } else { "reviewer" }).collect::<Vec<_>>().join(" or ");
         let plan = match (&p.spec, p.tickets.first()) {
-            (Some(sp), _) => format!("spec #{}: https://github.com/{}/issues/{}", sp.number, p.repo, sp.number),
-            (None, Some(t)) => format!("ticket #{}: https://github.com/{}/issues/{}", t.number, p.repo, t.number),
+            _ if p.repo.is_empty() => format!("“{}”, saved as Loft issues", p.spec.as_ref().or(p.tickets.first()).map_or("", |i| i.title.as_str())),
+            (Some(sp), _) => format!("spec #{}: {}", sp.number, url(sp)),
+            (None, Some(t)) => format!("ticket #{}: {}", t.number, url(t)),
             (None, None) => unreachable!("a card has a spec or a ticket"),
         };
         json!({
@@ -1104,8 +1112,8 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 
 /// The spec and ticket rules, in the brief and from `planning_guide` for a direct request.
 pub const SPEC: &str = r#"# Planning: spec
-At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns.
-- Offer it: when your project has a repo (or is a new project: see Planning: new project) and every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
+At the end of a grill, turn what was decided into a spec, published as a GitHub issue the user owns. A project with no GitHub repo (no git, no GitHub `origin`, or GitHub not connected) keeps its plan in Loft instead: the spec and tickets become Loft issues, and nothing goes to GitHub.
+- Offer it: when every branch is resolved, the last round asks "Turn this into a spec and tickets?" (recommendation: yes). If the user says no, finish the grill as usual.
 - Test seams: before writing the spec, put how it will be tested to the user as a round question with your recommendation: the seams the tests drive (an API, the tools, the UI) and what they assert on, following the prior art in the repo's tests ("Test it through the tools and the API, with a fake GitHub, like the existing grill tests?").
 - Write it in the glossary's terms, respecting the existing ADRs, in the user's language, with this template:
 
@@ -1132,8 +1140,8 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
   - <Anything else: the glossary terms and ADRs it relies on.>
   ```
 
-- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
-- When it fails (no GitHub remote, GitHub not connected, GitHub refused it), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
+- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. Without a GitHub repo it saves it as a Loft issue labelled `spec` and gives you its id. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
+- When it fails (GitHub refused it, for example), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
 - Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#;
 pub const TICKETS: &str = r#"# Planning: tickets
 Once the spec is published, split it into tickets the team can pick up.
@@ -1157,7 +1165,7 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec`, and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
 /// The grill instructions in full.
 pub fn brief() -> String {
@@ -1748,7 +1756,7 @@ pub(crate) mod tests {
         assert!(wake.contains("about 92k tokens") && wake.contains("suggesting they type `/compact`"), "{wake}");
 
         // Once the tickets are published, the spec is written: no point compacting for it.
-        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into() }), vec![IssueLink { number: 5, title: "Plans".into() }]);
+        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into(), id: String::new() }), vec![IssueLink { number: 5, title: "Plans".into(), id: String::new() }]);
         round(&st, &o, &["Annual too?"]).unwrap();
         assert!(!send(&st, &o).unwrap().contains("/compact"));
     }

@@ -28,16 +28,16 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. Calling it again with the same title returns the spec already published instead of creating another, so a retry is safe.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. Calling it again with the same title returns the spec already published instead of creating another, so a retry is safe.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
-        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
+        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
         "inputSchema": { "type": "object", "properties": {
-            "spec": { "type": "integer", "description": "The spec's issue number from publish_spec. Leave it out only for a single standalone ticket." },
+            "spec": { "type": ["integer", "string"], "description": "The spec from publish_spec: its GitHub issue number, or its Loft issue id when the plan is kept in Loft. Leave it out only for a single standalone ticket." },
             "tickets": { "type": "array", "description": "The tickets, in any order.", "items": { "type": "object", "properties": {
                 "title": { "type": "string", "description": "What the slice delivers, in a few words." },
                 "body": { "type": "string", "description": "The ticket in Markdown, following the ticket template." },
@@ -139,16 +139,104 @@ fn key(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-/// `owner/repo` from the `origin` of the agent's project folder.
-async fn repo_for(state: &AppState, a: &Agent) -> Result<String, String> {
+/// Where a plan goes: `owner/repo` from the `origin` of the agent's project folder, with GitHub
+/// connected. Err says why it stays in Loft instead: no project, no git, no GitHub remote, no token.
+async fn github_home(state: &AppState, a: &Agent) -> Result<String, String> {
     if a.project.trim().is_empty() {
-        return Err("You have no project, so there is no repo to publish to. Ask the user to set your project in the Config tab.".into());
+        return Err("you have no project".into());
     }
-    crate::repos::github_repo(state, &a.project).await.map_err(|e| {
-        // A new project: the user may have declined the repo earlier in the grill, so it is asked again.
-        let again = if crate::greenfield::needs_repo(state, a) { format!(" {}", crate::greenfield::ASK_AGAIN) } else { String::new() };
-        format!("{e}, so there is no GitHub repo to publish to.{again}")
-    })
+    let slug = crate::repos::github_repo(state, &a.project).await?;
+    if crate::github::token(state).is_none() {
+        return Err("GitHub isn't connected (no token in Settings, no `gh auth login`)".into());
+    }
+    Ok(slug)
+}
+
+/// Publishing for a project with no GitHub repo: Loft issues in the agent's project, with no GitHub calls.
+mod in_loft {
+    use super::*;
+    use crate::db::Task;
+
+    fn in_project(state: &AppState, me: &Agent) -> Vec<Task> {
+        state.db.list_tasks().unwrap_or_default().into_iter().filter(|t| t.project == me.project.trim() && t.github.is_none() && t.status != "cancelled").collect()
+    }
+
+    fn make(state: &AppState, me: &Agent, p: Value) -> Result<Task, String> {
+        crate::tasks::create(state, &p, &me.id).map(|(t, _)| t)
+    }
+
+    /// The spec as a Loft issue labelled `spec`; the same title again returns the one already saved.
+    pub(super) async fn spec(state: &AppState, me: &Agent, title: &str, body: &str, why: &str) -> Result<(String, String, IssueLink), String> {
+        let project = me.project.trim().to_string();
+        let _held = state.publish_locks.of(&format!("loft:{project}")).lock_owned().await;
+        let k = key(title);
+        let found = in_project(state, me).into_iter().find(|t| t.labels.iter().any(|l| l == "spec") && key(&t.title) == k);
+        let (t, msg) = match found {
+            Some(t) => {
+                let msg = format!("The spec \"{title}\" is already saved as Loft issue {}. Nothing new was created and its text wasn't changed.", t.id);
+                (t, msg)
+            }
+            None => {
+                let t = make(state, me, json!({ "title": title, "description": body.trim(), "labels": ["spec"], "project": project, "status": "inbox" }))?;
+                let msg = format!("Saved the spec as a Loft issue labelled `spec`, id {}: {why}, so the plan stays in Loft and nothing went to GitHub. Pass `spec: \"{}\"` to publish_tickets.", t.id, t.id);
+                (t, msg)
+            }
+        };
+        Ok((msg, String::new(), IssueLink { number: 0, title: t.title.clone(), id: t.id.clone() }))
+    }
+
+    /// The tickets as Loft issues labelled `ready-for-agent`: subtasks of the spec, blockers first,
+    /// each depending on the tickets that block it. Ones already saved under the spec are skipped.
+    pub(super) async fn tickets(state: &AppState, me: &Agent, spec: Option<&str>, ts: &[Ticket], order: &[usize], why: &str) -> Result<String, String> {
+        let project = me.project.trim().to_string();
+        let spec = match spec {
+            Some(id) => {
+                let s = state.db.get_task(id).map_err(|e| e.to_string())?.filter(|s| s.project == project && s.labels.iter().any(|l| l == "spec"));
+                Some(s.ok_or_else(|| format!("There's no spec with the Loft issue id {id} in your project: pass the id publish_spec gave."))?)
+            }
+            None => None,
+        };
+        let _held = state.publish_locks.of(&format!("loft:{project}")).lock_owned().await;
+        let siblings: Vec<Task> = in_project(state, me)
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "ready-for-agent"))
+            .filter(|t| match &spec {
+                Some(s) => t.parent_id.as_deref() == Some(&s.id),
+                None => t.parent_id.is_none() && t.state() == "open",
+            })
+            .collect();
+        let mut ids: Vec<Option<String>> = vec![None; ts.len()];
+        let mut lines = vec![];
+        let mut fresh = 0;
+        for (pos, &i) in order.iter().enumerate() {
+            let t = &ts[i];
+            let blockers: Vec<String> = t.blocked_by.iter().map(|&b| ids[b].clone().expect("blockers are saved first")).collect();
+            let (made, new) = match siblings.iter().find(|s| key(&s.title) == key(&t.title)) {
+                Some(s) => (s.clone(), false),
+                None => {
+                    let made = make(state, me, json!({
+                        "title": t.title, "description": t.body, "labels": ["ready-for-agent"], "project": project, "status": "ready",
+                        "parent_id": spec.as_ref().map(|s| s.id.clone()), "depends_on": blockers,
+                    }))?;
+                    fresh += 1;
+                    (made, true)
+                }
+            };
+            let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone() });
+            crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone() }]);
+            let by: Vec<String> = t.blocked_by.iter().map(|&b| format!("\"{}\"", ts[b].title)).collect();
+            let by = if by.is_empty() { String::new() } else { format!(", blocked by {}", by.join(", ")) };
+            let was = if new { "" } else { ", already saved" };
+            lines.push(format!("- {} (Loft issue {}){by}{was}", t.title, made.id));
+            ids[i] = Some(made.id);
+        }
+        let head = match &spec {
+            Some(s) => format!("Saved {} ticket{} as Loft issues under the spec \"{}\", blockers first", ts.len(), if ts.len() == 1 { "" } else { "s" }, s.title),
+            None => "Saved a standalone ticket as a Loft issue".to_string(),
+        };
+        let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already saved." } else { "" };
+        Ok(format!("{head}, labelled `ready-for-agent`: {why}, so nothing went to GitHub.\n{}{none_new}", lines.join("\n")))
+    }
 }
 
 /// Creates the labels the repo doesn't have yet; existing ones are left as they are.
@@ -174,13 +262,6 @@ async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn connected(state: &AppState) -> Result<(), String> {
-    match crate::github::token(state) {
-        Some(_) => Ok(()),
-        None => Err("GitHub isn't connected: the user needs to add a GitHub token in Loft's Settings or run `gh auth login`.".into()),
-    }
-}
-
 /// The login of the token's user: everything Loft publishes is assigned to them.
 async fn login(state: &AppState) -> Result<String, String> {
     let token = crate::github::token(state).unwrap_or_default();
@@ -202,13 +283,15 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     if title.chars().count() > MAX_TITLE {
         return Err(format!("the title is at most {MAX_TITLE} characters"));
     }
-    let slug = repo_for(state, me).await?;
+    let slug = match github_home(state, me).await {
+        Ok(slug) => slug,
+        Err(why) => return in_loft::spec(state, me, &title, body, &why).await,
+    };
     let _held = state.publish_locks.of(&slug).lock_owned().await;
-    connected(state)?;
     let k = key(&title);
     let already = |n: i64| {
         let msg = format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed.");
-        (msg, slug.clone(), IssueLink { number: n, title: title.clone() })
+        (msg, slug.clone(), IssueLink { number: n, title: title.clone(), id: String::new() })
     };
     if let Ok(Some(n)) = state.db.published_issue(&slug, "spec", &k) {
         return Ok(already(n));
@@ -235,7 +318,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     let n = made["number"].as_i64().ok_or("GitHub created the spec but didn't return its number.")?;
     state.db.record_published_issue(&slug, "spec", &k, n).map_err(|e| e.to_string())?;
     let msg = format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}");
-    Ok((msg, slug, IssueLink { number: n, title }))
+    Ok((msg, slug, IssueLink { number: n, title, id: String::new() }))
 }
 
 struct Ticket {
@@ -316,14 +399,26 @@ async fn issue_id(state: &AppState, slug: &str, n: i64, known: Option<i64>) -> R
 /// end-of-planning card lists it even if a later step fails and the grill ends without a retry.
 async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
     let ts = tickets_in(args)?;
-    let spec = args["spec"].as_i64();
-    if spec.is_none() && ts.len() > 1 {
-        return Err("Several tickets belong to a spec: publish it with `publish_spec` first and pass its number as `spec`. Only a single ticket goes without one.".into());
+    let given = !args["spec"].is_null();
+    if !given && ts.len() > 1 {
+        return Err("Several tickets belong to a spec: publish it with `publish_spec` first and pass it as `spec`. Only a single ticket goes without one.".into());
     }
     let order = blockers_first(&ts)?;
-    let slug = repo_for(state, me).await?;
+    let slug = match github_home(state, me).await {
+        Ok(slug) => slug,
+        Err(why) => {
+            let id = args["spec"].as_str().map(str::trim);
+            if given && id.is_none_or(str::is_empty) {
+                return Err(format!("This plan is kept in Loft ({why}): pass the spec's Loft issue id from publish_spec as `spec`, not a number."));
+            }
+            return in_loft::tickets(state, me, id, &ts, &order, &why).await;
+        }
+    };
+    let spec = args["spec"].as_i64();
+    if given && spec.is_none() {
+        return Err(format!("This project's plan goes to GitHub ({slug}): pass the spec's GitHub issue number as `spec`."));
+    }
     let _held = state.publish_locks.of(&slug).lock_owned().await;
-    connected(state)?;
     let login = login(state).await?;
     ensure_labels(state, &slug).await?;
     // What GitHub already has: the spec's sub-issues, or the open tickets for a standalone one.
@@ -367,8 +462,8 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             fresh += 1;
             (n, Some(id), true)
         };
-        let spec_link = spec.map(|number| IssueLink { number, title: String::new() });
-        crate::grill::record_published(state, &me.id, &slug, spec_link, vec![IssueLink { number: n, title: t.title.clone() }]);
+        let spec_link = spec.map(|number| IssueLink { number, title: String::new(), id: String::new() });
+        crate::grill::record_published(state, &me.id, &slug, spec_link, vec![IssueLink { number: n, title: t.title.clone(), id: String::new() }]);
         if let Some(s) = spec {
             let lk = format!("{s}/{n}");
             if !matches!(state.db.published_issue(&slug, "sub_issue", &lk), Ok(Some(_))) {
@@ -539,7 +634,7 @@ pub(crate) mod tests {
         assert!(out.contains("already published as #6"), "{out}");
         assert!(posts(&fake, "octo/spec-lost", "issues").is_empty());
         assert!(publish(&st, &a, "Rounds").await.unwrap().contains("#6"));
-        assert_eq!(fake.seen("/repos/octo/spec-lost/issues?").len(), 1, "the second retry trusts Loft's record");
+        assert_eq!(fake.seen("/repos/octo/spec-lost/issues?labels=spec").len(), 1, "the second retry trusts Loft's record");
     }
 
     #[tokio::test]
@@ -593,23 +688,97 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn explains_what_is_missing() {
-        let (_fake, st) = (fake_github(), state());
+    async fn without_a_github_repo_the_spec_stays_in_loft_and_github_is_never_called() {
+        let st = state();
+        let fake = own_fake(&st);
         let mut a = planner(&st, "spec-nowhere");
-        assert!(publish(&st, &a, "X").await.unwrap_err().starts_with("You have no project"));
-        a.project = "spec-nowhere".into();
-        assert!(publish(&st, &a, "X").await.unwrap_err().contains("isn't a git repo"));
-
-        let a = planner_on(&st, "spec-no-origin", None);
-        assert!(publish(&st, &a, "X").await.unwrap_err().contains("has no `origin` remote"));
-        let a = planner_on(&st, "spec-gitlab", Some("https://gitlab.com/octo/x.git"));
-        assert!(publish(&st, &a, "X").await.unwrap_err().contains("isn't on GitHub"));
-
-        let a = planner_on(&st, "spec-no-token", Some("https://github.com/octo/spec-no-token"));
+        let cases: Vec<(Agent, &str)> = {
+            let no_project = a.clone();
+            a.project = "spec-nowhere".into();
+            st.db.save_agent(&a).unwrap();
+            vec![
+                (no_project, "you have no project"),
+                (a.clone(), "isn't a git repo"),
+                (planner_on(&st, "spec-no-origin", None), "has no `origin` remote"),
+                (planner_on(&st, "spec-gitlab", Some("https://gitlab.com/octo/x.git")), "isn't on GitHub"),
+            ]
+        };
+        for (who, why) in &cases {
+            let out = publish(&st, who, "X").await.unwrap();
+            assert!(out.starts_with("Saved the spec as a Loft issue labelled `spec`") && out.contains(why) && out.contains("nothing went to GitHub"), "{out}");
+        }
+        // A repo, but GitHub isn't connected: also kept in Loft.
+        let b = planner_on(&st, "spec-no-token", Some("https://github.com/octo/spec-no-token"));
         let mut s = st.settings.get();
         s.github_token = String::new();
         st.settings.save(s).unwrap();
-        assert!(publish(&st, &a, "X").await.unwrap_err().starts_with("GitHub isn't connected"));
+        let out = publish(&st, &b, "X").await.unwrap();
+        assert!(out.contains("GitHub isn't connected"), "{out}");
+        assert!(fake.seen("/").is_empty(), "no GitHub request at all: {:?}", fake.seen("/"));
+
+        let specs: Vec<_> = st.db.list_tasks().unwrap().into_iter().filter(|t| t.labels == ["spec"]).collect();
+        assert_eq!(specs.len(), 5, "one per project, the project-less one included");
+        assert!(specs.iter().all(|t| t.github.is_none() && t.title == "X" && t.description == "## Problem Statement\n\nIt hurts." && t.status == "inbox"));
+    }
+
+    #[tokio::test]
+    async fn a_plan_without_a_repo_becomes_linked_loft_issues_with_no_github_requests() {
+        let st = state();
+        let fake = own_fake(&st);
+        let a = planner_on(&st, "plan-local", None);
+        crate::grill::tests::round(&st, &a, &["Turn this into a spec and tickets?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+
+        let out = publish(&st, &a, "Offline mode").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.labels == ["spec"]).unwrap();
+        assert!(out.contains(&format!("spec: \"{}\"", spec.id)), "{out}");
+        assert_eq!(publish(&st, &a, " offline  MODE ").await.unwrap(), format!("The spec \"offline MODE\" is already saved as Loft issue {}. Nothing new was created and its text wasn't changed.", spec.id));
+
+        let tickets = json!([ticket("UI", &["Store"]), ticket("Store", &[]), ticket("Sync", &["Store", "UI"])]);
+        let out = mcp_call(&st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": tickets })).await.unwrap().unwrap();
+        assert!(out.starts_with("Saved 3 tickets as Loft issues under the spec \"Offline mode\", blockers first, labelled `ready-for-agent`"), "{out}");
+        let all = st.db.list_tasks().unwrap();
+        let by = |title: &str| all.iter().find(|t| t.title == title).unwrap().clone();
+        let (store, ui, sync) = (by("Store"), by("UI"), by("Sync"));
+        for t in [&store, &ui, &sync] {
+            assert_eq!((t.parent_id.as_deref(), t.labels.as_slice(), t.status.as_str(), t.project.as_str()), (Some(spec.id.as_str()), &["ready-for-agent".to_string()][..], "ready", "plan-local"));
+            assert!(t.github.is_none() && t.agent_id.is_none() && t.created_by == a.id);
+        }
+        assert_eq!((store.depends_on.clone(), ui.depends_on.clone(), sync.depends_on.clone()), (vec![], vec![store.id.clone()], vec![store.id.clone(), ui.id.clone()]));
+
+        // The same tickets again: nothing new. A number for a Loft spec, or a spec from elsewhere, is refused.
+        let again = mcp_call(&st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": tickets })).await.unwrap().unwrap();
+        assert!(again.contains("Nothing new was created") && again.matches(", already saved").count() == 3, "{again}");
+        assert_eq!(st.db.list_tasks().unwrap().len(), 4);
+        assert!(mcp_call(&st, &a, "publish_tickets", &json!({ "spec": 7, "tickets": tickets })).await.unwrap().unwrap_err().contains("not a number"));
+        assert!(mcp_call(&st, &a, "publish_tickets", &json!({ "spec": "nope", "tickets": tickets })).await.unwrap().unwrap_err().starts_with("There's no spec with the Loft issue id nope"));
+        // A standalone ticket needs no spec.
+        let one = mcp_call(&st, &a, "publish_tickets", &json!({ "tickets": [ticket("Docs", &[])] })).await.unwrap().unwrap();
+        assert!(one.starts_with("Saved a standalone ticket as a Loft issue"), "{one}");
+
+        // The end-of-planning card links to the Loft issues.
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Offline it is." })).unwrap().unwrap();
+        let card = &summary(&st, &a).meta["grill"]["end_card"];
+        assert_eq!(card["repo"], "");
+        assert_eq!(card["spec"], json!({ "number": 0, "title": "Offline mode", "url": format!("/tasks/{}", spec.id) }));
+        assert_eq!(card["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect::<Vec<_>>()[..3], [format!("/tasks/{}", store.id), format!("/tasks/{}", ui.id), format!("/tasks/{}", sync.id)]);
+        assert_eq!(card["next_message"], "Implement the plan: hand its ready Loft issues to the team");
+        assert!(fake.seen("/").is_empty(), "no GitHub request at all: {:?}", fake.seen("/"));
+    }
+
+    #[tokio::test]
+    async fn with_a_repo_the_plan_still_goes_to_github() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/plan-remote";
+        let a = planner_on(&st, "plan-remote", Some("https://github.com/octo/plan-remote"));
+        tickets_repo(&fake, slug, 60, &[60, 61]);
+        let out = publish(&st, &a, "Remote mode").await.unwrap();
+        assert!(out.starts_with("Published the spec as #60"), "{out}");
+        assert!(mcp_call(&st, &a, "publish_tickets", &json!({ "spec": "60", "tickets": [ticket("Store", &[])] })).await.unwrap().unwrap_err().contains("pass the spec's GitHub issue number"));
+        let out = publish_tickets(&st, &a, Some(60), vec![ticket("Store", &[])]).await.unwrap();
+        assert!(out.contains("#61 Store"), "{out}");
+        assert!(st.db.list_tasks().unwrap().iter().all(|t| !t.labels.iter().any(|l| l == "spec")), "no Loft-only spec was made");
+        assert_eq!(posts(&fake, slug, "issues").len(), 2);
     }
 
     /// A repo with both labels and spec #spec, whose issue creations answer these numbers in turn (id = number * 100).
