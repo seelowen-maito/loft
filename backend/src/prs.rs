@@ -55,7 +55,7 @@ pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
     // GitHub computes mergeability lazily; ask again shortly when it's unknown.
     if pr.state == "open" && pr.mergeable.is_none() && pr.error.is_none() {
         let (state, id) = (state.clone(), pr.id.clone());
-        tokio::spawn(async move {
+        tokio::spawn(github::as_source("prs", async move {
             for delay in [3, 8, 20] {
                 tokio::time::sleep(Duration::from_secs(delay)).await;
                 match refresh_once(&state, &id).await {
@@ -63,7 +63,7 @@ pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
                     _ => break,
                 }
             }
-        });
+        }));
     }
     Ok(pr)
 }
@@ -168,13 +168,16 @@ pub async fn merge(state: &AppState, id: &str, method: &str) -> Result<PullReque
 /// Keep open PRs current so merges made elsewhere show up.
 pub async fn poller(state: AppState) {
     let mut tick = tokio::time::interval(POLL_EVERY);
-    loop {
-        tick.tick().await;
-        let Ok(prs) = state.db.list_pull_requests(None) else { continue };
-        for pr in prs.into_iter().filter(|p| p.state == "open" || p.state.is_empty()) {
-            let _ = refresh(&state, &pr.id).await;
+    github::as_source("prs", async {
+        loop {
+            tick.tick().await;
+            let Ok(prs) = state.db.list_pull_requests(None) else { continue };
+            for pr in prs.into_iter().filter(|p| p.state == "open" || p.state.is_empty()) {
+                let _ = refresh(&state, &pr.id).await;
+            }
         }
-    }
+    })
+    .await
 }
 
 /// Find PRs agents opened before this feature existed, anchored to their tool calls.

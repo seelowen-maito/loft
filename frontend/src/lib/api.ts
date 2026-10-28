@@ -354,6 +354,13 @@ export type Settings = {
 
 export type ApprovalMode = "ask" | "own" | "all";
 
+/** GitHub's rate limit as its last answers said (`reset` in Unix seconds), and Loft's requests this hour by source. */
+export type GithubBudget = {
+  resources: Record<string, { limit: number; remaining: number; used: number; reset: number }>;
+  by_source: Record<string, { requests: number; not_modified: number }>;
+  window_reset: number | null;
+};
+
 export type SettingsView = {
   settings: Settings;
   github_token_set: boolean;
@@ -422,6 +429,7 @@ export const api = {
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),

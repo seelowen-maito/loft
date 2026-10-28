@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         gh_token: Arc::new(github::TokenCache::default()),
         gh_pace: Arc::new(github::Pace::default()),
+        gh_budget: Arc::new(Default::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
         settings: Arc::new(settings::Store::load(&data_dir)?),
         usage: Arc::new(usage::Cache::default()),
@@ -150,6 +151,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/pull-requests", get(api::list_pull_requests))
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
+        .route("/github/budget", get(github::budget))
+        // GitHub requests a person's page or click makes count as `user` (a poller's have their own source).
+        .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| github::as_source("user", next.run(req))))
         .layer(axum::middleware::from_fn(guard::same_origin_writes));
 
     // Serve the built frontend when present (production mode).

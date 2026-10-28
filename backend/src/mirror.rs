@@ -67,6 +67,10 @@ pub struct Report {
 
 /// Polls every project's repo; the first round and every `FULL_EVERY`th are full reads.
 pub async fn poller(state: AppState) {
+    crate::github::as_source("mirror", poll(state)).await
+}
+
+async fn poll(state: AppState) {
     let mut round: u64 = 0;
     loop {
         let full = round.is_multiple_of(FULL_EVERY);
@@ -81,9 +85,9 @@ pub async fn poller(state: AppState) {
 /// A full read of one project, in the background: after Loft publishes there, for example.
 pub fn spawn_sync(state: &AppState, project: &str) {
     let (state, project) = (state.clone(), project.trim().to_string());
-    tokio::spawn(async move {
+    tokio::spawn(crate::github::as_source("mirror", async move {
         let _ = sync_project(&state, &project, true).await;
-    });
+    }));
 }
 
 #[derive(Deserialize, Default)]
@@ -568,7 +572,7 @@ pub fn spawn_write_through(state: &AppState, before: Task, after: Task) {
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
     let state = state.clone();
-    rt.spawn(async move { write_through(&state, &before, &after).await });
+    rt.spawn(crate::github::as_source("mirror", async move { write_through(&state, &before, &after).await }));
 }
 
 fn links_changed(before: &Task, after: &Task) -> bool {

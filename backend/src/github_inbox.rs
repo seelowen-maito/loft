@@ -130,12 +130,15 @@ async fn refresh(state: &AppState) -> anyhow::Result<()> {
 /// Refreshes the list every few minutes. One request per poll, so it stays far from rate limits.
 pub async fn poller(state: AppState) {
     let mut tick = tokio::time::interval(POLL_EVERY);
-    loop {
-        tick.tick().await;
-        if let Err(e) = refresh(&state).await {
-            tracing::warn!("github inbox: {e}");
+    crate::github::as_source("inbox", async {
+        loop {
+            tick.tick().await;
+            if let Err(e) = refresh(&state).await {
+                tracing::warn!("github inbox: {e}");
+            }
         }
-    }
+    })
+    .await
 }
 
 #[cfg(test)]
