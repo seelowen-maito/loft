@@ -51,18 +51,19 @@ function IssueFields({ description, setDescription, labels, setLabels, owner, se
 }
 
 /** Edit a task's title, description, labels and owner. */
-function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
+function EditDialog({ task: t, projects, onClose }: { task: Task; projects: string[]; onClose: () => void }) {
   const [title, setTitle] = useState(t.title);
   const [description, setDescription] = useState(t.description);
   const [labels, setLabels] = useState(t.labels.join(", "));
   const [owner, setOwner] = useState(t.owner);
+  const [project, setProject] = useState(t.project);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.updateTask(t.id, { title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim() || null });
+      await api.updateTask(t.id, { title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim() || null, project: project.trim() });
       onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -74,6 +75,13 @@ function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
     <Modal title="Edit Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className={FIELD} aria-label="Title" />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
+      {/* Mirrored issues stay on their repo. */}
+      {!t.github && (
+        <>
+          <input list="edit-projects" value={project} onChange={(e) => setProject(e.target.value)} placeholder="Project (its GitHub repo is where Publish goes)" className={FIELD} aria-label="Project" />
+          <datalist id="edit-projects">{projects.map((p) => <option key={p} value={p} />)}</datalist>
+        </>
+      )}
       {ACTIVE.includes(t.status) && <p className="text-[12px] text-fg-3">The agent already has the old description: message it if the work changes.</p>}
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -84,8 +92,15 @@ function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
   );
 }
 
+/** Why an open Loft-only issue can't be published yet, or null when it can. `repo` is its project's GitHub repo. */
+export function publishBlocked(t: { project: string }, repo: string | undefined): string | null {
+  if (!t.project.trim()) return "Pick a project first";
+  if (!repo) return "This project has no GitHub repo";
+  return null;
+}
+
 /** Buttons on a task's page: run, reassign, done, reopen, cancel, edit, copy link, delete. */
-export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Agent[]; repo?: string }) {
+export function TaskActions({ task: t, agents, repo, projects = [] }: { task: Task; agents: Agent[]; repo?: string; projects?: string[] }) {
   const navigate = useNavigate();
   const [dialog, setDialog] = useState<"run" | "cancel" | "delete" | "edit" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,12 +161,22 @@ export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Age
             <X className="size-3.5" /> Cancel issue
           </button>
         )}
-        {/* Only a Loft-only issue in a project with a GitHub repo can be published. */}
-        {!t.github && repo && t.state === "open" && (
-          <button className="btn" disabled={busy} onClick={() => act(() => api.publishTask(t.id))} title={`Create it as an issue on ${repo} and link them`}>
-            <CloudUpload className="size-3.5" /> Publish to GitHub
-          </button>
-        )}
+        {/* Always there on an open Loft-only issue; when it can't publish, it says why. */}
+        {!t.github && t.state === "open" && (() => {
+          const why = publishBlocked(t, repo);
+          return (
+            <span className="inline-flex items-center gap-2">
+              <button className="btn" disabled={busy || !!why} onClick={() => act(() => api.publishTask(t.id))} title={why ?? `Create it as an issue on ${repo} and link them`}>
+                <CloudUpload className="size-3.5" /> Publish to GitHub
+              </button>
+              {why && (
+                <button className="font-mono text-[11px] text-fg-3 underline decoration-dotted underline-offset-2 hover:text-fg" onClick={() => setDialog("edit")}>
+                  {why}
+                </button>
+              )}
+            </span>
+          );
+        })()}
         <button className="btn-ghost" onClick={() => setDialog("edit")} title="Edit title, description, labels and owner">
           <Pencil className="size-3.5" /> Edit
         </button>
@@ -167,7 +192,7 @@ export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Age
       {error && <div className="text-[12px] text-bad">{error}</div>}
 
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
-      {dialog === "edit" && <EditDialog task={t} onClose={() => setDialog(null)} />}
+      {dialog === "edit" && <EditDialog task={t} projects={projects} onClose={() => setDialog(null)} />}
       {dialog === "cancel" && (
         <Modal title="Cancel this issue?" onClose={() => setDialog(null)}>
           <p className="text-[13px] text-fg-2">

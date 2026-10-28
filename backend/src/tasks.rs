@@ -250,8 +250,14 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
         return Err("title is required".into());
     }
     apply_fields(state, &mut t, p)?;
-    if t.agent_id.is_some() {
+    if let Some(a) = t.agent_id.as_deref() {
         t.kind = "work".into();
+        // No project given: the agent's, so the issue can be published to its repo.
+        if t.project.is_empty()
+            && let Ok(Some(agent)) = state.db.get_agent(a)
+        {
+            t.project = agent.project.trim().to_string();
+        }
     }
     t.status = match p.get("status").and_then(|v| v.as_str()) {
         Some(s) if ["inbox", "ready"].contains(&s) => s.into(),
@@ -964,7 +970,8 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                     p[k] = json!(s(k));
                 }
             }
-            if s("project").is_empty() && !me.project.is_empty() {
+            // No project given: the assignee's (in `create`), else the creating agent's.
+            if s("project").is_empty() && assignee.is_none() && !me.project.is_empty() {
                 p["project"] = json!(me.project);
             }
             let (t, _) = create(state, &p, &me.id)?;
