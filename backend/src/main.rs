@@ -14,6 +14,7 @@ mod planning;
 mod guard;
 mod mcp;
 mod mentions;
+mod mirror;
 mod prs;
 mod push;
 mod repos;
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         grill_locks: Arc::new(grill::Locks::default()),
         publish_locks: Arc::new(planning::Locks::default()),
         publish_known: Arc::new(planning::Known::default()),
+        mirror: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));
@@ -87,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
+    tokio::spawn(mirror::poller(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))
@@ -99,9 +102,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
-        .route("/issues", get(issues::list))
-        .route("/issues/{number}", get(issues::get))
-        .route("/issues/{number}/send", post(issues::send))
+        // A project's GitHub issues, read live. `/issues` is the Loft issues list now.
+        .route("/github/issues", get(issues::list))
+        .route("/github/issues/{number}", get(issues::get))
+        .route("/github/issues/{number}/send", post(issues::send))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
@@ -129,12 +133,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/grill/commands", get(grill::command_catalog))
         .route("/grill/{id}", get(grill::get))
         .route("/grill/{id}/command", post(grill::command))
-        .route("/tasks", get(tasks::list).post(tasks::create_task))
-        .route("/tasks/{id}", get(tasks::get).patch(tasks::update).delete(tasks::delete))
-        .route("/tasks/{id}/execute", post(tasks::execute_task))
-        .route("/tasks/{id}/cancel", post(tasks::cancel))
-        .route("/tasks/{id}/comments", get(tasks::list_comments).post(tasks::add_comment))
-        .route("/tasks/{id}/plan", get(tasks::plan))
+        .nest("/issues", tasks::routes())
+        // The old name, kept until the iOS app moves to `/issues`.
+        .nest("/tasks", tasks::routes())
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
