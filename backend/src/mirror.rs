@@ -1364,7 +1364,7 @@ mod tests {
         assert!(lists()[0].path.contains("state=open"));
 
         // Opening it again: the change poll, not a full read.
-        sync_now(State(st.clone()), None).await.unwrap();
+        let _ = sync_now(State(st.clone()), None).await.unwrap();
         assert_eq!(lists().len(), 2);
         assert!(lists()[1].path.contains("state=all") && lists()[1].path.contains("since="), "{}", lists()[1].path);
         assert_eq!(mirrored(&st, repo).len(), 1, "no duplicate for the second project");
