@@ -155,6 +155,21 @@ final class LoftUITests: XCTestCase {
     }
 
     /// The Talk button: a tap talks to the Orchestrator; the long-press menu talks to another agent or dictates.
+    /// Agent messages in the fixture chat: the FYI one carries the mark (and says so to VoiceOver), the needs-action one doesn't.
+    func testFYIMarkOnlyOnFYIAgentMessages() {
+        let app = launch()
+        openOrchestratorChat(app)
+        let fyi = app.staticTexts["Backend Agent, FYI: Merged #40 on main; the endpoints are live."]
+        XCTAssertTrue(fyi.appears(timeout: 5), "VoiceOver reads the FYI message with FYI in its label")
+        let marks = app.staticTexts.matching(identifier: "fyiMark")
+        XCTAssertTrue(marks.matching(NSPredicate(format: "label == 'FYI'")).firstMatch.exists, "the mark shows in the chat")
+        XCTAssertEqual(fyi.identifier, "fyiMark", "the mark sits on the FYI message")
+        let needsAction = app.staticTexts["Backend Agent: Please review PR #41 before I merge it."]
+        XCTAssertTrue(needsAction.exists)
+        XCTAssertNotEqual(needsAction.identifier, "fyiMark", "no mark on a needs-action message")
+        XCTAssertFalse(marks.matching(NSPredicate(format: "label CONTAINS 'PR #41'")).firstMatch.exists)
+    }
+
     func testTalkButton() {
         let app = launch()
         let talk = app.buttons["talkButton"]
