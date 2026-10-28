@@ -87,6 +87,17 @@ function useUnreadCount(live: boolean) {
   return count;
 }
 
+/** The Agents tab's Unread reply dot. Its own component so agent events re-render only the dot, not App and the page under it. */
+function UnreadDot({ live }: { live: boolean }) {
+  const unread = useUnreadCount(live);
+  if (!unread) return null;
+  return (
+    <span className="absolute -right-2 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 font-mono text-[9px] font-medium leading-none text-ink-950" title={`${unread} Unread repl${unread > 1 ? "ies" : "y"}`}>
+      {unreadBadge(unread)}
+    </span>
+  );
+}
+
 /** Whether the Simulator tab is on (Settings → Navigation). Off until the settings load. */
 function useShowSimulator() {
   const [show, setShow] = useState(false);
@@ -102,7 +113,6 @@ function useShowSimulator() {
 export default function App() {
   const live = useLiveConnection();
   const showSimulator = useShowSimulator();
-  const unread = useUnreadCount(live);
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
       "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors",
@@ -124,11 +134,7 @@ export default function App() {
               {/* The dot sits on the icon so it still shows on phones, where the label hides. */}
               <span className="relative">
                 <Bot className="size-3.5" />
-                {!!unread && (
-                  <span className="absolute -right-2 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 font-mono text-[9px] font-medium leading-none text-ink-950" title={`${unread} Unread repl${unread > 1 ? "ies" : "y"}`}>
-                    {unreadBadge(unread)}
-                  </span>
-                )}
+                <UnreadDot live={live} />
               </span>{" "}
               <span className="max-md:hidden">Agents</span>
             </NavLink>
