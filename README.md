@@ -39,7 +39,7 @@ loft is built for engineers who already code with AI and want to try autonomous 
 - **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
 - **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.
 - **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.
-- **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone. A green dot by an agent's name means it answered you (your message or its schedule) since you last looked at its chat; its runs other agents started stay silent. The Agents tab counts them in a green dot from any page, and the browser tab title reads "(N) Loft".
+- **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
 
 loft aims to support any and every coding agent: Claude Code, Codex, and whatever comes next.
