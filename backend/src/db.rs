@@ -68,6 +68,9 @@ pub struct Agent {
     /// The agent that created this one, if an agent did. None when the user did.
     #[serde(default)]
     pub created_by: Option<String>,
+    /// FYI Agent messages it hasn't read yet, as prompt text: prepended to its next run's prompt, then cleared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_fyis: Vec<String>,
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.

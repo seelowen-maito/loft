@@ -37,7 +37,7 @@ loft is built for engineers who already code with AI and want to try autonomous 
 ## Why loft
 
 - **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
-- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.
+- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help. Each message is marked needs action, which wakes the recipient, or FYI, which shows in its chat right away and is read at the start of its next run without waking it.
 - **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.
 - **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
@@ -73,7 +73,7 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
 - **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `npm` and `cargo` on `PATH`.
-- **Messaging rules**: on by default. Every agent's instructions include Loft's rules for messaging other agents: send only findings, reports, verdicts and requests, never thanks or waiting notes, and send a verdict only to the agent that acts on it. Turn off to leave messaging to each agent's own instructions.
+- **Messaging rules**: on by default. Every agent's instructions include Loft's rules for messaging other agents: send only findings, reports, verdicts and requests, never thanks or waiting notes, and send a verdict only to the agent that acts on it; and mark each message needs action or FYI. Turn off to leave messaging to each agent's own instructions: every message then wakes its recipient.
 
 ### Use it from other devices
 

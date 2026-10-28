@@ -471,6 +471,25 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
     start(state, &to.id, Some(prompt), "agent");
 }
 
+/// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
+/// but starts no run. The recipient reads it at the start of its next run, whatever starts that.
+pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": from.id, "name": from.name }, "fyi": true }));
+    let prompt = format!(
+        "[FYI from agent {name} (id {id}), not from the user. It needs no action and no reply.]\n{text}",
+        name = from.name,
+        id = from.id,
+    );
+    let _ = state.db.update_agent(&to.id, |a| a.pending_fyis.push(prompt));
+}
+
+/// `prompt` with the agent's pending FYIs in front, which are then cleared.
+fn with_fyis(state: &AppState, agent_id: &str, prompt: String) -> String {
+    let mut fyis = vec![];
+    let _ = state.db.update_agent(agent_id, |a| fyis = std::mem::take(&mut a.pending_fyis));
+    if fyis.is_empty() { prompt } else { format!("{}\n\n{prompt}", fyis.join("\n\n")) }
+}
+
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str) {
     let prompt = text.unwrap_or_else(|| {
         format!(
@@ -503,6 +522,10 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
         loop {
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
+            }
+            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            if trigger != "compact" && trigger != "avatar" {
+                prompt = with_fyis(&state, &agent_id, prompt);
             }
             if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
@@ -1128,7 +1151,7 @@ pub async fn scheduler(state: AppState) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1264,7 +1287,7 @@ case "$prompt" in *linger*|*hang*)
 esac
 "#;
 
-    fn fake_claude_state() -> (AppState, Agent) {
+    pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let bin = dir.join("fake-claude");
@@ -1279,7 +1302,7 @@ esac
         (st, a)
     }
 
-    async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
+    pub(crate) async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
         let end = tokio::time::Instant::now() + Duration::from_secs(secs);
         while !f() {
             assert!(tokio::time::Instant::now() < end, "timed out waiting for: {what}");
