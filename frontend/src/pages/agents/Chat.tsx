@@ -13,6 +13,7 @@ import { GrillBar } from "./GrillBar";
 import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
 import { ContextSize } from "./ContextSize";
+import { ResumeDialog } from "./ResumeDialog";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
@@ -78,6 +79,7 @@ type Command = { name: string; description: string };
 const COMMANDS: Command[] = [
   { name: "/clear", description: "Clear the conversation context and start fresh. Memory is kept." },
   { name: "/compact", description: "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary." },
+  { name: "/resume", description: "Go back to one of this agent's past sessions." },
   { name: "/code", description: "Open this agent's workspace folder in VS Code." },
   { name: "/grill", description: "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it." },
 ];
@@ -108,6 +110,7 @@ export function Chat({
   const [cmdNote, setCmdNote] = useState<string | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showEarlier, setShowEarlier] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const picker = useRef<HTMLInputElement>(null);
   // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
@@ -265,6 +268,10 @@ export function Chat({
     if (name === "/clear") return clearContext();
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor();
+    if (name === "/resume") {
+      setText("");
+      return setResuming(true);
+    }
     if (name === "/grill") {
       // Picked from the menu: leave room for the topic; Enter again starts it.
       setText("/grill ");
@@ -406,7 +413,7 @@ export function Chat({
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
             {agent.context_tokens != null && (
-              <ContextSize tokens={agent.context_tokens} running={running} onCompact={() => compactContext("")} onClear={clearContext} />
+              <ContextSize tokens={agent.context_tokens} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
             )}
           </div>
         </div>
@@ -708,6 +715,7 @@ export function Chat({
           </div>
         </div>
       </div>
+      {resuming && <ResumeDialog agentId={agent.id} running={running} onClose={() => setResuming(false)} />}
     </div>
   );
 }
@@ -751,6 +759,17 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80">
           /clear · context cleared, memory kept · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
+      </div>
+    );
+  }
+  if (m.kind === "resume") {
+    return (
+      <div className="flex items-center gap-3 py-2">
+        <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
+        <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80" title={m.meta?.first_message}>
+          /resume · resumed the Session from {new Date(m.meta?.started_at ?? m.created_at).toLocaleDateString(undefined, { dateStyle: "medium" })} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>

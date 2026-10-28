@@ -18,6 +18,7 @@ mod prs;
 mod push;
 mod repos;
 mod schedule;
+mod sessions;
 mod settings;
 mod setup;
 mod signing;
@@ -115,6 +116,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
+        .route("/agents/{id}/sessions", get(api::list_sessions))
+        .route("/agents/{id}/resume-session", post(api::resume_session))
         .route("/agents/{id}/avatar/randomize", post(api::randomize_avatar))
         .route("/agents/{id}/memories", get(api::list_memories).post(api::add_memory))
         .route("/agents/{id}/memories/{mid}", delete(api::delete_memory))

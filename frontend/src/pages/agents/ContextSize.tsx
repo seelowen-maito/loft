@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Minimize2, RotateCcw } from "lucide-react";
+import { History, Minimize2, RotateCcw } from "lucide-react";
 import { cx, fmtNum } from "../../lib/format";
 import { contextWarns } from "../../lib/context";
 
 /** The chat header's context size: warns past the smart zone, and opens Compact and Clear for the Session. */
-export function ContextSize({ tokens, running, onCompact, onClear }: {
+export function ContextSize({ tokens, running, onCompact, onClear, onResume }: {
   tokens: number;
   running: boolean;
   onCompact: () => void;
   onClear: () => void;
+  onResume: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
@@ -56,6 +57,13 @@ export function ContextSize({ tokens, running, onCompact, onClear }: {
             <span>
               <span className="block text-fg">Clear</span>
               <span className="block text-[11.5px] text-fg-3">Start a fresh Session. Memory is kept.</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" className="flex items-start gap-2 rounded-md px-2.5 py-1.5 text-left hover:bg-white/5 disabled:opacity-50 disabled:hover:bg-transparent" disabled={running} onClick={() => pick(onResume)}>
+            <History className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              <span className="block text-fg">Resume a session</span>
+              <span className="block text-[11.5px] text-fg-3">Go back to one of this agent's past sessions.</span>
             </span>
           </button>
         </span>

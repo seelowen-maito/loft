@@ -340,6 +340,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         ("assistant", "tool_use") => format!("{} (tool)", a.name),
                         (_, "error") => "error".into(),
                         (_, "clear") => return Some(format!("[{}] --- context cleared ---", &m.created_at[..16])),
+                        (_, "resume") => return Some(format!("[{}] --- {} ---", &m.created_at[..16], m.content.trim_end_matches('.'))),
                         _ => return None,
                     };
                     Some(format!("[{}] {who}: {}", &m.created_at[..16], clip(&m.content, 2000)))

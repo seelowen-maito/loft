@@ -55,10 +55,18 @@ export type Message = {
   agent_id: string;
   run_id: string | null;
   role: "user" | "assistant" | "system" | "tool";
-  kind: "text" | "thinking" | "tool_use" | "tool_result" | "permission" | "error" | "notice" | "run_start" | "run_end" | "clear" | "compact";
+  kind: "text" | "thinking" | "tool_use" | "tool_result" | "permission" | "error" | "notice" | "run_start" | "run_end" | "clear" | "compact" | "resume";
   content: string;
   meta: Record<string, any>;
   created_at: string;
+};
+
+/** One of an agent's past Sessions, from Claude Code's transcripts (`/api/agents/{id}/sessions`). */
+export type PastSession = {
+  id: string;
+  started_at: string;
+  first_message: string;
+  context_tokens: number | null;
 };
 
 export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waiting_approval" | "done" | "failed" | "cancelled";
@@ -502,6 +510,8 @@ export const api = {
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
+  sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
+  resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
   randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),

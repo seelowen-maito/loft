@@ -101,34 +101,12 @@ fn set_context_tokens(state: &AppState, agent_id: &str, n: Option<u64>) {
     }
 }
 
-/// Context size from the end of a Claude Code session transcript: the last main-thread reply's input,
-/// or the compacted size if a compaction came after it.
-fn transcript_context(sid: &str) -> Option<u64> {
-    let projects = dirs::home_dir()?.join(".claude/projects");
-    let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{sid}.jsonl"))).find(|p| p.exists())?;
-    let mut last = None;
-    for line in std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(file).ok()?)).map_while(Result::ok) {
-        let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
-        match (ev["type"].as_str(), ev["subtype"].as_str()) {
-            (Some("assistant"), _) if !ev["isSidechain"].as_bool().unwrap_or(false) => {
-                let u = &ev["message"]["usage"];
-                if u.is_object() {
-                    last = Some(["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum());
-                }
-            }
-            (Some("system"), Some("compact_boundary")) => last = ev["compactMetadata"]["postTokens"].as_u64(),
-            _ => {}
-        }
-    }
-    last
-}
-
 /// Fill in context sizes for agents that haven't replied since this field was added.
 pub async fn backfill_context(state: AppState) {
     let Ok(agents) = state.db.list_agents() else { return };
     for a in agents.into_iter().filter(|a| a.context_tokens.is_none()) {
         let Some(sid) = a.session_id.clone() else { continue };
-        let n = tokio::task::spawn_blocking(move || transcript_context(&sid)).await.ok().flatten();
+        let n = tokio::task::spawn_blocking(move || crate::sessions::context_of(&sid)).await.ok().flatten();
         set_context_tokens(&state, &a.id, n);
     }
 }
@@ -1204,6 +1182,7 @@ prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
 while [ $# -gt 0 ]; do
   [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
+  [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
@@ -1296,6 +1275,39 @@ esac
         assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
         run(&st, &a.id, "after compact", 5).await;
         assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resuming_a_past_session_resumes_it_with_a_fresh_memory_index() {
+        let (st, a) = fake_claude_state();
+        st.db.add_memory(&a.id, "Deploys go through staging", "Every deploy goes to staging first.", "").unwrap();
+        run(&st, &a.id, "hello", 1).await;
+        st.db.add_memory(&a.id, "User prefers short replies", "Keep chat replies to a few lines.", "").unwrap();
+
+        let dir = crate::sessions::tests::tmp();
+        let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        crate::sessions::tests::write(&dir, past, &[
+            r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":120000}}}"#,
+        ]);
+        let resume = |sid: &str| crate::api::resume_from(&st, &a.id, dir.clone(), sid.into());
+        assert_eq!(resume("feed-404").await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        assert_eq!(resume(past).await.unwrap_err().0, axum::http::StatusCode::CONFLICT, "not while it runs");
+        st.rt.lock().unwrap().running.remove(&a.id);
+
+        let _ = resume(past).await.unwrap();
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!(now.session_id.as_deref(), Some(past));
+        assert_eq!(now.context_tokens, Some(120010), "the header shows the resumed Session's size");
+        let marker = st.db.list_messages(&a.id, 50, None).unwrap().into_iter().find(|m| m.kind == "resume").unwrap();
+        assert_eq!(marker.content, "Resumed the Session from 2026-10-20.");
+        assert_eq!(resume(past).await.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST, "already its Session");
+
+        run(&st, &a.id, "where were we?", 2).await;
+        let resumed = std::fs::read_to_string(workspace(&st, &a.id).join("resumed.log")).unwrap();
+        assert_eq!(resumed.lines().last(), Some(past), "the next run resumes the picked Session");
+        assert!(memory_parts(&st, &a.id)[1].contains("short replies"), "the memory index is built afresh");
     }
 
     #[test]

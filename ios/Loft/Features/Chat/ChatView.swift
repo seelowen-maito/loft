@@ -619,6 +619,10 @@ enum ChatItem: Identifiable, Hashable {
             case "compact":
                 flush()
                 out.append(.divider(id: m.id, text: "Conversation compacted", date: m.createdAt))
+            case "resume":
+                // "Resumed the Session from 2026-10-20." from the web's /resume: the log goes on, nothing reloads.
+                flush()
+                out.append(.divider(id: m.id, text: m.content.trimmingCharacters(in: CharacterSet(charactersIn: ".")), date: m.createdAt))
             default:
                 flush()
                 out.append(.message(m))

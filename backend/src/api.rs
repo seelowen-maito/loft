@@ -555,6 +555,59 @@ pub async fn compact_session(State(state): State<AppState>, Path(id): Path<Strin
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `/resume`: the agent's past Sessions, from Claude Code's transcripts for its workspace, newest first.
+pub async fn list_sessions(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let dir = crate::sessions::transcripts_dir(&workspace(&state, &id));
+    let sessions = tokio::task::spawn_blocking(move || crate::sessions::list(&dir)).await.unwrap_or_default();
+    Ok(Json(json!({ "sessions": sessions, "current": a.session_id })))
+}
+
+#[derive(Deserialize)]
+pub struct ResumeSession {
+    session_id: String,
+}
+
+/// Makes a past Session the agent's own: its next run resumes it.
+pub async fn resume_session(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<ResumeSession>) -> ApiResult<Value> {
+    let dir = crate::sessions::transcripts_dir(&workspace(&state, &id));
+    resume_from(&state, &id, dir, b.session_id).await
+}
+
+pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::PathBuf, sid: String) -> ApiResult<Value> {
+    let a = state.db.get_agent(id)?.ok_or_else(not_found)?;
+    if is_running(state, id) {
+        return Err(ApiError(StatusCode::CONFLICT, "Agent is working. Stop it before resuming a Session.".into()));
+    }
+    if a.session_id.as_deref() == Some(sid.as_str()) {
+        return Err(bad("That's already the agent's Session."));
+    }
+    let s = tokio::task::spawn_blocking(move || crate::sessions::find(&dir, &sid))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "No such Session in this agent's transcripts.".into()))?;
+    {
+        let mut rt = state.rt.lock().unwrap();
+        rt.queued.remove(id);
+        rt.grill_queued.remove(id);
+    }
+    // As for a new Session, the next run builds the memory index afresh.
+    let a = state.db.update_agent(id, |a| {
+        a.session_id = Some(s.id.clone());
+        a.context_tokens = s.context_tokens;
+        a.grill_briefed = false;
+        a.memory_index = None;
+    })?.ok_or_else(not_found)?;
+    let day = s.started_at.get(..10).unwrap_or(&s.started_at);
+    let m = state.db.add_message(id, None, "system", "resume", &format!("Resumed the Session from {day}."), json!({
+        "session_id": s.id, "started_at": s.started_at, "first_message": s.first_message,
+    }))?;
+    state.emit(Event::Message { message: json!(m) });
+    emit_agent(state, &a);
+    Ok(Json(agent_json(state, &a)))
+}
+
 pub async fn clear_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     state.db.clear_messages(&id)?;
     crate::uploads::remove_all(&state, &id);
