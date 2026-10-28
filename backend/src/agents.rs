@@ -483,11 +483,11 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     let _ = state.db.update_agent(&to.id, |a| a.pending_fyis.push(prompt));
 }
 
-/// `prompt` with the agent's pending FYIs in front, which are then cleared.
-fn with_fyis(state: &AppState, agent_id: &str, prompt: String) -> String {
+/// Take the agent's pending FYIs, to put in front of its next prompt.
+fn take_fyis(state: &AppState, agent_id: &str) -> Vec<String> {
     let mut fyis = vec![];
     let _ = state.db.update_agent(agent_id, |a| fyis = std::mem::take(&mut a.pending_fyis));
-    if fyis.is_empty() { prompt } else { format!("{}\n\n{prompt}", fyis.join("\n\n")) }
+    fyis
 }
 
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str) {
@@ -524,10 +524,13 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
             // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
-            if trigger != "compact" && trigger != "avatar" {
-                prompt = with_fyis(&state, &agent_id, prompt);
-            }
-            if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
+            let fyis = if trigger != "compact" && trigger != "avatar" { take_fyis(&state, &agent_id) } else { vec![] };
+            let full = if fyis.is_empty() { prompt.clone() } else { format!("{}\n\n{prompt}", fyis.join("\n\n")) };
+            if let Err(e) = run_once(&state, &agent_id, &full, trigger, kill.clone()).await {
+                // The FYIs may never have reached claude: keep them for the next run.
+                let _ = state.db.update_agent(&agent_id, |a| {
+                    a.pending_fyis.splice(0..0, fyis);
+                });
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
             }

@@ -539,4 +539,61 @@ mod tests {
         }
         assert!(st.db.list_messages(&to.id, 50, None).unwrap().iter().all(|m| m.meta.get("fyi").is_none()));
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_fyi_is_lost_to_concurrent_writes_of_the_same_agent() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        // The recipient's own run writes its status while FYIs to it arrive.
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let (st, from, to) = (st.clone(), from.clone(), to.clone());
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        agents::fyi_from_agent(&st, &from, &to, &format!("fyi {t}-{i}"));
+                        agents::set_status_text(&st, &to.id, &format!("step {t}-{i}"));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), 400);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_and_avatar_runs_leave_fyis_for_the_next_real_run() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        run(&st, &to, "first").await;
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        agents::compact(&st, &to.id, "");
+        until("the compact run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert_eq!(prompts(&st, &to)[1], "/compact");
+        agents::design_avatar(&st, &to.id, "a robot");
+        until("the avatar run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        assert!(!prompts(&st, &to)[2].contains("Merged #12"));
+        let p = run(&st, &to, "next").await;
+        assert!(p.starts_with("[FYI from agent Lead") && p.contains("Merged #12"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_fails_to_start_keeps_its_fyis() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        let bin = st.settings.get().claude_bin;
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        enqueue(&st, &to.id, Some("go".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), 1);
+        let mut s = st.settings.get();
+        s.claude_bin = bin;
+        st.settings.save(s).unwrap();
+        let p = run(&st, &to, "again").await;
+        assert!(p.contains("Merged #12"), "{p}");
+    }
 }

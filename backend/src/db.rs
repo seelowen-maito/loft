@@ -206,6 +206,24 @@ pub struct Task {
     pub completed_at: Option<String>,
 }
 
+fn read_agent(c: &Connection, id: &str) -> Result<Option<Agent>> {
+    let data: Option<String> = c.query_row("SELECT data FROM agents WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+    Ok(match data {
+        Some(d) => Some(serde_json::from_str(&d)?),
+        None => None,
+    })
+}
+
+fn write_agent(c: &Connection, a: &Agent) -> Result<()> {
+    c.execute(
+        "INSERT INTO agents (id, data, created_at, position)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), 0) + 1 FROM agents))
+         ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        params![a.id, serde_json::to_string(a)?, a.created_at],
+    )?;
+    Ok(())
+}
+
 pub fn now() -> String {
     Utc::now().to_rfc3339()
 }
@@ -381,34 +399,22 @@ impl Db {
     }
 
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
-        let c = self.0.lock().unwrap();
-        let data: Option<String> = c
-            .query_row("SELECT data FROM agents WHERE id = ?1", [id], |r| r.get(0))
-            .optional()?;
-        Ok(match data {
-            Some(d) => Some(serde_json::from_str(&d)?),
-            None => None,
-        })
+        read_agent(&self.0.lock().unwrap(), id)
     }
 
     pub fn save_agent(&self, a: &Agent) -> Result<()> {
-        let c = self.0.lock().unwrap();
-        c.execute(
-            "INSERT INTO agents (id, data, created_at, position)
-             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), 0) + 1 FROM agents))
-             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            params![a.id, serde_json::to_string(a)?, a.created_at],
-        )?;
-        Ok(())
+        write_agent(&self.0.lock().unwrap(), a)
     }
 
-    /// Read-modify-write an agent under the connection lock's ordering.
+    /// Read-modify-write an agent under one hold of the connection lock, so concurrent updates
+    /// (a status write and a pending FYI, say) can't overwrite each other. `f` must not use the db.
     pub fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> Result<Option<Agent>> {
-        let Some(mut a) = self.get_agent(id)? else {
+        let c = self.0.lock().unwrap();
+        let Some(mut a) = read_agent(&c, id)? else {
             return Ok(None);
         };
         f(&mut a);
-        self.save_agent(&a)?;
+        write_agent(&c, &a)?;
         Ok(Some(a))
     }
 
