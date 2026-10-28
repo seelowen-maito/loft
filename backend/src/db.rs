@@ -735,12 +735,14 @@ impl Db {
         .optional()?)
     }
 
-    /// The `run_start` marker of run `run_id`: its meta says what started the run.
-    pub fn run_start(&self, agent_id: &str, run_id: &str) -> Result<Option<Message>> {
+    /// The `run_start` marker of run `run_id`, before message `before`: its meta says what started the run.
+    /// Walks back from `before`, so it costs the run's length, not the agent's history.
+    pub fn run_start(&self, agent_id: &str, run_id: &str, before: i64) -> Result<Option<Message>> {
         let c = self.0.lock().unwrap();
         Ok(c.query_row(
-            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages WHERE agent_id = ?1 AND run_id = ?2 AND kind = 'run_start' ORDER BY id LIMIT 1",
-            params![agent_id, run_id],
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages
+             WHERE agent_id = ?1 AND id < ?3 AND run_id = ?2 AND kind = 'run_start' ORDER BY id DESC LIMIT 1",
+            params![agent_id, run_id, before],
             message_from_row,
         )
         .optional()?)

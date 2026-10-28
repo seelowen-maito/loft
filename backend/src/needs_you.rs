@@ -360,8 +360,11 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         let last_turn = msgs.iter().rev().find(|m| {
             m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || (m.role == "user" && m.kind == "text" && m.meta["from_agent"].is_null()))
         });
+        // The reply's run marker is usually among the messages already loaded.
         let for_user = |m: &Message| {
-            m.run_id.as_deref().and_then(|r| state.db.run_start(&a.id, r).ok().flatten()).is_some_and(|s| s.meta["for_user"] == json!(true))
+            let Some(r) = m.run_id.as_deref() else { return false };
+            let loaded = msgs.iter().find(|s| s.kind == "run_start" && s.run_id.as_deref() == Some(r)).cloned();
+            loaded.or_else(|| state.db.run_start(&a.id, r, m.id).ok().flatten()).is_some_and(|s| s.meta["for_user"] == json!(true))
         };
         if let Some(m) = last_turn.filter(|m| m.role == "assistant" && within(&m.created_at, chrono::Duration::days(QUESTION_DAYS)) && for_user(m)) {
             let ends_with_question = m.content.trim_end().trim_end_matches(['*', '_', ')']).ends_with('?');
@@ -801,5 +804,16 @@ mod tests {
         assert_eq!(questions(&st), ["Dev"]);
         crate::agents::add_msg(&st, &dev.id, None, "user", "text", "S3", json!({}));
         assert!(questions(&st).is_empty());
+
+        // A long run: its marker is past the loaded messages, so it's looked up, walking back from the reply.
+        let rid = "long-run";
+        let start = crate::agents::add_msg(&st, &dev.id, Some(rid), "system", "run_start", "user", json!({ "for_user": true })).unwrap();
+        for i in 0..40 {
+            crate::agents::add_msg(&st, &dev.id, Some(rid), "assistant", "tool_use", &format!("step {i}"), json!({}));
+        }
+        let r = crate::agents::add_msg(&st, &dev.id, Some(rid), "assistant", "text", "Ready to merge?", json!({})).unwrap();
+        assert_eq!(questions(&st), ["Dev"]);
+        assert_eq!(st.db.run_start(&dev.id, rid, r.id).unwrap().map(|m| m.id), Some(start.id));
+        assert!(st.db.run_start(&dev.id, rid, start.id).unwrap().is_none(), "only markers before the reply");
     }
 }
