@@ -48,7 +48,7 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Connected"].appears(timeout: 5))
         // Servers with `needs_you` (the fixture) show the "Needs you" card instead of "Needs your attention".
-        XCTAssertTrue(app.staticTexts["Needs you · 8"].appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Needs you · 9"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Backend Agent wants to use Bash"].exists)
         XCTAssertTrue(app.staticTexts["Active work"].exists)
         let chip = any("macTemperature", app)
@@ -476,7 +476,7 @@ final class LoftUITests: XCTestCase {
 
     func testNeedsYouGroupsPullRequestsByProject() {
         let app = launch(["-fixture-needs-you-projects"])
-        XCTAssertTrue(app.staticTexts["Needs you · 11"].firstMatch.appears(timeout: 5), "8 items, with the one PR swapped for four")
+        XCTAssertTrue(app.staticTexts["Needs you · 12"].firstMatch.appears(timeout: 5), "9 items, with the one PR swapped for four")
         app.buttons["needsYouSeeAll"].firstMatch.tap()
         let loft = app.buttons["needsYouProject-loft"]
         XCTAssertTrue(loft.appears(timeout: 5))
