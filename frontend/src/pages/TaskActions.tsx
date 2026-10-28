@@ -99,10 +99,100 @@ export function publishBlocked(t: { project: string }, repo: string | undefined)
   return null;
 }
 
+/** On an open issue nobody is working on: pick an agent and hand it over, from the issue itself. */
+export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }) {
+  // The project's agents first: they're on its repo.
+  const sorted = [...agents].sort((a, b) => Number(b.project.trim() === t.project) - Number(a.project.trim() === t.project) || a.name.localeCompare(b.name));
+  const [agentId, setAgentId] = useState(sorted[0]?.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.runTask(t.id, agentId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px]">Hand this issue to an agent</div>
+          <div className="mt-0.5 text-[12.5px] text-fg-3">
+            {t.github ? `It works from #${t.github.number}'s text and reports progress here; GitHub keeps the title, labels and state.` : "It gets the description and reports progress here."}
+          </div>
+        </div>
+        <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Agent to hand it to">
+          {sorted.map((a) => <option key={a.id} value={a.id}>{a.name}{a.project.trim() === t.project ? "" : ` · ${a.project || "no project"}`}</option>)}
+        </select>
+        <button className="btn-primary" disabled={!agentId || busy} onClick={start}>
+          <Play className="size-3 fill-current" /> Start
+        </button>
+      </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
+/** On an open Loft-only issue: what Publish to GitHub would create, and the button, or why it can't yet. */
+export function PublishCard({ task: t, repo, onEdit }: { task: Task; repo?: string; onEdit: () => void }) {
+  const why = publishBlocked(t, repo);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const publish = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.publishTask(t.id);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="rounded-2xl border border-line-strong bg-ink-850 p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <CloudUpload className="mt-0.5 size-4 shrink-0 text-fg-2" />
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="text-[14px]">Publish as a GitHub issue</div>
+          {why ? (
+            <div className="text-[12.5px] text-fg-3">
+              {t.project ? `${why}.` : "It needs a project with a GitHub repo."}{" "}
+              <button className="text-accent underline decoration-accent/30 underline-offset-2" onClick={onEdit}>
+                {t.project ? "Change the project" : "Pick a project"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="font-mono text-[11.5px] text-fg-2">
+                {repo} · {t.labels.length ? t.labels.join(", ") : "no labels"} · {t.owner ? `owner ${t.owner}` : "no owner"}
+              </div>
+              <div className="text-[12.5px] text-fg-3">The issue stays in Loft and links to it. From then on its title, description and labels are edited on GitHub too; the agent, progress and thread stay in Loft.</div>
+            </>
+          )}
+        </div>
+        <button className="btn" disabled={busy || !!why} onClick={publish} title={why ?? `Create it on ${repo}`}>
+          <CloudUpload className="size-3.5" /> Publish to GitHub
+        </button>
+      </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
 /** Buttons on a task's page: run, reassign, done, reopen, cancel, edit, copy link, delete. */
-export function TaskActions({ task: t, agents, repo, projects = [] }: { task: Task; agents: Agent[]; repo?: string; projects?: string[] }) {
+export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task: Task; agents: Agent[]; projects?: string[]; edit?: number }) {
   const navigate = useNavigate();
   const [dialog, setDialog] = useState<"run" | "cancel" | "delete" | "edit" | null>(null);
+  // The Publish card's "Pick a project" opens Edit here.
+  useEffect(() => {
+    if (edit) setDialog("edit");
+  }, [edit]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -161,22 +251,6 @@ export function TaskActions({ task: t, agents, repo, projects = [] }: { task: Ta
             <X className="size-3.5" /> Cancel issue
           </button>
         )}
-        {/* Always there on an open Loft-only issue; when it can't publish, it says why. */}
-        {!t.github && t.state === "open" && (() => {
-          const why = publishBlocked(t, repo);
-          return (
-            <span className="inline-flex items-center gap-2">
-              <button className="btn" disabled={busy || !!why} onClick={() => act(() => api.publishTask(t.id))} title={why ?? `Create it as an issue on ${repo} and link them`}>
-                <CloudUpload className="size-3.5" /> Publish to GitHub
-              </button>
-              {why && (
-                <button className="font-mono text-[11px] text-fg-3 underline decoration-dotted underline-offset-2 hover:text-fg" onClick={() => setDialog("edit")}>
-                  {why}
-                </button>
-              )}
-            </span>
-          );
-        })()}
         <button className="btn-ghost" onClick={() => setDialog("edit")} title="Edit title, description, labels and owner">
           <Pencil className="size-3.5" /> Edit
         </button>
