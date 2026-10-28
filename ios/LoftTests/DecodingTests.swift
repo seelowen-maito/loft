@@ -38,6 +38,23 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(t.dueAt, JSONCoding.parseDate("2026-10-24T09:00:00Z"))
     }
 
+    /// A task from a Loft with issue fields: `labels`, `owner` and an open/closed `state` next to `status`.
+    /// The app reads the execution status from `status`; the extra keys must not get in the way.
+    func testTaskWithIssueFields() throws {
+        let json = """
+        {"agent_id":null,"completed_at":null,"created_at":"2026-10-21T13:06:33.526952+00:00","created_by":"user","depends_on":[],
+         "description":"d","due_at":null,"error":"","id":"6f1d","kind":"todo","note":"","parent_id":null,
+         "labels":["bug","ready-for-agent"],"owner":"octo-dev","state":"open",
+         "priority":"normal","project":"loft","started_at":null,"status":"in_progress","summary":"","title":"Ship",
+         "updated_at":"2026-10-21T13:06:33.526952+00:00"}
+        """
+        let t = try JSONCoding.decoder.decode(HBTask.self, from: Data(json.utf8))
+        XCTAssertEqual(t.state, .inProgress)
+        XCTAssertEqual(t.title, "Ship")
+        let closed = try JSONCoding.decoder.decode(HBTask.self, from: Data(json.replacingOccurrences(of: #""status":"in_progress""#, with: #""status":"done""#).replacingOccurrences(of: #""state":"open""#, with: #""state":"closed""#).utf8))
+        XCTAssertEqual(closed.state, .done)
+    }
+
     func testMessageMeta() throws {
         let json = """
         {"id":42,"agent_id":"a","run_id":null,"role":"user","kind":"text","content":"[Task 123e4567-e89b-12d3-a456-426614174000] Do it\\n\\nDetails\\n\\n[Report progress on this task with x]",

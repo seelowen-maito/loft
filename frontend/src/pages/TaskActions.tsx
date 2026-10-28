@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
-import { ArrowUp, Check, Link2, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { useAutoGrow } from "../lib/autoGrow";
@@ -28,10 +28,66 @@ function AgentSelect({ agents, value, onChange, placeholder }: { agents: Agent[]
   );
 }
 
-/** Buttons on a task's page: run, reassign, done, reopen, cancel, copy link, delete. */
-export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }) {
+const FIELD = "w-full rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13px] outline-none placeholder:text-fg-3";
+
+/** Labels typed as a comma-separated list, as GitHub names them. */
+export const parseLabels = (s: string) => s.split(",").map((l) => l.trim()).filter(Boolean);
+
+/** The issue fields shared by New and Edit: description, labels and owner. */
+function IssueFields({ description, setDescription, labels, setLabels, owner, setOwner }: {
+  description: string; setDescription: (v: string) => void;
+  labels: string; setLabels: (v: string) => void;
+  owner: string; setOwner: (v: string) => void;
+}) {
+  return (
+    <>
+      <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={5} placeholder="Description, in Markdown (optional)" className={cx(FIELD, "resize-y font-mono text-[12.5px]")} aria-label="Description" />
+      <div className="flex gap-2">
+        <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="Labels, comma-separated" className={FIELD} aria-label="Labels" />
+        <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Owner (GitHub login)" className={cx(FIELD, "font-mono")} aria-label="Owner" spellCheck={false} autoCapitalize="off" />
+      </div>
+    </>
+  );
+}
+
+/** Edit a task's title, description, labels and owner. */
+function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
+  const [title, setTitle] = useState(t.title);
+  const [description, setDescription] = useState(t.description);
+  const [labels, setLabels] = useState(t.labels.join(", "));
+  const [owner, setOwner] = useState(t.owner);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateTask(t.id, { title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim() || null });
+      onClose();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Edit Loft issue" onClose={onClose}>
+      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className={FIELD} aria-label="Title" />
+      <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
+      {ACTIVE.includes(t.status) && <p className="text-[12px] text-fg-3">The agent already has the old description: message it if the work changes.</p>}
+      <div className="flex justify-end gap-2">
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn-primary" disabled={!title.trim() || busy} onClick={save}>Save</button>
+      </div>
+      {error && <div className="text-[12px] text-bad">{error}</div>}
+    </Modal>
+  );
+}
+
+/** Buttons on a task's page: run, reassign, done, reopen, cancel, edit, copy link, delete. */
+export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Agent[]; repo?: string }) {
   const navigate = useNavigate();
-  const [dialog, setDialog] = useState<"run" | "cancel" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"run" | "cancel" | "delete" | "edit" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -87,14 +143,23 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
         )}
         {!finished && (
           <button className="btn" disabled={busy} onClick={() => setDialog("cancel")}>
-            <X className="size-3.5" /> Cancel task
+            <X className="size-3.5" /> Cancel issue
           </button>
         )}
-        <button className="btn-ghost" onClick={copyLink} title="Copy a link to this task">
+        {/* Only a Loft-only issue in a project with a GitHub repo can be published. */}
+        {!t.github && repo && t.state === "open" && (
+          <button className="btn" disabled={busy} onClick={() => act(() => api.publishTask(t.id))} title={`Create it as an issue on ${repo} and link them`}>
+            <CloudUpload className="size-3.5" /> Publish to GitHub
+          </button>
+        )}
+        <button className="btn-ghost" onClick={() => setDialog("edit")} title="Edit title, description, labels and owner">
+          <Pencil className="size-3.5" /> Edit
+        </button>
+        <button className="btn-ghost" onClick={copyLink} title="Copy a link to this issue">
           <Link2 className="size-3.5" /> {copied ? "Copied" : "Copy link"}
         </button>
         {!active && (
-          <button className="btn-ghost text-fg-3 hover:text-bad" onClick={() => setDialog("delete")} title="Delete this task">
+          <button className="btn-ghost text-fg-3 hover:text-bad" onClick={() => setDialog("delete")} title="Delete this issue">
             <Trash2 className="size-3.5" />
           </button>
         )}
@@ -102,8 +167,9 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
       {error && <div className="text-[12px] text-bad">{error}</div>}
 
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
+      {dialog === "edit" && <EditDialog task={t} onClose={() => setDialog(null)} />}
       {dialog === "cancel" && (
-        <Modal title="Cancel this task?" onClose={() => setDialog(null)}>
+        <Modal title="Cancel this issue?" onClose={() => setDialog(null)}>
           <p className="text-[13px] text-fg-2">
             It's marked cancelled.{" "}
             {active && agent ? `${agent.name} is told to stop working on it; you can also stop its current run, which may be doing other work too.` : "Nobody is working on it right now."}
@@ -113,13 +179,13 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
             {active && agent?.running && (
               <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, true))}>Cancel and stop {agent.name}</button>
             )}
-            <button className="btn-primary" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel task</button>
+            <button className="btn-primary" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel issue</button>
           </div>
           {error && <div className="text-[12px] text-bad">{error}</div>}
         </Modal>
       )}
       {dialog === "delete" && (
-        <Modal title="Delete this task?" onClose={() => setDialog(null)}>
+        <Modal title="Delete this issue?" onClose={() => setDialog(null)}>
           <p className="text-[13px] text-fg-2">It's removed with its thread. Subtasks stay, without a parent. This can't be undone.</p>
           <div className="flex justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
@@ -230,7 +296,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
           }}
           ref={box}
           rows={2}
-          placeholder={agent && send ? `Comment, or ask ${agent.name} about this task…` : "A note on this task…"}
+          placeholder={agent && send ? `Comment, or ask ${agent.name} about this issue…` : "A note on this issue…"}
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
         <div className="flex flex-wrap items-center gap-3">
@@ -241,7 +307,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
             </label>
           )}
           {agent && send && finished && (
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run the task again with this comment as the instruction">
+            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run it again with this comment as the instruction">
               <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} className="accent-[var(--color-accent)]" />
               Reopen and run again
             </label>
@@ -261,11 +327,13 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   );
 }
 
-/** "New task" from the list. */
+/** "New Loft issue" from the list. */
 export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; projects: string[]; onClose: () => void }) {
   const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [labels, setLabels] = useState("");
+  const [owner, setOwner] = useState("");
   const [agentId, setAgentId] = useState("");
   const [priority, setPriority] = useState<Task["priority"]>("normal");
   const [project, setProject] = useState("");
@@ -276,7 +344,7 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
     setBusy(true);
     setError(null);
     try {
-      const t = await api.createTask({ title: title.trim(), description, agent_id: agentId || null, priority, project });
+      const t = await api.createTask({ title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim(), agent_id: agentId || null, priority, project });
       if (agentId && start) await api.runTask(t.id);
       onClose();
       navigate(`/tasks/${t.id}`);
@@ -286,11 +354,11 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
       setBusy(false);
     }
   };
-  const field = "w-full rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13px] outline-none placeholder:text-fg-3";
+  const field = FIELD;
   return (
-    <Modal title="New task" onClose={onClose}>
+    <Modal title="New Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing" className={field} />
-      <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} placeholder="Details (optional)" className={cx(field, "resize-none")} />
+      <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
       <AgentSelect agents={agents} value={agentId} onChange={setAgentId} placeholder="No agent (a to-do for you)" />
       <div className="flex gap-2">
         <select value={priority} onChange={(e) => setPriority(e.target.value as Task["priority"])} className={field} aria-label="Priority">
