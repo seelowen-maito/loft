@@ -77,7 +77,7 @@ pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
 }
 
-fn is_active(t: &Task) -> bool {
+pub(crate) fn is_active(t: &Task) -> bool {
     matches!(t.status.as_str(), "in_progress" | "blocked" | "waiting_approval")
 }
 
@@ -374,6 +374,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/comments", at_get(list_comments).post(add_comment))
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
+        .route("/{id}/keep-working", post(crate::mirror::keep_working))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
 }
@@ -1166,7 +1167,7 @@ pub(crate) mod tests {
     }
 
     /// An agent marked busy, so whatever reaches it is queued instead of starting a real claude run.
-    fn busy(st: &AppState, a: &Agent) {
+    pub(crate) fn busy(st: &AppState, a: &Agent) {
         st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
     }
 

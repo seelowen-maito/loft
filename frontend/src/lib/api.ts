@@ -476,6 +476,8 @@ export const api = {
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
   /** Publish to GitHub: creates the GitHub issue for a Loft-only issue and links them. */
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
+  /** Closed on GitHub while being worked on: go on, and reopen it there. */
+  keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

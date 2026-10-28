@@ -7,7 +7,7 @@ import { api, type Agent, type Task, type TaskComment, type TaskStatus } from ".
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
-import { CommentBox, NewTaskDialog, TaskActions } from "./TaskActions";
+import { ClosedOnGithubCard, CommentBox, NewTaskDialog, TaskActions } from "./TaskActions";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -339,6 +339,8 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           <TaskActions task={t} agents={agents} repo={repos[t.project]} />
         </div>
       </header>
+
+      {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
