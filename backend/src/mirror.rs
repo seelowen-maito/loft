@@ -305,6 +305,73 @@ pub(crate) fn bring_in(state: &AppState, project: &str, repo: &str, i: &Value) -
     Some((t, report.created > 0))
 }
 
+/// Publish to GitHub: creates the GitHub issue for a Loft-only issue in a project with a repo, and
+/// links them. A retry (or a second click) finds the one already published, through the published-issue
+/// memory, and creates no other. `by` is "user" or the agent's id, for the thread.
+pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, String> {
+    let t = state.db.get_task(id).map_err(|e| e.to_string())?.ok_or("No Loft issue with that id.")?;
+    if t.github.is_some() {
+        return Ok(t);
+    }
+    if t.project.trim().is_empty() {
+        return Err("This Loft issue has no project, so there's no GitHub repo to publish it to.".into());
+    }
+    let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| format!("{e}, so there's no GitHub repo to publish it to."))?;
+    if crate::github::token(state).is_none() {
+        return Err("GitHub isn't connected: add a GitHub token in Settings or run `gh auth login`.".into());
+    }
+    if t.state() == "closed" {
+        return Err("It's closed: reopen it before publishing it.".into());
+    }
+    let cursor = state.mirror.cursor(&repo);
+    let _held = cursor.lock().await;
+    let mut t = state.db.get_task(id).map_err(|e| e.to_string())?.ok_or("No Loft issue with that id.")?;
+    if t.github.is_some() {
+        return Ok(t);
+    }
+    let issue = match state.db.published_issue(&repo, "loft_issue", &t.id).ok().flatten() {
+        Some(n) => crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await.map_err(|e| format!("Couldn't read #{n} on {repo}: {e}"))?,
+        None => {
+            let mut body = json!({ "title": t.title, "body": t.description, "labels": t.labels });
+            if !t.owner.is_empty() {
+                body["assignees"] = json!([t.owner]);
+            }
+            let v = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/issues"), Some(body)).await.map_err(|e| format!("GitHub rejected it on {repo}: {e}"))?;
+            let n = v["number"].as_i64().ok_or("GitHub created the issue but didn't return its number.")?;
+            state.db.record_published_issue(&repo, "loft_issue", &t.id, n).map_err(|e| e.to_string())?;
+            v
+        }
+    };
+    let l = link(&repo, &issue);
+    let n = l.number;
+    t.github = Some(l);
+    t.updated_at = now();
+    state.db.save_task(&t).map_err(|e| e.to_string())?;
+    crate::tasks::emit(state, &t);
+    crate::tasks::log_status(state, &t, by, &format!("Published to GitHub as #{n}"));
+    state.emit(crate::state::Event::Issues { project: t.project.clone() });
+    Ok(t)
+}
+
+/// `POST /api/issues/{id}/publish`
+pub async fn publish_route(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiError> {
+    publish(&state, &id, "user").await.map(|t| Json(json!(t))).map_err(crate::api::bad)
+}
+
+/// Publishes a new Loft issue in the background when its project has auto-publish on.
+pub fn auto_publish(state: &AppState, t: &Task) {
+    if t.github.is_some() || !state.settings.get().auto_publish.iter().any(|p| p == t.project.trim()) {
+        return;
+    }
+    let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+    let (state, id, by) = (state.clone(), t.id.clone(), t.created_by.clone());
+    rt.spawn(async move {
+        if let Err(e) = publish(&state, &id, &by).await {
+            tracing::warn!("auto-publish {id}: {e}");
+        }
+    });
+}
+
 /// A linked issue that left GitHub (deleted, or moved to another repo). A Loft issue the mirror made
 /// and nobody touched goes with it; any other stays, unlinked, as a Loft-only issue with a note why.
 async fn reconcile(state: &AppState, mut t: Task, what: &str, report: &mut Report) {
@@ -866,6 +933,74 @@ mod tests {
         let _ = crate::tasks::update(State(st.clone()), axum::extract::Path(ids[&1].clone()), Json(json!({ "depends_on": [ids[&2]] }))).await.unwrap();
         assert!(writes(&fake, repo).is_empty(), "Loft's link isn't written over GitHub's change");
         assert_eq!(st.db.get_task(&ids[&1]).unwrap().unwrap().depends_on, [ids[&3].clone()]);
+    }
+
+
+    #[tokio::test]
+    async fn publishing_a_loft_issue_creates_one_github_issue_and_links_it() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/pub-one";
+        project(&st, "pub-one", Some("https://github.com/octo/pub-one"));
+        fake.route("POST", "/repos/octo/pub-one/issues", 201, gh(repo, 7, "Export notes", "open", "2026-10-28T10:00:00Z"));
+        fake.route("GET", "/repos/octo/pub-one/issues/7", 200, gh(repo, 7, "Export notes", "open", "2026-10-28T10:00:00Z"));
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Export notes", "description": "As Markdown.", "labels": ["feature"], "owner": "octo-dev", "priority": "high", "project": "pub-one" }), "user").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(fake.seen("/repos/").is_empty(), "a new Loft issue stays Loft-only");
+
+        let Json(v) = publish_route(State(st.clone()), axum::extract::Path(t.id.clone())).await.unwrap();
+        assert_eq!((&v["github"]["number"], &v["github"]["url"]), (&json!(7), &json!("https://github.com/octo/pub-one/issues/7")));
+        let posted: Vec<Value> = fake.seen("/repos/octo/pub-one/issues").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "title": "Export notes", "body": "As Markdown.", "labels": ["feature"], "assignees": ["octo-dev"] })], "no Loft-only fields");
+        assert!(st.db.list_task_comments(&t.id, 10, None).unwrap().iter().any(|c| c.text == "Published to GitHub as #7"));
+
+        // Again, and again after the link was lost: no second issue.
+        let _ = publish_route(State(st.clone()), axum::extract::Path(t.id.clone())).await.unwrap();
+        let mut lost = st.db.get_task(&t.id).unwrap().unwrap();
+        lost.github = None;
+        st.db.save_task(&lost).unwrap();
+        let Json(v) = publish_route(State(st.clone()), axum::extract::Path(t.id.clone())).await.unwrap();
+        assert_eq!(v["github"]["number"], json!(7));
+        assert_eq!(fake.seen("/repos/octo/pub-one/issues").iter().filter(|r| r.method == "POST").count(), 1);
+
+        // An agent publishes its own; not someone else's.
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let (mine, _) = crate::tasks::create(&st, &json!({ "title": "Mine", "project": "pub-one" }), &a.id).unwrap();
+        let (theirs, _) = crate::tasks::create(&st, &json!({ "title": "Theirs", "project": "pub-one" }), "user").unwrap();
+        fake.route("POST", "/repos/octo/pub-one/issues", 201, gh(repo, 8, "Mine", "open", "2026-10-28T10:00:00Z"));
+        let out = crate::planning::mcp_call(&st, &a, "publish_issue", &json!({ "id": mine.id })).await.unwrap().unwrap();
+        assert_eq!(out, "Published to GitHub as #8: https://github.com/octo/pub-one/issues/8");
+        assert!(crate::planning::mcp_call(&st, &a, "publish_issue", &json!({ "id": theirs.id })).await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn auto_publish_publishes_new_loft_issues_and_projects_without_a_repo_cant_publish() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/pub-auto";
+        project(&st, "pub-auto", Some("https://github.com/octo/pub-auto"));
+        project(&st, "pub-plain", None);
+        let mut s = st.settings.get();
+        s.auto_publish = vec!["pub-auto".into(), "pub-plain".into()];
+        st.settings.save(s).unwrap();
+        fake.route("POST", "/repos/octo/pub-auto/issues", 201, gh(repo, 3, "Auto", "open", "2026-10-28T10:00:00Z"));
+
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Auto", "project": "pub-auto" }), "user").unwrap();
+        for _ in 0..50 {
+            if st.db.get_task(&t.id).unwrap().unwrap().github.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().github.map(|g| g.number), Some(3));
+
+        // No repo: nothing is published, by hand or automatically, and GitHub isn't asked.
+        let (plain, _) = crate::tasks::create(&st, &json!({ "title": "Plain", "project": "pub-plain" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(plain.id.clone())).await.unwrap_err();
+        assert!(err.1.contains("isn't a git repo, so there's no GitHub repo to publish it to"), "{}", err.1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(st.db.get_task(&plain.id).unwrap().unwrap().github.is_none());
+        assert_eq!(fake.seen("/repos/").len(), 1, "only the one auto-published issue");
     }
 
 }

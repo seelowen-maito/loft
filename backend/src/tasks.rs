@@ -248,6 +248,7 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
     state.db.save_task(&t).map_err(|e| e.to_string())?;
     emit(state, &t);
     log_status(state, &t, created_by, &format!("Created by {}", who(state, created_by)));
+    crate::mirror::auto_publish(state, &t);
     Ok((t, true))
 }
 
@@ -358,6 +359,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/cancel", post(cancel))
         .route("/{id}/comments", at_get(list_comments).post(add_comment))
         .route("/{id}/plan", at_get(plan))
+        .route("/{id}/publish", post(crate::mirror::publish_route))
 }
 
 #[derive(Deserialize)]

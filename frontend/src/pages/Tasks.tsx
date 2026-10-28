@@ -48,6 +48,7 @@ export default function TasksPage() {
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [repos, setRepos] = useState<Record<string, string>>({});
   const [query, setQuery] = useState("");
   const [project, setProject] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -64,6 +65,8 @@ export default function TasksPage() {
   useEffect(() => {
     api.tasks().then(setTasks);
     api.agents().then(setAgents);
+    // Which projects have a GitHub repo: only their Loft issues can be published there.
+    api.repos().then((rs) => setRepos(Object.fromEntries(rs.filter((r) => r.github).map((r) => [r.name, r.github!])))).catch(() => {});
     sync();
   }, [sync]);
 
@@ -187,7 +190,7 @@ export default function TasksPage() {
       {/* detail */}
       <section className={cx("min-h-0 overflow-y-auto", !routeId && "max-lg:hidden")}>
         {selected ? (
-          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} />
+          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} />
         ) : routeId && tasks ? (
           <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
         ) : (
@@ -228,7 +231,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
   );
 }
 
-function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent> }) {
+function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   useEffect(() => {
     setThread(null);
@@ -295,7 +298,7 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} />
+          <TaskActions task={t} agents={agents} repo={repos[t.project]} />
         </div>
       </header>
 

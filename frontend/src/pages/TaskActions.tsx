@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
-import { ArrowUp, Check, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { useAutoGrow } from "../lib/autoGrow";
@@ -85,7 +85,7 @@ function EditDialog({ task: t, onClose }: { task: Task; onClose: () => void }) {
 }
 
 /** Buttons on a task's page: run, reassign, done, reopen, cancel, edit, copy link, delete. */
-export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }) {
+export function TaskActions({ task: t, agents, repo }: { task: Task; agents: Agent[]; repo?: string }) {
   const navigate = useNavigate();
   const [dialog, setDialog] = useState<"run" | "cancel" | "delete" | "edit" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +144,12 @@ export function TaskActions({ task: t, agents }: { task: Task; agents: Agent[] }
         {!finished && (
           <button className="btn" disabled={busy} onClick={() => setDialog("cancel")}>
             <X className="size-3.5" /> Cancel issue
+          </button>
+        )}
+        {/* Only a Loft-only issue in a project with a GitHub repo can be published. */}
+        {!t.github && repo && t.state === "open" && (
+          <button className="btn" disabled={busy} onClick={() => act(() => api.publishTask(t.id))} title={`Create it as an issue on ${repo} and link them`}>
+            <CloudUpload className="size-3.5" /> Publish to GitHub
           </button>
         )}
         <button className="btn-ghost" onClick={() => setDialog("edit")} title="Edit title, description, labels and owner">

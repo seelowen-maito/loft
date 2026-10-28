@@ -55,6 +55,10 @@ export default function SettingsPage() {
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [repos, setRepos] = useState<{ name: string; github: string }[] | null>(null);
+  useEffect(() => {
+    api.repos().then((rs) => setRepos(rs.filter((r) => r.github).map((r) => ({ name: r.name, github: r.github! })))).catch(() => setRepos([]));
+  }, []);
 
   const load = useCallback(() => api.settings().then((v) => {
     setView(v);
@@ -183,6 +187,24 @@ export default function SettingsPage() {
             label="Update automatically"
             hint="Checks for new commits every minute. Installs once no agent is running, then restarts."
           />
+        </Section>
+
+        <Section title="GitHub issues">
+          {repos === null ? (
+            <div className="skeleton h-10 rounded-xl" />
+          ) : repos.length === 0 ? (
+            <p className="text-[12.5px] text-fg-3">No project has a GitHub repo yet. Loft issues in projects without one stay in Loft.</p>
+          ) : (
+            repos.map((r) => (
+              <Toggle
+                key={r.name}
+                on={draft.auto_publish.includes(r.name)}
+                onChange={(v) => set("auto_publish", v ? [...draft.auto_publish, r.name] : draft.auto_publish.filter((p) => p !== r.name))}
+                label={`Publish new Loft issues in ${r.name}`}
+                hint={`Each new Loft issue becomes an issue on ${r.github} right away. Off: it stays in Loft until you press Publish to GitHub.`}
+              />
+            ))
+          )}
         </Section>
 
         <Section title="Navigation">

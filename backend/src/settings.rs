@@ -22,6 +22,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
     pub show_simulator: bool,
+    /// Projects whose new Loft issues are published to GitHub as they're made. Off (empty) by default.
+    pub auto_publish: Vec<String>,
     pub push: Push,
 }
 
@@ -54,6 +56,7 @@ impl Default for Settings {
             github_token: String::new(),
             auto_update: false,
             show_simulator: false,
+            auto_publish: vec![],
             push: Push::default(),
         }
     }

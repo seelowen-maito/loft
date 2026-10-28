@@ -45,6 +45,12 @@ pub fn mcp_tools() -> Vec<Value> {
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
     }), json!({
+        "name": "publish_issue",
+        "description": "Publish to GitHub: create the GitHub issue for a Loft issue you're on or created, in a project with a GitHub repo, and link them. Only when the user asked for it. Calling it again returns the issue already published.",
+        "inputSchema": { "type": "object", "properties": {
+            "id": { "type": "string", "description": "The Loft issue's id." }
+        }, "required": ["id"] }
+    }), json!({
         "name": "planning_guide",
         "description": "The templates and rules for a spec and its tickets. Call it before writing either outside a grill (a grill's instructions already include them).",
         "inputSchema": { "type": "object", "properties": {} }
@@ -55,6 +61,17 @@ pub fn mcp_tools() -> Vec<Value> {
 pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Option<Result<String, String>> {
     if name == "planning_guide" {
         return Some(Ok(format!("{}\n\n{}", crate::grill::SPEC, crate::grill::TICKETS)));
+    }
+    if name == "publish_issue" {
+        let id = args["id"].as_str().unwrap_or("").trim();
+        let mine = state.db.get_task(id).ok().flatten().is_some_and(|t| t.agent_id.as_deref() == Some(&me.id) || t.created_by == me.id);
+        if !mine {
+            return Some(Err("That Loft issue isn't assigned to you or created by you.".into()));
+        }
+        return Some(crate::mirror::publish(state, id, &me.id).await.map(|t| {
+            let g = t.github.unwrap_or_default();
+            format!("Published to GitHub as #{}: {}", g.number, g.url)
+        }));
     }
     if name != "publish_spec" && name != "publish_tickets" {
         return None;

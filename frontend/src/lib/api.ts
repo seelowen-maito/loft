@@ -340,6 +340,8 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
+  /** Projects whose new Loft issues are published to GitHub as they're made. */
+  auto_publish: string[];
 };
 
 export type SettingsView = {
@@ -500,6 +502,8 @@ export const api = {
   runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/issues/${id}/execute`, { agent_id: agentId, note }),
   cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/issues/${id}/cancel`, { stop_run: stopRun }),
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
+  /** Publish to GitHub: creates the GitHub issue for a Loft-only issue and links them. */
+  publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
   grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
