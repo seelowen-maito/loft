@@ -25,13 +25,17 @@ fn claude_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR").map(Into::into).unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
 }
 
-/// Where Claude Code keeps the transcripts of sessions run in `cwd`: the real path with every character that
-/// isn't a letter or digit turned into `-`. Very long names are cut and given a hash suffix, so those are
-/// found by their first 200 characters.
+/// Where Claude Code keeps the transcripts of sessions run in `cwd`: the real path with every UTF-16 unit that
+/// isn't an ASCII letter or digit turned into `-`, as its JavaScript regex does, so an emoji becomes `--`.
+/// Very long names are cut and given a hash suffix, so those are found by their first 200 characters.
 pub fn transcripts_dir(cwd: &Path) -> PathBuf {
     let projects = claude_dir().join("projects");
     let real = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let name: String = real.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let name: String = real
+        .to_string_lossy()
+        .chars()
+        .flat_map(|c| if c.is_ascii_alphanumeric() { vec![c] } else { vec!['-'; c.len_utf16()] })
+        .collect();
     if name.len() <= 200 {
         return projects.join(name);
     }
@@ -223,5 +227,13 @@ pub mod tests {
         let real = ws.canonicalize().unwrap().to_string_lossy().replace(['/', '.', '_'], "-");
         assert_eq!(name, real);
         assert!(name.ends_with("-agent-local-1"));
+    }
+
+    #[test]
+    fn an_emoji_in_the_path_counts_as_two_characters() {
+        let ws = tmp().join("rocket 🚀 café");
+        std::fs::create_dir_all(&ws).unwrap();
+        let name = transcripts_dir(&ws).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with("-rocket----caf-"), "{name}");
     }
 }
