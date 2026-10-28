@@ -412,9 +412,7 @@ export function Chat({
               <Clock className="size-3" /> {fmtSchedule(agent)}
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
-            {agent.context_tokens != null && (
-              <ContextSize tokens={agent.context_tokens} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
-            )}
+            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
