@@ -151,7 +151,7 @@ fn apply_fields(state: &AppState, t: &mut Task, p: &Value) -> Result<(), String>
         }
         t.owner = login;
     }
-    if let Some(v) = str_field("project") { t.project = clip(&v, 100); }
+    if let Some(v) = str_field("project") { t.project = crate::repos::project_name(&v)?; }
     if let Some(v) = str_field("priority") {
         if !PRIORITIES.contains(&v.as_str()) {
             return Err(format!("priority must be one of {}", PRIORITIES.join(" | ")));
