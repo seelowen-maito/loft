@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -19,7 +19,7 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
-import { fyiTitle, isFyi } from "../../lib/agentMessage";
+import { FyiMark } from "./FyiMark";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -743,57 +743,6 @@ function findAgent(agents: Agent[], key: string | undefined) {
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
 }
 
-/** The FYI mark on an agent message: its note opens on hover with a mouse, or on tap/Enter elsewhere.
- * The note anchors to the nearest positioned ancestor (the header row) so it stays on screen on phones. */
-function FyiMark({ agentName }: { agentName: string }) {
-  const [open, setOpen] = useState(false);
-  const pointer = useRef("mouse");
-  const root = useRef<HTMLSpanElement>(null);
-  const noteId = useId();
-  // A tap anywhere else closes a tapped-open note.
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: PointerEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, [open]);
-
-  return (
-    <span ref={root} className="flex">
-      <button
-        type="button"
-        className="rounded border border-line px-1 py-px text-[9.5px] uppercase text-fg-2 hover:text-fg"
-        aria-expanded={open}
-        aria-describedby={noteId}
-        onPointerDown={(e) => (pointer.current = e.pointerType)}
-        onPointerEnter={(e) => e.pointerType === "mouse" && setOpen(true)}
-        onPointerLeave={(e) => e.pointerType === "mouse" && setOpen(false)}
-        onClick={() => setOpen((o) => (o && pointer.current !== "mouse" ? false : true))}
-        onKeyDown={(e) => {
-          pointer.current = "keyboard";
-          if (e.key === "Escape") setOpen(false);
-        }}
-      >
-        FYI
-      </button>
-      {/* Always in the DOM so screen readers get it as the mark's description; shown only when open. */}
-      <span
-        id={noteId}
-        role="tooltip"
-        className={cx(
-          open
-            ? "pointer-events-none absolute right-0 top-full z-30 mt-1.5 w-max max-w-[min(18rem,calc(100vw-5rem))] rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 text-left font-mono text-[11px] normal-case tracking-normal text-fg-2 shadow-xl backdrop-blur"
-            : "sr-only",
-        )}
-      >
-        {fyiTitle(agentName)}
-      </span>
-    </span>
-  );
-}
-
 const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith }: {
   m: Message;
   agent: Agent;
@@ -871,9 +820,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex justify-end gap-3 pt-2">
         <div className="flex max-w-[80%] flex-col items-end">
           <div className="relative mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
-            {isFyi(m) && (
-              <FyiMark agentName={agent.name} />
-            )}
+            <FyiMark m={m} agentName={agent.name} />
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
           <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
