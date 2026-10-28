@@ -32,6 +32,10 @@ _Avoid_: Conversation, thread
 A fact an agent keeps across sessions: a one-line title and a body. Every session starts with the titles of the agent's memories; the agent reads a body with `recall` when it needs it, and updates a memory instead of saving a near-copy.
 _Avoid_: Note, knowledge
 
+**Unread reply**:
+The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
+_Avoid_: Notification, new message, unread message
+
 **Agent message**:
 A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
 _Avoid_: Ping, DM, hand-off

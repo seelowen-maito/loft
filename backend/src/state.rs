@@ -49,6 +49,8 @@ pub struct RunInfo {
     /// Background tasks the agent waits on after its reply, and since when.
     pub waiting_on: Vec<String>,
     pub waiting_since: Option<String>,
+    /// The run answers the user, so a Restart carries that over to the run it starts.
+    pub for_user: bool,
 }
 
 #[derive(Default)]
@@ -57,6 +59,9 @@ pub struct Runtime {
     pub running: HashMap<String, Arc<Notify>>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
+    /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
+    /// for an Unread reply
+    pub queued_for_user: std::collections::HashSet<String>,
     /// agent id -> grill prompts waiting for the current run; run quietly after user work
     pub grill_queued: HashMap<String, Vec<String>>,
     /// agent id -> wake-up for a run that has replied but waits on a Claude Code background task;

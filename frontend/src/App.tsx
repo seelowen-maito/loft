@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useParams } from "react-router";
 import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
-import { api, type Settings } from "./lib/api";
+import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
+import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
@@ -57,6 +58,45 @@ function PendingBadge() {
   );
 }
 
+/** Agents with an Unread reply, kept live from any page; it also sets the browser tab title. Reloads on reconnect, as events sent while offline are lost. */
+function useUnreadCount(live: boolean) {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  // Updates that arrive while the list loads are newer than it (opening an unread chat on a fresh load marks it read meanwhile).
+  const fresh = useRef(new Map<string, Agent | null>());
+  useEffect(() => {
+    if (!live) return;
+    fresh.current.clear();
+    api.agents().then((as) => setAgents(mergeLoaded(as, fresh.current))).catch(() => {});
+  }, [live]);
+  useServerEvents(
+    useCallback((e: ServerEvent) => {
+      if (e.type === "agent_updated") {
+        fresh.current.set(e.agent.id, e.agent);
+        setAgents((as) => (as.some((a) => a.id === e.agent.id) ? as.map((a) => (a.id === e.agent.id ? { ...a, ...e.agent } : a)) : [...as, e.agent]));
+      } else if (e.type === "agent_deleted") {
+        fresh.current.set(e.agent_id, null);
+        setAgents((as) => as.filter((a) => a.id !== e.agent_id));
+      }
+    }, []),
+  );
+  const count = unreadCount(agents);
+  useEffect(() => {
+    document.title = unreadTitle(count);
+  }, [count]);
+  return count;
+}
+
+/** The Agents tab's Unread reply dot. Its own component so agent events re-render only the dot, not App and the page under it. */
+function UnreadDot({ live }: { live: boolean }) {
+  const unread = useUnreadCount(live);
+  if (!unread) return null;
+  return (
+    <span className="absolute -right-2 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 font-mono text-[9px] font-medium leading-none text-ink-950" title={`${unread} Unread repl${unread > 1 ? "ies" : "y"}`}>
+      {unreadBadge(unread)}
+    </span>
+  );
+}
+
 /** Whether the Simulator tab is on (Settings → Navigation). Off until the settings load. */
 function useShowSimulator() {
   const [show, setShow] = useState(false);
@@ -96,7 +136,12 @@ export default function App() {
               <GitBranch className="size-3.5" /> <span className="max-md:hidden">Repos</span>
             </NavLink>
             <NavLink to="/agents" className={tab} aria-label="Agents">
-              <Bot className="size-3.5" /> <span className="max-md:hidden">Agents</span>
+              {/* The dot sits on the icon so it still shows on phones, where the label hides. */}
+              <span className="relative">
+                <Bot className="size-3.5" />
+                <UnreadDot live={live} />
+              </span>{" "}
+              <span className="max-md:hidden">Agents</span>
             </NavLink>
             <NavLink to="/tasks" className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>

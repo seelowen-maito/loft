@@ -665,7 +665,7 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         // The chat keeps what you wrote, as a task row (title, then your comment); the agent's prompt adds
         // how to answer. Queued behind a running run like any message.
         agents::add_msg(&state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{}", t.id, t.title, text), json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id }));
-        agents::wake(&state, &a.id, comment_prompt(&t, text), "user");
+        agents::wake_for_user(&state, &a.id, comment_prompt(&t, text));
     }
     Ok((StatusCode::CREATED, Json(json!({ "comment": c, "queued": queued, "delivered_to": deliver.then(|| t.agent_id.clone()).flatten() }))))
 }
