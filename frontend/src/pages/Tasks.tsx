@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
-import { api, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
+import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -82,10 +82,12 @@ export default function TasksPage() {
   const [creating, setCreating] = useState(false);
 
   const [syncing, setSyncing] = useState(false);
+  // The last read of GitHub, so the list can say why GitHub's issues aren't there (rate limit, no repo...).
+  const [mirror, setMirror] = useState<MirrorSync | null>(null);
   // Opening the list, and the refresh button, read the projects' GitHub issues; changes arrive as events.
   const sync = useCallback(() => {
     setSyncing(true);
-    api.syncIssues().catch(() => {}).finally(() => setSyncing(false));
+    api.syncIssues().then(setMirror).catch(() => {}).finally(() => setSyncing(false));
   }, []);
   useEffect(() => {
     api.tasks().then(setTasks);
@@ -191,6 +193,16 @@ export default function TasksPage() {
           </div>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-6">
+          {mirror?.projects.filter((p) => p.error).map((p) => (
+            <div key={p.project} className="mx-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
+              <span className="text-fg">Couldn't read {p.repo}.</span> {p.error}
+            </div>
+          ))}
+          {mirror && mirror.skipped.length > 0 && (
+            <div className="px-3 font-mono text-[10.5px] text-fg-3" title={mirror.skipped.map((s) => `${s.project}: ${s.reason}`).join("\n")}>
+              Not mirrored from GitHub: {mirror.skipped.map((s) => s.project).join(", ")} (no GitHub repo{mirror.connected ? "" : " or token"})
+            </div>
+          )}
           {tasks === null && <div className="px-3 font-mono text-[12px] text-fg-3">Loading…</div>}
           {tasks?.length === 0 && (
             <div className="flex flex-col items-center px-6 py-16 text-center text-fg-3">
