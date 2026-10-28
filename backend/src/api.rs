@@ -330,7 +330,6 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_at: now(),
         builtin: false,
         created_by,
-        pending_fyis: vec![],
     };
     apply_patch(&mut a, p)?;
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;

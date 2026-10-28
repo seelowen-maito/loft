@@ -68,9 +68,6 @@ pub struct Agent {
     /// The agent that created this one, if an agent did. None when the user did.
     #[serde(default)]
     pub created_by: Option<String>,
-    /// FYI Agent messages it hasn't read yet, as prompt text: prepended to its next run's prompt, then cleared.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_fyis: Vec<String>,
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.
@@ -376,6 +373,13 @@ CREATE TABLE IF NOT EXISTS published_issues (
     created_at TEXT NOT NULL,
     PRIMARY KEY(slug, kind, key)
 );
+CREATE TABLE IF NOT EXISTS pending_fyis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
 "#;
 
 fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
@@ -419,6 +423,14 @@ impl Db {
             conn.execute("ALTER TABLE grill_sessions ADD COLUMN status TEXT NOT NULL DEFAULT ''", [])?;
             conn.execute("UPDATE grill_sessions SET status = COALESCE(json_extract(data, '$.status'), '')", [])?;
         }
+        // FYIs used to wait in the agent's `data`; move any still there to their table, once.
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO pending_fyis (agent_id, prompt, created_at)
+                 SELECT a.id, j.value, a.created_at FROM agents a, json_each(a.data, '$.pending_fyis') j ORDER BY a.id, j.key;
+             UPDATE agents SET data = json_remove(data, '$.pending_fyis') WHERE json_type(data, '$.pending_fyis') IS NOT NULL;
+             COMMIT;",
+        )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
         let unroled: Vec<String> = {
@@ -472,7 +484,7 @@ impl Db {
     }
 
     /// Read-modify-write an agent under one hold of the connection lock, so concurrent updates
-    /// (a status write and a pending FYI, say) can't overwrite each other. `f` must not use the db.
+    /// (a status write and a context-token write, say) can't overwrite each other. `f` must not use the db.
     pub fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> Result<Option<Agent>> {
         let c = self.0.lock().unwrap();
         let Some(mut a) = read_agent(&c, id)? else {
@@ -481,6 +493,43 @@ impl Db {
         f(&mut a);
         write_agent(&c, &a)?;
         Ok(Some(a))
+    }
+
+    /// Queue an FYI's prompt text for the agent's next run.
+    pub fn add_pending_fyi(&self, agent_id: &str, prompt: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT INTO pending_fyis (agent_id, prompt, created_at) VALUES (?1, ?2, ?3)", params![agent_id, prompt, now()])?;
+        Ok(())
+    }
+
+    /// Remove and return the agent's pending FYIs, oldest first, as (id, prompt).
+    pub fn take_pending_fyis(&self, agent_id: &str) -> Result<Vec<(i64, String)>> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let fyis = {
+            let mut st = tx.prepare("SELECT id, prompt FROM pending_fyis WHERE agent_id = ?1 ORDER BY id")?;
+            let rows = st.query_map([agent_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [agent_id])?;
+        tx.commit()?;
+        Ok(fyis)
+    }
+
+    /// Put taken FYIs back under their old ids, so they stay ahead of any that arrived since.
+    pub fn restore_pending_fyis(&self, agent_id: &str, fyis: &[(i64, String)]) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for (id, prompt) in fyis {
+            tx.execute("INSERT OR IGNORE INTO pending_fyis (id, agent_id, prompt, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, agent_id, prompt, now()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn count_pending_fyis(&self, agent_id: &str) -> Result<usize> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT COUNT(*) FROM pending_fyis WHERE agent_id = ?1", [agent_id], |r| r.get::<_, i64>(0))? as usize)
     }
 
     /// Store the roster order. Ids not listed keep their position.
@@ -501,6 +550,7 @@ impl Db {
         c.execute("DELETE FROM memories WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
         Ok(())
     }
 
@@ -1116,6 +1166,30 @@ mod tests {
             "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn fyis_kept_in_agent_data_move_to_their_table_in_order() {
+        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            db.save_agent(&agent("a")).unwrap();
+            db.save_agent(&agent("b")).unwrap();
+            // As the branch before #117 stored them.
+            let c = db.0.lock().unwrap();
+            c.execute("UPDATE agents SET data = json_set(data, '$.pending_fyis', json('[\"first\",\"second\"]')) WHERE id = 'a'", []).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        db.add_pending_fyi("a", "third").unwrap();
+        let prompts = |v: Vec<(i64, String)>| v.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+        assert_eq!(prompts(db.take_pending_fyis("a").unwrap()), ["first", "second", "third"]);
+        assert!(db.take_pending_fyis("b").unwrap().is_empty());
+        let data: String = db.0.lock().unwrap().query_row("SELECT data FROM agents WHERE id = 'a'", [], |r| r.get(0)).unwrap();
+        assert!(!data.contains("pending_fyis"), "{data}");
+        // Opening again moves nothing twice.
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

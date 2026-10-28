@@ -537,7 +537,41 @@ mod tests {
         // Only once.
         let p = run(&st, &to, "and now?").await;
         assert!(!p.contains("Committed abc123"), "{p}");
-        assert!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.is_empty());
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_fyis_stay_out_of_agent_payloads() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let mut events = st.events.subscribe();
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        agents::set_status_text(&st, &to.id, "reading");
+        let mut updates = 0;
+        while let Ok(e) = events.try_recv() {
+            let v = serde_json::to_string(&e).unwrap();
+            assert!(!v.contains("Merged #12") || v.starts_with(r#"{"type":"message""#), "{v}");
+            updates += v.contains("agent_updated") as usize;
+        }
+        assert!(updates > 0);
+        let a = st.db.get_agent(&to.id).unwrap().unwrap();
+        assert!(!serde_json::to_string(&a).unwrap().contains("Merged #12"));
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_prompt_takes_the_newest_fyis_in_order_and_counts_the_rest() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        for i in 1..=25 {
+            agents::fyi_from_agent(&st, &from, &to, &format!("Note number {i}."));
+        }
+        let p = run(&st, &to, "go").await;
+        assert!(p.starts_with("[5 older FYIs from agents were left out."), "{p}");
+        let at = |i: usize| p.find(&format!("Note number {i}.")).unwrap_or_else(|| panic!("note {i}: {p}"));
+        assert!((1..=5).all(|i| !p.contains(&format!("Note number {i}."))), "{p}");
+        assert!((6..25).all(|i| at(i) < at(i + 1)) && p.ends_with("go"), "{p}");
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -598,7 +632,7 @@ mod tests {
         for t in threads {
             t.join().unwrap();
         }
-        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), 400);
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 400);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -628,12 +662,14 @@ mod tests {
         st.settings.save(s).unwrap();
         enqueue(&st, &to.id, Some("go".into()), "user");
         until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
-        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), 1);
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+        // Put back ahead of one that arrived after the failed run took it.
+        message(&st, &from, json!({ "agent": to.id, "text": "Released v2", "kind": "fyi" })).await;
         let mut s = st.settings.get();
         s.claude_bin = bin;
         st.settings.save(s).unwrap();
         let p = run(&st, &to, "again").await;
-        assert!(p.contains("Merged #12"), "{p}");
+        assert!(p.find("Merged #12").unwrap() < p.find("Released v2").unwrap(), "{p}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -649,8 +685,7 @@ mod tests {
             }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let a = st.db.get_agent(&to.id).unwrap().unwrap();
-        assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && a.pending_fyis.is_empty() && !is_running(&st, &to.id));
+        assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && st.db.count_pending_fyis(&to.id).unwrap() == 0 && !is_running(&st, &to.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -662,7 +697,7 @@ mod tests {
             let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
         }
-        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().pending_fyis.len(), texts.len());
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
     }
 
     #[tokio::test(flavor = "multi_thread")]

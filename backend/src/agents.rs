@@ -480,14 +480,26 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
         name = from.name,
         id = from.id,
     );
-    let _ = state.db.update_agent(&to.id, |a| a.pending_fyis.push(prompt));
+    let _ = state.db.add_pending_fyi(&to.id, &prompt);
 }
 
-/// Take the agent's pending FYIs, to put in front of its next prompt.
-fn take_fyis(state: &AppState, agent_id: &str) -> Vec<String> {
-    let mut fyis = vec![];
-    let _ = state.db.update_agent(agent_id, |a| fyis = std::mem::take(&mut a.pending_fyis));
-    fyis
+/// The most FYIs put in front of one prompt; older ones are only counted (they are still in the chat).
+const MAX_FYIS_PER_PROMPT: usize = 20;
+
+/// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
+/// after a line saying how many older ones were left out.
+fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
+    if fyis.is_empty() {
+        return prompt.to_string();
+    }
+    let skip = fyis.len().saturating_sub(MAX_FYIS_PER_PROMPT);
+    let mut parts: Vec<String> = vec![];
+    if skip > 0 {
+        parts.push(format!("[{skip} older FYIs from agents were left out. They are in your chat if you need them.]"));
+    }
+    parts.extend(fyis[skip..].iter().map(|(_, p)| p.clone()));
+    parts.push(prompt.to_string());
+    parts.join("\n\n")
 }
 
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str) {
@@ -524,13 +536,11 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
             // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
-            let fyis = if trigger != "compact" && trigger != "avatar" { take_fyis(&state, &agent_id) } else { vec![] };
-            let full = if fyis.is_empty() { prompt.clone() } else { format!("{}\n\n{prompt}", fyis.join("\n\n")) };
+            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            let full = with_fyis(&fyis, &prompt);
             if let Err(e) = run_once(&state, &agent_id, &full, trigger, kill.clone()).await {
                 // The FYIs may never have reached claude: keep them for the next run.
-                let _ = state.db.update_agent(&agent_id, |a| {
-                    a.pending_fyis.splice(0..0, fyis);
-                });
+                let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
             }
