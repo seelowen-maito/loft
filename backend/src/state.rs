@@ -49,6 +49,8 @@ pub struct RunInfo {
     /// Background tasks the agent waits on after its reply, and since when.
     pub waiting_on: Vec<String>,
     pub waiting_since: Option<String>,
+    /// The run answers the user, so a Restart carries that over to the run it starts.
+    pub for_user: bool,
 }
 
 #[derive(Default)]

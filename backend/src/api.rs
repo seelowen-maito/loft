@@ -519,6 +519,10 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
                 "[Loft: the user restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]"
             ));
         }
+        // The restarted run picks up the same work: if it was answering the user, so is this one.
+        if info.for_user {
+            rt.queued_for_user.insert(id.clone());
+        }
         rt.restarting.insert(id.clone());
     }
     stop_agent(State(state), Path(id)).await

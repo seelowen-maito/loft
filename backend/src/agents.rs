@@ -818,7 +818,7 @@ async fn run_process(
     let mut replied = false;
     let mut held_end: Option<Value> = None;
     let preempt = Arc::new(Notify::new());
-    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), ..Default::default() });
+    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
     loop {
         let waiting = replied && !bg.is_empty();
         let line = tokio::select! {
@@ -1528,6 +1528,45 @@ esac
         stop(&st, &a.id);
         idle(&st, &a.id).await;
         assert!(unread(&st, &a.id));
+    }
+
+    async fn restart(st: &AppState, id: &str) {
+        let _ = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string())).await.ok().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restarted_run_keeps_answering_the_user() {
+        let (st, a) = fake_claude_state();
+        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &a.id)).await;
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(unread(&st, &a.id), "the restarted run's reply");
+
+        let b = crate::tasks::tests::agent(&st, "Failing");
+        let _ = send(&st, &b.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &b.id)).await;
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        restart(&st, &b.id).await;
+        idle(&st, &b.id).await;
+        assert!(st.db.list_messages(&b.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
+        assert!(unread(&st, &b.id), "the restarted run's error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restarting_an_agents_run_leaves_none() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(!unread(&st, &a.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
