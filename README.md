@@ -38,7 +38,7 @@ loft is built for engineers who already code with AI and want to try autonomous 
 
 - **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
 - **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.
-- **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why. Memories are loaded when a session starts and stay the same until you clear or compact it, so saving one doesn't make the next run resend the whole conversation at full price.
+- **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why. Each memory has a one-line title and a body: the agent's prompt carries only the titles, newest first and kept to about 3,000 tokens, and the agent reads a body (or an older memory) with `recall` when it needs it. Memories are loaded when a session starts and stay the same until you clear or compact it, so saving one doesn't make the next run resend the whole conversation at full price.
 - **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
 

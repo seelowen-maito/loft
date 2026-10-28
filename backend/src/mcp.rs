@@ -28,15 +28,16 @@ fn base_tools() -> Value {
     json!([
         {
             "name": "remember",
-            "description": "Save a durable long-term memory. It persists across conversations and session resets.",
+            "description": "Save a durable long-term memory. It persists across conversations and session resets. Its title goes in your system prompt's memory index from your next session; the body is read with recall.",
             "inputSchema": { "type": "object", "properties": {
-                "content": { "type": "string", "description": "The fact to remember, short and self-contained." },
+                "title": { "type": "string", "description": "One line that says what the memory is about, under 80 chars." },
+                "content": { "type": "string", "description": "The body: the fact to remember, short and self-contained." },
                 "tags": { "type": "string", "description": "Optional comma-separated tags." }
-            }, "required": ["content"] }
+            }, "required": ["title", "content"] }
         },
         {
             "name": "recall",
-            "description": "Search long-term memory. Omit query to list everything.",
+            "description": "Search long-term memory by title and body; returns each match's id, date, title and body. Omit query to list everything.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" }
             } }
@@ -167,11 +168,17 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
     let s = |k: &str| args[k].as_str().unwrap_or("").to_string();
     match name {
         "remember" => {
-            let content = s("content");
-            if content.trim().is_empty() {
-                return tool_error("content is required");
+            let (title, content) = (s("title"), s("content"));
+            if title.trim().is_empty() {
+                return tool_error("title is required: one line that says what the memory is about");
             }
-            match state.db.add_memory(agent_id, content.trim(), s("tags").trim()) {
+            if title.trim().contains('\n') {
+                return tool_error("title must be one line; put the details in content");
+            }
+            if content.trim().is_empty() {
+                return tool_error("content is required: the memory's body");
+            }
+            match state.db.add_memory(agent_id, title.trim(), content.trim(), s("tags").trim()) {
                 Ok(m) => {
                     state.emit(Event::Memory { agent_id: agent_id.into() });
                     text(format!("Saved memory #{}", m.id))
@@ -190,9 +197,12 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(ms) if ms.is_empty() => text("No matching memories."),
                 Ok(ms) => text(
                     ms.iter()
-                        .map(|m| format!("#{} ({}) [{}] {}", m.id, &m.created_at[..10], m.tags, m.content))
+                        .map(|m| {
+                            let tags = if m.tags.is_empty() { String::new() } else { format!(" [{}]", m.tags) };
+                            format!("#{} ({}){} {}\n{}", m.id, &m.created_at[..10], tags, m.title, m.content)
+                        })
                         .collect::<Vec<_>>()
-                        .join("\n"),
+                        .join("\n\n"),
                 ),
                 Err(e) => tool_error(e.to_string()),
             }
@@ -388,4 +398,47 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
         }
     };
     Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(r: &Value) -> (&str, bool) {
+        (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn remember_needs_a_title_and_a_body() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let r = call_tool(&st, &a.id, "remember", json!({ "content": "Deploys go through staging" })).await;
+        let (t, err) = said(&r);
+        assert!(err && t.contains("title is required"), "{t}");
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": "Deploys", "content": " " })).await;
+        assert!(said(&r).1);
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": "Two\nlines", "content": "x" })).await;
+        assert!(said(&r).1);
+        assert!(st.db.list_memories(&a.id).unwrap().is_empty());
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": " Deploys go through staging ", "content": "Every deploy goes to staging first." })).await;
+        assert!(!said(&r).1);
+        let m = &st.db.list_memories(&a.id).unwrap()[0];
+        assert_eq!((m.title.as_str(), m.content.as_str()), ("Deploys go through staging", "Every deploy goes to staging first."));
+    }
+
+    #[tokio::test]
+    async fn recall_matches_title_or_body_and_returns_the_body() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let d = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "ops").unwrap();
+        let r = st.db.add_memory(&a.id, "Release day", "Releases ship on Friday mornings.", "").unwrap();
+        let recall = |q: &'static str| { let st = st.clone(); let id = a.id.clone(); async move { said(&call_tool(&st, &id, "recall", json!({ "query": q })).await).0.to_string() } };
+        let by_title = recall("deploys").await;
+        assert_eq!(by_title, format!("#{} ({}) [ops] Deploys\nEvery deploy goes to staging first.", d.id, &d.created_at[..10]));
+        let by_body = recall("friday").await;
+        assert!(by_body.starts_with(&format!("#{} ", r.id)) && by_body.ends_with("Releases ship on Friday mornings."), "{by_body}");
+        let all = recall("").await;
+        assert!(all.contains("staging first.") && all.contains("Friday mornings."), "{all}");
+        assert_eq!(recall("nothing like it").await, "No matching memories.");
+    }
 }

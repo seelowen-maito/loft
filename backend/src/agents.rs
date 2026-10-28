@@ -291,21 +291,33 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
 /// The agent's current memories as they go in the system prompt. Runs use the copy frozen when the
 /// Session started (`Agent::memory_index`), so this is only built again for a new Session.
 fn memory_block(state: &AppState, agent_id: &str) -> String {
-    let memories = state.db.list_memories(agent_id).unwrap_or_default();
+    memory_index(&state.db.list_memories(agent_id).unwrap_or_default())
+}
+
+/// About 3,000 tokens of titles, at roughly 4 characters a token.
+const MEMORY_INDEX_CHARS: usize = 12_000;
+
+/// Titles only, newest first, up to `MEMORY_INDEX_CHARS`; the bodies and any older memories are
+/// read with `recall`.
+fn memory_index(memories: &[crate::db::Memory]) -> String {
     if memories.is_empty() {
-        "(no memories yet)".to_string()
-    } else {
-        // Keep the prompt bounded; older memories stay reachable via recall.
-        let skip = memories.len().saturating_sub(80);
-        memories[skip..]
-            .iter()
-            .map(|m| {
-                let tags = if m.tags.is_empty() { String::new() } else { format!(" [{}]", m.tags) };
-                format!("- #{} ({}){}: {}", m.id, &m.created_at[..10], tags, m.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        return "(no memories yet)".to_string();
     }
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for m in memories.iter().rev() {
+        let line = format!("- #{} {}", m.id, m.title);
+        used += line.chars().count() + 1;
+        if used > MEMORY_INDEX_CHARS {
+            break;
+        }
+        lines.push(line);
+    }
+    let older = memories.len() - lines.len();
+    if older > 0 {
+        lines.push(format!("({older} older memor{}: use `mcp__loft__recall` to reach them.)", if older == 1 { "y" } else { "ies" }));
+    }
+    lines.join("\n")
 }
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
@@ -366,10 +378,10 @@ The user usually reads this chat from another device, where `localhost` doesn't 
 - iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath build`, then `xcrun simctl install booted <path to .app>` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
-You have persistent memory that survives across conversations and session resets. Your memories as of this session's start (ones you save, change or forget now show here from your next session):
+You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
 {mem_block}
 
-Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Keep each memory short and self-contained. Use `mcp__loft__forget` to remove stale ones and `mcp__loft__recall` to search.
+Read a memory's full body with `mcp__loft__recall` when its title looks relevant; it searches titles and bodies. Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Give each memory a one-line title and a short, self-contained body. Use `mcp__loft__forget` to remove stale ones.
 
 # Loft tools
 - `mcp__loft__set_status`: a short, live, present-tense line shown next to your avatar (e.g. "Reading CI logs for the API"). Update it when you start a distinct phase of work.
@@ -1261,11 +1273,11 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_part_stays_the_same_for_a_session_and_is_rebuilt_after_clear_and_compact() {
         let (st, a) = fake_claude_state();
-        let first = st.db.add_memory(&a.id, "Deploys go through staging", "").unwrap();
+        let first = st.db.add_memory(&a.id, "Deploys go through staging", "Every deploy goes to staging first.", "").unwrap();
         run(&st, &a.id, "hello", 1).await;
 
         // Saved by the agent or in the Memory tab, changes wait for the next Session.
-        st.db.add_memory(&a.id, "User prefers short replies", "").unwrap();
+        st.db.add_memory(&a.id, "User prefers short replies", "Keep chat replies to a few lines.", "").unwrap();
         st.db.delete_memory(&a.id, first.id).unwrap();
         run(&st, &a.id, "again", 2).await;
         let parts = memory_parts(&st, &a.id);
@@ -1277,12 +1289,40 @@ esac
         let parts = memory_parts(&st, &a.id);
         assert!(parts[2].contains("short replies") && !parts[2].contains("Deploys go through staging"), "{}", parts[2]);
 
-        st.db.add_memory(&a.id, "Release on Fridays", "").unwrap();
+        st.db.add_memory(&a.id, "Release on Fridays", "Releases ship on Friday mornings.", "").unwrap();
         compact(&st, &a.id, "");
         until("the compaction", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 4).await;
         assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
         run(&st, &a.id, "after compact", 5).await;
         assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
+    }
+
+    #[test]
+    fn memory_index_lists_titles_newest_first_and_never_bodies() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        assert!(system_prompt(&st, &a).contains("(no memories yet)"));
+        let old = st.db.add_memory(&a.id, "Deploys go through staging", "BODY-ONE every deploy goes to staging first.", "ops").unwrap();
+        let new = st.db.add_memory(&a.id, "User prefers short replies", "BODY-TWO keep replies to a few lines.", "").unwrap();
+        let p = system_prompt(&st, &a);
+        let (o, n) = (format!("- #{} Deploys go through staging", old.id), format!("- #{} User prefers short replies", new.id));
+        assert!(p.find(&n).unwrap() < p.find(&o).unwrap(), "newest first: {p}");
+        assert!(!p.contains("BODY-") && !p.contains("older memor"), "{p}");
+    }
+
+    #[test]
+    fn memory_index_keeps_the_newest_that_fit_and_says_how_many_older_exist() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ids: Vec<i64> = (0..400).map(|i| st.db.add_memory(&a.id, &format!("Status of epic {i:03}: {}", "x".repeat(40)), "body", "").unwrap().id).collect();
+        let block = memory_block(&st, &a.id);
+        assert!(block.chars().count() <= MEMORY_INDEX_CHARS + 100, "about 3k tokens");
+        let lines: Vec<&str> = block.lines().collect();
+        let listed = lines.len() - 1;
+        assert!(listed > 100 && listed < 400, "{listed}");
+        assert!(lines[0].starts_with(&format!("- #{} Status of epic 399", ids[399])));
+        assert!(lines[listed - 1].contains(&format!("epic {:03}", 400 - listed)), "the newest ones, without gaps");
+        assert_eq!(*lines.last().unwrap(), format!("({} older memories: use `mcp__loft__recall` to reach them.)", 400 - listed));
     }
 
     #[test]

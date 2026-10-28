@@ -185,7 +185,7 @@ export type PushDevice = {
 /** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
 export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
 
-export type Memory = { id: number; agent_id: string; content: string; tags: string; created_at: string };
+export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 
 export type PermissionRequest = {
   id: string;
@@ -504,7 +504,7 @@ export const api = {
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
-  addMemory: (id: string, content: string, tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { content, tags }),
+  addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
   /** Opens the workspace in VS Code; on a remote loft, via a Remote-SSH link handed to the local VS Code. */
   openEditor: async (id: string) => {

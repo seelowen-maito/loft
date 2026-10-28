@@ -579,6 +579,8 @@ pub async fn list_memories(State(state): State<AppState>, Path(id): Path<String>
 
 #[derive(Deserialize)]
 pub struct NewMemory {
+    title: String,
+    #[serde(default)]
     content: String,
     #[serde(default)]
     tags: String,
@@ -586,10 +588,13 @@ pub struct NewMemory {
 
 pub async fn add_memory(State(state): State<AppState>, Path(id): Path<String>, Json(m): Json<NewMemory>) -> ApiResult<Value> {
     state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    if m.content.trim().is_empty() {
-        return Err(bad("empty memory"));
+    let title = m.title.trim();
+    if title.is_empty() || title.contains('\n') {
+        return Err(bad("a memory needs a one-line title"));
     }
-    let mem = state.db.add_memory(&id, m.content.trim(), m.tags.trim())?;
+    // A memory added with only a title keeps the title as its body too.
+    let content = if m.content.trim().is_empty() { title } else { m.content.trim() };
+    let mem = state.db.add_memory(&id, title, content, m.tags.trim())?;
     state.emit(Event::Memory { agent_id: id });
     Ok(Json(json!(mem)))
 }

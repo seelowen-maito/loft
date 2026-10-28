@@ -116,9 +116,23 @@ pub struct TaskComment {
 pub struct Memory {
     pub id: i64,
     pub agent_id: String,
+    /// One line, listed in the agent's system prompt.
+    pub title: String,
+    /// The full text, read with `recall`.
     pub content: String,
     pub tags: String,
     pub created_at: String,
+}
+
+/// A title for a memory saved before titles existed: its first line, cut at about 80 characters.
+pub fn title_from(content: &str) -> String {
+    let line = content.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.chars().count() <= 80 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(80).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).trim_end();
+    format!("{cut}…")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +245,7 @@ CREATE INDEX IF NOT EXISTS messages_agent ON messages(agent_id, id);
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
@@ -314,9 +329,10 @@ fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: r.get(0)?,
         agent_id: r.get(1)?,
-        content: r.get(2)?,
-        tags: r.get(3)?,
-        created_at: r.get(4)?,
+        title: r.get(2)?,
+        content: r.get(3)?,
+        tags: r.get(4)?,
+        created_at: r.get(5)?,
     })
 }
 
@@ -336,6 +352,19 @@ impl Db {
         if !has_status {
             conn.execute("ALTER TABLE grill_sessions ADD COLUMN status TEXT NOT NULL DEFAULT ''", [])?;
             conn.execute("UPDATE grill_sessions SET status = COALESCE(json_extract(data, '$.status'), '')", [])?;
+        }
+        // Memories saved before titles existed get their first line as title, once; the text stays the body.
+        let has_title: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'title'", [], |r| r.get(0))?;
+        if !has_title {
+            conn.execute("ALTER TABLE memories ADD COLUMN title TEXT NOT NULL DEFAULT ''", [])?;
+            let old: Vec<(i64, String)> = {
+                let mut st = conn.prepare("SELECT id, content FROM memories")?;
+                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (id, content) in old {
+                conn.execute("UPDATE memories SET title = ?1 WHERE id = ?2", params![title_from(&content), id])?;
+            }
         }
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
@@ -756,16 +785,17 @@ impl Db {
 
     // ---- memories -----------------------------------------------------
 
-    pub fn add_memory(&self, agent_id: &str, content: &str, tags: &str) -> Result<Memory> {
+    pub fn add_memory(&self, agent_id: &str, title: &str, content: &str, tags: &str) -> Result<Memory> {
         let c = self.0.lock().unwrap();
         let created_at = now();
         c.execute(
-            "INSERT INTO memories (agent_id, content, tags, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![agent_id, content, tags, created_at],
+            "INSERT INTO memories (agent_id, title, content, tags, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_id, title, content, tags, created_at],
         )?;
         Ok(Memory {
             id: c.last_insert_rowid(),
             agent_id: agent_id.into(),
+            title: title.into(),
             content: content.into(),
             tags: tags.into(),
             created_at,
@@ -775,7 +805,7 @@ impl Db {
     pub fn list_memories(&self, agent_id: &str) -> Result<Vec<Memory>> {
         let c = self.0.lock().unwrap();
         let mut st = c.prepare(
-            "SELECT id, agent_id, content, tags, created_at FROM memories WHERE agent_id = ?1 ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at FROM memories WHERE agent_id = ?1 ORDER BY id",
         )?;
         let rows = st.query_map([agent_id], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -785,8 +815,8 @@ impl Db {
         let c = self.0.lock().unwrap();
         let like = format!("%{}%", query.to_lowercase());
         let mut st = c.prepare(
-            "SELECT id, agent_id, content, tags, created_at FROM memories
-             WHERE agent_id = ?1 AND (lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at FROM memories
+             WHERE agent_id = ?1 AND (lower(title) LIKE ?2 OR lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY id",
         )?;
         let rows = st.query_map(params![agent_id, like], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1048,6 +1078,36 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.active_grill("a").unwrap().unwrap().id, "new");
         assert_eq!(db.open_grills().unwrap().len(), 2);
+        drop(db);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    #[test]
+    fn older_memories_get_their_first_line_as_title_and_keep_their_text() {
+        let path = std::env::temp_dir().join(format!("loft-memories-{}.db", uuid::Uuid::new_v4()));
+        let long = "Deploys go through staging first and only then to production, after the smoke tests pass on it\nmore";
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);").unwrap();
+            for content in ["User prefers short replies", "\n  Two lines  \nThe second one", long] {
+                c.execute("INSERT INTO memories (agent_id, content, created_at) VALUES ('a', ?1, '2026-01-01')", [content]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let ms = db.list_memories("a").unwrap();
+        let titles: Vec<&str> = ms.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, ["User prefers short replies", "Two lines", "Deploys go through staging first and only then to production, after the smoke…"]);
+        assert!(titles[2].chars().count() <= 81);
+        assert_eq!(ms[2].content, long, "the whole text stays the body");
+        // Opening again changes nothing; new memories keep the title they were given.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.list_memories("a").unwrap()[1].title, "Two lines");
+        let m = db.add_memory("a", "Release on Fridays", "Releases ship on Friday mornings.", "").unwrap();
+        assert_eq!(db.search_memories("a", "release").unwrap()[0].id, m.id, "matches the title");
+        assert_eq!(db.search_memories("a", "MORNINGS").unwrap()[0].id, m.id, "matches the body");
         drop(db);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
