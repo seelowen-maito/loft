@@ -319,7 +319,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
           {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
         </div>
-        {(t.labels.length > 0 || t.owner) && (
+        {!t.github && (t.labels.length > 0 || t.owner) && (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
             {t.labels.length > 0 && (
               <div className="flex flex-wrap items-center gap-1">
@@ -339,6 +339,8 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           <TaskActions task={t} agents={agents} repo={repos[t.project]} />
         </div>
       </header>
+
+      {t.github && <OwnedBy task={t} agent={agent} deps={deps} />}
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
@@ -378,6 +380,41 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
         <div className="mt-4">
           <CommentBox task={t} agent={agent} />
         </div>
+      </section>
+    </div>
+  );
+}
+
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5 text-[13px]">
+      <span className="text-fg-3">{label}</span>
+      <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-fg-2">{children}</span>
+    </div>
+  );
+}
+
+/** A mirrored issue's fields, split by who owns them: GitHub (edits go there) and Loft (never sent). */
+function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Task[] }) {
+  const g = t.github!;
+  const open = deps.filter((d) => d.state === "open").length;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <section className="panel p-4">
+        <div className="eyebrow mb-2">On GitHub · {g.repo}#{g.number}</div>
+        <Fact label="State">{g.state === "open" ? <><CircleDot className="size-3.5 text-good" /> Open</> : <><CircleCheck className="size-3.5 text-merged" /> Closed</>}</Fact>
+        <Fact label="Labels">{t.labels.length ? t.labels.map((l) => <LabelChip key={l} name={l} />) : <span className="text-fg-3">none</span>}</Fact>
+        <Fact label="Owner">{t.owner ? <><UserRound className="size-3.5 text-fg-3" /> <span className="font-mono">{t.owner}</span></> : <span className="text-fg-3">nobody</span>}</Fact>
+        <Fact label="Blocked by">{deps.length ? `${open} open of ${deps.length}` : <span className="text-fg-3">nothing</span>}</Fact>
+        <div className="mt-2 font-mono text-[10.5px] text-fg-3">Title, description, labels, owner, open/closed and links live on GitHub; edits here go there.</div>
+      </section>
+      <section className="panel p-4">
+        <div className="eyebrow mb-2">In Loft</div>
+        <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
+        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.lead} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
+        <Fact label="Priority">{t.priority}</Fact>
+        <Fact label="When done">closes #{g.number} on GitHub</Fact>
+        <div className="mt-2 font-mono text-[10.5px] text-fg-3">Who works on it, its progress, priority and notes stay in Loft.</div>
       </section>
     </div>
   );
