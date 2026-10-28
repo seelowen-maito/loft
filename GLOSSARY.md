@@ -24,6 +24,14 @@ _Avoid_: Orchestrator, manager, planner
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Session**:
+The conversation an agent carries from run to run until the user clears it; Compact summarises it in place. Every model call in a run resends the whole session, mostly from the prompt cache.
+_Avoid_: Conversation, thread
+
+**Memory**:
+A fact an agent keeps across sessions: a one-line title and a body. Every session starts with the titles of the agent's memories; the agent reads a body with `recall` when it needs it, and updates a memory instead of saving a near-copy.
+_Avoid_: Note, knowledge
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
