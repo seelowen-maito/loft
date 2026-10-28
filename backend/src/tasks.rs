@@ -1,6 +1,6 @@
 //! Tasks: personal todos and work handed to agents. The user owns a task's
 //! description and assignment; the agent working on it owns its execution
-//! status, which it reports through the `update_task` MCP tool.
+//! status, which it reports through the `update_issue` MCP tool (`update_task` is its old name).
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -14,22 +14,28 @@ use crate::db::{Agent, Task, TaskComment, now};
 use crate::state::{AppState, Event};
 
 const PRIORITIES: &[&str] = &["low", "normal", "high", "urgent"];
+/// GitHub's limits: label names up to 50 characters; Loft keeps at most 20 labels on an issue.
+const MAX_LABEL: usize = 50;
+const MAX_LABELS: usize = 20;
 /// Statuses the user may set directly. The rest come from the agent doing the work, or from execute/cancel.
 const USER_STATUSES: &[&str] = &["inbox", "ready", "done"];
 /// Statuses an agent may report on a task it owns.
 const AGENT_STATUSES: &[&str] = &["in_progress", "blocked", "waiting_approval", "done", "failed"];
 
-fn emit(state: &AppState, t: &Task) {
+pub(crate) fn emit(state: &AppState, t: &Task) {
     state.emit(Event::Task { task: json!(t) });
 }
 
 /// Longest comment or note kept in a task's thread.
 const MAX_COMMENT: usize = 4000;
 
-/// "you" for the user, else the agent's name.
+/// "you" for the user, "GitHub" for the mirror, else the agent's name.
 fn who(state: &AppState, author: &str) -> String {
     if author == "user" {
         return "you".into();
+    }
+    if author == crate::mirror::FROM_GITHUB {
+        return "GitHub".into();
     }
     state.db.get_agent(author).ok().flatten().map(|a| a.name).unwrap_or_else(|| "an agent".into())
 }
@@ -40,9 +46,23 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     if author != "user" {
         meta["author_name"] = json!(who(state, author));
     }
+    // A comment on a mirrored issue waits for the user's approval before it reaches GitHub (mirror.rs).
+    // Progress notes and status entries stay in Loft.
+    let mut auto = false;
+    if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB {
+        auto = match state.settings.get().approval_mode(&t.project) {
+            "all" => true,
+            "own" => author == "user",
+            _ => false,
+        };
+        meta["github"] = if auto { json!({ "state": "pending", "auto": true }) } else { json!({ "state": "pending" }) };
+    }
     match state.db.add_task_comment(&t.id, author, kind, &clip(text, MAX_COMMENT), meta) {
         Ok(c) => {
             state.emit(Event::TaskComment { comment: json!(c) });
+            if auto {
+                crate::mirror::spawn_approve(state, &t.id, c.id);
+            }
             Some(c)
         }
         Err(e) => {
@@ -53,7 +73,7 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
 }
 
 /// A status entry: "Started by Web Dev", "Marked done by you".
-fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
+pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
 }
 
@@ -62,7 +82,12 @@ fn is_active(t: &Task) -> bool {
 }
 
 fn is_closed(t: &Task) -> bool {
-    matches!(t.status.as_str(), "done" | "cancelled")
+    t.state() == "closed"
+}
+
+/// A GitHub login: 1–39 letters, digits or hyphens, not starting or ending with a hyphen, no double hyphen.
+fn is_github_login(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 39 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !s.starts_with('-') && !s.ends_with('-') && !s.contains("--")
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -94,6 +119,38 @@ fn apply_fields(state: &AppState, t: &mut Task, p: &Value) -> Result<(), String>
         t.title = clip(v, 200);
     }
     if let Some(v) = str_field("description") { t.description = clip(&v, 20_000); }
+    if let Some(v) = p.get("labels") {
+        let names: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| "labels must be a list of label names".to_string())?;
+        let mut labels: Vec<String> = vec![];
+        for n in names {
+            let n = n.trim();
+            if n.is_empty() {
+                continue;
+            }
+            if n.chars().count() > MAX_LABEL {
+                return Err(format!("a label can be at most {MAX_LABEL} characters, like on GitHub"));
+            }
+            // GitHub label names are case-insensitive: keep the first spelling.
+            if !labels.iter().any(|l| l.eq_ignore_ascii_case(n)) {
+                labels.push(n.to_string());
+            }
+        }
+        if labels.len() > MAX_LABELS {
+            return Err(format!("at most {MAX_LABELS} labels"));
+        }
+        t.labels = labels;
+    }
+    if let Some(v) = p.get("owner") {
+        let login = match v {
+            Value::Null => String::new(),
+            Value::String(s) => s.trim().trim_start_matches('@').to_string(),
+            _ => return Err("owner must be a GitHub login or null".into()),
+        };
+        if !login.is_empty() && !is_github_login(&login) {
+            return Err("owner must be a GitHub login: letters, digits and single hyphens, at most 39 characters".into());
+        }
+        t.owner = login;
+    }
     if let Some(v) = str_field("project") { t.project = clip(&v, 100); }
     if let Some(v) = str_field("priority") {
         if !PRIORITIES.contains(&v.as_str()) {
@@ -205,6 +262,7 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
     state.db.save_task(&t).map_err(|e| e.to_string())?;
     emit(state, &t);
     log_status(state, &t, created_by, &format!("Created by {}", who(state, created_by)));
+    crate::mirror::auto_publish(state, &t);
     Ok((t, true))
 }
 
@@ -238,7 +296,7 @@ fn brief(state: &AppState, t: &Task, note: &str) -> String {
     if !t.depends_on.is_empty() {
         ids += &format!(", depends on {}", t.depends_on.join(", "));
     }
-    s += &format!("\n\n[Report progress on this task with `mcp__loft__update_task` ({ids}): notes as you go, then `done` with a summary or `failed`/`blocked` with the reason.]");
+    s += &format!("\n\n[Report progress on this Loft issue with `mcp__loft__update_issue` ({ids}): notes as you go, then `done` with a summary or `failed`/`blocked` with the reason.]");
     s
 }
 
@@ -303,6 +361,22 @@ fn tell_delegator(state: &AppState, t: &Task, from: &Agent) {
 }
 
 // ---- REST ---------------------------------------------------------------
+
+/// The Loft issue endpoints. Mounted at `/api/issues` and, under the old name, at `/api/tasks`.
+pub fn routes() -> axum::Router<AppState> {
+    use axum::routing::{get as at_get, post};
+    axum::Router::new()
+        .route("/", at_get(list).post(create_task))
+        .route("/sync", post(crate::mirror::sync_now))
+        .route("/{id}", at_get(get).patch(update).delete(delete))
+        .route("/{id}/execute", post(execute_task))
+        .route("/{id}/cancel", post(cancel))
+        .route("/{id}/comments", at_get(list_comments).post(add_comment))
+        .route("/{id}/plan", at_get(plan))
+        .route("/{id}/publish", post(crate::mirror::publish_route))
+        .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
+        .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
+}
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -372,7 +446,8 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<String>, Json(
         };
         log_status(&state, &t, "user", &text);
     }
-    Ok(Json(json!(t)))
+    crate::mirror::write_through(&state, &before, &t).await;
+    Ok(Json(json!(state.db.get_task(&id)?.unwrap_or(t))))
 }
 
 pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -442,7 +517,7 @@ pub fn reference_header(state: &AppState, ids: &[String]) -> String {
                     s += &format!(". {}: {}", capitalize(k), clip(v.lines().next().unwrap_or(""), 300));
                 }
             }
-            s + ". `mcp__loft__get_task` shows its details and thread.]"
+            s + ". `mcp__loft__get_issue` shows its details and thread.]"
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -567,6 +642,7 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         reopened.status = "ready".into();
         state.db.save_task(&reopened)?;
         log_status(&state, &reopened, "user", "Reopened by you");
+        crate::mirror::write_through(&state, &t, &reopened).await;
         let (t, queued) = execute(&state, &t.id, None, text, None)?;
         let c = state.db.list_task_comments(&t.id, 1, None)?.pop();
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
@@ -574,10 +650,15 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
     let deliver = b.send && agent.is_some();
     let mut meta = client_id.map_or(json!({}), |c| json!({ "client_id": c }));
     meta["private"] = json!(!deliver);
+    let who = mentioned(&state, "user", text);
+    if !who.is_empty() {
+        meta["mentions"] = json!(who.iter().map(|a| a.id.clone()).collect::<Vec<_>>());
+    }
     if let (true, Some(a)) = (deliver, &agent) {
         meta["to_agent"] = json!(a.id);
     }
     let c = log(&state, &t, "user", "comment", text, meta).ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the comment".into()))?;
+    deliver_mentions(&state, &t, &c, &who, deliver.then_some(t.agent_id.as_deref()).flatten());
     let mut queued = false;
     if let (true, Some(a)) = (deliver, &agent) {
         queued = is_running(&state, &a.id);
@@ -618,6 +699,7 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>, body:
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is already {}.", t.status)));
     }
     let was_active = is_active(&t);
+    let before = t.clone();
     let ts = now();
     t.status = "cancelled".into();
     t.completed_at = Some(ts.clone());
@@ -625,6 +707,8 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>, body:
     state.db.save_task(&t)?;
     emit(&state, &t);
     log_status(&state, &t, "user", "Cancelled by you");
+    crate::mirror::write_through(&state, &before, &t).await;
+    let t = state.db.get_task(&id)?.unwrap_or(t);
     let mut stopped = false;
     if let (true, Some(agent_id)) = (was_active, t.agent_id.as_deref()) {
         if b.stop_run {
@@ -724,33 +808,47 @@ pub async fn activity(State(state): State<AppState>, Query(q): Query<ActivityQue
 
 // ---- MCP tools ------------------------------------------------------------
 
+/// The old task tool names, kept as aliases of the issue tools until every client and agent has moved.
+const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("list_tasks", "list_issues"),
+    ("create_task", "create_issue"),
+    ("update_task", "update_issue"),
+    ("get_task", "get_issue"),
+    ("comment_task", "comment_issue"),
+];
+
+/// The issue tool a name means: itself, or the issue tool an old task name stands for.
+pub fn tool_name(name: &str) -> &str {
+    TOOL_ALIASES.iter().find(|(old, _)| *old == name).map_or(name, |(_, new)| new)
+}
+
 pub fn mcp_tools() -> Vec<Value> {
-    vec![
+    let tools = vec![
         json!({
-            "name": "list_tasks",
-            "description": "List Loft tasks: id, status, title, assignee. By default the open tasks assigned to you or created by you.",
+            "name": "list_issues",
+            "description": "List Loft issues: id, status, title, assignee. By default the open ones assigned to you or created by you.",
             "inputSchema": { "type": "object", "properties": {
-                "all": { "type": "boolean", "description": "Every task, not just yours." },
-                "include_closed": { "type": "boolean", "description": "Include done and cancelled tasks." }
+                "all": { "type": "boolean", "description": "Every Loft issue, not just yours." },
+                "include_closed": { "type": "boolean", "description": "Include done and cancelled ones." }
             } }
         }),
         json!({
-            "name": "create_task",
-            "description": "Create a task on the user's task list, optionally a subtask (`parent_id`) assigned to another agent. With `start: true` the agent gets it right away; you're messaged when it is done, failed or blocked.",
+            "name": "create_issue",
+            "description": "Create a Loft issue on the user's list, optionally a subtask (`parent_id`) assigned to another agent. With `start: true` the agent gets it right away; you're messaged when it is done, failed or blocked.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "description": { "type": "string" },
                 "agent": { "type": "string", "description": "Id or name of the agent to do it (you, or another agent)." },
                 "parent_id": { "type": "string" },
-                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks that must finish first." },
+                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of Loft issues that must finish first." },
                 "priority": { "type": "string", "enum": PRIORITIES },
                 "project": { "type": "string" },
                 "start": { "type": "boolean", "description": "Hand it to the agent now." }
             }, "required": ["title"] }
         }),
         json!({
-            "name": "update_task",
-            "description": "Report progress on a task assigned to you (or that you created). `status`: in_progress | blocked | waiting_approval | done | failed. Add a short `note` for progress, a `summary` when done, an `error` when failed or blocked.",
+            "name": "update_issue",
+            "description": "Report progress on a Loft issue assigned to you (or that you created). `status`: in_progress | blocked | waiting_approval | done | failed. Add a short `note` for progress, a `summary` when done, an `error` when failed or blocked.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" },
                 "status": { "type": "string", "enum": AGENT_STATUSES },
@@ -760,34 +858,64 @@ pub fn mcp_tools() -> Vec<Value> {
             }, "required": ["id"] }
         }),
         json!({
-            "name": "get_task",
-            "description": "One task with its thread: comments from the user and agents, progress notes and status changes, oldest first.",
+            "name": "get_issue",
+            "description": "One Loft issue with its thread: comments from the user and agents, progress notes and status changes, oldest first.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" }
             }, "required": ["id"] }
         }),
         json!({
-            "name": "comment_task",
-            "description": "Comment on a task you're on, created or delegated: answer a comment the user left on it (a message starting with `[Comment on task <id>`), or ask the user something about it. The user sees it on the task (and in this chat).",
+            "name": "comment_issue",
+            "description": "Comment on a Loft issue you're on, created or delegated: answer a comment the user left on it (a message starting with `[Comment on task <id>`), or ask the user something about it. The user sees it on the issue (and in this chat).",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string" },
                 "text": { "type": "string" }
             }, "required": ["id", "text"] }
         }),
-    ]
+    ];
+    // The old names stay listed, so a conversation that already used them keeps working.
+    let aliases: Vec<Value> = TOOL_ALIASES
+        .iter()
+        .map(|(old, new)| {
+            let mut t = tools.iter().find(|t| t["name"] == *new).cloned().unwrap();
+            t["name"] = json!(old);
+            t["description"] = json!(format!("Old name for `{new}`, which does the same: use `{new}`. {}", t["description"].as_str().unwrap_or("")));
+            t
+        })
+        .collect();
+    tools.into_iter().chain(aliases).collect()
 }
 
 /// May `me` comment on `t`: assigned to it, created it, or delegated the task it's part of.
 fn involved(state: &AppState, t: &Task, me: &Agent) -> bool {
     t.agent_id.as_deref() == Some(&me.id)
         || t.created_by == me.id
+        // An agent @mentioned in the thread is on the issue too, so it can answer there.
+        || state.db.list_task_comments(&t.id, 500, None).unwrap_or_default().iter().any(|c| c.meta["mentions"].as_array().is_some_and(|m| m.iter().any(|id| id == &me.id)))
         || t.parent_id.as_deref().and_then(|p| state.db.get_task(p).ok().flatten()).is_some_and(|p| p.agent_id.as_deref() == Some(&me.id) || p.created_by == me.id)
+}
+
+/// The agents a thread comment by `author` @mentions, for its `meta.mentions`.
+fn mentioned(state: &AppState, author: &str, text: &str) -> Vec<Agent> {
+    let agents = state.db.list_agents().unwrap_or_default();
+    crate::mentions::parse(text, &agents, author).0.into_iter().cloned().collect()
+}
+
+/// Hands a thread comment to each agent it @mentions (but `skip`, who already got it), tagged with the
+/// issue, the way a user comment reaches the issue's agent. Nothing waits for GitHub approval for this.
+fn deliver_mentions(state: &AppState, t: &Task, c: &TaskComment, who: &[Agent], skip: Option<&str>) {
+    let from = if c.author == "user" { String::new() } else { format!("{} wrote: ", c.meta["author_name"].as_str().unwrap_or("An agent")) };
+    for a in who.iter().filter(|a| Some(a.id.as_str()) != skip) {
+        agents::add_msg(state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{from}{}", t.id, t.title, c.text), json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id }));
+        // A mention wakes the agent like a user comment does; who wrote it is in the prompt.
+        agents::wake(state, &a.id, comment_prompt(t, &format!("{from}{}", c.text)), "user");
+    }
 }
 
 /// The prompt an agent gets for a comment on its task.
 fn comment_prompt(t: &Task, text: &str) -> String {
     format!(
-        "[Comment on task {} “{}” (status: {})]\n{}\n\n[Answer on the task with `mcp__loft__comment_task` (id {}); `mcp__loft__get_task` shows its whole thread. If it changes the work, carry on and report with `update_task` as usual.]",
+        "[Comment on task {} “{}” (status: {})]\n{}\n\n[Answer on the Loft issue with `mcp__loft__comment_issue` (id {}); `mcp__loft__get_issue` shows its whole thread. If it changes the work, carry on and report with `update_issue` as usual.]",
         t.id,
         t.title,
         t.status.replace('_', " "),
@@ -806,8 +934,8 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
         let parent = t.parent_id.as_deref().map(|p| format!(" (subtask of {p})")).unwrap_or_default();
         format!("- {} [{}] {}{who}{parent}", t.id, t.status, t.title)
     };
-    Some(match name {
-        "list_tasks" => (|| {
+    Some(match tool_name(name) {
+        "list_issues" => (|| {
             let all = args["all"].as_bool().unwrap_or(false);
             let closed = args["include_closed"].as_bool().unwrap_or(false);
             let tasks = state.db.list_tasks().map_err(|e| e.to_string())?;
@@ -819,7 +947,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 .collect();
             Ok(if lines.is_empty() { "No tasks.".into() } else { lines.join("\n") })
         })(),
-        "create_task" => (|| {
+        "create_issue" => (|| {
             let assignee = match s("agent") {
                 a if a.is_empty() => None,
                 a => Some(find_agent(&a)?),
@@ -852,7 +980,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 _ => Ok(format!("Created task {}.", t.id)),
             }
         })(),
-        "get_task" => (|| {
+        "get_issue" => (|| {
             let t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             let mut out = vec![line(&t)];
             for (k, v) in [("Description", &t.description), ("Latest note", &t.note), ("Summary", &t.summary), ("Problem", &t.error)] {
@@ -870,7 +998,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             Ok(out.join("\n"))
         })(),
-        "comment_task" => (|| {
+        "comment_issue" => (|| {
             let t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             if !involved(state, &t, me) {
                 return Err("You can only comment on tasks you're on, created or delegated.".to_string());
@@ -879,10 +1007,14 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             if text.trim().is_empty() {
                 return Err("text is empty".to_string());
             }
-            log(state, &t, &me.id, "comment", text.trim(), json!({})).ok_or("Couldn't save the comment.")?;
-            Ok(format!("Commented on task {}.", t.id))
+            let who = mentioned(state, &me.id, text.trim());
+            let meta = if who.is_empty() { json!({}) } else { json!({ "mentions": who.iter().map(|a| a.id.clone()).collect::<Vec<_>>() }) };
+            let c = log(state, &t, &me.id, "comment", text.trim(), meta).ok_or("Couldn't save the comment.")?;
+            deliver_mentions(state, &t, &c, &who, None);
+            let to = if who.is_empty() { String::new() } else { format!(" and sent it to {}", who.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")) };
+            Ok(format!("Commented on task {}{to}.", t.id))
         })(),
-        "update_task" => (|| {
+        "update_issue" => (|| {
             let mut t = state.db.get_task(&s("id")).map_err(|e| e.to_string())?.ok_or("No task with that id. Call list_tasks.")?;
             if t.agent_id.as_deref() != Some(&me.id) && t.created_by != me.id {
                 return Err("That task isn't assigned to you or created by you.".to_string());
@@ -892,6 +1024,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             let status = s("status");
             let before = t.status.clone();
+            let was = t.clone();
             if !status.is_empty() {
                 if !AGENT_STATUSES.contains(&status.as_str()) {
                     return Err(format!("status must be one of {}", AGENT_STATUSES.join(" | ")));
@@ -911,6 +1044,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             t.updated_at = now();
             state.db.save_task(&t).map_err(|e| e.to_string())?;
             emit(state, &t);
+            crate::mirror::spawn_write_through(state, was, t.clone());
             // Every note is kept in the thread; `note` on the task is only the latest.
             if !s("note").is_empty() {
                 log(state, &t, &me.id, "note", &s("note"), json!({}));
@@ -966,6 +1100,7 @@ pub(crate) mod tests {
             grill_locks: Arc::new(Default::default()),
             publish_locks: Arc::new(Default::default()),
             publish_known: Arc::new(Default::default()),
+            mirror: Arc::new(Default::default()),
         }
     }
 
@@ -1051,7 +1186,7 @@ pub(crate) mod tests {
         assert_eq!((r["queued"].clone(), r["delivered_to"].clone()), (json!(true), json!(a.id)));
         let q = queued(&st, &a);
         assert!(q.starts_with(&format!("[Comment on task {} “Fix login” (status: in progress)]\nAlso check the iPad layout", t.id)), "{q}");
-        assert!(q.contains("mcp__loft__comment_task"));
+        assert!(q.contains("mcp__loft__comment_issue"));
         // In the agent's chat it's a task row with what you wrote, not the instructions for the agent.
         let m = st.db.list_messages(&a.id, 10, None).unwrap().into_iter().last().unwrap();
         assert_eq!((m.meta["task_id"].clone(), m.meta["task_role"].clone()), (json!(t.id), json!("comment")));
@@ -1064,6 +1199,43 @@ pub(crate) mod tests {
         assert_eq!(r["delivered_to"], Value::Null);
         assert!(!queued(&st, &a).contains("Remember to ask Tom"));
         assert_eq!(st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap().meta["private"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn an_at_mention_in_the_thread_reaches_that_agent_who_can_answer_there() {
+        let st = crate::issues::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        let (worker, reviewer, stranger) = (agent(&st, "Worker"), agent(&st, "Reviewer"), agent(&st, "Stranger"));
+        for a in [&worker, &reviewer, &stranger] {
+            busy(&st, a);
+        }
+        // A mirrored issue, so it's also clear a mention doesn't wait for GitHub approval.
+        let (mut t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": worker.id }), "user").unwrap();
+        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into() });
+        st.db.save_task(&t).unwrap();
+
+        // You mention the reviewer in a private note: it reaches the reviewer, tagged with the issue, and not the worker.
+        let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("@Reviewer can you check the session cookie?", false, false)).await.unwrap();
+        assert_eq!(r["delivered_to"], Value::Null);
+        let q = queued(&st, &reviewer);
+        assert!(q.starts_with(&format!("[Comment on task {} “Fix login”", t.id)) && q.contains("@Reviewer can you check the session cookie?"), "{q}");
+        assert!(!queued(&st, &worker).contains("session cookie"));
+        let m = st.db.list_messages(&reviewer.id, 10, None).unwrap().into_iter().last().unwrap();
+        assert_eq!((m.meta["task_id"].clone(), m.meta["task_role"].clone()), (json!(t.id), json!("comment")));
+        let c = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
+        assert_eq!((&c.meta["mentions"], &c.meta["github"]["state"]), (&json!([reviewer.id]), &json!("pending")), "in Loft now, waiting for GitHub");
+
+        // The reviewer answers on the issue, mentioning the worker: it lands in the thread and reaches the worker.
+        let none = |k: &str| Err::<Agent, _>(k.to_string());
+        let out = mcp_call(&st, &reviewer, "comment_issue", &json!({ "id": t.id, "text": "Looks fine. @Worker ship it" }), none).unwrap().unwrap();
+        assert!(out.ends_with("and sent it to Worker."), "{out}");
+        let last = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
+        assert_eq!((last.author.as_str(), last.text.as_str()), (reviewer.id.as_str(), "Looks fine. @Worker ship it"));
+        assert!(queued(&st, &worker).contains("Reviewer wrote: Looks fine. @Worker ship it"), "{}", queued(&st, &worker));
+
+        // Someone neither on it nor mentioned is refused.
+        assert!(mcp_call(&st, &stranger, "comment_issue", &json!({ "id": t.id, "text": "hi" }), none).unwrap().is_err());
+        assert!(fake.seen("/").is_empty(), "mentions never go to GitHub on their own");
     }
 
     #[tokio::test]
@@ -1201,6 +1373,146 @@ pub(crate) mod tests {
         assert!(create(&st, &json!({ "title": "x", "agent_id": "nope" }), "user").is_err());
         assert!(create(&st, &json!({ "title": "x", "parent_id": "nope" }), "user").is_err());
         assert!(create(&st, &json!({ "title": "x", "due_at": "tomorrow" }), "user").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_issue_has_a_description_labels_an_owner_and_a_state() {
+        let st = state();
+        let (code, Json(v)) = create_task(
+            State(st.clone()),
+            Json(json!({ "title": "Retry cap", "description": "## What\n\nCap at **5**.", "labels": [" bug ", "Bug", "ready-for-agent", ""], "owner": "@octo-cat" })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!((&v["description"], &v["labels"], &v["owner"], &v["state"]), (&json!("## What\n\nCap at **5**."), &json!(["bug", "ready-for-agent"]), &json!("octo-cat"), &json!("open")));
+        let id = v["id"].as_str().unwrap().to_string();
+
+        // Edits change only what's sent; null and [] clear.
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "labels": ["docs"] }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"], &v["description"]), (&json!(["docs"]), &json!("octo-cat"), &json!("## What\n\nCap at **5**.")));
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "owner": null, "labels": [] }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"]), (&json!([]), &json!("")));
+
+        // Open/closed follows the status, both ways.
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "status": "done" }))).await.unwrap();
+        assert_eq!(v["state"], "closed");
+        let Json(v) = get(State(st.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(v["state"], "closed");
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "status": "inbox" }))).await.unwrap();
+        assert_eq!(v["state"], "open");
+        let Json(v) = cancel(State(st.clone()), Path(id.clone()), None).await.unwrap();
+        assert_eq!((&v["task"]["status"], &v["task"]["state"]), (&json!("cancelled"), &json!("closed")));
+
+        // Bad values are refused and change nothing.
+        for bad in [json!({ "owner": "not a login" }), json!({ "owner": "-x" }), json!({ "owner": "a--b" }), json!({ "owner": 7 }), json!({ "labels": "bug" }), json!({ "labels": ["x".repeat(51)] })] {
+            assert_eq!(update(State(st.clone()), Path(id.clone()), Json(bad.clone())).await.unwrap_err().0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let many: Vec<String> = (0..21).map(|i| format!("l{i}")).collect();
+        assert!(create_task(State(st.clone()), Json(json!({ "title": "x", "labels": many }))).await.is_err());
+        let Json(v) = get(State(st), Path(id)).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"]), (&json!([]), &json!("")));
+    }
+
+    #[tokio::test]
+    async fn tasks_stored_before_labels_and_owner_still_load_and_work() {
+        let st = state();
+        let id = uuid::Uuid::new_v4().to_string();
+        // A row as an older Loft wrote it: no labels, owner or state.
+        let old = json!({
+            "id": id, "title": "Old one", "description": "From before", "kind": "todo", "status": "ready", "priority": "normal",
+            "project": "api", "agent_id": null, "parent_id": null, "depends_on": [], "due_at": null, "created_by": "user",
+            "note": "", "summary": "", "error": "", "created_at": "2026-10-01T10:00:00+00:00", "updated_at": "2026-10-01T10:00:00+00:00",
+            "started_at": null, "completed_at": null,
+        });
+        st.db.insert_raw_task(&id, &old.to_string(), "2026-10-01T10:00:00+00:00");
+
+        let Json(list) = list(State(st.clone()), Query(ListQuery { status: None, agent_id: None, parent_id: None, project: None })).await.unwrap();
+        let v = &list[0];
+        assert_eq!((&v["title"], &v["description"], &v["labels"], &v["owner"], &v["state"]), (&json!("Old one"), &json!("From before"), &json!([]), &json!(""), &json!("open")));
+
+        let Json(v) = update(State(st.clone()), Path(id.clone()), Json(json!({ "labels": ["bug"], "owner": "octo" }))).await.unwrap();
+        assert_eq!((&v["labels"], &v["owner"], &v["title"], &v["status"]), (&json!(["bug"]), &json!("octo"), &json!("Old one"), &json!("ready")));
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        let Json(v) = execute_task(State(st.clone()), Path(id.clone()), Some(Json(ExecuteBody { agent_id: Some(a.id.clone()), ..Default::default() }))).await.unwrap();
+        assert_eq!((&v["task"]["status"], &v["task"]["labels"], &v["task"]["state"]), (&json!("in_progress"), &json!(["bug"]), &json!("open")));
+    }
+
+    #[tokio::test]
+    async fn issues_and_tasks_are_the_same_endpoints() {
+        let st = state();
+        let app = axum::Router::new().nest("/api/issues", routes()).nest("/api/tasks", routes()).with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let r = http.post(format!("{base}/api/issues")).json(&json!({ "title": "Made as an issue" })).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        let made: Value = r.json().await.unwrap();
+        let id = made["id"].as_str().unwrap();
+        let r = http.post(format!("{base}/api/tasks")).json(&json!({ "title": "Made as a task" })).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+
+        // Both lists and both single views give the same data.
+        let issues: Value = http.get(format!("{base}/api/issues")).send().await.unwrap().json().await.unwrap();
+        let tasks: Value = http.get(format!("{base}/api/tasks")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(issues, tasks);
+        assert_eq!(issues.as_array().unwrap().len(), 2);
+        let one: Value = http.get(format!("{base}/api/issues/{id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(one, http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().json::<Value>().await.unwrap());
+        assert_eq!(one["title"], "Made as an issue");
+
+        // An edit, a comment and a cancel under one name show under the other.
+        let r = http.patch(format!("{base}/api/issues/{id}")).json(&json!({ "priority": "high" })).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = http.post(format!("{base}/api/tasks/{id}/comments")).json(&json!({ "text": "A note", "send": false })).send().await.unwrap();
+        assert!(r.status().is_success(), "{}", r.status());
+        let thread: Value = http.get(format!("{base}/api/issues/{id}/comments")).send().await.unwrap().json().await.unwrap();
+        assert!(thread.as_array().unwrap().iter().any(|c| c["text"] == "A note"), "{thread}");
+        let r = http.post(format!("{base}/api/issues/{id}/cancel")).json(&json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let one: Value = http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((&one["priority"], &one["status"]), (&json!("high"), &json!("cancelled")));
+        assert_eq!(http.get(format!("{base}/api/issues/{id}/plan")).send().await.unwrap().status(), 200);
+        assert_eq!(http.delete(format!("{base}/api/issues/{id}")).send().await.unwrap().status(), 200);
+        assert_eq!(http.get(format!("{base}/api/tasks/{id}")).send().await.unwrap().status(), 404);
+    }
+
+    #[tokio::test]
+    async fn issue_tools_and_their_old_task_names_do_the_same() {
+        let st = state();
+        let me = agent(&st, "Builder");
+        let find = |k: &str| if k == "Builder" { Ok(me.clone()) } else { Err(k.to_string()) };
+
+        // Both names are listed, the old ones pointing at the new.
+        let names: Vec<String> = mcp_tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        for (old, new) in TOOL_ALIASES {
+            assert!(names.contains(&new.to_string()) && names.contains(&old.to_string()), "{old} / {new}");
+            let alias = mcp_tools().into_iter().find(|t| t["name"] == *old).unwrap();
+            let tool = mcp_tools().into_iter().find(|t| t["name"] == *new).unwrap();
+            assert_eq!(alias["inputSchema"], tool["inputSchema"]);
+            assert!(alias["description"].as_str().unwrap().contains(&format!("`{new}`")));
+        }
+
+        let a = mcp_call(&st, &me, "create_issue", &json!({ "title": "New name" }), find).unwrap().unwrap();
+        let b = mcp_call(&st, &me, "create_task", &json!({ "title": "Old name" }), find).unwrap().unwrap();
+        let ids: Vec<String> = st.db.list_tasks().unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 2, "{a}\n{b}");
+        assert_eq!(mcp_call(&st, &me, "list_issues", &json!({}), find).unwrap(), mcp_call(&st, &me, "list_tasks", &json!({}), find).unwrap());
+
+        let id = &ids[0];
+        mcp_call(&st, &me, "update_issue", &json!({ "id": id, "status": "in_progress", "note": "via issue" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "update_task", &json!({ "id": id, "note": "via task" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "comment_issue", &json!({ "id": id, "text": "Comment one" }), find).unwrap().unwrap();
+        mcp_call(&st, &me, "comment_task", &json!({ "id": id, "text": "Comment two" }), find).unwrap().unwrap();
+        let view = mcp_call(&st, &me, "get_issue", &json!({ "id": id }), find).unwrap().unwrap();
+        assert_eq!(view, mcp_call(&st, &me, "get_task", &json!({ "id": id }), find).unwrap().unwrap());
+        for text in ["via issue", "via task", "Comment one", "Comment two"] {
+            assert!(view.contains(text), "{text} missing from {view}");
+        }
+        assert!(mcp_call(&st, &me, "no_such_tool", &json!({}), find).is_none());
     }
 
     #[test]

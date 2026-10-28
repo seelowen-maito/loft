@@ -218,7 +218,7 @@ export default function ReposPage() {
             loading={ghLoading && !allIssues.length}
             empty="No open issues."
             onRepo={setSelected}
-            seeAll="/issues"
+            seeAll="/tasks?source=github"
           />
         </section>
 

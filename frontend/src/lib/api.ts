@@ -74,10 +74,20 @@ export type PastSession = {
 export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waiting_approval" | "done" | "failed" | "cancelled";
 
 /** A task on the shared list (`/api/tasks`). */
+/** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 export type Task = {
   id: string;
   title: string;
+  /** Markdown. */
   description: string;
+  /** Label names, as on GitHub. */
+  labels: string[];
+  /** GitHub login of the person who owns it, or "". */
+  owner: string;
+  /** Derived from status: done and cancelled are closed. Read-only. */
+  state: "open" | "closed";
+  /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -106,7 +116,11 @@ export type TaskComment = {
   author: string;
   kind: "comment" | "note" | "status";
   text: string;
-  meta: { author_name?: string; status?: string; summary?: string; error?: string; private?: boolean; to_agent?: string; client_id?: string };
+  meta: {
+    author_name?: string; status?: string; summary?: string; error?: string; private?: boolean; to_agent?: string; client_id?: string;
+    /** On a mirrored issue: pending (waits for your approval), posted, kept (in Loft only), or from_github. */
+    github?: { state: "pending" | "posted" | "kept" | "from_github"; comment_id?: number; auto?: boolean };
+  };
   created_at: string;
 };
 
@@ -340,7 +354,15 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
+  /** Projects whose new Loft issues are published to GitHub as they're made. */
+  auto_publish: string[];
+  /** Per project: ask (every comment waits for approval), own (yours go straight) or all. */
+  comment_approval: Record<string, ApprovalMode>;
+  /** The mode of projects not in comment_approval. */
+  comment_approval_default: ApprovalMode;
 };
+
+export type ApprovalMode = "ask" | "own" | "all";
 
 export type SettingsView = {
   settings: Settings;
@@ -369,39 +391,6 @@ export type SystemReading = {
 };
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
-
-/** A GitHub issue as the Issues tab lists it. */
-export type Issue = {
-  number: number;
-  title: string;
-  state: "open" | "closed";
-  state_reason: string | null;
-  url: string;
-  author: string;
-  labels: { name: string; color: string; description: string | null }[];
-  assignees: { login: string; avatar_url: string }[];
-  comments: number;
-  created_at: string;
-  updated_at: string;
-  sub_issues: { total: number; completed: number };
-  blocked_by: number;
-  blocking: number;
-};
-
-export type IssueLink = { number: number; title: string; state: "open" | "closed"; url: string };
-
-/** One issue with its body, a spec's sub-issues and a ticket's dependencies. */
-export type IssueDetail = Issue & {
-  project: string;
-  repo: string;
-  body: string;
-  sub_issue_list: IssueLink[];
-  blocked_by_list: IssueLink[];
-  blocking_list: IssueLink[];
-};
-
-/** A project's issues. `problem`: it has no GitHub repo; `error`: GitHub turned the request down; `truncated`: more than the pages Loft reads. */
-export type ProjectIssues = { project: string; repo: string | null; problem?: string | null; error?: string; truncated?: boolean; issues: Issue[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -445,11 +434,6 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
-  /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
-  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/issues?project=${encodeURIComponent(project)}` : "/issues"),
-  issue: (project: string, n: number) => req<IssueDetail>("GET", `/issues/${n}?project=${encodeURIComponent(project)}`),
-  /** Sends `agent` a chat message with the issue's number and link, which wakes it; it must be on the issue's repo. */
-  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/issues/${n}/send`, { project, agent }),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
@@ -477,27 +461,34 @@ export const api = {
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
-  tasks: () => req<Task[]>("GET", "/tasks"),
-  task: (id: string) => req<Task>("GET", `/tasks/${id}`),
+  tasks: () => req<Task[]>("GET", "/issues"),
+  /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
+  syncIssues: () => req<{ connected: boolean; projects: { project: string; repo: string; error?: string }[] }>("POST", "/issues/sync", {}),
+  task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
-  taskPlan: (id: string) => req<TaskPlan>("GET", `/tasks/${id}/plan`),
-  taskComments: (id: string) => req<TaskComment[]>("GET", `/tasks/${id}/comments?limit=200`),
+  taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
+  taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `reopen`: run a finished task again with it. */
   commentTask: (id: string, text: string, opts: { send: boolean; reopen: boolean }) =>
-    req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/tasks/${id}/comments`, {
+    req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
       ...opts,
     }),
-  createTask: (t: Partial<Task> & { title: string }) => req<Task>("POST", "/tasks", { ...t, id: crypto.randomUUID() }),
-  updateTask: (id: string, p: Partial<Task>) => req<Task>("PATCH", `/tasks/${id}`, p),
-  runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/tasks/${id}/execute`, { agent_id: agentId, note }),
-  cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/tasks/${id}/cancel`, { stop_run: stopRun }),
-  deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/tasks/${id}`),
+  createTask: (t: Partial<Task> & { title: string }) => req<Task>("POST", "/issues", { ...t, id: crypto.randomUUID() }),
+  updateTask: (id: string, p: Partial<Omit<Task, "owner">> & { owner?: string | null }) => req<Task>("PATCH", `/issues/${id}`, p),
+  runTask: (id: string, agentId?: string, note = "") => req<{ task: Task; queued: boolean }>("POST", `/issues/${id}/execute`, { agent_id: agentId, note }),
+  cancelTask: (id: string, stopRun: boolean) => req<{ task: Task; stopped: boolean }>("POST", `/issues/${id}/cancel`, { stop_run: stopRun }),
+  deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
+  /** Publish to GitHub: creates the GitHub issue for a Loft-only issue and links them. */
+  publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
+  /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
+  approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
+  keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
   grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
