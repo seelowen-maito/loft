@@ -91,7 +91,7 @@ final class LoftUITests: XCTestCase {
         app.tabBars.buttons["Agents"].tap()
         let warning = any("contextChipOver", app)
         XCTAssertTrue(warning.appears(timeout: 5))
-        XCTAssertTrue(warning.label.hasSuffix("over the 200k window"))
+        XCTAssertTrue(warning.label.hasSuffix("past the 80k smart zone"))
         app.buttons["agentRow-Backend Agent"].firstMatch.tap()
         XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Implement backend endpoints"].exists)

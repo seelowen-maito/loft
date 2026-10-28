@@ -85,11 +85,11 @@ struct UsageMeter: View {
 
 // MARK: - Context
 
-/// "ctx 182k": an agent's context size, amber past the 200k window like the web UI.
+/// "ctx 182k": an agent's context size, amber from 80k (out of the smart zone) like the web UI.
 struct ContextChip: View {
     let tokens: Int
 
-    private var over: Bool { tokens >= ContextWindow.warnAt }
+    private var over: Bool { ContextWindow.warns(tokens) }
 
     var body: some View {
         HStack(spacing: 3) {
@@ -103,7 +103,7 @@ struct ContextChip: View {
         .foregroundStyle(over ? Theme.attention : .secondary)
         .background((over ? Theme.attention : Color.secondary).opacity(0.15), in: Capsule())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Context \(Self.short(tokens)) tokens" + (over ? ", over the 200k window" : ""))
+        .accessibilityLabel("Context \(Self.short(tokens)) tokens" + (over ? ", past the 80k smart zone" : ""))
         .accessibilityIdentifier(over ? "contextChipOver" : "contextChip")
     }
 

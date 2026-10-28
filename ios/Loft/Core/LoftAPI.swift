@@ -31,6 +31,8 @@ protocol LoftAPI: Sendable {
     func restartRun(agentId: String) async throws
     /// Clear context: a fresh Claude session, memory kept.
     func resetSession(agentId: String) async throws
+    /// Compact: Claude summarizes the Session so later runs carry less. Fails while the agent works.
+    func compact(agentId: String) async throws
     func permissions() async throws -> [PermissionRequest]
     func decidePermission(id: String, decision: String) async throws
     func pullRequests() async throws -> [PullRequest]
@@ -195,6 +197,7 @@ struct LiveLoftAPI: LoftAPI {
     func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
     func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
+    func compact(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/compact", body: .object(["instructions": .string("")])) }
     func permissions() async throws -> [PermissionRequest] { try await get("/permissions") }
 
     func decidePermission(id: String, decision: String) async throws {

@@ -786,6 +786,7 @@ final class LoftStore {
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
     func resetSession(_ agentId: String) async throws { try await requireWrite().resetSession(agentId: agentId) }
+    func compact(_ agentId: String) async throws { try await requireWrite().compact(agentId: agentId) }
 
     /// "Set up the team with loft" on an end-of-planning card. The server sends the setup message once and marks
     /// the card sent, so a second tap, an app restart or the web having sent it already sends nothing more.

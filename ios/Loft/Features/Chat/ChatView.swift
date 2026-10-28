@@ -226,6 +226,9 @@ struct ChatView: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+            if let ctx = agent.contextTokens {
+                ToolbarItem(placement: .topBarTrailing) { contextMenu(ctx, running: state == .working || agent.running == true) }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
@@ -532,6 +535,30 @@ extension ChatView {
         case .command(let c):
             grillCommand(c)
         }
+    }
+
+    /// The context size: amber from 80k, and a tap offers Compact and Clear for the Session, like the web.
+    fileprivate func contextMenu(_ tokens: Int, running: Bool) -> some View {
+        Menu {
+            if running { Text("Stop the agent first.") }
+            Button { sessionAction { try await store.compact(agentId) } } label: {
+                Label("Compact", systemImage: "arrow.down.right.and.arrow.up.left")
+                Text("Summarize the conversation so later runs carry less.")
+            }
+            .disabled(running)
+            Button { sessionAction { try await store.resetSession(agentId) } } label: {
+                Label("Clear", systemImage: "arrow.counterclockwise")
+                Text("Start a fresh Session. Memory is kept.")
+            }
+            .disabled(running)
+        } label: {
+            ContextChip(tokens: tokens)
+        }
+        .accessibilityIdentifier("contextMenu")
+    }
+
+    fileprivate func sessionAction(_ action: @escaping () async throws -> Void) {
+        Task { do { try await action() } catch { actionError = APIError.from(error) } }
     }
 
     /// The end-of-planning card's Clear context: a fresh session, with the next message waiting in the composer, unsent.

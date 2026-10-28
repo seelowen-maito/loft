@@ -266,9 +266,13 @@ struct AgentSummary: Codable, Hashable, Identifiable {
     }
 }
 
-/// Context windows Loft's web UI warns at (Claude Code's default 200k window).
+/// The context size warning, like the web's.
 enum ContextWindow {
-    static let warnAt = 200_000
+    /// Past this many tokens in context a Session leaves the smart zone: the same limit grills compact at.
+    static let warnAt = 80_000
+
+    /// Whether the context size shows in the warning color.
+    static func warns(_ tokens: Int) -> Bool { tokens >= warnAt }
 }
 
 struct VoiceCleanResponse: Codable {

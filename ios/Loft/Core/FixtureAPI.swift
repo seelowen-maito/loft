@@ -510,6 +510,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
 
     func resetSession(agentId: String) async throws { try check() }
+    func compact(agentId: String) async throws { try check() }
 
     func restartRun(agentId: String) async throws {
         try check()
