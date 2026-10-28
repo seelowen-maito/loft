@@ -673,6 +673,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_fails_after_claude_has_its_prompt_delivers_its_fyis_once() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        // "garbled" fails the run with an error after claude got the prompt; "crash" ends it without a result.
+        for (i, how) in ["garbled", "crash"].into_iter().enumerate() {
+            message(&st, &from, json!({ "agent": to.id, "text": format!("Merged #{i}"), "kind": "fyi" })).await;
+            let n = prompts(&st, &to).len();
+            enqueue(&st, &to.id, Some(how.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
+            assert!(prompts(&st, &to)[n].contains(&format!("Merged #{i}")));
+            assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0, "{how}");
+            let p = run(&st, &to, "again").await;
+            assert!(!p.contains("Merged #"), "{how}: {p}");
+        }
+        assert!(st.db.list_messages(&to.id, 100, None).unwrap().iter().filter(|m| m.kind == "error").count() >= 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");

@@ -538,9 +538,12 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
             // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
             let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
-            if let Err(e) = run_once(&state, &agent_id, &full, trigger, kill.clone()).await {
-                // The FYIs may never have reached claude: keep them for the next run.
-                let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+            let mut delivered = false;
+            if let Err(e) = run_once(&state, &agent_id, &full, trigger, kill.clone(), &mut delivered).await {
+                // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
+                if !delivered {
+                    let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+                }
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
             }
@@ -721,13 +724,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd
 }
 
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, kill: Arc<Notify>) -> Result<()> {
+/// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
     let mut resume = true;
     loop {
-        match run_process(state, agent_id, prompt, trigger, kill.clone(), resume).await? {
+        match run_process(state, agent_id, prompt, trigger, kill.clone(), resume, delivered).await? {
             RunOutcome::Done => return Ok(()),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
+                *delivered = false;
                 // The stored Claude session is gone; start fresh (memory survives).
                 if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
                     a.session_id = None;
@@ -767,6 +772,7 @@ async fn run_process(
     trigger: &str,
     kill: Arc<Notify>,
     resume: bool,
+    delivered: &mut bool,
 ) -> Result<RunOutcome> {
     let agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
     let quiet = trigger == "grill" || trigger == "avatar";
@@ -807,6 +813,7 @@ async fn run_process(
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
     }
+    *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
     let stderr_task = tokio::spawn(async move {
@@ -1273,12 +1280,15 @@ pub(crate) mod tests {
 
     /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
-/// "busy" never replies, "slow" replays an empty result first.
+/// "busy" never replies, "slow" replays an empty result first, "crash" exits without one and "garbled"
+    /// writes output that isn't text, which fails the run.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
+case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
