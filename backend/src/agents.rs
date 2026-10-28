@@ -47,9 +47,18 @@ pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
 }
 
 pub fn emit_agent(state: &AppState, a: &Agent) {
-    let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+    let mut v = client_json(a);
     run_fields(state, &a.id, &mut v);
     state.emit(Event::AgentUpdated { agent: v });
+}
+
+/// The agent as clients see it: without the frozen memory index, which only claude needs.
+pub fn client_json(a: &Agent) -> Value {
+    let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("memory_index");
+    }
+    v
 }
 
 /// `running`, plus how the current run is doing: `last_output_at` (the last event from claude),
@@ -279,10 +288,11 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
 
 // ---- prompt assembly --------------------------------------------------
 
-pub fn system_prompt(state: &AppState, a: &Agent) -> String {
-    let ws = workspace(state, &a.id);
-    let memories = state.db.list_memories(&a.id).unwrap_or_default();
-    let mem_block = if memories.is_empty() {
+/// The agent's current memories as they go in the system prompt. Runs use the copy frozen when the
+/// Session started (`Agent::memory_index`), so this is only built again for a new Session.
+fn memory_block(state: &AppState, agent_id: &str) -> String {
+    let memories = state.db.list_memories(agent_id).unwrap_or_default();
+    if memories.is_empty() {
         "(no memories yet)".to_string()
     } else {
         // Keep the prompt bounded; older memories stay reachable via recall.
@@ -295,7 +305,12 @@ pub fn system_prompt(state: &AppState, a: &Agent) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    };
+    }
+}
+
+pub fn system_prompt(state: &AppState, a: &Agent) -> String {
+    let ws = workspace(state, &a.id);
+    let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
     let schedule = if a.interval_minutes > 0 {
         let mut s = format!("You are woken up autonomously every {} minutes.", a.interval_minutes);
         if !a.quiet_hours.is_empty() {
@@ -351,7 +366,7 @@ The user usually reads this chat from another device, where `localhost` doesn't 
 - iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath build`, then `xcrun simctl install booted <path to .app>` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
-You have persistent memory that survives across conversations and session resets. Current memories:
+You have persistent memory that survives across conversations and session resets. Your memories as of this session's start (ones you save, change or forget now show here from your next session):
 {mem_block}
 
 Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Keep each memory short and self-contained. Use `mcp__loft__forget` to remove stale ones and `mcp__loft__recall` to search.
@@ -684,6 +699,7 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
                     a.session_id = None;
                     a.context_tokens = None;
                     a.grill_briefed = false;
+                    a.memory_index = None;
                 }) {
                     emit_agent(state, &a);
                 }
@@ -719,7 +735,12 @@ async fn run_process(
     kill: Arc<Notify>,
     resume: bool,
 ) -> Result<RunOutcome> {
-    let agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    if !resume || agent.session_id.is_none() || agent.memory_index.is_none() {
+        // A new Session (or the first run since Clear or Compact): freeze its memories for the runs to come.
+        let block = memory_block(state, agent_id);
+        agent = state.db.update_agent(agent_id, |a| a.memory_index = Some(block))?.unwrap_or(agent);
+    }
     let quiet = trigger == "grill" || trigger == "avatar";
     // Set once the run has called a grill tool: the tools post what the user sees, so any text the agent
     // writes after that (models narrate despite being told not to) would only repeat or spoil it.
@@ -842,7 +863,11 @@ async fn run_process(
                     }));
                     set_context_tokens(state, agent_id, m["post_tokens"].as_u64());
                     // The summary may have dropped the grill instructions: the next grill run resends them.
-                    state.db.update_agent(agent_id, |a| a.grill_briefed = false)?;
+                    // The cache is rebuilt after a compaction anyway, so the next run takes fresh memories.
+                    state.db.update_agent(agent_id, |a| {
+                        a.grill_briefed = false;
+                        a.memory_index = None;
+                    })?;
                 }
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
@@ -1156,14 +1181,22 @@ mod tests {
         assert_eq!(suggest_rule("Bash", &json!({ "command": "npm test" })), "Bash(npm *)");
     }
 
-    /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
+    /// Stands in for `claude -p`: logs each prompt to `prompts.log` and system prompt to `system.log` in the
+    /// workspace (a compaction for `/compact`), replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
 /// "busy" never replies, "slow" replays an empty result first.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
+while [ $# -gt 0 ]; do
+  [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
+  shift
+done
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
+case "$prompt" in /compact*)
+  echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
+esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
@@ -1210,6 +1243,54 @@ esac
 
     fn status_text(st: &AppState, id: &str) -> String {
         st.db.get_agent(id).unwrap().unwrap().status_text
+    }
+
+    /// The memory part of each system prompt the fake claude was started with, in order.
+    fn memory_parts(st: &AppState, id: &str) -> Vec<String> {
+        let log = std::fs::read_to_string(workspace(st, id).join("system.log")).unwrap_or_default();
+        log.split("\n---\n")
+            .filter_map(|p| Some(p.split_once("# Long-term memory")?.1.split_once("# Loft tools")?.0.to_string()))
+            .collect()
+    }
+
+    async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
+        enqueue(st, id, Some(text.into()), "user");
+        until("the run", 10, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_part_stays_the_same_for_a_session_and_is_rebuilt_after_clear_and_compact() {
+        let (st, a) = fake_claude_state();
+        let first = st.db.add_memory(&a.id, "Deploys go through staging", "").unwrap();
+        run(&st, &a.id, "hello", 1).await;
+
+        // Saved by the agent or in the Memory tab, changes wait for the next Session.
+        st.db.add_memory(&a.id, "User prefers short replies", "").unwrap();
+        st.db.delete_memory(&a.id, first.id).unwrap();
+        run(&st, &a.id, "again", 2).await;
+        let parts = memory_parts(&st, &a.id);
+        assert_eq!(parts[0], parts[1]);
+        assert!(parts[1].contains("Deploys go through staging") && !parts[1].contains("short replies"), "{}", parts[1]);
+
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        run(&st, &a.id, "after clear", 3).await;
+        let parts = memory_parts(&st, &a.id);
+        assert!(parts[2].contains("short replies") && !parts[2].contains("Deploys go through staging"), "{}", parts[2]);
+
+        st.db.add_memory(&a.id, "Release on Fridays", "").unwrap();
+        compact(&st, &a.id, "");
+        until("the compaction", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 4).await;
+        assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
+        run(&st, &a.id, "after compact", 5).await;
+        assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
+    }
+
+    #[test]
+    fn clients_never_see_the_frozen_memory_index() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Worker");
+        a.memory_index = Some("- #1 secret".into());
+        assert!(client_json(&a).get("memory_index").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

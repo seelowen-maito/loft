@@ -453,7 +453,7 @@ function MemoryTab({ agent }: { agent: Agent }) {
   return (
     <div className="space-y-4 p-5">
       <p className="text-[12.5px] leading-relaxed text-fg-2">
-        Long-term memory is private to {agent.name}. It survives new sessions and is loaded into every run. The agent writes here with its <code className="font-mono text-[11.5px]">remember</code> tool.
+        Long-term memory is private to {agent.name}. It survives new sessions and is loaded when a session starts, so what you add or delete here reaches the agent's prompt from its next session. The agent writes here with its <code className="font-mono text-[11.5px]">remember</code> tool.
       </p>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) api.addMemory(agent.id, text).then(() => setText("")); }}>
         <input className="input" placeholder="Teach it something…" value={text} onChange={(e) => setText(e.target.value)} />

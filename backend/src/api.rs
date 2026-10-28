@@ -45,7 +45,7 @@ pub fn not_found() -> ApiError {
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
 fn agent_json(state: &AppState, a: &Agent) -> Value {
-    let mut v = serde_json::to_value(a).unwrap();
+    let mut v = agents::client_json(a);
     agents::run_fields(state, &a.id, &mut v);
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
     v
@@ -317,6 +317,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         subagent_model: String::new(),
         max_subagents: None,
         grill_briefed: false,
+        memory_index: None,
         lead: false,
         role: String::new(),
         avatar: Avatar::generate(&id),
@@ -532,6 +533,7 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
         a.session_id = None;
         a.context_tokens = None;
         a.grill_briefed = false;
+        a.memory_index = None;
     })?.ok_or_else(not_found)?;
     let m = state.db.add_message(&id, None, "system", "clear", "Context cleared. Long-term memory carries over.", json!({}))?;
     state.emit(Event::Message { message: json!(m) });

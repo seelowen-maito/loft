@@ -44,6 +44,10 @@ pub struct Agent {
     /// or compacted, so the next grill run sends them again.
     #[serde(default)]
     pub grill_briefed: bool,
+    /// The memory part of its system prompt, built when its Session starts and resent unchanged by every
+    /// run of that Session, so saving a memory doesn't break the prompt cache. Clear and Compact drop it.
+    #[serde(default)]
+    pub memory_index: Option<String>,
     /// Leads its team (the agents sharing its project): at most one per project.
     #[serde(default)]
     pub lead: bool,
