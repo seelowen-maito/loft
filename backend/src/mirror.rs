@@ -123,7 +123,10 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
     let mut cursor = cursor.lock().await;
     let result = if full || cursor.since.is_none() { full_read(state, project, &repo, &mut cursor, &mut report).await } else { changes(state, project, &repo, &mut cursor, &mut report).await };
     if let Err(e) = result {
-        tracing::warn!("mirror {repo}: {e}");
+        // Paused for the rate limit is expected and says so in the list; it isn't worth a warning each tick.
+        if !crate::github::is_paused(&e) {
+            tracing::warn!("mirror {repo}: {e}");
+        }
         report.error = Some(e.to_string());
     }
     Some(report)
