@@ -95,6 +95,22 @@ fn rate_limit_wait(status: reqwest::StatusCode, headers: &reqwest::header::Heade
 }
 
 pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
+    Ok(exchange(state, method, path, body, None).await?.map_or(Value::Null, |(v, _)| v))
+}
+
+/// A GET with `If-None-Match`: Ok(None) when GitHub answers 304 Not Modified, which doesn't count
+/// against the rate limit; otherwise the body and the response's ETag, for the next poll.
+pub async fn get_if_changed(state: &AppState, path: &str, etag: Option<&str>) -> Result<Option<(Value, Option<String>)>> {
+    exchange(state, reqwest::Method::GET, path, None, etag).await
+}
+
+/// GitHub said the thing isn't there (404) or is gone for good (410).
+pub fn is_gone(e: &anyhow::Error) -> bool {
+    let m = e.to_string();
+    m.starts_with("GitHub 404") || m.starts_with("GitHub 410")
+}
+
+async fn exchange(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, etag: Option<&str>) -> Result<Option<(Value, Option<String>)>> {
     let mut retried = false;
     loop {
         if method != reqwest::Method::GET && path != "/graphql" {
@@ -112,12 +128,19 @@ pub async fn request(state: &AppState, method: reqwest::Method, path: &str, body
         if let Some(b) = &body {
             req = req.json(b);
         }
+        if let Some(e) = etag {
+            req = req.header("If-None-Match", e);
+        }
         let resp = req.send().await?;
         let status = resp.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
         let headers = resp.headers().clone();
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         if status.is_success() {
-            return Ok(body);
+            let tag = headers.get("etag").and_then(|v| v.to_str().ok()).map(String::from);
+            return Ok(Some((body, tag)));
         }
         let msg = body["message"].as_str().unwrap_or("request failed");
         // Rate limited: wait as long as GitHub asks and try once more.
@@ -243,6 +266,7 @@ pub(crate) mod tests {
                                 headers: json!({
                                     "authorization": h("authorization"), "accept": h("accept"),
                                     "user-agent": h("user-agent"), "x-github-api-version": h("x-github-api-version"),
+                                    "if-none-match": h("if-none-match"),
                                 }),
                                 body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                             });
@@ -311,7 +335,7 @@ pub(crate) mod tests {
         assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("GET", "/repos/octo/issues-demo/issues?state=all"));
         assert_eq!(seen[0].headers, json!({
             "authorization": "Bearer test-token", "accept": "application/vnd.github+json",
-            "user-agent": "loft", "x-github-api-version": "2022-11-28",
+            "user-agent": "loft", "x-github-api-version": "2022-11-28", "if-none-match": "",
         }));
         assert_eq!(seen[0].body, Value::Null, "a GET sends no body");
 

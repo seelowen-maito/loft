@@ -22,17 +22,20 @@ const USER_STATUSES: &[&str] = &["inbox", "ready", "done"];
 /// Statuses an agent may report on a task it owns.
 const AGENT_STATUSES: &[&str] = &["in_progress", "blocked", "waiting_approval", "done", "failed"];
 
-fn emit(state: &AppState, t: &Task) {
+pub(crate) fn emit(state: &AppState, t: &Task) {
     state.emit(Event::Task { task: json!(t) });
 }
 
 /// Longest comment or note kept in a task's thread.
 const MAX_COMMENT: usize = 4000;
 
-/// "you" for the user, else the agent's name.
+/// "you" for the user, "GitHub" for the mirror, else the agent's name.
 fn who(state: &AppState, author: &str) -> String {
     if author == "user" {
         return "you".into();
+    }
+    if author == crate::mirror::FROM_GITHUB {
+        return "GitHub".into();
     }
     state.db.get_agent(author).ok().flatten().map(|a| a.name).unwrap_or_else(|| "an agent".into())
 }
@@ -56,7 +59,7 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
 }
 
 /// A status entry: "Started by Web Dev", "Marked done by you".
-fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
+pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
 }
 
@@ -349,6 +352,7 @@ pub fn routes() -> axum::Router<AppState> {
     use axum::routing::{get as at_get, post};
     axum::Router::new()
         .route("/", at_get(list).post(create_task))
+        .route("/sync", post(crate::mirror::sync_now))
         .route("/{id}", at_get(get).patch(update).delete(delete))
         .route("/{id}/execute", post(execute_task))
         .route("/{id}/cancel", post(cancel))
@@ -1043,6 +1047,7 @@ pub(crate) mod tests {
             grill_locks: Arc::new(Default::default()),
             publish_locks: Arc::new(Default::default()),
             publish_known: Arc::new(Default::default()),
+            mirror: Arc::new(Default::default()),
         }
     }
 

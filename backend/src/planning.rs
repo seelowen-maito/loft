@@ -69,6 +69,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     };
     // Even a failure can leave issues published, so the Issues tab refetches either way.
     state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
+    // What was published shows up as Loft issues without waiting for the next poll.
+    crate::mirror::spawn_sync(state, &me.project);
     Some(out)
 }
 

@@ -41,7 +41,7 @@ fn link(i: &Value) -> Value {
 }
 
 /// The projects the agents belong to, A–Z (case-insensitive), each once.
-fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
+pub(crate) fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
     let mut ps: Vec<String> = state.db.list_agents()?.iter().map(|a| a.project.trim().to_string()).filter(|p| !p.is_empty()).collect();
     ps.sort();
     ps.dedup();
@@ -243,12 +243,12 @@ pub async fn send(State(state): State<AppState>, Path(number): Path<i64>, Json(s
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::tests::{fake_github, own_fake, state_with_token};
 
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
-    fn state() -> AppState {
+    pub(crate) fn state() -> AppState {
         let st = state_with_token();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let projects = dir.join("projects");
@@ -258,7 +258,7 @@ mod tests {
     }
 
     /// An agent on `project`, whose folder is a git repo with this `origin` (none: not a repo at all).
-    fn project(st: &AppState, project: &str, origin: Option<&str>) {
+    pub(crate) fn project(st: &AppState, project: &str, origin: Option<&str>) {
         let mut a = crate::tasks::tests::agent(st, &format!("{project}-dev"));
         a.project = project.into();
         st.db.save_agent(&a).unwrap();

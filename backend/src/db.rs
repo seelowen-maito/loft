@@ -189,6 +189,8 @@ pub struct Task {
     pub labels: Vec<String>,
     /// The GitHub login of the person who owns it, or empty. Always a person, never an agent.
     pub owner: String,
+    /// The GitHub issue it mirrors, if any. None: a Loft-only issue.
+    pub github: Option<GithubLink>,
     /// todo (personal; never runs by itself) | work (meant for an agent)
     pub kind: String,
     /// inbox | ready | in_progress | blocked | waiting_approval | done | failed | cancelled
@@ -212,6 +214,20 @@ pub struct Task {
     pub completed_at: Option<String>,
 }
 
+/// Where a mirrored Loft issue lives on GitHub, and what Loft last read of it there.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct GithubLink {
+    /// owner/name
+    pub repo: String,
+    pub number: i64,
+    pub url: String,
+    /// open | closed, as GitHub last said.
+    pub state: String,
+    /// GitHub's `updated_at` for the issue when Loft last read it.
+    pub updated_at: String,
+}
+
 impl Task {
     /// `open` or `closed`, as on GitHub: done and cancelled are closed, everything else is open.
     pub fn state(&self) -> &'static str {
@@ -222,13 +238,14 @@ impl Task {
 impl Serialize for Task {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut m = s.serialize_struct("Task", 25)?;
+        let mut m = s.serialize_struct("Task", 26)?;
         m.serialize_field("id", &self.id)?;
         m.serialize_field("title", &self.title)?;
         m.serialize_field("description", &self.description)?;
         m.serialize_field("labels", &self.labels)?;
         m.serialize_field("owner", &self.owner)?;
         m.serialize_field("state", self.state())?;
+        m.serialize_field("github", &self.github)?;
         m.serialize_field("kind", &self.kind)?;
         m.serialize_field("status", &self.status)?;
         m.serialize_field("priority", &self.priority)?;

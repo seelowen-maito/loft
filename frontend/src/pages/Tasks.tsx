@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ListTodo, MessageSquare, NotebookPen, Plus, Search, UserRound } from "lucide-react";
+import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
 import { api, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
@@ -55,10 +55,17 @@ export default function TasksPage() {
   const [showClosed, setShowClosed] = useState(false);
   const [creating, setCreating] = useState(false);
 
+  const [syncing, setSyncing] = useState(false);
+  // Opening the list, and the refresh button, read the projects' GitHub issues; changes arrive as events.
+  const sync = useCallback(() => {
+    setSyncing(true);
+    api.syncIssues().catch(() => {}).finally(() => setSyncing(false));
+  }, []);
   useEffect(() => {
     api.tasks().then(setTasks);
     api.agents().then(setAgents);
-  }, []);
+    sync();
+  }, [sync]);
 
   useServerEvents(
     useCallback((e: ServerEvent) => {
@@ -118,9 +125,14 @@ export default function TasksPage() {
                 {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
               </div>
             </div>
+            <div className="flex items-center gap-1">
+            <button className="btn-ghost size-8 justify-center p-0" onClick={sync} aria-label="Refresh from GitHub" title="Refresh from GitHub">
+              <RefreshCw className={cx("size-4", syncing && "animate-spin")} />
+            </button>
             <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
               <Plus className="size-4" />
             </button>
+            </div>
           </div>
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
@@ -203,6 +215,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
+          {t.github && <span className="text-fg-2">· #{t.github.number}</span>}
           {agent && <>· {agent.name}</>}
           {t.project && <>· {t.project}</>}
           {(t.priority === "high" || t.priority === "urgent") && <span className="text-warn">· {t.priority}</span>}
@@ -232,7 +245,7 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
   );
 
   const agent = t.agent_id ? agentById.get(t.agent_id) : undefined;
-  const creator = t.created_by === "user" ? "you" : agentById.get(t.created_by)?.name ?? "an agent";
+  const creator = t.created_by === "user" ? "you" : t.created_by === "github" ? "GitHub" : agentById.get(t.created_by)?.name ?? "an agent";
   const parent = t.parent_id ? tasks.find((x) => x.id === t.parent_id) : undefined;
   const subtasks = tasks.filter((x) => x.parent_id === t.id);
   const deps = t.depends_on.map((id) => tasks.find((x) => x.id === id)).filter((x): x is Task => !!x);
@@ -257,6 +270,11 @@ function TaskDetail({ task: t, tasks, agents, agentById }: { task: Task; tasks: 
           <span className={cx("chip", STATUS_TONE[t.status])}>{statusLabel(t.status)}</span>
           {t.priority !== "normal" && <span className={cx("chip", (t.priority === "high" || t.priority === "urgent") && "text-warn")}>{t.priority}</span>}
           {t.project && <span className="chip">{t.project}</span>}
+          {t.github && (
+            <a href={t.github.url} target="_blank" rel="noreferrer" className="chip gap-1 hover:text-fg" title={`Mirrors ${t.github.repo}#${t.github.number} on GitHub (${t.github.state} there)`}>
+              {t.github.repo}#{t.github.number} <ExternalLink className="size-3" />
+            </a>
+          )}
           <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
           {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
         </div>

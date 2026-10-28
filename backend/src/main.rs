@@ -14,6 +14,7 @@ mod planning;
 mod guard;
 mod mcp;
 mod mentions;
+mod mirror;
 mod prs;
 mod push;
 mod repos;
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         grill_locks: Arc::new(grill::Locks::default()),
         publish_locks: Arc::new(planning::Locks::default()),
         publish_known: Arc::new(planning::Known::default()),
+        mirror: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     tokio::spawn(agents::scheduler(state.clone()));
@@ -87,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
+    tokio::spawn(mirror::poller(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))

@@ -76,6 +76,8 @@ export type Task = {
   owner: string;
   /** Derived from status: done and cancelled are closed. Read-only. */
   state: "open" | "closed";
+  /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -476,6 +478,8 @@ export const api = {
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
+  /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
+  syncIssues: () => req<{ connected: boolean; projects: { project: string; repo: string; error?: string }[] }>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
