@@ -12,6 +12,11 @@ export function showsUnreadDot(agent: Unread, openId: string | null): boolean {
   return !!agent.unread_reply && agent.id !== openId;
 }
 
+/** A collapsed project group's "N unread": the roster dots its folded rows would show. */
+export function groupUnread(agents: Unread[], openId: string | null): number {
+  return agents.filter((a) => showsUnreadDot(a, openId)).length;
+}
+
 /** How many agents have an Unread reply, the open chat included: a reply that lands in a background tab counts until it's seen. */
 export function unreadCount(agents: Unread[]): number {
   return agents.filter((a) => a.unread_reply).length;

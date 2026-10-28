@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeLoaded, shouldMarkRead, showsUnreadDot, unreadBadge, unreadCount, unreadTitle } from "../src/lib/unread.ts";
+import { groupUnread, mergeLoaded, shouldMarkRead, showsUnreadDot, unreadBadge, unreadCount, unreadTitle } from "../src/lib/unread.ts";
 
 const dev = { id: "dev", unread_reply: true };
 
@@ -26,6 +26,13 @@ test("the roster dot shows for each agent with an Unread reply except the open c
   assert.equal(showsUnreadDot(dev, null), true);
   assert.equal(showsUnreadDot(dev, "dev"), false);
   assert.equal(showsUnreadDot({ id: "lead" }, "dev"), false);
+});
+
+test("a collapsed group counts its agents with an Unread reply, except the open chat", () => {
+  const agents = [{ id: "a", unread_reply: true }, { id: "b", unread_reply: true }, { id: "c" }];
+  assert.equal(groupUnread(agents, null), 2);
+  assert.equal(groupUnread(agents, "a"), 1);
+  assert.equal(groupUnread([{ id: "c" }, { id: "d", unread_reply: false }], null), 0);
 });
 
 test("the Agents tab counts every agent with an Unread reply, the open chat included", () => {

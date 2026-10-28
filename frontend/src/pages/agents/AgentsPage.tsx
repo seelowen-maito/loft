@@ -12,7 +12,7 @@ import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
-import { shouldMarkRead, showsUnreadDot } from "../../lib/unread";
+import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
 const INSPECTOR_KEY = "loft:inspector-hidden";
@@ -201,11 +201,13 @@ export default function AgentsPage() {
             const open = !projects.length || folded.isOpen(g.project);
             const groupWorking = g.agents.filter((a) => a.running).length;
             const groupPending = g.agents.reduce((n, a) => n + (pendingBy.get(a.id) ?? 0), 0);
+            const groupUnreadCount = groupUnread(g.agents, selectedId);
             return (
               <div key={g.project} className="space-y-1">
                 {projects.length > 0 && (
                   <ProjectHeader name={g.project || "Other"} open={open} onToggle={() => folded.toggle(g.project)}>
                     {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
+                    {!open && groupUnreadCount > 0 && <span className="text-accent">{groupUnreadCount} unread</span>}
                     {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
                     <span>{g.agents.length}</span>
                   </ProjectHeader>
