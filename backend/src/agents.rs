@@ -435,6 +435,11 @@ pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static 
     start(state, agent_id, Some(prompt), trigger, false);
 }
 
+/// `wake` for the user's own words recorded elsewhere (a task comment sent to the agent): its reply is an Unread reply.
+pub fn wake_for_user(state: &AppState, agent_id: &str, prompt: String) {
+    start(state, agent_id, Some(prompt), "user", true);
+}
+
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
 pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     let prompt = format!(
@@ -1456,6 +1461,34 @@ esac
         enqueue(&st, &b.id, None, "schedule");
         idle(&st, &b.id).await;
         assert!(unread(&st, &b.id));
+
+        let c = crate::tasks::tests::agent(&st, "Run now");
+        let _ = crate::api::run_now(axum::extract::State(st.clone()), axum::extract::Path(c.id.clone())).await.ok().unwrap();
+        idle(&st, &c.id).await;
+        assert!(unread(&st, &c.id), "Run now is the user starting it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_cannot_start_leaves_an_unread_reply() {
+        let (st, a) = fake_claude_state();
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_comment_sent_to_the_agent_counts() {
+        let (st, a) = fake_claude_state();
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Fix it", "agent_id": a.id }), "user").unwrap();
+        let body = serde_json::from_value(json!({ "text": "Any update?" })).unwrap();
+        let _ = crate::tasks::add_comment(axum::extract::State(st.clone()), axum::extract::Path(t.id.clone()), axum::Json(body)).await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("Any update?"));
+        assert!(unread(&st, &a.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
