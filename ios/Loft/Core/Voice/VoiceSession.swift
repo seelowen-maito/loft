@@ -188,9 +188,18 @@ final class VoiceSession {
             phase = .idle
             return
         }
-        await clean()
+        // Voice style B sends what was heard, without the tidy-up on the Mac.
+        let variant = VoiceVariant.selected
+        if variant != .b { await clean() }
         phase = .review
         switch reason {
+        case .review where variant == .a && store.canWrite:
+            // Voice style A: Done sends after the Undo countdown, no review screen.
+            VoiceLog.shared.add("talk: Done: sending after the countdown (style A)")
+            scheduleAutoSend()
+        case .review where variant == .b && store.canWrite:
+            VoiceLog.shared.add("talk: Done: sending as heard (style B)")
+            await send(raw)
         case .send where store.canWrite:
             VoiceLog.shared.add("talk: heard “send”: sending the cleaned text")
             await send(cleaned ?? raw)
@@ -253,6 +262,13 @@ final class VoiceSession {
         guard isActive else { return }
         VoiceLog.shared.add("talk: interview ended: mic off")
         discard()
+    }
+
+    /// Voice style C: who the dictation goes to, picked on the Talk screen. Remembered for the next Talk.
+    func switchAgent(_ id: String) {
+        guard phase != .sending, phase != .speaking else { return }
+        agentId = id
+        UserDefaults.standard.set(id, forKey: "voiceLastAgent")
     }
 
     /// Undo an automatic send: the text stays for review and editing.

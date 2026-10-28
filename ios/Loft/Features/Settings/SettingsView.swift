@@ -54,6 +54,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.aiChatReplies) private var aiChatReplies = true
     @AppStorage(Prefs.aiExplain) private var aiExplain = true
     @AppStorage(Prefs.speechVoice) private var speechVoice = ""
+    @AppStorage(VoiceVariant.key) private var voiceVariant = VoiceVariant.current.rawValue
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     @State private var copied = false
@@ -200,6 +201,10 @@ struct SettingsView: View {
                     LabeledContent("Voice", value: VoiceChoice.displayName(for: speechVoice))
                 }
                 .accessibilityIdentifier("voiceRow")
+                Picker("Voice style (trial)", selection: $voiceVariant) {
+                    ForEach(VoiceVariant.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) }
+                }
+                .accessibilityIdentifier("voiceVariantPicker")
                 NavigationLink("Voice log") { VoiceLogView() }
                     .accessibilityIdentifier("voiceLogRow")
             } header: {
