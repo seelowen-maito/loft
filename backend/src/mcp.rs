@@ -37,7 +37,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "recall",
-            "description": "Search long-term memory by title and body; returns each match's id, date, title and body. Omit query to list everything.",
+            "description": "Search long-term memory by title and body; returns each match's id, date, title and body, last saved or updated first, like your memory index. Omit query to list everything.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" }
             } }
@@ -206,9 +206,11 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(ms) if ms.is_empty() => text("No matching memories."),
                 Ok(ms) => text(
                     ms.iter()
+                        .rev()
                         .map(|m| {
                             let tags = if m.tags.is_empty() { String::new() } else { format!(" [{}]", m.tags) };
-                            format!("#{} ({}){} {}\n{}", m.id, &m.created_at[..10], tags, m.title, m.content)
+                            let saved = m.updated_at.as_deref().unwrap_or(&m.created_at);
+                            format!("#{} ({}){} {}\n{}", m.id, &saved[..10], tags, m.title, m.content)
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n"),
@@ -479,6 +481,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recall_lists_the_last_saved_or_updated_first() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let status = st.db.add_memory(&a.id, "Release status", "Release is in QA.", "").unwrap();
+        let deploys = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "").unwrap();
+        let ids = |text: String| text.split("\n\n").map(|m| m.split(' ').next().unwrap().to_string()).collect::<Vec<_>>();
+        let all = said(&call_tool(&st, &a.id, "recall", json!({})).await).0.to_string();
+        assert_eq!(ids(all), [format!("#{}", deploys.id), format!("#{}", status.id)], "newest first");
+        call_tool(&st, &a.id, "update", json!({ "id": status.id, "content": "Release shipped." })).await;
+        let all = said(&call_tool(&st, &a.id, "recall", json!({})).await).0.to_string();
+        assert_eq!(ids(all), [format!("#{}", status.id), format!("#{}", deploys.id)], "the updated one moves up");
+    }
+
+    #[tokio::test]
     async fn update_rewrites_only_that_memory_and_only_the_given_parts() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
@@ -493,8 +509,8 @@ mod tests {
         assert!(!said(&r).1);
         let ms = st.db.list_memories(&a.id).unwrap();
         assert_eq!(ms.len(), 2);
-        assert_eq!((ms[0].id, ms[0].title.as_str(), ms[0].content.as_str()), (status.id, "Release shipped", "Release shipped on Friday."));
-        assert_eq!((ms[1].title.as_str(), ms[1].content.as_str()), (other.title.as_str(), other.content.as_str()));
+        assert_eq!((ms[1].id, ms[1].title.as_str(), ms[1].content.as_str()), (status.id, "Release shipped", "Release shipped on Friday."), "updated, so newest");
+        assert_eq!((ms[0].title.as_str(), ms[0].content.as_str()), (other.title.as_str(), other.content.as_str()));
 
         for bad in [
             json!({ "id": 9999, "title": "x" }),
@@ -511,6 +527,6 @@ mod tests {
         let r = call_tool(&st, &a.id, "update", json!({ "id": theirs.id, "title": "Mine now" })).await;
         assert_eq!(said(&r).0, "No memory with that id.");
         assert_eq!(st.db.list_memories(&b.id).unwrap()[0].title, "Theirs");
-        assert_eq!(st.db.list_memories(&a.id).unwrap()[0].title, "Release shipped");
+        assert_eq!(st.db.list_memories(&a.id).unwrap()[1].title, "Release shipped");
     }
 }

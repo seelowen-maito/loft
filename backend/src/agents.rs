@@ -275,7 +275,7 @@ fn memory_block(state: &AppState, agent_id: &str) -> String {
 /// About 3,000 tokens of titles, at roughly 4 characters a token.
 const MEMORY_INDEX_CHARS: usize = 12_000;
 
-/// Titles only, newest first, up to `MEMORY_INDEX_CHARS`; the bodies and any older memories are
+/// Titles only, last saved or updated first, up to `MEMORY_INDEX_CHARS`; the bodies and any older memories are
 /// read with `recall`.
 fn memory_index(memories: &[crate::db::Memory]) -> String {
     if memories.is_empty() {
@@ -1371,6 +1371,20 @@ esac
         assert!(lines[0].starts_with(&format!("- #{} Status of epic 399", ids[399])));
         assert!(lines[listed - 1].contains(&format!("epic {:03}", 400 - listed)), "the newest ones, without gaps");
         assert_eq!(*lines.last().unwrap(), format!("({} older memories: use `mcp__loft__recall` to reach them.)", 400 - listed));
+    }
+
+    #[test]
+    fn an_updated_memory_moves_to_the_top_of_the_index() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ids: Vec<i64> = (0..400).map(|i| st.db.add_memory(&a.id, &format!("Status of epic {i:03}: {}", "x".repeat(40)), "body", "").unwrap().id).collect();
+        st.db.update_memory(&a.id, ids[0], None, Some("Epic 000 shipped.")).unwrap();
+        let block = memory_block(&st, &a.id);
+        let lines: Vec<&str> = block.lines().collect();
+        assert!(lines[0].starts_with(&format!("- #{} Status of epic 000", ids[0])), "{}", lines[0]);
+        assert!(lines[1].starts_with(&format!("- #{} Status of epic 399", ids[399])));
+        assert!(!block.contains(&format!("- #{} ", ids[1])), "an old untouched one falls out");
+        assert_eq!(*lines.last().unwrap(), format!("({} older memories: use `mcp__loft__recall` to reach them.)", 400 - (lines.len() - 1)));
     }
 
     #[test]

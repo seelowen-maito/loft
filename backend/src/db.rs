@@ -122,6 +122,8 @@ pub struct Memory {
     pub content: String,
     pub tags: String,
     pub created_at: String,
+    /// When `update` last rewrote it; memories never updated (or saved before this existed) have none.
+    pub updated_at: Option<String>,
 }
 
 /// A title for a memory saved before titles existed: its first line, cut at about 80 characters.
@@ -248,7 +250,8 @@ CREATE TABLE IF NOT EXISTS memories (
     title TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS memories_agent ON memories(agent_id, id);
 CREATE TABLE IF NOT EXISTS permissions (
@@ -333,6 +336,7 @@ fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
         content: r.get(3)?,
         tags: r.get(4)?,
         created_at: r.get(5)?,
+        updated_at: r.get(6)?,
     })
 }
 
@@ -365,6 +369,11 @@ impl Db {
             for (id, content) in old {
                 conn.execute("UPDATE memories SET title = ?1 WHERE id = ?2", params![title_from(&content), id])?;
             }
+        }
+        // Memories saved before updates were timed have none, so they keep their creation order.
+        let has_updated: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'updated_at'", [], |r| r.get(0))?;
+        if !has_updated {
+            conn.execute("ALTER TABLE memories ADD COLUMN updated_at TEXT", [])?;
         }
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
@@ -799,13 +808,15 @@ impl Db {
             content: content.into(),
             tags: tags.into(),
             created_at,
+            updated_at: None,
         })
     }
 
+    /// Oldest first by when each was last saved or updated, so an updated memory counts as new.
     pub fn list_memories(&self, agent_id: &str) -> Result<Vec<Memory>> {
         let c = self.0.lock().unwrap();
         let mut st = c.prepare(
-            "SELECT id, agent_id, title, content, tags, created_at FROM memories WHERE agent_id = ?1 ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories WHERE agent_id = ?1 ORDER BY coalesce(updated_at, created_at), id",
         )?;
         let rows = st.query_map([agent_id], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -815,8 +826,8 @@ impl Db {
         let c = self.0.lock().unwrap();
         let like = format!("%{}%", query.to_lowercase());
         let mut st = c.prepare(
-            "SELECT id, agent_id, title, content, tags, created_at FROM memories
-             WHERE agent_id = ?1 AND (lower(title) LIKE ?2 OR lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories
+             WHERE agent_id = ?1 AND (lower(title) LIKE ?2 OR lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY coalesce(updated_at, created_at), id",
         )?;
         let rows = st.query_map(params![agent_id, like], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -827,14 +838,14 @@ impl Db {
     pub fn update_memory(&self, agent_id: &str, id: i64, title: Option<&str>, content: Option<&str>) -> Result<Option<Memory>> {
         let c = self.0.lock().unwrap();
         let n = c.execute(
-            "UPDATE memories SET title = coalesce(?3, title), content = coalesce(?4, content) WHERE agent_id = ?1 AND id = ?2",
-            params![agent_id, id, title, content],
+            "UPDATE memories SET title = coalesce(?3, title), content = coalesce(?4, content), updated_at = ?5 WHERE agent_id = ?1 AND id = ?2",
+            params![agent_id, id, title, content, now()],
         )?;
         if n == 0 {
             return Ok(None);
         }
         Ok(Some(c.query_row(
-            "SELECT id, agent_id, title, content, tags, created_at FROM memories WHERE id = ?1",
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories WHERE id = ?1",
             [id],
             memory_from_row,
         )?))
@@ -1119,6 +1130,7 @@ mod tests {
         assert_eq!(titles, ["User prefers short replies", "Two lines", "Deploys go through staging first and only then to production, after the smoke…"]);
         assert!(titles[2].chars().count() <= 81);
         assert_eq!(ms[2].content, long, "the whole text stays the body");
+        assert!(ms.iter().all(|m| m.updated_at.is_none()), "never updated, so they keep their creation order");
         // Opening again changes nothing; new memories keep the title they were given.
         drop(db);
         let db = Db::open(&path).unwrap();
