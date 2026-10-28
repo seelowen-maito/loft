@@ -133,6 +133,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   meta: ["task_id": "t6", "task_role": "brief"]),
                 m(7, "orch", "user", "text", "[Task t2] “Implement backend endpoints”, which you delegated to me, is now done: All 4 endpoints are in, with tests.", 12,
                   meta: ["task_id": "t2", "task_role": "report", "task_status": "done", "from_agent": ["id": "be", "name": "Backend Agent"]]),
+                // Agent messages: needs action, and an FYI read on the next run (#112).
+                m(12, "orch", "user", "text", "Please review PR #41 before I merge it.", 9, meta: ["from_agent": ["id": "be", "name": "Backend Agent"]]),
+                m(13, "orch", "user", "text", "Merged #40 on main; the endpoints are live.", 8, meta: ["from_agent": ["id": "be", "name": "Backend Agent"], "fyi": true]),
                 m(8, "orch", "user", "text", "[Task t4] “Test the integrated flow”, which you delegated to me, is now blocked: Waiting for the backend and iOS work", 6,
                   meta: ["task_id": "t4", "task_role": "report", "task_status": "blocked", "from_agent": ["id": "qa", "name": "QA Agent"]]),
             ],

@@ -675,7 +675,19 @@ private struct MessageBubble: View {
                         }
                         .accessibilityElement(children: .combine)
                     } else if let from = message.fromAgentName {
-                        Label("From \(from)", systemImage: "arrow.turn.down.right").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent)
+                        HStack(spacing: 6) {
+                            Label("From \(from)", systemImage: "arrow.turn.down.right").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent)
+                            if message.isFYI {
+                                // Delivered without waking the agent: it reads it at the start of its next run.
+                                Text("FYI")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Theme.card, in: Capsule())
+                                    .accessibilityIdentifier("fyiMark")
+                            }
+                        }
                     }
                     let tasks = message.taskRefs.compactMap { store.task($0) }
                     if !tasks.isEmpty {
@@ -711,7 +723,7 @@ private struct MessageBubble: View {
                 if !isUser { Spacer(minLength: 32) }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name): \(message.displayContent)")
+            .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
         }
     }

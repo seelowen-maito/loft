@@ -37,7 +37,7 @@ loft is built for engineers who already code with AI and want to try autonomous 
 ## Why loft
 
 - **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
-- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help. Each message is marked needs action, which wakes the recipient, or FYI, which shows in its chat right away and is read at the start of its next run without waking it.
+- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help. Each message is marked needs action, which wakes the recipient, or FYI, which shows in its chat right away with an FYI mark (on the web and on iOS) and is read at the start of its next run without waking it.
 - **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.
 - **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
