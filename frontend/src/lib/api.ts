@@ -382,39 +382,6 @@ export type SystemReading = {
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
-/** A GitHub issue as the Issues tab lists it. */
-export type Issue = {
-  number: number;
-  title: string;
-  state: "open" | "closed";
-  state_reason: string | null;
-  url: string;
-  author: string;
-  labels: { name: string; color: string; description: string | null }[];
-  assignees: { login: string; avatar_url: string }[];
-  comments: number;
-  created_at: string;
-  updated_at: string;
-  sub_issues: { total: number; completed: number };
-  blocked_by: number;
-  blocking: number;
-};
-
-export type IssueLink = { number: number; title: string; state: "open" | "closed"; url: string };
-
-/** One issue with its body, a spec's sub-issues and a ticket's dependencies. */
-export type IssueDetail = Issue & {
-  project: string;
-  repo: string;
-  body: string;
-  sub_issue_list: IssueLink[];
-  blocked_by_list: IssueLink[];
-  blocking_list: IssueLink[];
-};
-
-/** A project's issues. `problem`: it has no GitHub repo; `error`: GitHub turned the request down; `truncated`: more than the pages Loft reads. */
-export type ProjectIssues = { project: string; repo: string | null; problem?: string | null; error?: string; truncated?: boolean; issues: Issue[] };
-
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
@@ -457,11 +424,6 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
-  /** Every project's GitHub issues (or just `project`'s), fetched live; nothing is fetched when `connected` is false. */
-  issues: (project?: string) => req<{ connected: boolean; projects: ProjectIssues[] }>("GET", project ? `/github/issues?project=${encodeURIComponent(project)}` : "/github/issues"),
-  issue: (project: string, n: number) => req<IssueDetail>("GET", `/github/issues/${n}?project=${encodeURIComponent(project)}`),
-  /** Sends `agent` a chat message with the issue's number and link, which wakes it; it must be on the issue's repo. */
-  sendIssue: (project: string, n: number, agent: string) => req<{ ok: boolean; queued: boolean }>("POST", `/github/issues/${n}/send`, { project, agent }),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),

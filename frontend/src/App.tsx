@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router";
-import { Bot, CircleDot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { NavLink, Navigate, Route, Routes, useParams } from "react-router";
+import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
-import IssuesPage from "./pages/Issues";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
@@ -70,6 +69,12 @@ function useShowSimulator() {
   return show;
 }
 
+/** `/issues/:project/:number` from the old Issues tab: the list, searched for `#number` in that project. */
+function OldIssue() {
+  const { project = "", number = "" } = useParams();
+  return <Navigate to={`/tasks?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+}
+
 export default function App() {
   const live = useLiveConnection();
   const showSimulator = useShowSimulator();
@@ -95,10 +100,6 @@ export default function App() {
             </NavLink>
             <NavLink to="/tasks" className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
-            </NavLink>
-            {/* The GitHub issues read live, until they are folded into the Loft issues list. */}
-            <NavLink to="/issues" className={tab} aria-label="GitHub issues" title="GitHub issues, read live">
-              <CircleDot className="size-3.5" /> <span className="max-md:hidden">GitHub</span>
             </NavLink>
             {showSimulator && (
               <NavLink to="/simulator" className={tab} aria-label="Simulator">
@@ -134,8 +135,9 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
-          <Route path="/issues" element={<IssuesPage />} />
-          <Route path="/issues/:project/:number" element={<IssuesPage />} />
+          {/* The old GitHub Issues tab's links: the one list, showing GitHub's, or that issue. */}
+          <Route path="/issues" element={<Navigate to="/tasks?source=github" replace />} />
+          <Route path="/issues/:project/:number" element={<OldIssue />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/tasks/:id" element={<TasksPage />} />
           <Route path="/simulator" element={<SimulatorPage />} />

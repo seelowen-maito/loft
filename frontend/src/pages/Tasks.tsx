@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
@@ -31,6 +31,28 @@ const STATUS_TONE: Record<string, string> = {
 
 const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
+type Source = "all" | "loft" | "github";
+const SOURCES: { key: Source; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "loft", label: "Loft" },
+  { key: "github", label: "GitHub" },
+];
+
+/** Where an issue lives: the Loft house for a Loft-only one, GitHub's mark for one mirroring GitHub. */
+function Origin({ github }: { github: boolean }) {
+  return github ? (
+    <svg viewBox="0 0 16 16" className="size-3 shrink-0 text-fg-2" fill="currentColor" role="img" aria-label="On GitHub">
+      <title>On GitHub</title>
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 8 8" className="size-3 shrink-0 text-accent" shapeRendering="crispEdges" fill="currentColor" role="img" aria-label="Loft only">
+      <title>Loft only</title>
+      <path d="M3 0h2v1H3zM2 1h4v1H2zM1 2h6v1H1zM0 3h8v1H0zM1 4h1v4H1zM6 4h1v4H6zM2 7h4v1H2zM3 5h2v2H3z" />
+    </svg>
+  );
+}
+
 const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
 
 /** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
@@ -49,8 +71,11 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [repos, setRepos] = useState<Record<string, string>>({});
-  const [query, setQuery] = useState("");
-  const [project, setProject] = useState("");
+  // The old Issues tab's links arrive as ?source=github, or ?q=#42&project=api.
+  const [params] = useSearchParams();
+  const [query, setQuery] = useState(params.get("q") ?? "");
+  const [project, setProject] = useState(params.get("project") ?? "");
+  const [source, setSource] = useState<Source>((params.get("source") as Source) ?? "all");
   const [agentId, setAgentId] = useState("");
   const [mine, setMine] = useState(false);
   const [showClosed, setShowClosed] = useState(false);
@@ -89,14 +114,17 @@ export default function TasksPage() {
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // "#42" finds the issue mirroring GitHub #42, and only it.
+    const number = /^#\d+$/.test(q) ? Number(q.slice(1)) : null;
     return (tasks ?? []).filter(
       (t) =>
-        (!q || t.title.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.labels.some((l) => l.toLowerCase().includes(q)) || t.owner.toLowerCase() === q.replace(/^@/, "")) &&
+        (number !== null ? t.github?.number === number : !q || t.title.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.labels.some((l) => l.toLowerCase().includes(q)) || t.owner.toLowerCase() === q.replace(/^@/, "")) &&
+        (source === "all" || (source === "github") === !!t.github) &&
         (!project || t.project === project) &&
         (!agentId || t.agent_id === agentId) &&
         (!mine || t.created_by === "user"),
     );
-  }, [tasks, query, project, agentId, mine]);
+  }, [tasks, query, project, agentId, mine, source]);
 
   const groups = useMemo(
     () =>
@@ -139,9 +167,16 @@ export default function TasksPage() {
           </div>
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
           </label>
           <div className="flex flex-wrap gap-2">
+            <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
+              {SOURCES.map((s) => (
+                <button key={s.key} onClick={() => setSource(s.key)} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
+                  {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
+                </button>
+              ))}
+            </div>
             <select value={project} onChange={(e) => setProject(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Project">
               <option value="">All projects</option>
               {projects.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -211,6 +246,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
       <StateIcon task={t} className="mt-0.5 size-3.5 shrink-0" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
+          <Origin github={!!t.github} />
           <span className={cx("truncate text-[13.5px]", t.status === "cancelled" && "text-fg-3 line-through")}>{t.title}</span>
           {/* Two labels fit next to a title; the rest are counted and show on the task's page. */}
           {t.labels.slice(0, 2).map((l) => <span key={l} className="shrink-0"><LabelChip name={l} /></span>)}
@@ -253,6 +289,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
   const parent = t.parent_id ? tasks.find((x) => x.id === t.parent_id) : undefined;
   const subtasks = tasks.filter((x) => x.parent_id === t.id);
   const deps = t.depends_on.map((id) => tasks.find((x) => x.id === id)).filter((x): x is Task => !!x);
+  const blocking = tasks.filter((x) => x.depends_on.includes(t.id));
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
@@ -319,10 +356,11 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       {t.note && t.status !== "done" && <Block title="Latest progress" text={t.note} />}
       {t.description && <Block title="Description" text={t.description} />}
 
-      {(subtasks.length > 0 || deps.length > 0) && (
+      {(subtasks.length > 0 || deps.length > 0 || blocking.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
           {subtasks.length > 0 && <TaskLinks title="Subtasks" tasks={subtasks} />}
-          {deps.length > 0 && <TaskLinks title="Waits for" tasks={deps} />}
+          {deps.length > 0 && <TaskLinks title="Blocked by" tasks={deps} />}
+          {blocking.length > 0 && <TaskLinks title="Blocking" tasks={blocking} />}
         </div>
       )}
 
