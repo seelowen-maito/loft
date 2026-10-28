@@ -24,6 +24,10 @@ _Avoid_: Orchestrator, manager, planner
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Unread reply**:
+The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
+_Avoid_: Notification, new message, unread message
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
