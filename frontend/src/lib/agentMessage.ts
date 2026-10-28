@@ -7,7 +7,7 @@ export function isFyi(m: Msg): boolean {
   return m.role === "user" && !!m.meta?.from_agent && m.meta.fyi === true;
 }
 
-/** What the FYI mark explains on hover. */
+/** What the FYI mark explains on hover or tap. */
 export function fyiTitle(agentName: string): string {
   return `FYI: delivered without waking ${agentName}. It reads this at the start of its next run.`;
 }
