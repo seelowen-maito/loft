@@ -620,9 +620,9 @@ enum ChatItem: Identifiable, Hashable {
                 flush()
                 out.append(.divider(id: m.id, text: "Conversation compacted", date: m.createdAt))
             case "resume":
-                // "Resumed the Session from 2026-10-20." from the web's /resume: the log goes on, nothing reloads.
+                // From the web's /resume: the log goes on, nothing reloads.
                 flush()
-                out.append(.divider(id: m.id, text: m.content.trimmingCharacters(in: CharacterSet(charactersIn: ".")), date: m.createdAt))
+                out.append(.divider(id: m.id, text: resumeText(m), date: m.createdAt))
             default:
                 flush()
                 out.append(.message(m))
@@ -630,6 +630,16 @@ enum ChatItem: Identifiable, Hashable {
         }
         flush()
         return out
+    }
+
+    /// "Resumed the Session from Oct 20, 2026", the start date in local time as the web's Resume list shows it; the
+    /// stored text names the UTC day (#103).
+    static func resumeText(_ m: ChatMessage, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+        guard let s = m.meta?["started_at"]?.stringValue, let start = JSONCoding.parseDate(s) else {
+            return m.content.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        }
+        let day = start.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: locale, timeZone: timeZone))
+        return "Resumed the Session from \(day)"
     }
 }
 

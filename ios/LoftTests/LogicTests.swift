@@ -137,6 +137,19 @@ final class ChatItemTests: XCTestCase {
         let items = ChatItem.build([m(1, "text", "user"), search, m(3, "text")])
         XCTAssertEqual(items.map(\.id), ["m1", "m3"], "no tool row for a tool lookup alone")
     }
+
+    func testResumeMarkerShowsTheLocalDay() {
+        // 22:30 on Oct 20 in São Paulo is already Oct 21 in UTC, the day the stored text names.
+        let resume = ChatMessage(id: 5, agentId: "a", runId: nil, role: "system", kind: "resume", content: "Resumed the Session from 2026-10-21.",
+                                 meta: ["started_at": "2026-10-21T01:30:00.123Z"], createdAt: .now)
+        let local = ChatItem.resumeText(resume, timeZone: TimeZone(identifier: "America/Sao_Paulo")!, locale: Locale(identifier: "en_US"))
+        XCTAssertEqual(local, "Resumed the Session from Oct 20, 2026")
+        guard case .divider(_, let text, _) = ChatItem.build([resume]).first else { return XCTFail() }
+        XCTAssertEqual(text, ChatItem.resumeText(resume), "the chat uses the device's time zone")
+        var old = resume
+        old.meta = nil
+        XCTAssertEqual(ChatItem.resumeText(old), "Resumed the Session from 2026-10-21", "without a start date, the stored text")
+    }
 }
 
 private extension Agent {
