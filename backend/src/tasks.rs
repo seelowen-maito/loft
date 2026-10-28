@@ -428,7 +428,8 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<String>, Json(
         };
         log_status(&state, &t, "user", &text);
     }
-    Ok(Json(json!(t)))
+    crate::mirror::write_through(&state, &before, &t).await;
+    Ok(Json(json!(state.db.get_task(&id)?.unwrap_or(t))))
 }
 
 pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -623,6 +624,7 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         reopened.status = "ready".into();
         state.db.save_task(&reopened)?;
         log_status(&state, &reopened, "user", "Reopened by you");
+        crate::mirror::write_through(&state, &t, &reopened).await;
         let (t, queued) = execute(&state, &t.id, None, text, None)?;
         let c = state.db.list_task_comments(&t.id, 1, None)?.pop();
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
@@ -674,6 +676,7 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>, body:
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is already {}.", t.status)));
     }
     let was_active = is_active(&t);
+    let before = t.clone();
     let ts = now();
     t.status = "cancelled".into();
     t.completed_at = Some(ts.clone());
@@ -681,6 +684,8 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>, body:
     state.db.save_task(&t)?;
     emit(&state, &t);
     log_status(&state, &t, "user", "Cancelled by you");
+    crate::mirror::write_through(&state, &before, &t).await;
+    let t = state.db.get_task(&id)?.unwrap_or(t);
     let mut stopped = false;
     if let (true, Some(agent_id)) = (was_active, t.agent_id.as_deref()) {
         if b.stop_run {
@@ -973,6 +978,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             let status = s("status");
             let before = t.status.clone();
+            let was = t.clone();
             if !status.is_empty() {
                 if !AGENT_STATUSES.contains(&status.as_str()) {
                     return Err(format!("status must be one of {}", AGENT_STATUSES.join(" | ")));
@@ -992,6 +998,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             t.updated_at = now();
             state.db.save_task(&t).map_err(|e| e.to_string())?;
             emit(state, &t);
+            crate::mirror::spawn_write_through(state, was, t.clone());
             // Every note is kept in the thread; `note` on the task is only the latest.
             if !s("note").is_empty() {
                 log(state, &t, &me.id, "note", &s("note"), json!({}));
