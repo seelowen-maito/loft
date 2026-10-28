@@ -24,6 +24,10 @@ _Avoid_: Orchestrator, manager, planner
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Agent message**:
+A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
+_Avoid_: Ping, DM, hand-off
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
@@ -43,11 +47,11 @@ The agent's proposed answer to a question in a round, which the user can accept 
 _Avoid_: Default, suggestion
 
 **Spec**:
-A GitHub issue labelled `spec` that describes a feature from the user's perspective, written from a grill.
+An issue labelled `spec` that describes a feature from the user's perspective, written from a grill: on GitHub, or a Loft issue when the project has no GitHub repo.
 _Avoid_: PRD, plan, design doc
 
 **Ticket**:
-A GitHub issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with native blocking links to the tickets it waits on.
+An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
 
 **Owner**:

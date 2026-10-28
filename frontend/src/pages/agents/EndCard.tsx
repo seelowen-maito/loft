@@ -5,16 +5,19 @@ import { api, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
 const ROLE: Record<string, string> = { dev: "Dev", reviewer: "reviewer" };
 
-function Issue({ i, icon }: { i: PlannedIssue; icon: React.ReactNode }) {
-  return (
-    <a href={i.url} target="_blank" rel="noopener noreferrer" className="group flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
+/** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
+function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
+  const cls = "group flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]";
+  const inner = (
+    <>
       {icon}
       <span className="min-w-0 flex-1 text-[13px]">
-        <span className="font-mono text-fg-3">#{i.number}</span> {i.title || "Untitled"}
+        {!inLoft && <span className="font-mono text-fg-3">#{i.number}</span>} {i.title || "Untitled"}
       </span>
-      <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-fg-3 opacity-0 transition group-hover:opacity-100" />
-    </a>
+      {!inLoft && <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-fg-3 opacity-0 transition group-hover:opacity-100" />}
+    </>
   );
+  return inLoft ? <Link to={i.url} className={cls}>{inner}</Link> : <a href={i.url} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>;
 }
 
 /** The end of a planning grill: the spec and tickets it published, Clear context with the next message, and the team check. */
@@ -37,10 +40,11 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const shown = sent || !!setup?.sent_at;
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
-      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {card.repo}</div>
+      {/* No repo: the plan was kept as Loft issues. */}
+      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {card.repo || "kept in Loft"}</div>
       <div className="mt-2 space-y-0.5">
-        {card.spec && <Issue i={card.spec} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
-        {card.tickets.map((t) => <Issue key={t.number} i={t} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
+        {card.spec && <Issue i={card.spec} inLoft={!card.repo} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
+        {card.tickets.map((t) => <Issue key={t.url} i={t} inLoft={!card.repo} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
       </div>
       {setup && (
         <div className="mt-3 rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">

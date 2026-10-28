@@ -175,14 +175,25 @@ pub struct PullRequest {
     pub created_at: String,
 }
 
-/// A unit of work: a personal todo, or work handed to an agent. Agents report
-/// progress on the tasks they own through MCP; the user owns the rest.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
+/// GitHub issue (title, markdown description, labels, owner, open or closed) plus what Loft adds: an
+/// agent, an execution status and a thread. Agents report progress on the tasks they own through MCP;
+/// the user owns the rest.
+///
+/// Serialized by hand (below) so the API also carries `state`, derived from `status`.
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Task {
     pub id: String,
     pub title: String,
+    /// Markdown.
     pub description: String,
+    /// Label names, as on GitHub. Items stored before labels existed load with none.
+    pub labels: Vec<String>,
+    /// The GitHub login of the person who owns it, or empty. Always a person, never an agent.
+    pub owner: String,
+    /// The GitHub issue it mirrors, if any. None: a Loft-only issue.
+    pub github: Option<GithubLink>,
     /// todo (personal; never runs by itself) | work (meant for an agent)
     pub kind: String,
     /// inbox | ready | in_progress | blocked | waiting_approval | done | failed | cancelled
@@ -222,6 +233,60 @@ fn write_agent(c: &Connection, a: &Agent) -> Result<()> {
         params![a.id, serde_json::to_string(a)?, a.created_at],
     )?;
     Ok(())
+}
+
+/// Where a mirrored Loft issue lives on GitHub, and what Loft last read of it there.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct GithubLink {
+    /// owner/name
+    pub repo: String,
+    pub number: i64,
+    /// GitHub's database id of the issue, which sub-issue and dependency links take.
+    pub id: i64,
+    pub url: String,
+    /// open | closed, as GitHub last said.
+    pub state: String,
+    /// GitHub's `updated_at` for the issue when Loft last read it.
+    pub updated_at: String,
+}
+
+impl Task {
+    /// `open` or `closed`, as on GitHub: done and cancelled are closed, everything else is open.
+    pub fn state(&self) -> &'static str {
+        if matches!(self.status.as_str(), "done" | "cancelled") { "closed" } else { "open" }
+    }
+}
+
+impl Serialize for Task {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut m = s.serialize_struct("Task", 26)?;
+        m.serialize_field("id", &self.id)?;
+        m.serialize_field("title", &self.title)?;
+        m.serialize_field("description", &self.description)?;
+        m.serialize_field("labels", &self.labels)?;
+        m.serialize_field("owner", &self.owner)?;
+        m.serialize_field("state", self.state())?;
+        m.serialize_field("github", &self.github)?;
+        m.serialize_field("kind", &self.kind)?;
+        m.serialize_field("status", &self.status)?;
+        m.serialize_field("priority", &self.priority)?;
+        m.serialize_field("project", &self.project)?;
+        m.serialize_field("agent_id", &self.agent_id)?;
+        m.serialize_field("parent_id", &self.parent_id)?;
+        m.serialize_field("depends_on", &self.depends_on)?;
+        m.serialize_field("due_at", &self.due_at)?;
+        m.serialize_field("created_by", &self.created_by)?;
+        m.serialize_field("note", &self.note)?;
+        m.serialize_field("summary", &self.summary)?;
+        m.serialize_field("error", &self.error)?;
+        m.serialize_field("created_at", &self.created_at)?;
+        m.serialize_field("updated_at", &self.updated_at)?;
+        m.serialize_field("started_at", &self.started_at)?;
+        m.serialize_field("completed_at", &self.completed_at)?;
+        m.end()
+    }
 }
 
 pub fn now() -> String {
@@ -522,6 +587,13 @@ impl Db {
         Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
     }
 
+    /// A task row exactly as given, for tests that start from data an older Loft wrote.
+    #[cfg(test)]
+    pub(crate) fn insert_raw_task(&self, id: &str, data: &str, created_at: &str) {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT INTO tasks (id, data, created_at) VALUES (?1, ?2, ?3)", params![id, data, created_at]).unwrap();
+    }
+
     pub fn save_task(&self, t: &Task) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute(
@@ -547,6 +619,39 @@ impl Db {
             params![task_id, author, kind, text, meta.to_string(), created_at],
         )?;
         Ok(TaskComment { id: c.last_insert_rowid(), task_id: task_id.into(), author: author.into(), kind: kind.into(), text: text.into(), meta, created_at })
+    }
+
+    /// Thread entries by a query on their columns: `WHERE {filter}` with `args`, oldest first.
+    fn task_comments_where(&self, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<TaskComment>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(&format!("SELECT id, task_id, author, kind, text, meta, created_at FROM task_comments WHERE {filter} ORDER BY id"))?;
+        let rows = st
+            .query_map(args, |r| {
+                let meta: String = r.get(5)?;
+                Ok(TaskComment { id: r.get(0)?, task_id: r.get(1)?, author: r.get(2)?, kind: r.get(3)?, text: r.get(4)?, meta: serde_json::from_str(&meta).unwrap_or(Value::Null), created_at: r.get(6)? })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_task_comment(&self, id: i64) -> Result<Option<TaskComment>> {
+        Ok(self.task_comments_where("id = ?1", &[&id])?.pop())
+    }
+
+    /// Comments whose GitHub state (`meta.github.state`) is this, across every thread: one read.
+    pub fn task_comments_on_github(&self, github_state: &str) -> Result<Vec<TaskComment>> {
+        self.task_comments_where("json_extract(meta, '$.github.state') = ?1", &[&github_state])
+    }
+
+    /// GitHub comment ids already in a thread, so a GitHub comment is added once and Loft's own aren't echoed.
+    pub fn github_comment_ids(&self, task_id: &str) -> Result<Vec<i64>> {
+        Ok(self.task_comments_where("task_id = ?1 AND json_extract(meta, '$.github.comment_id') IS NOT NULL", &[&task_id])?.iter().filter_map(|c| c.meta["github"]["comment_id"].as_i64()).collect())
+    }
+
+    pub fn update_task_comment(&self, id: i64, text: &str, meta: &Value) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE task_comments SET text = ?2, meta = ?3 WHERE id = ?1", params![id, text, meta.to_string()])?;
+        Ok(())
     }
 
     /// The newest `limit` entries (older than `before`, an id, when paging), oldest first.

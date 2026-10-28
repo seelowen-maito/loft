@@ -18,9 +18,6 @@ const MAX_LISTED: usize = 100;
 const MAX_QUESTION: usize = 500;
 const MAX_OWNERS: usize = 5;
 
-/// What publishing the spec says when the project has no GitHub repo: the user is asked again first.
-pub const ASK_AGAIN: &str = "Ask the user again first: put \"Create the GitHub repo and publish this folder?\" to them as a round question (`mcp__loft__preview_new_repo` gives it), and after their yes call `mcp__loft__create_repo`, then publish.";
-
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "preview_new_repo",
@@ -246,7 +243,7 @@ fn check_yes(state: &AppState, me: &Agent, qid: &str) -> Result<Question, String
             _ => "none".into(),
         };
         return Err(format!(
-            "The user didn't say yes to creating the repo (their answer: {answer}), so nothing was created. Keep grilling without it, and ask again in a round before publishing the spec."
+            "The user didn't say yes to creating the repo (their answer: {answer}), so nothing was created. Keep grilling without it: without a repo, the spec and tickets are kept as Loft issues."
         ));
     }
     Ok(q.clone())
@@ -572,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declining_keeps_the_grill_going_and_publishing_the_spec_asks_again() {
+    async fn declining_keeps_the_grill_going_and_the_spec_stays_in_loft() {
         let st = state();
         let fake = own_fake(&st);
         owners_on(&fake);
@@ -580,14 +577,15 @@ mod tests {
 
         let qid = ask(&st, &a, Some("No, not now"), true);
         let err = call(&st, &a, "create_repo", json!({ "question_id": qid })).await.unwrap_err();
-        assert_eq!(err, "The user didn't say yes to creating the repo (their answer: \"No, not now\"), so nothing was created. Keep grilling without it, and ask again in a round before publishing the spec.");
+        assert_eq!(err, "The user didn't say yes to creating the repo (their answer: \"No, not now\"), so nothing was created. Keep grilling without it: without a repo, the spec and tickets are kept as Loft issues.");
         assert_eq!(crate::grill::active(&st, &a.id).unwrap().status, "active", "the grill goes on");
         assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists(), "the folder is untouched");
         assert!(creations(&fake, "/user/repos", "gf-no").is_empty());
 
-        // Publishing the spec sends the agent back to the question first.
-        let err = crate::planning::mcp_call(&st, &a, "publish_spec", &json!({ "title": "New app", "body": "## Problem Statement\n\nX." })).await.unwrap().unwrap_err();
-        assert!(err.contains("isn't a git repo, so there is no GitHub repo to publish to. Ask the user again first") && err.contains("mcp__loft__create_repo"), "{err}");
+        // Without the repo, the spec is kept as a Loft issue, and nothing is published on GitHub.
+        let out = crate::planning::mcp_call(&st, &a, "publish_spec", &json!({ "title": "New app", "body": "## Problem Statement\n\nX." })).await.unwrap().unwrap();
+        assert!(out.starts_with("Saved the spec as a Loft issue") && out.contains("isn't a git repo"), "{out}");
+        assert!(fake.seen("/repos/").is_empty(), "no issue on GitHub");
 
         // A question left to the agent, a made-up id, a yes still waiting in an unsent round: nothing either.
         let decided = ask(&st, &a, None, false);

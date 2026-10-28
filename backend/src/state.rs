@@ -97,6 +97,8 @@ pub struct AppState {
     pub publish_locks: Arc<crate::planning::Locks>,
     /// What publishing already looked up on GitHub: the token's login, repos whose labels exist.
     pub publish_known: Arc<crate::planning::Known>,
+    /// Where mirroring each GitHub repo stands.
+    pub mirror: Arc<crate::mirror::Mirror>,
 }
 
 impl AppState {

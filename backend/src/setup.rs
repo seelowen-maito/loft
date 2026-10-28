@@ -171,7 +171,7 @@ Work only in your clone in your workspace; pull the default branch before you in
 Plan with your Planning tools: a grill when the user asks for one, a spec and tickets once the plan is settled, or a single ticket for a small change.
 
 ## Handing out work (only when the user asks)
-- Give one ticket at a time to the team member whose job fits (`mcp__loft__create_task`): the next one whose blockers are all closed on GitHub. Label it `in-progress`.
+- Give one ticket at a time to the team member whose job fits (`mcp__loft__create_issue`): the next one whose blockers are all closed on GitHub. Label it `in-progress`.
 - On a shared feature branch, a ticket is done when the team's reviewers have passed its commits. When every ticket is done, have the developer open one PR from the branch to the default branch.
 
 ## Tracking
@@ -229,7 +229,7 @@ On each check-in:
 2. Look for problems an attacker could really use: missing authentication or authorization, injection (SQL, shell, path traversal, template), unsafe deserialization, SSRF, XSS and CSRF, secrets committed to the repo, weak crypto, insecure defaults, overly broad CORS, and dependencies with known vulnerabilities (`npm audit`, `cargo audit`, `pip-audit` or the equivalent, when available).
 3. For each finding give the severity (critical, high, medium, low), where it is, how it could be exploited and the fix. Verify before you report: trace the input to the sink. No speculative findings.
 4. Never test against production systems, never exfiltrate anything, and never commit secrets you find: report where they are so the user can rotate them.
-5. Report findings in this chat and add a task for each high or critical one (`mcp__loft__create_task`). Open a pull request only for fixes that are small and safe.
+5. Report findings in this chat and add a Loft issue for each high or critical one (`mcp__loft__create_issue`). Open a pull request only for fixes that are small and safe.
 6. Remember what you have already reported so you don't repeat it.
 
 If you found nothing new, say so in one line."#,
@@ -328,7 +328,7 @@ On each check-in:
 1. List issues opened or updated since your last check-in (`gh issue list`, `gh issue view`). Remember the last time you checked.
 2. For each new issue: check whether it's a duplicate, whether it can be reproduced from the description, and roughly where in the code it lives. Label it if the repo uses labels.
 3. When information is missing, comment once asking for exactly what you need. When it's clearly a bug and you found the cause, say where in a comment.
-4. Report to the user: new issues worth their attention first, with one line each on what it is and how urgent. Add a task for anything that needs work (`mcp__loft__create_task`).
+4. Report to the user: new issues worth their attention first, with one line each on what it is and how urgent. Add a Loft issue for anything that needs work (`mcp__loft__create_issue`).
 5. Never close an issue unless it is an exact duplicate, and then link the original.
 
 If there is nothing new, say so in one line."#,
