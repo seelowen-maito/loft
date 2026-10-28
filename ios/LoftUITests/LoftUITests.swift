@@ -215,42 +215,28 @@ final class LoftUITests: XCTestCase {
         return app
     }
 
-    /// The end-of-planning card: issue links, the missing reviewer, and Clear context leaving the next message unsent.
+    /// The end-of-planning card in one launch. "Set up the team with loft" sends once (the card then reads "Sent to loft"
+    /// and can't be tapped again), and Clear context leaves the next message unsent in the composer. A card the web
+    /// already sent is a unit test (GrillTests.testATeamSetupSentFromTheWebShowsAsSent).
     func testEndOfPlanningCard() {
-        let app = openGrillChat(["-fixture-grill-ended"])
-        let clear = app.buttons["endCardClear"]
-        XCTAssertTrue(clear.appears(timeout: 5))
-        XCTAssertTrue(app.buttons["endCardSetup"].exists)
-        // The card is the last thing in the chat: bring it out from under the composer.
-        app.swipeUp()
-        clear.tap()
-        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
-        let deadline = Date().addingTimeInterval(5)
-        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
-        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
-    }
-
-    /// "Set up the team with loft" sends once: after the tap the card reads "Sent to loft" and can't be tapped again.
-    func testEndOfPlanningCardSendsTheTeamSetupOnce() {
         let app = openGrillChat(["-fixture-grill-ended"])
         let setup = app.buttons["endCardSetup"]
         XCTAssertTrue(setup.appears(timeout: 5))
+        XCTAssertTrue(app.buttons["endCardClear"].exists)
+        // The card is the last thing in the chat: bring it out from under the composer.
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
         setup.tap()
-        let deadline = Date().addingTimeInterval(5)
+        var deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertEqual(setup.label, "Sent to loft")
         XCTAssertFalse(setup.isEnabled)
-    }
 
-    /// A card the web already sent shows as sent on the phone, with nothing left to tap.
-    func testEndOfPlanningCardSentFromTheWeb() {
-        let app = openGrillChat(["-fixture-grill-ended", "-fixture-setup-sent"])
-        let setup = app.buttons["endCardSetup"]
-        XCTAssertTrue(setup.appears(timeout: 5))
-        XCTAssertEqual(setup.label, "Sent to loft")
-        XCTAssertFalse(setup.isEnabled)
+        app.buttons["endCardClear"].tap()
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
+        deadline = Date().addingTimeInterval(5)
+        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
     }
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
