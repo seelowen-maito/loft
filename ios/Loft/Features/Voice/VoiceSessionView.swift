@@ -6,8 +6,12 @@ import SwiftUI
 struct VoiceSessionView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
     @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage(VoiceVariant.key) private var variantRaw = VoiceVariant.current.rawValue
     let dismiss: () -> Void
+
+    private var variant: VoiceVariant { VoiceVariant(rawValue: variantRaw.lowercased()) ?? .current }
 
     @State private var showOriginal = false
     @State private var draft = ""
@@ -36,6 +40,11 @@ struct VoiceSessionView: View {
         .background(Theme.background.ignoresSafeArea())
         .onChange(of: voice.phase, initial: true) { _, p in
             if p == .review { loadDraft() }
+            // Voice style B: once it's sent, the chat takes over (your message, then "thinking…" and the reply).
+            if p == .sending, variant == .b, let id = voice.agentId {
+                router.openChat(id)
+                dismiss()
+            }
         }
         .confirmationDialog("Discard what you said?", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("Discard", role: .destructive) { voice.discard(); dismiss() }
@@ -97,7 +106,9 @@ struct VoiceSessionView: View {
             .accessibilityIdentifier("voiceClose")
             Spacer()
             VStack(spacing: 2) {
-                Text(agentName).font(.headline).lineLimit(1).minimumScaleFactor(0.6)
+                if variant == .c { recipientChip } else {
+                    Text(agentName).font(.headline).lineLimit(1).minimumScaleFactor(0.6)
+                }
                 Text(subtitle).font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
             }
             .accessibilityElement(children: .combine)
@@ -115,6 +126,30 @@ struct VoiceSessionView: View {
             .frame(width: 44, height: 44)
         }
         .padding(.horizontal, 8)
+    }
+
+    /// Voice style C: who this goes to, changeable before it's sent.
+    private var recipientChip: some View {
+        Menu {
+            ForEach(store.agents) { a in
+                Button { voice.switchAgent(a.id) } label: {
+                    if a.id == agentId { Label(a.name, systemImage: "checkmark") } else { Text(a.name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text("To").foregroundStyle(.secondary)
+                Text(agentName).fontWeight(.semibold)
+                Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Theme.accent.opacity(0.15), in: Capsule())
+        }
+        .disabled(voice.phase == .sending || voice.phase == .speaking)
+        .accessibilityLabel("To \(agentName)")
+        .accessibilityHint("Choose who this message goes to.")
+        .accessibilityIdentifier("voiceRecipient")
     }
 
     private var subtitle: String {
@@ -144,24 +179,36 @@ struct VoiceSessionView: View {
         return VStack(spacing: ax ? 8 : 16) {
             if !ax {
                 Spacer(minLength: 0)
-                VoiceOrb(level: voice.level, active: voice.phase == .listening,
-                         tint: voice.phase == .listening ? Theme.accent : .secondary)
-                    .frame(maxWidth: 220)
-                    .opacity(preparing ? 0.45 : 1)
+                Group {
+                    let tint = voice.phase == .listening ? Theme.accent : Color.secondary
+                    switch variant {
+                    case .current: VoiceOrb(level: voice.level, active: voice.phase == .listening, tint: tint).frame(maxWidth: 220)
+                    case .a: VoiceBars(level: voice.level, active: voice.phase == .listening, tint: tint)
+                    case .b: VoicePulse(level: voice.level, active: voice.phase == .listening, tint: tint)
+                    case .c: VoiceLine(level: voice.level, active: voice.phase == .listening, tint: tint).padding(.horizontal, Theme.gutter)
+                    }
+                }
+                .opacity(preparing ? 0.45 : 1)
             }
             Spacer(minLength: 0)
             if preparing {
                 ProgressView("Getting ready…").accessibilityIdentifier("voicePreparing")
                 Spacer(minLength: 0)
             } else {
-                transcript
-                    .frame(maxHeight: 280)
-                    .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
+                switch variant {
+                case .current:
+                    transcript
+                        .frame(maxHeight: 280)
+                        .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
+                case .a: CaptionTranscript(committed: voice.committed, live: voice.live)
+                case .b: BubbleTranscript(text: voice.raw, agentName: agentName)
+                case .c: LiveCaptions(committed: voice.committed, live: voice.live)
+                }
                 if voice.phase == .paused {
                     Label("Paused. Tap resume to keep talking.", systemImage: "pause.circle")
                         .font(.footnote).foregroundStyle(.secondary)
                 } else {
-                    Text("Take your time. Say “send” when you're done; after a quiet moment I'll ask.")
+                    Text(hint)
                         .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .lineLimit(ax ? 2 : nil)
                         .accessibilityIdentifier("voiceFinishHint")
@@ -192,6 +239,14 @@ struct VoiceSessionView: View {
             .controlSize(.large)
             .padding(.horizontal, Theme.gutter)
             .padding(.bottom, 12)
+        }
+    }
+
+    private var hint: String {
+        switch variant {
+        case .current, .c: "Take your time. Say “send” when you're done; after a quiet moment I'll ask."
+        case .a: "Say “send” or tap Done. It's tidied up and goes after 3 seconds, with Undo."
+        case .b: "Say “send” or tap Done. It goes to the chat as you said it."
         }
     }
 
@@ -317,7 +372,11 @@ struct VoiceSessionView: View {
 
     // MARK: Agent replying
 
-    private var working: some View {
+    @ViewBuilder private var working: some View {
+        if variant == .a || variant == .c { VoiceProgress(agentId: agentId) } else { workingOrb }
+    }
+
+    private var workingOrb: some View {
         VStack(spacing: 20) {
             VoiceOrb(level: 0.35, active: true, tint: Theme.working).frame(maxWidth: 160)
             Text("\(agentName) is working…").font(.title3.weight(.semibold))
