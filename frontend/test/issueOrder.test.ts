@@ -33,3 +33,8 @@ test("a spec's progress uses GitHub's own count, which includes closed sub-issue
   assert.deepEqual(specProgress(spec, [spec, ...kids]), { done: 1, total: 3 });
   assert.deepEqual(specProgress({ ...spec, github: { sub_total: 0, sub_done: 0 } }, [spec, ...kids]), { done: 0, total: 2 }, "no GitHub count: the Loft sub-issues");
 });
+
+test("a spec is recognised whatever the case of its label, as GitHub labels are", () => {
+  for (const l of ["spec", "Spec", "SPEC"]) assert.equal(isSpec(row("s", { labels: [l] })), true, l);
+  assert.equal(isSpec(row("s", { labels: ["specs"] })), false);
+});

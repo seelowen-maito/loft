@@ -1474,5 +1474,10 @@ mod tests {
         let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
         assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
         assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
+        // GitHub labels are case-insensitive: "Spec" is a spec too.
+        let mut other = st.db.get_task(&spec.id).unwrap().unwrap();
+        other.labels = vec!["SPEC".into()];
+        st.db.save_task(&other).unwrap();
+        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
     }
 }

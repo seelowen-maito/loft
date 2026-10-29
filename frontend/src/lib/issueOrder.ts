@@ -3,7 +3,7 @@ type Row = { id: string; github?: { sub_total?: number; sub_done?: number } | nu
 
 const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
-export const isSpec = (t: { labels: string[] }) => t.labels.includes("spec");
+export const isSpec = (t: { labels: string[] }) => t.labels.some((l) => l.toLowerCase() === "spec");
 const ready = (t: { labels: string[] }) => t.labels.includes("ready-for-agent");
 
 /** Open rows: `ready-for-agent` first, then by priority, then the most recently changed. */

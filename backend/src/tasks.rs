@@ -318,7 +318,7 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     if is_closed(&t) {
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is {}. Reopen it before running it again.", t.status)));
     }
-    if t.labels.iter().any(|l| l == "spec") {
+    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
         return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
     }
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
