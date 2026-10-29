@@ -82,6 +82,20 @@ fn emit_run(state: &AppState, agent_id: &str) {
     }
 }
 
+/// After the reply, what the run still waits on: every background task in the status line, the shells and
+/// monitors in `waiting_on`. Pushes the change.
+fn show_waiting(state: &AppState, agent_id: &str, bg: &[(String, String)], shells: &[String]) {
+    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+        i.waiting_on = shells.to_vec();
+    }
+    if bg.is_empty() {
+        emit_run(state, agent_id);
+    } else {
+        let names = bg.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>().join(", ");
+        set_status_text(state, agent_id, &format!("Waiting on: {names}"));
+    }
+}
+
 /// A run the user started has ended with a reply or an error: the agent has an Unread reply.
 fn mark_replied(state: &AppState, agent_id: &str) {
     if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.replied_at = Some(now())) {
@@ -902,6 +916,8 @@ async fn run_process(
     // Claude Code background tasks (shells, monitors, background subagents) still running: id -> description.
     // claude -p stays alive for them and starts another turn when one finishes.
     let mut bg: Vec<(String, String)> = Vec::new();
+    // The shells and monitors among them, which the waiting bar names; the subagent bar shows the subagents.
+    let mut shells: Vec<String> = Vec::new();
     // Set at a final result with no background tasks left: claude should exit by then, or it is stopped.
     let mut exit_by: Option<tokio::time::Instant> = None;
     // The agent has given its reply (a result) and hasn't started another turn since.
@@ -989,7 +1005,9 @@ async fn run_process(
                 }
                 Some("background_tasks_changed") => {
                     let tasks = ev["tasks"].as_array().cloned().unwrap_or_default();
-                    bg = tasks.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), t["description"].as_str().unwrap_or("background task").to_string())).collect();
+                    let desc = |t: &Value| t["description"].as_str().unwrap_or("background task").to_string();
+                    bg = tasks.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), desc(t))).collect();
+                    shells = tasks.iter().filter(|t| t["task_type"] != "local_agent").map(desc).collect();
                     // A launched background subagent runs until the list drops it. Without its task id, until
                     // no subagent the agent started itself is left.
                     let any_own = tasks.iter().any(|t| t["task_type"] == "local_agent" && t["parent_task_id"].is_null());
@@ -1004,8 +1022,11 @@ async fn run_process(
                         });
                         i.subagents.len() < n
                     });
-                    if ended {
+                    if ended && !replied {
                         emit_run(state, agent_id);
+                    }
+                    if replied {
+                        show_waiting(state, agent_id, &bg, &shells);
                     }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
@@ -1136,12 +1157,10 @@ async fn run_process(
                 if replied && bg.is_empty() {
                     exit_by = Some(tokio::time::Instant::now() + EXIT_GRACE);
                 } else if replied {
-                    let names = bg.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>().join(", ");
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
-                        i.waiting_on = bg.iter().map(|(_, d)| d.clone()).collect();
                         i.waiting_since = Some(now());
                     }
-                    set_status_text(state, agent_id, &format!("Waiting on: {names}"));
+                    show_waiting(state, agent_id, &bg, &shells);
                     let mut rt = state.rt.lock().unwrap();
                     rt.waiting.insert(agent_id.to_string(), preempt.clone());
                     if rt.queued.get(agent_id).is_some_and(|q| !q.is_empty()) || rt.grill_queued.get(agent_id).is_some_and(|q| !q.is_empty()) {
@@ -1418,7 +1437,8 @@ pub(crate) mod tests {
     /// "delegate" starts an Explore subagent, which starts one of its own, and waits for a `go` file before the
 /// subagent returns and for `go2` before the reply; "orphan" replies with a subagent that never returned.
 /// "bg-agent" launches two background subagents next to a shell; the task list drops one at `go` and the other at
-/// `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started).
+/// `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started,
+/// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
@@ -1479,6 +1499,10 @@ case "$prompt" in *bg-agent*)
     esac
     echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b'$i'","content":"Async agent launched successfully."}]}}'
   done
+  case "$prompt" in *early*)
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"launched"}]}}'
+    echo '{"type":"result","subtype":"success","result":"launched","num_turns":1,"session_id":"s1","total_cost_usd":0}';;
+  esac
   case "$prompt" in *linger*) ;; *)
     while [ ! -f go ]; do sleep 0.05; done
     echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
@@ -1888,6 +1912,28 @@ esac
             std::fs::write(ws.join("go3"), "").unwrap();
             until("the run to end", 10, || !is_running(&st, &a.id)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_waiting_bar_names_shells_and_follows_the_task_list() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let status = || st.db.get_agent(&a.id).unwrap().unwrap().status_text;
+        enqueue(&st, &a.id, Some("bg-agent early".into()), "user");
+        until("the reply", 10, || fields(&st, &a.id)["waiting_since"].is_string()).await;
+        // The subagent bar shows the subagents; the waiting bar only the shell.
+        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
+        assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")]);
+        assert_eq!(status(), "Waiting on: Run the QA suite, Audit 1, Audit 2");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the task list to drop b1", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+        until("the status to drop it", 10, || status() == "Waiting on: Run the QA suite, Audit 2").await;
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("the status to drop b2", 10, || status() == "Waiting on: Run the QA suite").await;
+        assert!(subagents(&st, &a.id).is_empty());
+        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
+        std::fs::write(ws.join("go3"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
