@@ -458,6 +458,7 @@ struct GrillSuggestionBar: View {
 /// server sends that once and marks the card (`setup.sent_at`), so it shows as sent everywhere and after a restart.
 struct EndCardView: View {
     @Environment(LoftStore.self) private var store
+    @Environment(Router.self) private var router
     /// The final summary the card is on.
     let message: ChatMessage
     let card: EndCard
@@ -467,7 +468,7 @@ struct EndCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Planning done · \(card.repo)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            Text("Planning done · \(card.repo.isEmpty ? "Loft" : card.repo)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
                 if let s = card.spec { issue(s, symbol: "doc.text") }
                 ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
@@ -511,13 +512,19 @@ struct EndCardView: View {
     }
 
     private func issue(_ i: EndCard.Issue, symbol: String) -> some View {
-        Link(destination: i.url) {
-            Label {
-                Text("#\(i.number) ").foregroundStyle(.secondary) + Text(i.title.isEmpty ? "Untitled" : i.title)
-            } icon: {
-                Image(systemName: symbol)
+        let label = Label {
+            Text("#\(i.number) ").foregroundStyle(.secondary) + Text(i.title.isEmpty ? "Untitled" : i.title)
+        } icon: {
+            Image(systemName: symbol)
+        }
+        .font(.footnote)
+        return Group {
+            // A plan kept in Loft: its issues open here, in Tasks.
+            if let id = i.loftTaskId {
+                Button { router.open(.task(taskId: id)) } label: { label }.buttonStyle(.borderless)
+            } else {
+                Link(destination: i.url) { label }
             }
-            .font(.footnote)
         }
     }
 }
