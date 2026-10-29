@@ -78,6 +78,17 @@ struct TaskDetailView: View {
                     if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
                 } else {
                     LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
+                    // Its project's repo gets it as a GitHub issue; the server says why when it can't.
+                    if !t.project.isEmpty, !t.state.isClosed {
+                        Button {
+                            act {
+                                let p = try await store.publishTask(t.id)
+                                notice = p.github.map { "Published as \($0.shortName)." }
+                            }
+                        } label: { Label("Publish to GitHub", systemImage: "arrow.up.forward.square") }
+                        .disabled(!store.canWrite || busy)
+                        .accessibilityIdentifier("publishTask")
+                    }
                 }
                 if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
             }

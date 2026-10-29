@@ -621,6 +621,20 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
+    /// As the server: a Loft-only issue in a project gets the next number on octo/<project>.
+    func publishTask(id: String) async throws -> HBTask {
+        try check()
+        return try locked {
+            guard let i = taskList.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            guard !taskList[i].project.isEmpty else {
+                throw APIError.server(status: 400, message: "This Loft issue has no project, so there's no GitHub repo to publish it to.")
+            }
+            let repo = "octo/\(taskList[i].project)"
+            taskList[i].github = .init(repo: repo, number: 50, url: "https://github.com/\(repo)/issues/50", state: "open")
+            return taskList[i]
+        }
+    }
+
     func deleteTask(id: String) async throws { try check(); locked { taskList.removeAll { $0.id == id } } }
 
     func executeTask(id: String, agentId: String?, note: String) async throws -> ExecuteResponse {
