@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -427,16 +428,19 @@ CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
 /// Each one becomes its difference from the previous run end of the same session, keeping the reported
 /// total as `session_cost_usd`, which also marks it done; the agent's lifetime total is then recomputed.
+/// Old run ends don't name their session: a Resume marker does, and a cleared or fresh session runs
+/// unnamed until the next one, except the last, which is the agent's current session.
 fn per_run_costs(conn: &Connection) -> Result<()> {
-    let agents: Vec<String> = {
+    let agents: Vec<(String, String)> = {
         let mut st = conn.prepare(
-            "SELECT DISTINCT agent_id FROM messages WHERE kind = 'run_end'
-               AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL",
+            "SELECT id, data FROM agents WHERE id IN (SELECT agent_id FROM messages WHERE kind = 'run_end'
+               AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL)",
         )?;
-        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    for agent_id in agents {
+    for (agent_id, data) in agents {
+        let current = serde_json::from_str::<Value>(&data).ok().and_then(|d| d["session_id"].as_str().map(String::from));
         let tx = conn.unchecked_transaction()?;
         let rows: Vec<(i64, String, Value)> = {
             let mut st = tx.prepare(
@@ -447,24 +451,46 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
+        // The session the runs belong to (None while unnamed), its last total, and each named session's last total.
+        let mut sid: Option<String> = None;
         let mut prev = 0.0;
+        let mut totals: HashMap<String, f64> = HashMap::new();
+        let mut unnamed: Vec<(i64, Value)> = vec![];
         for (id, kind, mut meta) in rows {
             match kind.as_str() {
-                "clear" | "resume" => prev = 0.0,
-                "run_start" if meta["resumed"] == Value::Bool(false) => prev = 0.0,
+                "clear" => (sid, prev, unnamed) = (None, 0.0, vec![]),
+                "run_start" if meta["resumed"] == Value::Bool(false) => (sid, prev, unnamed) = (None, 0.0, vec![]),
+                "resume" => {
+                    sid = meta["session_id"].as_str().map(String::from);
+                    prev = sid.as_ref().and_then(|s| totals.get(s)).copied().unwrap_or(0.0);
+                    unnamed.clear();
+                }
                 "run_end" => {
                     // A stopped run reported nothing.
                     let Some(total) = meta["cost_usd"].as_f64() else { continue };
                     if let Some(total) = meta["session_cost_usd"].as_f64() {
                         prev = total;
-                        continue;
+                    } else {
+                        meta["cost_usd"] = run_cost(total, prev).into();
+                        meta["session_cost_usd"] = total.into();
+                        match &sid {
+                            Some(s) => meta["session_id"] = s.as_str().into(),
+                            None => unnamed.push((id, meta.clone())),
+                        }
+                        tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
+                        prev = total;
                     }
-                    meta["cost_usd"] = run_cost(total, prev).into();
-                    meta["session_cost_usd"] = total.into();
-                    tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
-                    prev = total;
+                    if let Some(s) = &sid {
+                        totals.insert(s.clone(), prev);
+                    }
                 }
                 _ => {}
+            }
+        }
+        if let (None, Some(cur)) = (&sid, &current) {
+            for (id, mut meta) in unnamed {
+                meta["session_id"] = cur.as_str().into();
+                tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
             }
         }
         tx.execute(
@@ -617,6 +643,21 @@ impl Db {
         f(&mut a);
         write_agent(&c, &a)?;
         Ok(Some(a))
+    }
+
+    /// The running total Claude Code last reported for one of the agent's sessions; 0 when none of its runs was recorded.
+    pub fn session_total(&self, agent_id: &str, session_id: &str) -> Result<f64> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT json_extract(meta, '$.session_cost_usd') FROM messages
+             WHERE agent_id = ?1 AND kind = 'run_end' AND json_extract(meta, '$.session_id') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![agent_id, session_id],
+            |r| r.get::<_, Option<f64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .unwrap_or(0.0))
     }
 
     /// Queue an FYI's prompt text for the agent's next run.
@@ -1332,7 +1373,7 @@ mod tests {
         {
             let db = Db::open(&path).unwrap();
             let mut a = agent("a");
-            a.total_cost_usd = 0.005 + 0.006 + 0.007 + 0.002;
+            a.session_id = Some("Z".into());
             db.save_agent(&a).unwrap();
             // As runs before #164 stored them: each run end holds the session's running total.
             let run = |resumed: bool, cost: Option<f64>| {
@@ -1340,26 +1381,44 @@ mod tests {
                 let end = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c }));
                 db.add_message("a", None, "system", "run_end", "", end).unwrap();
             };
+            let marker = |kind: &str, sid: Option<&str>| {
+                db.add_message("a", None, "system", kind, "", serde_json::json!({ "session_id": sid })).unwrap();
+            };
             run(false, Some(0.005));
             run(true, Some(0.006));
             run(true, None);
             run(true, Some(0.007));
-            run(false, Some(0.002));
+            run(false, Some(0.002)); // a fresh session
+            marker("clear", None);
+            run(false, Some(0.004));
+            marker("resume", Some("X")); // never run here: its whole total counts
+            run(true, Some(0.010));
+            run(true, Some(0.012));
+            marker("resume", Some("Y"));
+            run(true, Some(0.003));
+            marker("resume", Some("X")); // back to X: from its last total
+            run(true, Some(0.015));
+            marker("clear", None);
+            run(false, Some(0.002)); // the agent's current session, Z
         }
         let costs = |db: &Db| -> Vec<f64> {
-            let mut m = db.list_messages("a", 50, None).unwrap();
+            let mut m = db.list_messages("a", 100, None).unwrap();
             m.sort_by_key(|m| m.id);
             m.iter().filter_map(|m| (m.kind == "run_end").then(|| m.meta["cost_usd"].as_f64()).flatten()).map(|c| (c * 1e6).round() / 1e6).collect()
         };
+        let want = vec![0.005, 0.001, 0.001, 0.002, 0.004, 0.010, 0.002, 0.003, 0.003, 0.002];
         let db = Db::open(&path).unwrap();
-        assert_eq!(costs(&db), vec![0.005, 0.001, 0.001, 0.002], "a new session counts from 0");
+        assert_eq!(costs(&db), want);
         let a = db.get_agent("a").unwrap().unwrap();
-        assert!((a.total_cost_usd - 0.009).abs() < 1e-9, "{}", a.total_cost_usd);
+        assert!((a.total_cost_usd - 0.033).abs() < 1e-9, "{}", a.total_cost_usd);
         assert_eq!(a.session_cost_usd, 0.002, "the next run of the session counts from its last total");
+        // Named sessions keep their last total for a later Resume.
+        assert_eq!(db.session_total("a", "X").unwrap(), 0.015);
+        assert_eq!(db.session_total("a", "Z").unwrap(), 0.002);
         drop(db);
         let db = Db::open(&path).unwrap();
-        assert_eq!(costs(&db), vec![0.005, 0.001, 0.001, 0.002], "running it again changes nothing");
-        assert!((db.get_agent("a").unwrap().unwrap().total_cost_usd - 0.009).abs() < 1e-9);
+        assert_eq!(costs(&db), want, "running it again changes nothing");
+        assert!((db.get_agent("a").unwrap().unwrap().total_cost_usd - 0.033).abs() < 1e-9);
     }
 
     #[test]

@@ -764,6 +764,20 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd
 }
 
+/// Points the agent at Claude session `sid`. A different session than its last one brings the running
+/// total last recorded for it (0 for a new one), so the next run's cost is only what that run adds.
+fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
+    let same = state.db.get_agent(agent_id)?.is_some_and(|a| a.session_id.as_deref() == Some(sid));
+    let seed = if same { None } else { Some(state.db.session_total(agent_id, sid)?) };
+    state.db.update_agent(agent_id, |a| {
+        a.session_id = Some(sid.to_string());
+        if let Some(t) = seed {
+            a.session_cost_usd = t;
+        }
+    })?;
+    Ok(())
+}
+
 /// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
 async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
     let mut resume = true;
@@ -933,8 +947,7 @@ async fn run_process(
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
                     if let Some(sid) = ev["session_id"].as_str() {
-                        let sid = sid.to_string();
-                        state.db.update_agent(agent_id, |a| a.session_id = Some(sid))?;
+                        set_session(state, agent_id, sid)?;
                     }
                 }
                 // Manual /compact and Claude Code's own auto-compaction both land here.
@@ -1082,11 +1095,9 @@ async fn run_process(
                 let total = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
                 let mut cost = total;
                 if let Some(sid) = ev["session_id"].as_str() {
-                    let sid = sid.to_string();
+                    set_session(state, agent_id, sid)?;
                     state.db.update_agent(agent_id, |a| {
-                        let prev = if a.session_id.as_deref() == Some(sid.as_str()) { a.session_cost_usd } else { 0.0 };
-                        cost = crate::db::run_cost(total, prev);
-                        a.session_id = Some(sid);
+                        cost = crate::db::run_cost(total, a.session_cost_usd);
                         a.session_cost_usd = total;
                         a.total_cost_usd += cost;
                     })?;
@@ -1099,6 +1110,7 @@ async fn run_process(
                 let end = json!({
                     "cost_usd": cost,
                     "session_cost_usd": total,
+                    "session_id": ev["session_id"],
                     "duration_ms": ev["duration_ms"],
                     "num_turns": ev["num_turns"],
                     "is_error": ev["is_error"],
@@ -1360,9 +1372,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
-sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9]*\).*/\1/p')
+sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
-echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
@@ -1465,16 +1477,35 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn each_run_costs_what_it_added_to_the_session() {
         let (st, a) = fake_claude_state();
-        // Claude Code reports the resumed session's running total; a new session starts again from 0.
-        for (i, p) in ["cost=0.005", "cost=0.006", "cost=0.007", "sid=s2 cost=0.003", "sid=s2 cost=0.002"].iter().enumerate() {
-            run(&st, &a.id, p, i + 1).await;
+        let costs = || -> Vec<f64> {
+            let mut msgs = st.db.list_messages(&a.id, 200, None).unwrap();
+            msgs.sort_by_key(|m| m.id);
+            msgs.iter().filter(|m| m.kind == "run_end").map(|m| (m.meta["cost_usd"].as_f64().unwrap() * 1e6).round() / 1e6).collect()
+        };
+        // Claude Code reports the resumed session's running total.
+        let s1 = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        for (i, c) in ["0.005", "0.006", "0.007"].iter().enumerate() {
+            run(&st, &a.id, &format!("sid={s1} cost={c}"), i + 1).await;
         }
-        let mut msgs = st.db.list_messages(&a.id, 100, None).unwrap();
-        msgs.sort_by_key(|m| m.id);
-        let costs: Vec<f64> = msgs.iter().filter(|m| m.kind == "run_end").map(|m| (m.meta["cost_usd"].as_f64().unwrap() * 1e6).round() / 1e6).collect();
-        assert_eq!(costs, vec![0.005, 0.001, 0.001, 0.003, 0.002], "a total that went down counts whole, never negative");
+        assert_eq!(costs(), vec![0.005, 0.001, 0.001]);
+        assert!((st.db.get_agent(&a.id).unwrap().unwrap().total_cost_usd - 0.007).abs() < 1e-9);
+
+        // After a Clear the new session counts from 0, even when its total tops the old one's.
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        run(&st, &a.id, "sid=s2 cost=0.009", 4).await;
+        run(&st, &a.id, "sid=s2 cost=0.010", 5).await;
+        assert_eq!(costs()[3..], [0.009, 0.001]);
+
+        // Resuming the first session picks up from its last total, not from 0.
+        let dir = crate::sessions::tests::tmp();
+        crate::sessions::tests::write(&dir, s1, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"hello"}}"#]);
+        let _ = crate::api::resume_from(&st, &a.id, dir, s1.into()).await.unwrap();
+        run(&st, &a.id, &format!("sid={s1} cost=0.008"), 6).await;
+        // A total that went down is a fresh session: it counts whole, never negative.
+        run(&st, &a.id, &format!("sid={s1} cost=0.002"), 7).await;
+        assert_eq!(costs()[5..], [0.001, 0.002]);
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
-        assert!((a.total_cost_usd - 0.012).abs() < 1e-9, "{}", a.total_cost_usd);
+        assert!((a.total_cost_usd - 0.020).abs() < 1e-9, "{}", a.total_cost_usd);
     }
 
     #[tokio::test(flavor = "multi_thread")]

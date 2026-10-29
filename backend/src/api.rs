@@ -608,9 +608,11 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
     }
-    // As for a new Session, the next run builds the memory index afresh.
+    // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.
+    let total = state.db.session_total(id, &s.id)?;
     let a = state.db.update_agent(id, |a| {
         a.session_id = Some(s.id.clone());
+        a.session_cost_usd = total;
         a.context_tokens = s.context_tokens;
         a.grill_briefed = false;
         a.memory_index = None;
