@@ -8,6 +8,7 @@ import { clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/d
 import { draftImages, type Attachment } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
+import { useAutoGrow } from "../../lib/autoGrow";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -143,6 +144,9 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
     saveAnswerDraft(sessionId, round, q.id, same ? { text: "", images: [] } : { text: draft, images: imageList ? imageList.split("\n") : [] });
   }, [sessionId, round, q.id, same, draft, imageList]);
   const empty = !draft.trim() && images.length === 0;
+  // Grows with the answer up to 5 lines, then scrolls.
+  const field = useRef<HTMLTextAreaElement>(null);
+  useAutoGrow(field, draft, 1, 5);
   const wait = failed ? "Remove the image that failed to upload" : uploading ? "Waiting for images to upload" : undefined;
   return (
     <div
@@ -185,17 +189,26 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
         </div>
       )}
       <form
-        className="mt-2 flex items-center gap-2"
+        className="mt-2 flex items-end gap-2"
         onSubmit={(e) => {
           e.preventDefault();
           answer(draft);
         }}
       >
-        <input
-          className="input py-1.5"
+        <textarea
+          ref={field}
+          rows={1}
+          className="input resize-none py-1.5 leading-5"
           placeholder={q.accepted || q.state === "decided" ? "Or answer differently…" : "Your answer, or a comment to discuss…"}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          // Enter saves, like the chat; Shift+Enter adds a line, and Enter that confirms an IME composition doesn't save.
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              answer(draft);
+            }
+          }}
           onPaste={(e) => {
             const files = pastedImages(e);
             if (files.length > 0) addImages(files);
