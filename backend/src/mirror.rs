@@ -1166,7 +1166,7 @@ mod tests {
         let comment_posts = || fake.seen("/repos/octo/cm-flow/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
 
         // Yours and an agent's: in the thread at once, not on GitHub yet, both in Needs you. The agent isn't blocked.
-        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ship it Friday", "send": false })).unwrap();
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ship it Friday", "send": true })).unwrap();
         let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
         let out = crate::tasks::mcp_call(&st, &a, "comment_issue", &json!({ "id": id, "text": "Done with the cap" }), |k: &str| Err(k.to_string())).unwrap();
         assert!(out.is_ok(), "{out:?}");
@@ -1213,7 +1213,7 @@ mod tests {
     /// Posts a comment by `who` ("user" or an agent) on `id`; its thread entry once it's there.
     async fn comment_by(st: &AppState, id: &str, who: &crate::db::Agent, user: bool, text: &str) -> crate::db::TaskComment {
         if user {
-            let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": text, "send": false })).unwrap();
+            let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": text, "send": true })).unwrap();
             let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.to_string()), Json(body)).await.unwrap();
         } else {
             crate::tasks::mcp_call(st, who, "comment_issue", &json!({ "id": id, "text": text }), |k: &str| Err(k.to_string())).unwrap().unwrap();
@@ -1378,6 +1378,73 @@ mod tests {
         let _ = crate::tasks::cancel(State(st.clone()), axum::extract::Path(id.clone()), None).await.unwrap();
         assert_eq!(st.db.get_task(&id).unwrap().unwrap().status, "cancelled");
         assert!(fake.seen("/repos/octo/cw2/issues/1").iter().all(|r| r.method == "GET"), "no PATCH: it was already closed");
+    }
+
+
+    #[tokio::test]
+    async fn private_notes_and_handoff_notes_never_go_to_github_whatever_the_mode() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/priv";
+        let id = one_mirrored(&st, &fake, "priv", repo, "2026-10-02T00:00:00Z").await;
+        fake.route("POST", "/repos/octo/priv/issues/1/comments", 201, json!({ "id": 800 }));
+        let mut s = st.settings.get();
+        s.comment_approval = [("priv".to_string(), "all".to_string())].into();
+        st.settings.save(s).unwrap();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+
+        // Handed over with a note, then a private note: in Loft, never queued for GitHub, never posted.
+        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", None).unwrap();
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ask Tom about the deadline", "send": false })).unwrap();
+        let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
+        // A comment meant for the issue still goes (mode: all).
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Shipping Friday", "send": true })).unwrap();
+        let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        for text in ["The staging password is in 1Password", "Ask Tom about the deadline"] {
+            let c = thread.iter().find(|c| c.text == text).unwrap();
+            assert!(c.meta["github"].is_null(), "{text}: {:?}", c.meta);
+        }
+        let posted: Vec<Value> = fake.seen("/repos/octo/priv/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "body": "Shipping Friday" })]);
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "comment_approval"));
+    }
+
+    #[tokio::test]
+    async fn post_on_github_says_where_a_comment_goes_agent_or_not() {
+        let st = state();
+        let fake = own_fake(&st);
+        let id = one_mirrored(&st, &fake, "gh-flag", "octo/gh-flag", "2026-10-02T00:00:00Z").await;
+        fake.route("POST", "/repos/octo/gh-flag/issues/1/comments", 201, json!({ "id": 801 }));
+        let mut s = st.settings.get();
+        s.comment_approval = [("gh-flag".to_string(), "all".to_string())].into();
+        st.settings.save(s).unwrap();
+        assert!(st.db.get_task(&id).unwrap().unwrap().agent_id.is_none());
+        let post = |b: Value| {
+            let st = st.clone();
+            let id = id.clone();
+            async move {
+                let body: crate::tasks::CommentBody = serde_json::from_value(b).unwrap();
+                let _ = crate::tasks::add_comment(State(st), axum::extract::Path(id), Json(body)).await.unwrap();
+            }
+        };
+
+        // Nobody works on it: a sent comment still goes to GitHub, unless it says not to.
+        post(json!({ "text": "Shipping Friday", "send": true })).await;
+        post(json!({ "text": "Only for Loft", "send": true, "github": false })).await;
+        post(json!({ "text": "A private note", "send": false })).await;
+        post(json!({ "text": "Tell GitHub anyway", "send": false, "github": true })).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let posted: Vec<Value> = fake.seen("/repos/octo/gh-flag/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "body": "Shipping Friday" }), json!({ "body": "Tell GitHub anyway" })]);
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        let private = |text: &str| thread.iter().find(|c| c.text == text).unwrap().meta["private"].clone();
+        assert_eq!(private("Shipping Friday"), json!(false));
+        assert_eq!(private("A private note"), json!(true));
     }
 
 }

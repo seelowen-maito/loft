@@ -460,8 +460,9 @@ export const api = {
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
-  /** `send`: deliver to the task's agent (else a private note); `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; reopen: boolean }) =>
+  /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
+   * `reopen`: run a finished task again with it. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
