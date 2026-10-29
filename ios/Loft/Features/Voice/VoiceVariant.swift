@@ -114,7 +114,7 @@ struct VoiceStatusView: View {
             step("Reply", index: 2)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(["Sending", "Thinking", "Reply"][status.step])
+        .accessibilityLabel(status == .failed ? "Not sent" : ["Sending", "Thinking", "Reply"][status.step])
         .accessibilityIdentifier("voiceStatusSteps")
     }
 
