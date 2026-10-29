@@ -5,6 +5,8 @@ import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
+import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
+import { MentionMenu } from "../components/MentionMenu";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -375,7 +377,7 @@ export function ClosedOnGithubCard({ task: t }: { task: Task }) {
 }
 
 /** The comment box under a task's thread. */
-export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
+export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Agent; agents: Agent[] }) {
   const [text, setText] = useState("");
   const box = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(box, text, 2);
@@ -386,6 +388,19 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const finished = FINISHED.includes(t.status);
+  // "@" in the box (comment or note) offers agents to mention; Escape closes it until the text changes.
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [closedAt, setClosedAt] = useState<string | null>(null);
+  const query = atQuery(text);
+  const groups = query === undefined || closedAt === text ? [] : mentionGroups(agents, t.project, query);
+  const flat = groups.flatMap((g) => g.agents);
+  const marks: Record<string, string> = { ...(t.created_by ? { [t.created_by]: "created it" } : {}), ...(t.agent_id ? { [t.agent_id]: "on this issue" } : {}) };
+  const told = mentionedIn(text, agents);
+  const pick = (a: Agent) => {
+    setText((v) => insertMention(v, a));
+    box.current?.focus();
+  };
+  useEffect(() => setMenuIndex(0), [query]);
 
   useEffect(() => {
     setText("");
@@ -425,11 +440,29 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : finished && reopen ? "Reopen and send" : `Send to ${agent.name}`;
   return (
     <div className="space-y-2">
+      {flat.length > 0 && <MentionMenu groups={groups} index={Math.min(menuIndex, flat.length - 1)} marks={marks} onHover={setMenuIndex} onPick={pick} />}
       <div className="rounded-2xl border border-line-strong bg-ink-850 p-2 pl-3 transition focus-within:border-accent/40">
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
+            if (flat.length > 0) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : flat.length - 1)) % flat.length);
+                return;
+              }
+              if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                pick(flat[Math.min(menuIndex, flat.length - 1)]);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setClosedAt(text);
+                return;
+              }
+            }
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               post();
@@ -437,7 +470,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
           }}
           ref={box}
           rows={2}
-          placeholder={agent && send ? `Comment, or ask ${agent.name} about this issue…` : "A note on this issue…"}
+          placeholder={agent && send ? `Comment, or ask ${agent.name} about this issue… (@ to mention an agent)` : "A note on this issue… (@ to mention an agent)"}
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
         <div className="flex flex-wrap items-center gap-3">
@@ -454,12 +487,16 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
             </label>
           )}
           {t.github && (
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="After approval, per the project's comment setting">
+            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="After approval, per the comment setting in Settings">
               <input type="checkbox" checked={github} onChange={(e) => setGithub(e.target.checked)} className="accent-[var(--color-accent)]" />
               Post on GitHub
             </label>
           )}
-          {(!agent || !send) && !(t.github && github) && <span className="font-mono text-[11px] text-fg-3">Private: no agent is told.</span>}
+          {(!agent || !send) && !(t.github && github) && (
+            <span className="font-mono text-[11px] text-fg-3">
+              {told.length > 0 ? `Private: only ${told.map((a) => `@${a.name}`).join(", ")} ${told.length > 1 ? "are" : "is"} told.` : "Private: no agent is told."}
+            </span>
+          )}
           <button className={cx("ml-auto", agent && send ? "btn-primary" : "btn")} disabled={!text.trim() || busy} onClick={post}>
             <ArrowUp className="size-3.5" /> {label}
           </button>
