@@ -157,11 +157,20 @@ pub fn project_name(raw: &str) -> Result<String, String> {
 }
 
 /// The folder of `project` inside the projects folder, resolved (symlinks too); None when it isn't one.
+/// Agents' workspaces are never a project, even where they sit inside the projects folder: an agent
+/// can make a repo there with any origin.
 pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf> {
     let name = project_name(project).ok().filter(|n| !n.is_empty())?;
     let root = state.settings.boot().projects_dir.canonicalize().ok()?;
     let dir = root.join(&name).canonicalize().ok()?;
-    dir.starts_with(&root).then_some(dir)
+    let workspaces = state.cfg.storage_dir.canonicalize().unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
+}
+
+/// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
+/// could point the project at any repo on the Mac (and its origin).
+fn own_git_dir(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir())
 }
 
 /// `owner/repo` of a project from its folder's `origin`; the error says what's missing, without a full stop.
@@ -173,6 +182,9 @@ pub async fn github_repo(state: &AppState, project: &str) -> Result<String, Stri
     };
     if !dir.join(".git").exists() {
         return Err(format!("The project folder {} isn't a git repo", dir.display()));
+    }
+    if !own_git_dir(&dir) {
+        return Err(format!("The project folder {}'s .git isn't a folder of its own (a symlink, a worktree or a submodule), so Loft won't publish from it", dir.display()));
     }
     let remote = git(&dir, &["remote", "get-url", "origin"]).await.map_err(|_| format!("The project {project} has no `origin` remote"))?;
     github_slug(&remote).ok_or_else(|| format!("The project {project}'s `origin` ({}) isn't on GitHub", strip_userinfo(remote.trim())))
@@ -639,6 +651,52 @@ mod tests {
         st.db.save_task(&old).unwrap();
         assert!(crate::mirror::publish(&st, &t.id, "user").await.is_err());
         assert!(fake.seen("/").is_empty(), "no GitHub call");
+    }
+
+
+    #[tokio::test]
+    async fn a_project_cant_borrow_another_repos_origin_from_inside_the_projects_folder() {
+        let st = crate::issues::tests::state();
+        let projects = st.settings.boot().projects_dir.clone();
+        // Agents' workspaces inside the projects folder, as with ~/dev/loft/agent-local-storage.
+        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage") };
+        let st = crate::state::AppState { cfg: std::sync::Arc::new(cfg), ..st };
+        let fake = crate::github::tests::own_fake(&st);
+        let git_in = |d: &std::path::Path, args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap().status.success());
+        // A repo outside the projects folder, with a GitHub origin.
+        let outside = projects.parent().unwrap().join("outside2");
+        std::fs::create_dir_all(&outside).unwrap();
+        git_in(&outside, &["init", "-q"]);
+        git_in(&outside, &["remote", "add", "origin", "https://github.com/victim/private"]);
+
+        // 1. A project whose .git is a symlink to that repo's .git.
+        let linked = projects.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(outside.join(".git"), linked.join(".git")).unwrap();
+        // 2. A project whose .git is a `gitdir:` file pointing there.
+        let gitfile = projects.join("gitfile");
+        std::fs::create_dir_all(&gitfile).unwrap();
+        std::fs::write(gitfile.join(".git"), format!("gitdir: {}\n", outside.join(".git").display())).unwrap();
+        // 3. A repo an agent made in its own workspace, which is inside the projects folder.
+        let evil = st.cfg.storage_dir.join("agent-1").join("evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        git_in(&evil, &["init", "-q"]);
+        git_in(&evil, &["remote", "add", "origin", "https://github.com/victim/private"]);
+
+        for p in ["linked", "gitfile"] {
+            let e = super::github_repo(&st, p).await.unwrap_err();
+            assert!(e.contains("isn't a folder of its own"), "{p}: {e}");
+        }
+        let p = "loft/agent-local-storage/agent-1/evil";
+        assert!(super::project_dir(&st, p).is_none(), "an agent's workspace is never a project");
+        assert!(super::github_repo(&st, p).await.is_err());
+        // A real repo inside the projects folder still works.
+        let real = projects.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        git_in(&real, &["init", "-q"]);
+        git_in(&real, &["remote", "add", "origin", "git@github.com:octo/real.git"]);
+        assert_eq!(super::github_repo(&st, "real").await.unwrap(), "octo/real");
+        assert!(fake.seen("/").is_empty());
     }
 
 }
