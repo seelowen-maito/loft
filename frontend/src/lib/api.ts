@@ -48,9 +48,13 @@ export type Agent = {
   /** Background tasks the agent waits on after it has replied, and since when. */
   waiting_on?: string[];
   waiting_since?: string | null;
+  /** Subagents the agent itself started in the current run that haven't returned yet. */
+  subagents?: RunningSubagent[];
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
 };
+
+export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
 export type Message = {
   id: number;

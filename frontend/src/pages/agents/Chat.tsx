@@ -10,6 +10,7 @@ import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
+import { SubagentBar } from "./SubagentBar";
 import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
 import { ContextSize } from "./ContextSize";
@@ -476,6 +477,7 @@ export function Chat({
               </button>
             </div>
           )}
+          <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
             <TaskPicker

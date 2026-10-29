@@ -63,8 +63,8 @@ pub fn client_json(a: &Agent) -> Value {
 }
 
 /// `running`, plus how the current run is doing: `last_output_at` (the last event from claude),
-/// and `waiting_on` / `waiting_since` while the agent has replied but waits on background tasks.
-/// Clients show "waiting" or "no activity for N min" from these, with a restart.
+/// `waiting_on` / `waiting_since` while the agent has replied but waits on background tasks, and the
+/// `subagents` it has running. Clients show "waiting" or "no activity for N min" from these, with a restart.
 pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     let rt = state.rt.lock().unwrap();
     let info = rt.runs.get(agent_id);
@@ -72,6 +72,14 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["last_output_at"] = json!(info.map(|i| &i.last_output_at));
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
+    v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
+}
+
+/// Pushes the agent's run fields after they changed outside a database update.
+fn emit_run(state: &AppState, agent_id: &str) {
+    if let Ok(Some(a)) = state.db.get_agent(agent_id) {
+        emit_agent(state, &a);
+    }
 }
 
 /// A run the user started has ended with a reply or an error: the agent has an Unread reply.
@@ -1026,6 +1034,14 @@ async fn run_process(
                             let summary = tool_summary(name, &b["input"]);
                             if let Some(id) = b["id"].as_str() {
                                 tool_calls.insert(id.to_string(), (name.to_string(), b["input"].clone()));
+                                // Only the agent's own subagents count; one a subagent starts runs inside it.
+                                if sub.is_none() && matches!(name, "Agent" | "Task") {
+                                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                                        let s = |k: &str| b["input"][k].as_str().unwrap_or("").to_string();
+                                        i.subagents.push(crate::state::Subagent { id: id.to_string(), description: s("description"), kind: s("subagent_type"), started_at: now() });
+                                    }
+                                    emit_run(state, agent_id);
+                                }
                             }
                             // Grill tools post what the user sees themselves; their rows would only clutter the interview.
                             let hide = quiet || name.starts_with("mcp__loft__grill_");
@@ -1052,6 +1068,14 @@ async fn run_process(
                         let full = result_text(&b["content"]);
                         let use_id = b["tool_use_id"].as_str().unwrap_or("").to_string();
                         let ok = !b["is_error"].as_bool().unwrap_or(false);
+                        let ended = state.rt.lock().unwrap().runs.get_mut(agent_id).is_some_and(|i| {
+                            let n = i.subagents.len();
+                            i.subagents.retain(|s| s.id != use_id);
+                            i.subagents.len() < n
+                        });
+                        if ended {
+                            emit_run(state, agent_id);
+                        }
                         if let Some((name, input)) = tool_calls.get(&use_id) {
                             if ok && crate::prs::creates_pr(name, input) {
                                 for (slug, n) in crate::github::extract_pr_links(&full) {
@@ -1128,10 +1152,13 @@ async fn run_process(
         }
     }
 
-    {
+    let had_subagents = {
         let mut rt = state.rt.lock().unwrap();
         rt.waiting.remove(agent_id);
-        rt.runs.remove(agent_id);
+        rt.runs.remove(agent_id).is_some_and(|i| !i.subagents.is_empty())
+    };
+    if had_subagents {
+        emit_run(state, agent_id);
     }
     if let Some(end) = held_end {
         run_msg(quiet, state, agent_id, rid, "system", "run_end", "", end);
@@ -1354,7 +1381,9 @@ pub(crate) mod tests {
     /// workspace (a compaction for `/compact`), replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
     /// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question,
-    /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
+    /// "delegate" starts an Explore subagent, which starts one of its own, and waits for a `go` file before the
+/// subagent returns and for `go2` before the reply; "orphan" replies with a subagent that never returned.
+/// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
@@ -1392,6 +1421,16 @@ esac
 case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
   exit 1;;
+esac
+case "$prompt" in *delegate*|*orphan*)
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Find the parser","subagent_type":"Explore","prompt":"x"}}]}}'
+  echo '{"type":"assistant","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_use","id":"n1","name":"Agent","input":{"description":"Nested","subagent_type":"general-purpose","prompt":"y"}}]}}';;
+esac
+case "$prompt" in *delegate*)
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"user","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"n1","content":"nested done"}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a1","content":"found it"}]}}'
+  while [ ! -f go2 ]; do sleep 0.05; done;;
 esac
 case "$prompt" in *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
@@ -1700,9 +1739,44 @@ esac
         let r = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert!(r.is_ok());
         until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
-        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null }));
+        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [] }));
         let log = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
         assert!(log.contains("restarted your last run (it was waiting on Run the QA suite)"), "{log}");
+    }
+
+    fn subagents(st: &AppState, id: &str) -> Vec<Value> {
+        fields(st, id)["subagents"].as_array().cloned().unwrap_or_default()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_json_shows_its_running_subagents() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("delegate".into()), "user");
+        until("the nested call", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
+        let subs = subagents(&st, &a.id);
+        assert_eq!(subs.len(), 1, "the subagent's own Agent call isn't counted: {subs:?}");
+        assert!(subs[0]["id"] == "a1" && subs[0]["description"] == "Find the parser" && subs[0]["type"] == "Explore" && subs[0]["started_at"].is_string(), "{subs:?}");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the subagent's result", 10, || subagents(&st, &a.id).is_empty()).await;
+        assert!(is_running(&st, &a.id), "the result ends the subagent, not the run");
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_run_ending_clears_its_subagents() {
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("orphan".into()), "user");
+        until("the run to end", 10, || !is_running(&st, &a.id) && st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "run_end")).await;
+        assert!(subagents(&st, &a.id).is_empty());
+
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("delegate".into()), "user");
+        until("the subagent", 10, || subagents(&st, &a.id).len() == 1).await;
+        assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
+        until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
+        assert!(subagents(&st, &a.id).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
