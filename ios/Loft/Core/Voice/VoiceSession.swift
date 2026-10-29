@@ -21,6 +21,8 @@ final class VoiceSession {
         /// Sent; waiting for the agent to answer.
         case sending
         case speaking
+        /// Voice style E: the reply has been read (or arrived, with reading off) and stays on screen.
+        case replied
         case failed(String)
     }
 
@@ -35,8 +37,8 @@ final class VoiceSession {
     /// Microphone level, 0…1, about 20 times a second.
     private(set) var level: Float = 0
     private(set) var elapsed: TimeInterval = 0
-    /// Voice style D: how long it's been quiet since the last word, for the ring that fills before the turn ends.
-    private(set) var quietFor: TimeInterval = 0
+    /// When the message went out, for the status screen's timer.
+    private(set) var sentAt: Date?
     /// The cleaned-up text, set in `.review`. Nil when cleanup failed or isn't available: show `raw`.
     private(set) var cleaned: String?
     private(set) var cleanupNote: String?
@@ -56,13 +58,12 @@ final class VoiceSession {
     var isFailed: Bool { if case .failed = phase { return true } else { return false } }
     var endPhrases: [String] { VoiceText.endPhrases }
 
-    /// Voice style D is a conversation: always hands-free and read aloud.
     var handsFree: Bool {
-        get { VoiceVariant.selected == .d || UserDefaults.standard.bool(forKey: Prefs.voiceHandsFree) }
+        get { UserDefaults.standard.bool(forKey: Prefs.voiceHandsFree) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceHandsFree) }
     }
     var readReplies: Bool {
-        get { VoiceVariant.selected == .d || UserDefaults.standard.bool(forKey: Prefs.voiceReadReplies) }
+        get { UserDefaults.standard.bool(forKey: Prefs.voiceReadReplies) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceReadReplies) }
     }
 
@@ -99,7 +100,7 @@ final class VoiceSession {
     // MARK: - Listening
 
     func start(agentId: String) async {
-        guard phase == .idle || isFailed || phase == .review || phase == .speaking else { return }
+        guard phase == .idle || isFailed || phase == .review || phase == .speaking || phase == .replied else { return }
         speaker.stop()
         failureNeedsPermission = false
         failedSend = nil
@@ -191,19 +192,9 @@ final class VoiceSession {
             phase = .idle
             return
         }
-        // Voice style B sends what was heard, without the tidy-up on the Mac.
-        let variant = VoiceVariant.selected
-        // B and D send what was heard, without the tidy-up on the Mac (D is a conversation: speed first).
-        if variant != .b && variant != .d { await clean() }
+        await clean()
         phase = .review
         switch reason {
-        case .review where variant == .a && store.canWrite:
-            // Voice style A: Done sends after the Undo countdown, no review screen.
-            VoiceLog.shared.add("talk: Done: sending after the countdown (style A)")
-            scheduleAutoSend()
-        case .review where variant == .b && store.canWrite:
-            VoiceLog.shared.add("talk: Done: sending as heard (style B)")
-            await send(raw)
         case .send where store.canWrite:
             VoiceLog.shared.add("talk: heard “send”: sending the cleaned text")
             await send(cleaned ?? raw)
@@ -268,11 +259,43 @@ final class VoiceSession {
         discard()
     }
 
-    /// Voice style C: who the dictation goes to, picked on the Talk screen. Remembered for the next Talk.
+    /// Voice style E: who the dictation goes to, picked on the To: row. Remembered for the next Talk.
     func switchAgent(_ id: String) {
         guard phase != .sending, phase != .speaking else { return }
         agentId = id
         UserDefaults.standard.set(id, forKey: "voiceLastAgent")
+    }
+
+    /// Voice style E: a dictated message sent from the chat's message box goes out after a short Undo, with the
+    /// full-screen status (Sent, Thinking, the reply read aloud) instead of only a bubble in the chat.
+    func sendWithStatus(_ text: String, to agentId: String) {
+        guard phase == .idle || phase == .replied || isFailed else { return }
+        self.agentId = agentId
+        segments = []
+        committed = ""
+        live = ""
+        reply = nil
+        failedSend = nil
+        cleaned = text
+        // The countdown first, so the screen already sees it when the phase changes (no Undo: E's review means "to the chat").
+        scheduleAutoSend()
+        phase = .review
+        VoiceLog.shared.add("talk: sending from the chat with the status screen (style E)")
+    }
+
+    /// Voice style E: read the reply again.
+    func replay() async {
+        guard phase == .replied, let text = reply else { return }
+        phase = .speaking
+        _ = await speaker.readReply(text, isActive: { phase == .speaking })
+        if phase == .speaking { phase = .replied }
+    }
+
+    /// Voice style E: stop reading; the reply stays on screen.
+    func stopReading() {
+        guard phase == .speaking else { return }
+        phase = .replied
+        speaker.stop()
     }
 
     /// Undo an automatic send: the text stays for review and editing.
@@ -356,15 +379,6 @@ final class VoiceSession {
             }
         }
         if quiet >= VoiceSend.utteranceGap { pauseBase = raw }
-        // Voice style D: a short silence after some words ends your turn and sends it, no question asked.
-        if VoiceVariant.selected == .d {
-            quietFor = raw.isEmpty ? 0 : quiet
-            let open = VoiceSend.endsOpen(raw)
-            if VoiceLoop.reduce(.listening, .quiet(quiet, hasText: !raw.isEmpty, endsOpen: open)) == .thinking {
-                VoiceLog.shared.add("talk: quiet \(String(format: "%.1f", quiet)) s: end of turn, sending (style D)")
-                return await finish(.send)
-            }
-        }
         if raw.isEmpty, quiet >= VoiceSend.noSpeechTimeout {
             VoiceLog.shared.add("talk: nothing heard for \(Int(VoiceSend.noSpeechTimeout)) s: paused")
             return pause()
@@ -480,6 +494,7 @@ final class VoiceSession {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         phase = .sending
+        sentAt = Date()
         let before = store.conversation(agentId).last?.id ?? 0
         // While a round waits, what you say answers the question read last (same as typing it in the chat); the next
         // question of the round is read straight away, and after the last one the round goes out.
@@ -556,6 +571,11 @@ final class VoiceSession {
             VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
             let ended = await speaker.readReply(spoken, messageId: id, isActive: { phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")
+            if VoiceVariant.selected == .e, next == nil {
+                // Style E: the reply stays on screen with Replay, Reply by voice, Open chat and Done.
+                if phase == .speaking { phase = .replied }
+                return
+            }
             if ended == .stop, phase == .speaking {
                 // "Stop" while the reply is read ends the conversation.
                 phase = .idle
@@ -565,6 +585,10 @@ final class VoiceSession {
             VoiceLog.shared.add("talk: not read, “Read replies aloud” is off")
         }
         guard phase == .speaking || phase == .sending else { return } // stopped meanwhile
+        if VoiceVariant.selected == .e, next == nil {
+            phase = .replied
+            return
+        }
         if handsFree {
             phase = .idle
             await start(agentId: agentId)
@@ -733,7 +757,6 @@ final class VoiceSession {
         live = "and add a button to copy the diagnostics"
         level = 0.55
         elapsed = 83
-        quietFor = 0.9
         switch name {
         case "paused": phase = .paused
         case "preparing": phase = .preparing
@@ -749,7 +772,21 @@ final class VoiceSession {
             live = ""
             phase = .review
             autoSendAt = Date().addingTimeInterval(3600)
-        case "sending": phase = .sending
+        case "sent":
+            // Style E's status screen: the message on its way, with Undo.
+            live = ""
+            cleaned = "I want the settings screen to show the server version and the last sync time, and add a button to copy the diagnostics."
+            phase = .review
+            autoSendAt = Date().addingTimeInterval(3600)
+        case "sending", "thinking":
+            sentAt = Date().addingTimeInterval(-74)
+            phase = .sending
+        case "replied":
+            reply = "Done. The settings screen now shows the server version and last sync, and there's a Copy diagnostics button."
+            phase = .replied
+        case "failed-send":
+            failedSend = PendingMessage(id: "fixture", agentId: agentId, text: "Add a copy diagnostics button", createdAt: Date(), failure: "The Mac can't be reached")
+            phase = .failed("Not sent: The Mac can't be reached. It's kept in the chat to retry.")
         case "speaking":
             reply = "Done. The settings screen now shows the server version and last sync, and there's a Copy diagnostics button."
             phase = .speaking

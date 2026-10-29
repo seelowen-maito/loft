@@ -49,9 +49,7 @@ final class Speaker: NSObject {
         let (text, truncated) = VoiceText.speakable(markdown)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
-        // Voice style D always listens while it reads: talking over the reply is how you take your turn.
-        let bargeIn = VoiceVariant.selected == .d
-        let listens = interruptible && (bargeIn || UserDefaults.standard.bool(forKey: Prefs.voiceInterrupt)) && !UIAccessibility.isVoiceOverRunning
+        let listens = interruptible && UserDefaults.standard.bool(forKey: Prefs.voiceInterrupt) && !UIAccessibility.isVoiceOverRunning
             && InterruptibleReader.canListen(locale: locale)
         let spoken = hasMore ? text + "\n\n" + Self.askForMore(text, byVoice: listens) : truncated ? text + "\n\n" + Self.moreInChat(text) : text
         lastFailure = nil
@@ -68,7 +66,6 @@ final class Speaker: NSObject {
         if listens {
             let r = InterruptibleReader()
             r.phrases = phrases
-            r.bargeIn = bargeIn
             r.onCommand = { [weak self] c in self?.interrupt(c) }
             reader = r
             do {

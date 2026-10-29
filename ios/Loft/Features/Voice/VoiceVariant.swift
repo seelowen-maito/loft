@@ -1,16 +1,11 @@
 import SwiftUI
 
-/// Temporary: three takes on the Talk screen to compare (Settings › Voice style, or `-voiceVariant a|b|c`).
-/// One is kept and the rest deleted once picked.
-/// - A "Bars": rising bars, a caption-style transcript, and Done sends the tidied text after a 3 s Undo (no review screen).
-/// - B "Chat": a pulsing ring, the transcript as the message bubble, and Done sends what was heard straight into the chat.
-/// - C "Direct": a voice line, the transcript as live captions, and a To: chip to talk to any agent instead of the Lead.
-/// - D "Conversation" (round 2, like Grok or ChatGPT voice): a short silence ends your turn and sends it, the reply is
-///   read with captions, talking over it is your turn, and it listens again. One big state ring, one End button.
-/// - E "Dictate" (round 2, like Wispr Flow): talk (or hold the mic) and let go; the tidied text lands in the chat's
-///   message box, to read and send with one tap. A To: row with recent agents.
+/// Temporary: the Talk screen trial (Settings › Voice style, or `-voiceVariant e`). Round 3 kept one flow, E:
+/// talk (or hold the mic) and let go; the tidied text lands in the chat's message box, with a To: row of recent agents.
+/// Sending it from there opens a full-screen status (Sent → Thinking → the reply read aloud) with its buttons.
+/// The toggle goes once it's decided.
 enum VoiceVariant: String, CaseIterable {
-    case current, a, b, c, d, e
+    case current, e
 
     static let key = "voiceVariant"
     static var selected: VoiceVariant { VoiceVariant(rawValue: UserDefaults.standard.string(forKey: key)?.lowercased() ?? "") ?? .current }
@@ -18,18 +13,14 @@ enum VoiceVariant: String, CaseIterable {
     var title: String {
         switch self {
         case .current: "Current"
-        case .a: "A · Bars, send with Undo"
-        case .b: "B · Bubble, send into the chat"
-        case .c: "C · Captions, talk to any agent"
-        case .d: "D · Conversation, hands-free"
-        case .e: "E · Dictate into the chat"
+        case .e: "E · Dictate, then a status screen"
         }
     }
 }
 
 // MARK: - Animations
 
-/// A: bars that rise with the voice, taller in the middle, each moving at its own pace.
+/// Bars that rise with the voice, taller in the middle, each moving at its own pace.
 struct VoiceBars: View {
     var level: Float
     var active: Bool
@@ -55,64 +46,9 @@ struct VoiceBars: View {
     }
 }
 
-/// B: a mic disc with rings that swell with the voice.
-struct VoicePulse: View {
-    var level: Float
-    var active: Bool
-    var tint: Color = Theme.accent
-
-    var body: some View {
-        let l = active ? CGFloat(min(max(level, 0), 1)) : 0
-        ZStack {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .stroke(tint.opacity(0.45 - Double(i) * 0.12), lineWidth: 2)
-                    .scaleEffect(0.55 + l * (0.18 + CGFloat(i) * 0.14) + CGFloat(i) * 0.08)
-            }
-            Circle().fill(tint.gradient).scaleEffect(0.5)
-            Image(systemName: "mic.fill").font(.system(size: 34, weight: .semibold)).foregroundStyle(.white)
-        }
-        .animation(.spring(duration: 0.25), value: level)
-        .aspectRatio(1, contentMode: .fit)
-        .frame(maxWidth: 180)
-        .accessibilityHidden(true)
-    }
-}
-
-/// C: a soft line that waves with the voice, three strands slightly out of step.
-struct VoiceLine: View {
-    var level: Float
-    var active: Bool
-    var tint: Color = Theme.accent
-
-    var body: some View {
-        TimelineView(.animation(paused: !active || TestMode.noAnimations)) { t in
-            let phase = t.date.timeIntervalSinceReferenceDate
-            let l = active ? CGFloat(min(max(level, 0), 1)) : 0
-            Canvas { ctx, size in
-                for strand in 0..<3 {
-                    var p = Path()
-                    let amp = size.height / 2 * (0.08 + 0.9 * l) * (1 - CGFloat(strand) * 0.28)
-                    for x in stride(from: 0, through: size.width, by: 2) {
-                        let u = x / size.width
-                        // Fades to flat at both ends.
-                        let envelope = sin(.pi * u)
-                        let y = size.height / 2 + amp * envelope * sin(u * 4 * .pi + phase * (3 + Double(strand)) + Double(strand))
-                        x == 0 ? p.move(to: CGPoint(x: x, y: y)) : p.addLine(to: CGPoint(x: x, y: y))
-                    }
-                    ctx.stroke(p, with: .color(tint.opacity(1 - Double(strand) * 0.3)), lineWidth: strand == 0 ? 3 : 1.5)
-                }
-            }
-            .frame(height: 120)
-        }
-        .animation(.easeOut(duration: 0.1), value: level)
-        .accessibilityHidden(true)
-    }
-}
-
 // MARK: - Transcripts
 
-/// A: the last few lines in large type, the words still being recognised in the accent colour.
+/// The last few lines in large type, the words still being recognised in the accent colour.
 struct CaptionTranscript: View {
     var committed: String
     var live: String
@@ -134,166 +70,191 @@ struct CaptionTranscript: View {
     }
 }
 
-/// B: the message as it will look in the chat, growing as you talk.
-struct BubbleTranscript: View {
-    var text: String
-    var agentName: String
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            ScrollView {
-                Text(text.isEmpty ? "Start talking…" : text)
-                    .font(.body)
-                    .foregroundStyle(text.isEmpty ? Color.white.opacity(0.7) : .white)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-            }
-            .defaultScrollAnchor(.bottom)
-            .scrollBounceBehavior(.basedOnSize)
-            .fixedSize(horizontal: false, vertical: text.count < 160)
-            .frame(maxHeight: 220)
-            .background(Theme.accent.gradient, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            Text("To \(agentName), as you say it").font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(.leading, 48)
-        .padding(.horizontal, Theme.gutter)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("voiceTranscript")
-    }
-}
-
-/// C: live captions. The sentence being said is large; the ones before it fade above.
-struct LiveCaptions: View {
-    var committed: String
-    var live: String
-
-    var body: some View {
-        let earlier = committed
-        let now = live.isEmpty ? "" : live
-        VStack(alignment: .leading, spacing: 10) {
-            if !earlier.isEmpty {
-                Text(earlier)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .truncationMode(.head)
-            }
-            Text(now.isEmpty ? (earlier.isEmpty ? "Start talking…" : "…") : now)
-                .font(.title.weight(.semibold))
-                .foregroundStyle(now.isEmpty ? .tertiary : .primary)
-                .lineLimit(3)
-                .truncationMode(.head)
-                .contentTransition(.opacity)
-                .animation(.easeOut(duration: 0.15), value: now)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.gutter)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("voiceTranscript")
-    }
-}
-
 // MARK: - After sending
 
-/// A and C: what happens after Send, in two steps. "Sending to …" until the server has the message,
-/// then "… is thinking" with the agent's live status, so it's always clear who has it and what they're doing.
-struct VoiceProgress: View {
+/// Style E after Send: the whole screen says where the message is. Sent (with Undo) → Thinking, with the agent's own
+/// status line and a timer → the reply, read aloud, as a big bubble. The chat is one tap away at every step.
+struct VoiceStatusView: View {
     @Environment(LoftStore.self) private var store
-    let agentId: String
+    @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
+    let status: VoiceStatus
+    let dismiss: () -> Void
+
+    private var agentId: String { voice.agentId ?? "" }
 
     var body: some View {
         let agent = store.agent(agentId)
-        let name = agent?.name ?? "Agent"
-        let sending = !store.pending(for: agentId).isEmpty
         VStack(spacing: 18) {
-            HStack(spacing: 10) {
-                step("Sent", done: !sending, active: sending)
-                Rectangle().fill(.quaternary).frame(width: 24, height: 2)
-                step("Thinking", done: false, active: !sending)
-                Rectangle().fill(.quaternary).frame(width: 24, height: 2)
-                step("Reply", done: false, active: false)
-            }
-            Text(sending ? "Sending to \(name)…" : "\(name) is thinking…").font(.title3.weight(.semibold))
-            if !sending, let status = agent?.statusText, !status.isEmpty {
-                Label(status, systemImage: "gearshape.2").font(.footnote).foregroundStyle(.secondary).lineLimit(2)
-            }
-            if !sending, let since = agent?.lastRunAt {
-                RelativeTime(date: since).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
-            }
+            Spacer(minLength: 0)
+            steps
+            Text(status.title(agent: agent?.name ?? "Agent"))
+                .font(.title.weight(.bold))
+                .multilineTextAlignment(.center)
+                .accessibilityIdentifier("voiceStatusTitle")
+            detail(agent)
+            Spacer(minLength: 0)
+            buttons
         }
         .padding(.horizontal, Theme.gutter)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("voiceProgress")
+        .padding(.bottom, 12)
+        .sensoryFeedback(.impact(weight: .medium), trigger: status)
+        .sensoryFeedback(.success, trigger: status == .replied)
+        .sensoryFeedback(.error, trigger: status == .failed)
     }
 
-    private func step(_ title: String, done: Bool, active: Bool) -> some View {
-        VStack(spacing: 4) {
+    // MARK: Steps
+
+    private var steps: some View {
+        HStack(spacing: 10) {
+            step("Sent", index: 0)
+            Rectangle().fill(.quaternary).frame(width: 28, height: 2)
+            step("Thinking", index: 1)
+            Rectangle().fill(.quaternary).frame(width: 28, height: 2)
+            step("Reply", index: 2)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(["Sending", "Thinking", "Reply"][status.step])
+        .accessibilityIdentifier("voiceStatusSteps")
+    }
+
+    private func step(_ title: String, index: Int) -> some View {
+        let done = index < status.step || (index == 2 && status == .replied)
+        let active = index == status.step && !done
+        let failed = status == .failed && index == 0
+        return VStack(spacing: 6) {
             ZStack {
-                Circle().fill(done ? Theme.accent : active ? Theme.working.opacity(0.25) : Color.secondary.opacity(0.15))
-                if done {
-                    Image(systemName: "checkmark").font(.caption.weight(.bold)).foregroundStyle(.white)
+                Circle().fill(failed ? Theme.failure : done ? Theme.accent : active ? Theme.working.opacity(0.25) : Color.secondary.opacity(0.15))
+                if failed {
+                    Image(systemName: "xmark").font(.callout.weight(.bold)).foregroundStyle(.white)
+                } else if done {
+                    Image(systemName: "checkmark").font(.callout.weight(.bold)).foregroundStyle(.white)
+                } else if active && status == .speaking {
+                    Image(systemName: "waveform").font(.callout.weight(.bold)).foregroundStyle(Theme.working)
+                        .symbolEffect(.variableColor.iterative, isActive: !TestMode.noAnimations)
                 } else if active {
-                    ProgressView().controlSize(.mini)
+                    ProgressView().controlSize(.small)
                 }
             }
-            .frame(width: 26, height: 26)
-            Text(title).font(.caption2).foregroundStyle(active || done ? .primary : .secondary)
-        }
-    }
-}
-
-// MARK: - D: conversation
-
-/// The one thing D shows: a big ring that says whose turn it is. Listening: it fills as you pause, and the turn ends
-/// when it's full. Thinking: it turns while the agent works. Speaking: it pulses with the reply.
-struct VoiceStateRing: View {
-    var state: VoiceLoop.State
-    var level: Float
-    /// 0…1 of the silence that ends your turn.
-    var progress: Double
-
-    private var tint: Color {
-        switch state {
-        case .listening: Theme.accent
-        case .thinking: Theme.attention
-        case .speaking: Theme.working
-        case .ended: .secondary
-        }
-    }
-    private var title: String {
-        switch state {
-        case .listening: "Listening"
-        case .thinking: "Thinking"
-        case .speaking: "Speaking"
-        case .ended: "Ended"
+            .frame(width: 40, height: 40)
+            Text(title).font(.subheadline).foregroundStyle(active || done ? .primary : .secondary)
         }
     }
 
-    var body: some View {
-        let l = CGFloat(min(max(level, 0), 1))
-        ZStack {
-            Circle().stroke(tint.opacity(0.18), lineWidth: 10)
-            if state == .listening {
-                Circle().trim(from: 0, to: progress)
-                    .stroke(tint, style: StrokeStyle(lineWidth: 10, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.25), value: progress)
-            } else if state == .thinking {
-                TimelineView(.animation(paused: TestMode.noAnimations)) { t in
-                    Circle().trim(from: 0, to: 0.25)
-                        .stroke(tint, style: StrokeStyle(lineWidth: 10, lineCap: .round))
-                        .rotationEffect(.degrees(t.date.timeIntervalSinceReferenceDate * 240))
+    // MARK: Detail
+
+    @ViewBuilder private func detail(_ agent: Agent?) -> some View {
+        switch status {
+        case .sending, .thinking:
+            if status == .thinking, let s = agent?.statusText, !s.isEmpty {
+                Label(s, systemImage: "gearshape.2").font(.body).foregroundStyle(.secondary).lineLimit(2)
+                    .accessibilityIdentifier("voiceStatusLine")
+            } else if status == .sending, let text = voice.cleaned {
+                Text("“\(text)”").font(.body).foregroundStyle(.secondary).lineLimit(4).multilineTextAlignment(.center)
+            }
+            if let at = voice.sentAt, status == .thinking {
+                TimelineView(.periodic(from: at, by: 1)) { ctx in
+                    Text(VoiceSessionView.clock(ctx.date.timeIntervalSince(at)))
+                        .font(.callout.monospacedDigit()).foregroundStyle(.tertiary)
+                }
+                .accessibilityLabel("Waiting")
+            }
+        case .speaking, .replied:
+            ScrollView {
+                Text(voice.reply ?? "")
+                    .font(.title3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .accessibilityIdentifier("voiceReply")
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 340)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            if status == .speaking {
+                VoiceBars(level: 0.45, active: true, tint: Theme.working).frame(height: 40).scaleEffect(0.4)
+            }
+        case .failed:
+            if case .failed(let message) = voice.phase {
+                Text(message).font(.body).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    // MARK: Buttons
+
+    private var buttons: some View {
+        VStack(spacing: 10) {
+            switch status {
+            case .sending:
+                AutoSendBar(recipient: store.agent(agentId)?.name ?? "Agent", undo: undo, sendNow: {
+                    Task { await voice.send(voice.cleaned ?? voice.raw) }
+                })
+            case .thinking:
+                EmptyView()
+            case .speaking:
+                big("Stop", "stop.fill", id: "voiceStop") { voice.stopReading() }
+            case .replied:
+                big("Replay", "play.fill", id: "voiceReplay") { Task { await voice.replay() } }
+            case .failed:
+                big("Retry", "arrow.clockwise", id: "voiceRetrySend") { Task { await voice.retrySend() } }
+                    .disabled(!store.canWrite)
+            }
+            if status == .speaking || status == .replied {
+                small("Reply by voice", "mic.fill", id: "voiceReplyByVoice") {
+                    voice.stopReading()
+                    Task { await voice.start(agentId: agentId) }
                 }
             }
-            Circle().fill(tint.gradient)
-                .scaleEffect(0.62 + (state == .listening || state == .speaking ? l * 0.18 : 0))
-                .animation(.spring(duration: 0.2), value: level)
-            Text(title).font(.title2.weight(.bold)).foregroundStyle(.white)
+            HStack(spacing: 10) {
+                small("Open chat", "bubble.left.and.bubble.right", id: "voiceOpenChat", action: openChat)
+                // While it can still be undone, Undo is the way out.
+                if status != .sending {
+                    small("Done", "checkmark", id: "voiceStatusDone") {
+                        voice.speaker.stop()
+                        voice.discard()
+                        dismiss()
+                    }
+                }
+            }
         }
-        .frame(width: 220, height: 220)
-        .accessibilityElement()
-        .accessibilityLabel(title)
-        .accessibilityIdentifier("voiceStateRing")
+        .controlSize(.large)
+    }
+
+    private func big(_ title: String, _ symbol: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: symbol).frame(maxWidth: .infinity, minHeight: 30) }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier(id)
+    }
+
+    private func small(_ title: String, _ symbol: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol).frame(maxWidth: .infinity, minHeight: 30)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier(id)
+    }
+
+    /// Undo: nothing goes; the text is back in the chat's message box.
+    private func undo() {
+        let text = voice.cleaned ?? voice.raw
+        voice.cancelAutoSend()
+        voice.discard()
+        router.openChat(agentId, draft: text)
+        dismiss()
+    }
+
+    /// The chat, where the same message, "thinking…" and the reply show. Mid-countdown it sends first.
+    private func openChat() {
+        let id = agentId
+        if voice.autoSendAt != nil {
+            let text = voice.cleaned ?? voice.raw
+            voice.cancelAutoSend()
+            Task { await store.send(text, to: id) }
+        }
+        voice.speaker.stop()
+        voice.discard()
+        router.openChat(id)
+        dismiss()
     }
 }
 

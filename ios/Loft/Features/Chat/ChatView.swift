@@ -205,6 +205,10 @@ struct ChatView: View {
                     // on another one) and the voice moves on; typed text is always chat, as on the web.
                     if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
                         Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
+                    } else if VoiceVariant.selected == .e, VoicePresentation.shared.statusAgentId == agentId, attached == nil {
+                        // Voice style E: a dictation sent from here gets the full-screen status (Sent, Thinking, the reply).
+                        VoicePresentation.shared.statusAgentId = nil
+                        voice.sendWithStatus(text, to: agentId)
                     } else {
                         quickReply(to: text)
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
