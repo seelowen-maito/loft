@@ -1436,8 +1436,8 @@ pub(crate) mod tests {
     /// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question,
     /// "delegate" starts an Explore subagent, which starts one of its own, and waits for a `go` file before the
 /// subagent returns and for `go2` before the reply; "orphan" replies with a subagent that never returned.
-/// "bg-agent" launches two background subagents next to a shell; the task list drops one at `go` and the other at
-/// `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started,
+/// "bg-agent" launches two background subagents next to a shell and a monitor; the task list drops one subagent at
+/// `go` and the other with the monitor at `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started,
 /// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
@@ -1492,7 +1492,7 @@ case "$prompt" in *bg-agent*)
   for i in 1 2; do
     echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b'$i'","name":"Agent","input":{"description":"Audit '$i'","subagent_type":"Explore","prompt":"x","run_in_background":true}}]}}'
   done
-  echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"t1","task_type":"local_agent","subagent_type":"Explore","description":"Audit 1"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+  echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"m1","task_type":"monitor","description":"Watch the logs"},{"task_id":"t1","task_type":"local_agent","subagent_type":"Explore","description":"Audit 1"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
   for i in 1 2; do
     case "$prompt" in *no-task-id*) ;; *)
       echo '{"type":"system","subtype":"task_started","task_id":"t'$i'","tool_use_id":"b'$i'","description":"Audit '$i'","task_type":"local_agent","is_backgrounded":true}';;
@@ -1505,7 +1505,7 @@ case "$prompt" in *bg-agent*)
   esac
   case "$prompt" in *linger*) ;; *)
     while [ ! -f go ]; do sleep 0.05; done
-    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"m1","task_type":"monitor","description":"Watch the logs"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
     while [ ! -f go2 ]; do sleep 0.05; done
     echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"}]}'
     while [ ! -f go3 ]; do sleep 0.05; done;;
@@ -1921,15 +1921,15 @@ esac
         let status = || st.db.get_agent(&a.id).unwrap().unwrap().status_text;
         enqueue(&st, &a.id, Some("bg-agent early".into()), "user");
         until("the reply", 10, || fields(&st, &a.id)["waiting_since"].is_string()).await;
-        // The subagent bar shows the subagents; the waiting bar only the shell.
-        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
+        // The subagent bar shows the subagents; the waiting bar only the shell and the monitor.
+        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite", "Watch the logs"]));
         assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")]);
-        assert_eq!(status(), "Waiting on: Run the QA suite, Audit 1, Audit 2");
+        assert_eq!(status(), "Waiting on: Run the QA suite, Watch the logs, Audit 1, Audit 2");
         std::fs::write(ws.join("go"), "").unwrap();
         until("the task list to drop b1", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
-        until("the status to drop it", 10, || status() == "Waiting on: Run the QA suite, Audit 2").await;
+        until("the status to drop it", 10, || status() == "Waiting on: Run the QA suite, Watch the logs, Audit 2").await;
         std::fs::write(ws.join("go2"), "").unwrap();
-        until("the status to drop b2", 10, || status() == "Waiting on: Run the QA suite").await;
+        until("the status to drop b2 and the monitor", 10, || status() == "Waiting on: Run the QA suite").await;
         assert!(subagents(&st, &a.id).is_empty());
         assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
         std::fs::write(ws.join("go3"), "").unwrap();
