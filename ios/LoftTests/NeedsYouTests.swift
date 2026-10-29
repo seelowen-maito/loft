@@ -10,7 +10,7 @@ final class NeedsYouTests: XCTestCase {
         let l = try fixture()
         XCTAssertEqual(l.version, 1)
         XCTAssertEqual(l.items.first?.type, "permission", "the server's order is kept")
-        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "task_done"])
+        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "comment_approval", "task_done"])
         let open = try XCTUnwrap(l.items.first { $0.type == "question" }?.openAction)
         XCTAssertEqual(open.target?.screen, "chat")
         XCTAssertFalse(l.items.first { $0.type == "permission" }!.canDismiss, "permissions can't be dismissed")
@@ -24,6 +24,19 @@ final class NeedsYouTests: XCTestCase {
         // Other actions are sent exactly as given.
         let approve = try XCTUnwrap(try fixture().items.first { $0.type == "permission" }?.actions.first { $0.kind == "approve" })
         XCTAssertEqual(approve.body(text: nil, clientId: "c2"), approve.body)
+    }
+
+    /// A comment waiting for GitHub (spec #65): Approve, "Edit and approve" starting from the comment's text, Keep in Loft.
+    func testACommentApprovalEditsTheCommentItself() throws {
+        let item = try XCTUnwrap(try fixture().items.first { $0.type == "comment_approval" })
+        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open task"])
+        let edit = try XCTUnwrap(item.answerAction)
+        XCTAssertEqual(edit.draft, item.text, "editing starts from the comment, not an empty box")
+        guard case .object(let o)? = edit.body(text: "Edited", clientId: "c1") else { return XCTFail() }
+        XCTAssertEqual(o["text"], .string("Edited"))
+        XCTAssertEqual(edit.path, "/api/issues/t1/comments/77/approve")
+        // An ordinary answer still starts empty.
+        XCTAssertEqual(try fixture().items.first { $0.type == "question" }?.answerAction?.draft, "")
     }
 
     @MainActor
