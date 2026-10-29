@@ -344,11 +344,9 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
-  /** Projects whose new Loft issues are published to GitHub as they're made. */
-  auto_publish: string[];
-  /** Per project: ask (every comment waits for approval), own (yours go straight) or all. */
-  comment_approval: Record<string, ApprovalMode>;
-  /** The mode of projects not in comment_approval. */
+  /** Publish new Loft issues to GitHub as they're made (projects with a GitHub repo). */
+  auto_publish_all: boolean;
+  /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
 };
 

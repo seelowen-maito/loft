@@ -69,10 +69,6 @@ export default function SettingsPage() {
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
-  const [repos, setRepos] = useState<{ name: string; github: string }[] | null>(null);
-  useEffect(() => {
-    api.repos().then((rs) => setRepos(rs.filter((r) => r.github).map((r) => ({ name: r.name, github: r.github! })))).catch(() => setRepos([]));
-  }, []);
 
   const load = useCallback(() => api.settings().then((v) => {
     setView(v);
@@ -204,31 +200,15 @@ export default function SettingsPage() {
         </Section>
 
         <Section title="GitHub issues">
-          <Field label="Comments going to GitHub" hint="For projects without their own choice below. Every comment on a GitHub issue waits for your approval unless this says otherwise.">
+          <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
             <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
           </Field>
-          {repos === null ? (
-            <div className="skeleton h-10 rounded-xl" />
-          ) : repos.length === 0 ? (
-            <p className="text-[12.5px] text-fg-3">No project has a GitHub repo yet. Loft issues in projects without one stay in Loft.</p>
-          ) : (
-            repos.map((r) => (
-              <div key={r.name} className="space-y-3 border-t border-line pt-4">
-                <Toggle
-                  on={draft.auto_publish.includes(r.name)}
-                  onChange={(v) => set("auto_publish", v ? [...draft.auto_publish, r.name] : draft.auto_publish.filter((p) => p !== r.name))}
-                  label={`Publish new Loft issues in ${r.name}`}
-                  hint={`Each new Loft issue becomes an issue on ${r.github} right away. Off: it stays in Loft until you press Publish to GitHub.`}
-                />
-                <Field label={`Comments on ${r.github}`}>
-                  <ModeSelect
-                    value={draft.comment_approval[r.name] ?? draft.comment_approval_default}
-                    onChange={(m) => set("comment_approval", { ...draft.comment_approval, [r.name]: m })}
-                  />
-                </Field>
-              </div>
-            ))
-          )}
+          <Toggle
+            on={draft.auto_publish_all}
+            onChange={(v) => set("auto_publish_all", v)}
+            label="Publish new Loft issues to GitHub automatically"
+            hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
+          />
         </Section>
 
         <Section title="Navigation">

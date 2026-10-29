@@ -22,20 +22,23 @@ pub struct Settings {
     pub auto_update: bool,
     /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
     pub show_simulator: bool,
-    /// Projects whose new Loft issues are published to GitHub as they're made. Off (empty) by default.
+    /// Publish new Loft issues to GitHub as they're made (only projects with a GitHub repo can). Off by default.
+    /// `None` until `migrate_auto_publish` has turned the old per-project `auto_publish` list into this.
+    pub auto_publish_all: Option<bool>,
+    /// Old per-project list, no longer read. Kept so clients that still send it keep working.
     pub auto_publish: Vec<String>,
-    /// When comments on mirrored issues go to GitHub, per project: `ask` (every one waits for approval),
-    /// `own` (yours go straight, agents' wait) or `all` (everything goes straight).
+    /// Old per-project modes, no longer read; see `auto_publish`.
     pub comment_approval: std::collections::HashMap<String, String>,
-    /// The mode of a project not in `comment_approval`.
+    /// When comments on mirrored issues go to GitHub, for every project: `ask` (every one waits for approval),
+    /// `own` (yours go straight, agents' wait) or `all` (everything goes straight). Was the per-project fallback.
     pub comment_approval_default: String,
     pub push: Push,
 }
 
 impl Settings {
-    /// The comment approval mode of `project`: its own, else the default; anything unknown asks.
-    pub fn approval_mode(&self, project: &str) -> &str {
-        let m = self.comment_approval.get(project.trim()).unwrap_or(&self.comment_approval_default);
+    /// The comment approval mode; anything unknown asks.
+    pub fn approval_mode(&self) -> &str {
+        let m = &self.comment_approval_default;
         if matches!(m.as_str(), "own" | "all") { m } else { "ask" }
     }
 }
@@ -69,6 +72,7 @@ impl Default for Settings {
             github_token: String::new(),
             auto_update: false,
             show_simulator: false,
+            auto_publish_all: None,
             auto_publish: vec![],
             comment_approval: Default::default(),
             comment_approval_default: "ask".into(),
@@ -121,6 +125,17 @@ impl Store {
         Ok(())
     }
 
+    /// Turns the old per-project `auto_publish` list into the global switch, once. It's on only if it was on
+    /// for every project in `with_repo` (those with a GitHub repo), so nothing goes public that didn't before.
+    pub fn migrate_auto_publish(&self, with_repo: &[String]) -> Result<()> {
+        let mut s = self.get();
+        if s.auto_publish_all.is_some() {
+            return Ok(());
+        }
+        s.auto_publish_all = Some(!with_repo.is_empty() && with_repo.iter().all(|p| s.auto_publish.contains(p)));
+        self.save(s)
+    }
+
     /// Restart-only fields whose saved value differs from the running one.
     pub fn pending_restart(&self) -> Vec<&'static str> {
         let s = self.current.read().unwrap();
@@ -129,5 +144,46 @@ impl Store {
             pending.push("projects_dir");
         }
         pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(json: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy());
+        std::fs::write(dir.join("settings.json"), json).unwrap();
+        Store::load(&dir).unwrap()
+    }
+
+    fn migrated(old: &str, with_repo: &[&str]) -> Option<bool> {
+        let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", {old} }}"#));
+        s.migrate_auto_publish(&with_repo.iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap();
+        s.get().auto_publish_all
+    }
+
+    #[test]
+    fn auto_publish_migrates_on_only_if_it_was_on_for_every_project_with_a_repo() {
+        let all = r#""auto_publish": ["a", "b", "no-repo"]"#;
+        assert_eq!(migrated(all, &["a", "b"]), Some(true));
+        assert_eq!(migrated(r#""auto_publish": ["a"]"#, &["a", "b"]), Some(false), "off for one: stays off");
+        assert_eq!(migrated(r#""auto_publish": ["no-repo"]"#, &["a"]), Some(false), "no-repo projects don't count");
+        assert_eq!(migrated(all, &[]), Some(false), "nothing to publish to");
+        assert_eq!(migrated(r#""x": 1"#, &["a"]), Some(false), "never set");
+    }
+
+    #[test]
+    fn the_migration_runs_once_and_the_old_mode_becomes_the_global_one() {
+        let s = store(r#"{ "projects_dir": "PROJECTS", "auto_publish": ["a"], "comment_approval_default": "own", "comment_approval": { "a": "all" } }"#);
+        s.migrate_auto_publish(&["a".into()]).unwrap();
+        assert_eq!((s.get().auto_publish_all, s.get().approval_mode()), (Some(true), "own"));
+        let mut now = s.get();
+        now.auto_publish_all = Some(false);
+        s.save(now).unwrap();
+        s.migrate_auto_publish(&["a".into()]).unwrap();
+        assert_eq!(s.get().auto_publish_all, Some(false), "a later choice isn't overwritten");
     }
 }
