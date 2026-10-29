@@ -5,6 +5,9 @@ import { Check, CornerDownLeft, MessageCircle, Send, Sparkles, Wand2 } from "luc
 import { api, grillError, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/draft";
+import { draftImages, type Attachment } from "../../lib/useDraft";
+import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { AttachmentTile } from "../../components/AttachmentTile";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -79,17 +82,41 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
  * other answer, saved as a decision or as a comment to discuss. */
 function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
   const written = (q.state === "answered" && !q.accepted) || q.state === "discuss";
-  // A half-typed answer is this question's Draft, so it survives switching agents or tabs.
-  const [draft, setDraft] = useState(() => loadAnswerDraft(sessionId, round, q.id) || (written ? (q.answer ?? "") : ""));
+  const saved = q.images ?? [];
+  // A half-typed answer, with its pasted images, is this question's Draft, so it survives switching agents or tabs.
+  // A saved answer keeps showing its text and thumbnails.
+  const [initial] = useState(() => {
+    const d = loadAnswerDraft(sessionId, round, q.id);
+    return d.text || d.images.length > 0 ? d : { text: written ? (q.answer ?? "") : "", images: written ? saved : [] };
+  });
+  const [draft, setDraft] = useState(initial.text);
+  const [attachments, setAttachments] = useState<Attachment[]>(() => draftImages(agentId, initial.images));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Answers given elsewhere (the app) show here too; on mount the Draft wins.
-  const seen = useRef({ written, answer: q.answer });
+  const savedList = saved.join("\n");
+  const seen = useRef({ written, answer: q.answer, images: savedList });
   useEffect(() => {
-    if (seen.current.written === written && seen.current.answer === q.answer) return;
-    seen.current = { written, answer: q.answer };
-    if (written) setDraft(q.answer ?? "");
-  }, [written, q.answer]);
+    if (seen.current.written === written && seen.current.answer === q.answer && seen.current.images === savedList) return;
+    seen.current = { written, answer: q.answer, images: savedList };
+    if (!written) return;
+    setDraft(q.answer ?? "");
+    const files = savedList ? savedList.split("\n") : [];
+    // Just saved from here: keep the tiles already shown.
+    setAttachments((a) =>
+      a.map((x) => x.file).join("\n") === savedList ? a : (a.forEach((x) => URL.revokeObjectURL(x.preview)), draftImages(agentId, files)),
+    );
+  }, [written, q.answer, savedList, agentId]);
+
+  const addImages = (files: File[]) => setError(attachImages(agentId, files, attachments.length, setAttachments, "answer"));
+  const removeImage = (key: string) =>
+    setAttachments((a) => a.filter((x) => (x.key === key ? (URL.revokeObjectURL(x.preview), false) : true)));
+  // Images are dropped on the card, not on the chat around it.
+  const drop = useFileDrop(addImages, true);
+  const uploading = attachments.some((a) => !a.file && !a.error);
+  const failed = attachments.some((a) => a.error);
+  const images = attachments.flatMap((a) => (a.file ? [a.file] : []));
+  const imageList = images.join("\n");
 
   const run = async (f: () => Promise<unknown>) => {
     setBusy(true);
@@ -102,20 +129,26 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
       setBusy(false);
     }
   };
-  const answer = (text: string, discuss = false) => {
-    if (!text.trim()) return;
+  // An answer is text, images or both.
+  const answer = (text: string, discuss = false, attached: string[] = images) => {
+    if ((!text.trim() && attached.length === 0) || (attached === images && (uploading || failed))) return;
     run(async () => {
-      await api.grillAnswer(agentId, sessionId, q.id, text.trim(), discuss);
-      if (text === draft) clearAnswerDrafts(sessionId, round, [q.id]);
+      await api.grillAnswer(agentId, sessionId, q.id, text.trim(), discuss, attached);
+      if (text === draft && attached === images) clearAnswerDrafts(sessionId, round, [q.id]);
     });
   };
 
-  const same = written && q.answer === draft.trim();
+  const same = written && q.answer === draft.trim() && savedList === imageList;
   useEffect(() => {
-    saveAnswerDraft(sessionId, round, q.id, same ? "" : draft);
-  }, [sessionId, round, q.id, same, draft]);
+    saveAnswerDraft(sessionId, round, q.id, same ? { text: "", images: [] } : { text: draft, images: imageList ? imageList.split("\n") : [] });
+  }, [sessionId, round, q.id, same, draft, imageList]);
+  const empty = !draft.trim() && images.length === 0;
+  const wait = failed ? "Remove the image that failed to upload" : uploading ? "Waiting for images to upload" : undefined;
   return (
-    <div className="rounded-xl border border-line bg-ink-900/70 p-3">
+    <div
+      {...drop.handlers}
+      className={cx("rounded-xl border bg-ink-900/70 p-3 transition", drop.dragging ? "border-dashed border-accent/60" : "border-line")}
+    >
       {q.from_round != null && <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Still open from round {q.from_round}</div>}
       <div className="prose-chat text-[14px]">
         <Markdown remarkPlugins={[remarkGfm]}>{`${n}. ${q.text}`}</Markdown>
@@ -132,7 +165,7 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
             <Check className="size-3.5" /> Accepted
           </span>
         ) : (
-          <button className="btn shrink-0" disabled={busy} onClick={() => answer("Yes")}>
+          <button className="btn shrink-0" disabled={busy} onClick={() => answer("Yes", false, [])}>
             <Check className="size-3.5" /> Accept
           </button>
         )}
@@ -146,6 +179,11 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
           </button>
         )}
       </div>
+      {attachments.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} onMissing={() => removeImage(a.key)} />)}
+        </div>
+      )}
       <form
         className="mt-2 flex items-center gap-2"
         onSubmit={(e) => {
@@ -158,6 +196,10 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
           placeholder={q.accepted || q.state === "decided" ? "Or answer differently…" : "Your answer, or a comment to discuss…"}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            const files = pastedImages(e);
+            if (files.length > 0) addImages(files);
+          }}
           aria-label={`Answer to question ${n}`}
         />
         {same && q.state === "answered" ? (
@@ -165,7 +207,7 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
             <Check className="size-3.5" /> Saved
           </span>
         ) : (
-          <button className="btn shrink-0" type="submit" disabled={busy || !draft.trim()} aria-label="Save answer" title="Save as your answer">
+          <button className="btn shrink-0" type="submit" disabled={busy || empty || uploading || failed} aria-label="Save answer" title={wait ?? "Save as your answer"}>
             <CornerDownLeft className="size-3.5" />
           </button>
         )}
@@ -177,9 +219,9 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
           <button
             className="btn shrink-0"
             type="button"
-            disabled={busy || !draft.trim()}
+            disabled={busy || empty || uploading || failed}
             onClick={() => answer(draft, true)}
-            title="Not a decision: the agent explains and asks again next round"
+            title={wait ?? "Not a decision: the agent explains and asks again next round"}
           >
             <MessageCircle className="size-3.5" /> <span className="max-md:hidden">Discuss</span>
           </button>

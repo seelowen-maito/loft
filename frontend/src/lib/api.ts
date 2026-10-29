@@ -159,6 +159,8 @@ export type GrillQuestion = {
   accepted: boolean;
   /** Carried over unanswered: the round it was first asked in. */
   from_round: number | null;
+  /** Uploads sent with a typed answer or comment. Missing from older Loft versions. */
+  images?: string[];
 };
 
 /** An interview (grill) the agent is running, in rounds; `GET /agents/{id}/grill`. */
@@ -500,8 +502,8 @@ export const api = {
     req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
   /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
-  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false) =>
-    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
+  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false, images: string[] = []) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, images, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
   /** Asks a Planning agent for a grill; the backend opens the session. */
   grillStart: (agentId: string, text: string) =>
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),

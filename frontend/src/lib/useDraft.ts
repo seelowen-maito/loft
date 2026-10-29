@@ -6,7 +6,7 @@ import { loadDraft, saveDraft, type Draft } from "./draft";
 export type Attachment = { key: string; preview: string; file?: string; error?: string };
 
 /** A Draft's images, already uploaded: they preview from the server. */
-const draftImages = (agent: string, files: string[]): Attachment[] => files.map((file) => ({ key: file, preview: api.uploadUrl(agent, file), file }));
+export const draftImages = (agent: string, files: string[]): Attachment[] => files.map((file) => ({ key: file, preview: api.uploadUrl(agent, file), file }));
 
 /** The composer's state, kept as the shown agent's Draft: loaded when the agent is shown, saved on every change. */
 export function useDraft(agent: string) {

@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -22,7 +22,9 @@ import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
-import { useDraft, type Attachment } from "../../lib/useDraft";
+import { useDraft } from "../../lib/useDraft";
+import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { AttachmentTile } from "../../components/AttachmentTile";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -115,8 +117,6 @@ export function Chat({
   const [showEarlier, setShowEarlier] = useState(false);
   const [resuming, setResuming] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
-  // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
-  const [dragDepth, setDragDepth] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(composer, text, 1);
@@ -185,7 +185,7 @@ export function Chat({
   useEffect(() => {
     stick.current = true;
     setShowEarlier(false);
-    setDragDepth(0);
+    drop.reset();
     setCmdError(null);
     setCmdNote(null);
   }, [agent.id]);
@@ -281,23 +281,9 @@ export function Chat({
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
-  const addImages = (all: File[]) => {
-    const images = all.filter((f) => f.type.startsWith("image/"));
-    const files = images.slice(0, MAX_IMAGES - attachments.length);
-    setCmdError(
-      files.length < images.length ? `Up to ${MAX_IMAGES} images per message.`
-      : images.length < all.length ? "Only images can be attached." : null,
-    );
-    for (const f of files) {
-      const key = crypto.randomUUID();
-      setAttachments((a) => [...a, { key, preview: URL.createObjectURL(f) }]);
-      const update = (u: Partial<Attachment>) => setAttachments((a) => a.map((x) => (x.key === key ? { ...x, ...u } : x)));
-      prepareImage(f)
-        .then((blob) => api.upload(agent.id, blob))
-        .then((r) => update({ file: r.file }), (e) => update({ error: (e as Error).message }));
-    }
-  };
+  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments));
 
+  const drop = useFileDrop(addImages);
   const uploading = attachments.some((a) => !a.file && !a.error);
   const failed = attachments.some((a) => a.error);
 
@@ -366,17 +352,9 @@ export function Chat({
   return (
     <div
       className="relative flex h-full min-w-0 flex-col"
-      onDragEnter={(e) => e.dataTransfer.types.includes("Files") && setDragDepth((d) => d + 1)}
-      onDragLeave={(e) => e.dataTransfer.types.includes("Files") && setDragDepth((d) => Math.max(0, d - 1))}
-      onDragOver={(e) => e.dataTransfer.types.includes("Files") && e.preventDefault()}
-      onDrop={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
-        e.preventDefault();
-        setDragDepth(0);
-        addImages([...e.dataTransfer.files]);
-      }}
+      {...drop.handlers}
     >
-      {dragDepth > 0 && (
+      {drop.dragging && (
         <div className="pointer-events-none absolute inset-3 z-20 grid place-items-center rounded-2xl border-2 border-dashed border-accent/50 bg-ink-950/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-fg-2">
             <ImagePlus className="size-7 text-accent" />
@@ -631,11 +609,8 @@ export function Chat({
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onPaste={(e) => {
-                  const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
-                  if (files.length === 0) return;
-                  // Copying an image from a page also puts its address on the clipboard: take just the image.
-                  e.preventDefault();
-                  addImages(files);
+                  const files = pastedImages(e);
+                  if (files.length > 0) addImages(files);
                 }}
                 onKeyDown={(e) => {
                   if (mentionMatches.length > 0) {
@@ -956,66 +931,4 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
       )}
     </div>
   );
-}
-
-/** `onMissing` fires when an uploaded image's file can't be loaded, e.g. a Draft's after the chat history was cleared. */
-export function AttachmentTile({ a, onRemove, onMissing }: { a: Attachment; onRemove: () => void; onMissing: () => void }) {
-  const [loaded, setLoaded] = useState(false);
-  const busy = !a.file && !a.error;
-  return (
-    <div
-      className={cx("group relative size-24 overflow-hidden rounded-xl border bg-ink-950", a.error ? "border-bad/50" : "border-line")}
-      title={a.error}
-    >
-      <img
-        src={a.preview}
-        alt="Pasted image"
-        onLoad={() => setLoaded(true)}
-        onError={() => a.file && onMissing()}
-        className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
-      />
-      {busy && (
-        <div className="absolute inset-0 grid place-items-center" role="status" aria-label="Uploading image">
-          <Loader2 className="size-5 animate-spin text-fg-2" />
-        </div>
-      )}
-      {a.error && (
-        <div className="absolute inset-0 grid place-items-center bg-bad/10">
-          <AlertCircle className="size-5 text-bad" />
-        </div>
-      )}
-      <button
-        onClick={onRemove}
-        aria-label="Remove image"
-        className="absolute right-1 top-1 grid size-5 place-items-center rounded-full bg-ink-950/80 text-fg-2 opacity-0 transition hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
-      >
-        <X className="size-3" />
-      </button>
-    </div>
-  );
-}
-
-/** The API's limits: 3.75 MB raw (5 MB base64), and it scales anything bigger than 1568 px down anyway. */
-const MAX_IMAGE_BYTES = 3_750_000;
-const MAX_IMAGE_EDGE = 1568;
-const MAX_IMAGES = 10;
-const SENDABLE = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
-/** The image as-is when the API takes it, else redrawn to fit: PNG keeps screenshots sharp, JPEG if that's still too big. */
-async function prepareImage(f: File): Promise<Blob> {
-  const bmp = await createImageBitmap(f).catch(() => {
-    throw new Error("Couldn't read this image");
-  });
-  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bmp.width, bmp.height));
-  if (scale === 1 && f.size <= MAX_IMAGE_BYTES && SENDABLE.includes(f.type)) return f;
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(bmp.width * scale);
-  canvas.height = Math.round(bmp.height * scale);
-  canvas.getContext("2d")!.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-  const encode = (type: string, q?: number) => new Promise<Blob | null>((r) => canvas.toBlob(r, type, q));
-  const png = await encode("image/png");
-  if (png && png.size <= MAX_IMAGE_BYTES) return png;
-  const jpeg = await encode("image/jpeg", 0.85);
-  if (jpeg && jpeg.size <= MAX_IMAGE_BYTES) return jpeg;
-  throw new Error("Image is too large");
 }

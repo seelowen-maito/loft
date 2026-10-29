@@ -134,6 +134,9 @@ pub struct Question {
     /// The round it was first asked in, when it was carried into this one unanswered.
     #[serde(default)]
     pub from_round: Option<u32>,
+    /// Uploads (the agent's `uploads/` folder) sent with a typed answer or comment.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 /// One lock per agent, held around every load, change and save of its grill session. Writers (answers
@@ -309,14 +312,19 @@ fn post_round(state: &AppState, s: &Session, r: &Round) {
 
 /// One question's answer, as the agent reads it.
 fn answer_line(q: &Question) -> String {
-    match q.state.as_str() {
+    let line: String = match q.state.as_str() {
         "answered" if q.accepted => "accepted the recommendation".into(),
         "answered" => format!("\"{}\"", q.answer.as_deref().unwrap_or("")),
         "discuss" => format!("wants to discuss first: \"{}\"", q.answer.as_deref().unwrap_or("")),
         "decided" => "left it to you: your recommendation is the decision".into(),
         "carried" => "no answer (Loft asks it again in the next round)".into(),
         _ => "no answer".into(),
+    };
+    if q.images.is_empty() || !matches!(q.state.as_str(), "answered" | "discuss") {
+        return line;
     }
+    let paths: Vec<String> = q.images.iter().map(|f| format!("uploads/{f}")).collect();
+    format!("{line}, with images: {}", paths.join(", "))
 }
 
 /// The user's answers to a round, posted in chat when it is sent. Plain text: clients show user messages as typed.
@@ -330,7 +338,11 @@ fn answers_text(s: &Session, r: &Round) -> String {
             "decided" => say(s, &format!("Up to you ({})", q.recommendation), &format!("Você decide ({})", q.recommendation)),
             _ => format!("({})", say(s, "no answer", "sem resposta")),
         };
-        out += &format!("\n{}. {a}", i + 1);
+        let a = match q.images.len() {
+            0 => a,
+            n => format!("{} [{n} {}]", a.trim_end(), if n == 1 { say(s, "image", "imagem") } else { say(s, "images", "imagens") }),
+        };
+        out += &format!("\n{}. {}", i + 1, a.trim_start());
     }
     out
 }
@@ -381,6 +393,7 @@ fn parse_questions(v: &Value) -> Result<Vec<Question>, String> {
                 accepted: false,
                 answered_at: None,
                 from_round: None,
+                images: vec![],
             })
         })
         .collect()
@@ -550,7 +563,8 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
 
     let qid = grill.and_then(|g| g["question_id"].as_str()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "an answer needs question_id".into()))?;
     let discuss = grill.is_some_and(|g| g["discuss"] == true);
-    record_answer(state, &mut s, qid, text, discuss)?;
+    let images: Vec<String> = meta["images"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+    record_answer(state, &mut s, qid, text, &images, discuss)?;
     Ok(Routed::Handled { message: None, wake: None })
 }
 
@@ -560,13 +574,14 @@ fn is_yes(text: &str) -> bool {
     YES.contains(&commands::normalize(text).as_str())
 }
 
-/// Holds `text` as the answer to `qid` in the open round, without waking the agent. The user may change
-/// it until the round is sent. With `discuss`, the text is a comment instead of a decision: the agent
-/// explains and asks again in the next round.
-fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str, discuss: bool) -> Result<(), ApiError> {
+/// Holds `text` and `images` (already validated uploads) as the answer to `qid` in the open round, without
+/// waking the agent. The user may change it until the round is sent. With `discuss`, it is a comment instead
+/// of a decision: the agent explains and asks again in the next round.
+fn record_answer(state: &AppState, s: &mut Session, qid: &str, text: &str, images: &[String], discuss: bool) -> Result<(), ApiError> {
     let closed = || ApiError(StatusCode::CONFLICT, "question_closed".into());
     let q = open_round_mut(s).and_then(|r| r.questions.iter_mut().find(|q| q.id == qid)).ok_or_else(closed)?;
-    q.accepted = !discuss && is_yes(text);
+    q.images = images.to_vec();
+    q.accepted = !discuss && images.is_empty() && is_yes(text);
     q.answer = Some(if q.accepted { q.recommendation.clone() } else { clip(text, MAX_ANSWER) });
     q.state = if discuss { "discuss" } else { "answered" }.into();
     q.answered_at = Some(now());
@@ -615,7 +630,9 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
             }
             add_msg(state, &s.agent_id, None, "user", "text", &text, meta);
             let context = state.db.get_agent(&s.agent_id).ok().flatten().and_then(|a| a.context_tokens);
-            wake = Some(round_prompt(s, &r, context));
+            // The answers' images reach the agent as chat images do: image blocks after the prompt.
+            let images: Vec<String> = r.questions.iter().filter(|q| matches!(q.state.as_str(), "answered" | "discuss")).flat_map(|q| q.images.clone()).collect();
+            wake = Some(round_prompt(s, &r, context) + &crate::uploads::markers(state, &s.agent_id, &images));
         }
         "decide" => {
             let r = open_round_mut(s).ok_or_else(closed)?;
@@ -631,6 +648,7 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
             q.state = "decided".into();
             q.answer = Some(q.recommendation.clone());
             q.accepted = false;
+            q.images.clear();
             q.answered_at = Some(now());
             let (qid, rec) = (q.id.clone(), q.recommendation.clone());
             resume_if_paused(state, s, Some(json!({ "command": cmd })));
@@ -919,7 +937,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                     r.questions
                         .iter()
                         .filter(|q| q.state == "carried" && !drop.contains(&q.id.as_str()))
-                        .map(|q| Question { id: uuid::Uuid::new_v4().to_string(), state: "open".into(), answer: None, accepted: false, answered_at: None, from_round: q.from_round.or(Some(r.index)), ..q.clone() })
+                        .map(|q| Question { id: uuid::Uuid::new_v4().to_string(), state: "open".into(), answer: None, accepted: false, answered_at: None, from_round: q.from_round.or(Some(r.index)), images: vec![], ..q.clone() })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1412,6 +1430,73 @@ pub(crate) mod tests {
         // Tagged answers still need their question.
         let s = active(&st, &o.id).unwrap();
         assert_eq!(on_user_message(&st, &o, "x", Some(&json!({ "role": "answer", "session_id": s.id })), json!({})).err().map(|e| e.0), Some(StatusCode::BAD_REQUEST));
+    }
+
+    /// A PNG saved in `a`'s uploads, as `POST /agents/{id}/uploads` would.
+    fn upload(st: &AppState, a: &Agent) -> String {
+        let file = format!("{}.png", uuid::Uuid::new_v4());
+        let d = crate::uploads::dir(st, &a.id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(&file), b"\x89PNG\r\n\x1a\n").unwrap();
+        file
+    }
+
+    /// A grill answer sent the way the cards send it, through `POST /agents/{id}/messages`.
+    async fn answer_with(st: &AppState, a: &Agent, qid: &str, text: &str, images: &[String], discuss: bool) -> Result<(), StatusCode> {
+        let s = active(st, &a.id).unwrap();
+        let body = json!({ "text": text, "images": images, "meta": { "grill": { "role": "answer", "session_id": s.id, "question_id": qid, "discuss": discuss } } });
+        crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), axum::Json(serde_json::from_value(body).unwrap()))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.0)
+    }
+
+    #[tokio::test]
+    async fn answers_carry_images_to_the_agent_with_the_round() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Which layout?", "Which logo?", "Which colour?"]).unwrap();
+        let ids = qids(&st, &o);
+        let (shot, logo, mock) = (upload(&st, &o), upload(&st, &o), upload(&st, &o));
+        // Text with an image, an image alone, and an image alone as a comment to discuss.
+        answer_with(&st, &o, &ids[0], "Like this one", &[shot.clone()], false).await.unwrap();
+        answer_with(&st, &o, &ids[1], "", &[logo.clone()], false).await.unwrap();
+        answer_with(&st, &o, &ids[2], "  ", &[mock.clone()], true).await.unwrap();
+        let qs = active(&st, &o.id).unwrap().rounds[0].questions.clone();
+        assert_eq!((qs[0].state.as_str(), qs[0].answer.as_deref(), qs[0].images.clone()), ("answered", Some("Like this one"), vec![shot.clone()]));
+        assert_eq!((qs[1].state.as_str(), qs[1].answer.as_deref(), qs[1].images.clone()), ("answered", Some(""), vec![logo.clone()]));
+        assert_eq!((qs[2].state.as_str(), qs[2].images.clone()), ("discuss", vec![mock.clone()]));
+        // The round lists each answer's image paths and carries the images as chat images do.
+        let wake = send(&st, &o).unwrap();
+        assert!(wake.contains(&format!("\"Like this one\", with images: uploads/{shot}")), "{wake}");
+        assert!(wake.contains(&format!("\"\", with images: uploads/{logo}")), "{wake}");
+        assert!(wake.contains(&format!("wants to discuss first: \"\", with images: uploads/{mock}")), "{wake}");
+        for f in [&shot, &logo, &mock] {
+            assert!(wake.contains(&format!("[loft-image:{f}]")), "{wake}");
+        }
+        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).unwrap().contains("\"type\":\"image\""));
+        // The chat's copy of the answers says how many images each had.
+        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == json!("answers")).unwrap();
+        assert!(posted.content.contains("1. Like this one [1 image]\n2. [1 image]\n3. Let's discuss: [1 image]"), "{}", posted.content);
+    }
+
+    #[tokio::test]
+    async fn grill_answers_refuse_images_like_chat_messages() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Which layout?"]).unwrap();
+        let ids = qids(&st, &o);
+        let other = planner(&st, "Dev");
+        for images in [vec!["../../etc/passwd".to_string()], vec![format!("{}.png", uuid::Uuid::new_v4())], vec![upload(&st, &other)]] {
+            assert_eq!(answer_with(&st, &o, &ids[0], "see image", &images, false).await, Err(StatusCode::BAD_REQUEST), "{images:?}");
+        }
+        assert_eq!(answer_with(&st, &o, &ids[0], "", &[], false).await, Err(StatusCode::BAD_REQUEST), "no text and no images");
+        assert_eq!(active(&st, &o.id).unwrap().rounds[0].questions[0].state, "open");
+        // A new answer replaces the images; Accept and Decide for me drop them.
+        let f = upload(&st, &o);
+        answer_with(&st, &o, &ids[0], "this", &[f], false).await.unwrap();
+        answer(&st, &o, &ids[0], "yes");
+        assert!(active(&st, &o.id).unwrap().rounds[0].questions[0].images.is_empty());
     }
 
     #[test]

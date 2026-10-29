@@ -17,6 +17,7 @@ function memory() {
 }
 
 const draft = { text: "half a thought", images: ["a.png", "b.jpg"], task: "t1" };
+const NO_ANSWER = { text: "", images: [] };
 
 test("with nothing saved an agent's draft is empty", () => {
   assert.deepEqual(loadDraft("dev", memory()), EMPTY_DRAFT);
@@ -61,25 +62,25 @@ test("a corrupt draft loads as empty", () => {
   assert.deepEqual(loadDraft("dev", s), { text: "", images: ["a.png"], task: null });
 });
 
-test("grill answer drafts are kept per question and round", () => {
+test("grill answer drafts are kept per question and round, with their images", () => {
   const s = memory();
-  saveAnswerDraft("g1", 2, "q1", "maybe Postgres", s);
-  saveAnswerDraft("g1", 2, "q2", "no", s);
-  assert.equal(loadAnswerDraft("g1", 2, "q1", s), "maybe Postgres");
-  assert.equal(loadAnswerDraft("g1", 2, "q2", s), "no");
-  assert.equal(loadAnswerDraft("g1", 3, "q1", s), "", "a later round starts blank");
-  assert.equal(loadAnswerDraft("g2", 2, "q1", s), "", "another grill starts blank");
+  saveAnswerDraft("g1", 2, "q1", { text: "maybe Postgres", images: ["shot.png"] }, s);
+  saveAnswerDraft("g1", 2, "q2", { text: "", images: ["logo.png"] }, s);
+  assert.deepEqual(loadAnswerDraft("g1", 2, "q1", s), { text: "maybe Postgres", images: ["shot.png"] });
+  assert.deepEqual(loadAnswerDraft("g1", 2, "q2", s), { text: "", images: ["logo.png"] }, "an image alone is a draft");
+  assert.deepEqual(loadAnswerDraft("g1", 3, "q1", s), NO_ANSWER, "a later round starts blank");
+  assert.deepEqual(loadAnswerDraft("g2", 2, "q1", s), NO_ANSWER, "another grill starts blank");
   assert.deepEqual(loadDraft("g1", s), EMPTY_DRAFT, "answers aren't a composer draft");
+  saveAnswerDraft("g1", 2, "q1", NO_ANSWER, s);
+  assert.equal(s.m.has("loft:draft:grill:g1:2:q1"), false, "an emptied answer takes no storage");
 });
 
 test("a saved answer or a closed round deletes its drafts", () => {
   const s = memory();
-  saveAnswerDraft("g1", 1, "q1", "a", s);
-  saveAnswerDraft("g1", 1, "q2", "b", s);
-  saveAnswerDraft("g1", 1, "q3", "c", s);
+  for (const q of ["q1", "q2", "q3"]) saveAnswerDraft("g1", 1, q, { text: q, images: [] }, s);
   clearAnswerDrafts("g1", 1, ["q1"], s);
-  assert.equal(loadAnswerDraft("g1", 1, "q1", s), "");
-  assert.equal(loadAnswerDraft("g1", 1, "q2", s), "b");
+  assert.deepEqual(loadAnswerDraft("g1", 1, "q1", s), NO_ANSWER);
+  assert.equal(loadAnswerDraft("g1", 1, "q2", s).text, "q2");
   clearAnswerDrafts("g1", 1, ["q2", "q3"], s);
   assert.equal(s.m.size, 0);
 });
@@ -90,7 +91,7 @@ test("storage that throws never breaks the composer", () => {
   saveDraft("dev", draft, blocked);
   clearDraft("dev", blocked);
   assert.deepEqual(loadDraft("dev", blocked), EMPTY_DRAFT);
-  saveAnswerDraft("g1", 1, "q1", "a", blocked);
+  saveAnswerDraft("g1", 1, "q1", { text: "a", images: [] }, blocked);
   clearAnswerDrafts("g1", 1, ["q1"], blocked);
-  assert.equal(loadAnswerDraft("g1", 1, "q1", blocked), "");
+  assert.deepEqual(loadAnswerDraft("g1", 1, "q1", blocked), NO_ANSWER);
 });

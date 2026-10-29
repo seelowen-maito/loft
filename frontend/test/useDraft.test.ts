@@ -28,7 +28,7 @@ let AttachmentTile: (p: object) => unknown;
 before(async () => {
   vite = await createServer({ logLevel: "silent", appType: "custom", server: { middlewareMode: true, hmr: false } });
   ({ useDraft } = await vite.ssrLoadModule("/src/lib/useDraft.ts"));
-  ({ AttachmentTile } = await vite.ssrLoadModule("/src/pages/agents/Chat.tsx"));
+  ({ AttachmentTile } = await vite.ssrLoadModule("/src/components/AttachmentTile.tsx"));
 });
 after(() => vite.close());
 beforeEach(() => localStorage.clear());

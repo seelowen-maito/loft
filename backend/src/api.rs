@@ -430,7 +430,11 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         }
     }
     let queued = is_running(&state, &id);
-    let meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
+    let mut meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
+    // Images go in before routing: a grill answer keeps them too.
+    if !m.images.is_empty() {
+        meta["images"] = json!(m.images);
+    }
     let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
     let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
@@ -443,9 +447,6 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         }
     };
     let mut meta = meta;
-    if !m.images.is_empty() {
-        meta["images"] = json!(m.images);
-    }
     let text = m.text.trim().to_string();
     // A task attached to the message, or task links in it: stored on the message, and the agent gets a short header.
     let attached = m.meta.as_ref().and_then(|v| v["task_id"].as_str()).map(|a| a.trim().to_lowercase());
