@@ -41,6 +41,8 @@ struct ChatView: View {
     /// A task picked in "Attach a task", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
     @State private var pickingTask = false
+    /// "Resume a session" in the context menu: the agent's past Sessions.
+    @State private var resuming = false
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
@@ -226,6 +228,7 @@ struct ChatView: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+            ToolbarItem(placement: .topBarTrailing) { contextMenu(agent, running: state == .working || agent.running == true) }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
@@ -311,6 +314,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
+        .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
             let replies = await OnDeviceFeatures.chatReplies(to: m.displayContent)
@@ -534,6 +538,43 @@ extension ChatView {
         }
     }
 
+    /// The context size: amber from 80k, and a tap offers Compact, Clear and Resume for the Session, like the web.
+    /// With no Session (as after Clear) it reads "no session" and offers only Resume.
+    fileprivate func contextMenu(_ agent: Agent, running: Bool) -> some View {
+        // Older servers don't send the Session id; a known size still means there is one.
+        let session = agent.sessionId != nil || agent.contextTokens != nil
+        return Menu {
+            if running { Text("Stop the agent first.") }
+            if session {
+                Button { sessionAction { try await store.compact(agentId) } } label: {
+                    Label("Compact", systemImage: "arrow.down.right.and.arrow.up.left")
+                    Text("Summarize the conversation so later runs carry less.")
+                }
+                .disabled(running)
+                .accessibilityIdentifier("contextCompact")
+                Button { sessionAction { try await store.resetSession(agentId) } } label: {
+                    Label("Clear", systemImage: "arrow.counterclockwise")
+                    Text("Start a fresh Session. Memory is kept.")
+                }
+                .disabled(running)
+                .accessibilityIdentifier("contextClear")
+            }
+            Button { resuming = true } label: {
+                Label("Resume a session", systemImage: "clock.arrow.circlepath")
+                Text("Go back to one of this agent's past sessions.")
+            }
+            .disabled(running)
+            .accessibilityIdentifier("contextResume")
+        } label: {
+            ContextChip(tokens: agent.contextTokens, session: session)
+        }
+        .accessibilityIdentifier("contextMenu")
+    }
+
+    fileprivate func sessionAction(_ action: @escaping () async throws -> Void) {
+        Task { do { try await action() } catch { actionError = APIError.from(error) } }
+    }
+
     /// The end-of-planning card's Clear context: a fresh session, with the next message waiting in the composer, unsent.
     fileprivate func clearWith(_ next: String) {
         Task {
@@ -590,6 +631,10 @@ enum ChatItem: Identifiable, Hashable {
             case "compact":
                 flush()
                 out.append(.divider(id: m.id, text: "Conversation compacted", date: m.createdAt))
+            case "resume":
+                // From Resume a session (here or the web's /resume): the log goes on, nothing reloads.
+                flush()
+                out.append(.divider(id: m.id, text: resumeText(m), date: m.createdAt))
             default:
                 flush()
                 out.append(.message(m))
@@ -597,6 +642,16 @@ enum ChatItem: Identifiable, Hashable {
         }
         flush()
         return out
+    }
+
+    /// "Resumed the Session from Oct 20, 2026", the start date in local time as the web's Resume list shows it; the
+    /// stored text names the UTC day (#103).
+    static func resumeText(_ m: ChatMessage, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+        guard let s = m.meta?["started_at"]?.stringValue, let start = JSONCoding.parseDate(s) else {
+            return m.content.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        }
+        let day = start.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: locale, timeZone: timeZone))
+        return "Resumed the Session from \(day)"
     }
 }
 
@@ -675,7 +730,19 @@ private struct MessageBubble: View {
                         }
                         .accessibilityElement(children: .combine)
                     } else if let from = message.fromAgentName {
-                        Label("From \(from)", systemImage: "arrow.turn.down.right").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent)
+                        HStack(spacing: 6) {
+                            Label("From \(from)", systemImage: "arrow.turn.down.right").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent)
+                            if message.isFYI {
+                                // Delivered without waking the agent: it reads it at the start of its next run.
+                                Text("FYI")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Theme.card, in: Capsule())
+                                    .accessibilityIdentifier("fyiMark")
+                            }
+                        }
                     }
                     let tasks = message.taskRefs.compactMap { store.task($0) }
                     if !tasks.isEmpty {
@@ -711,7 +778,7 @@ private struct MessageBubble: View {
                 if !isUser { Spacer(minLength: 32) }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name): \(message.displayContent)")
+            .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
         }
     }

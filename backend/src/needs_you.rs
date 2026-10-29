@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, not_found};
-use crate::db::{Agent, Task};
+use crate::db::{Agent, Message, Task};
 use crate::state::{AppState, Event};
 
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
@@ -383,12 +383,20 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             continue;
         }
 
-        // An agent that ended its reply with a question to you (and nothing came after it).
+        // An agent that ended its reply to you with a question (and you haven't written since): like an
+        // Unread reply, only a run you started (a message or a schedule) counts, and only your own
+        // message answers it, not another agent's.
         let msgs = state.db.list_messages(&a.id, 30, None).map_err(e)?;
         let last_turn = msgs.iter().rev().find(|m| {
-            m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || (m.role == "user" && m.kind == "text"))
+            m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || (m.role == "user" && m.kind == "text" && m.meta["from_agent"].is_null()))
         });
-        if let Some(m) = last_turn.filter(|m| m.role == "assistant" && within(&m.created_at, chrono::Duration::days(QUESTION_DAYS))) {
+        // The reply's run marker is usually among the messages already loaded.
+        let for_user = |m: &Message| {
+            let Some(r) = m.run_id.as_deref() else { return false };
+            let loaded = msgs.iter().find(|s| s.kind == "run_start" && s.run_id.as_deref() == Some(r)).cloned();
+            loaded.or_else(|| state.db.run_start(&a.id, r, m.id).ok().flatten()).is_some_and(|s| s.meta["for_user"] == json!(true))
+        };
+        if let Some(m) = last_turn.filter(|m| m.role == "assistant" && within(&m.created_at, chrono::Duration::days(QUESTION_DAYS)) && for_user(m)) {
             let ends_with_question = m.content.trim_end().trim_end_matches(['*', '_', ')']).ends_with('?');
             if ends_with_question {
                 let last_q = m.content.lines().rev().map(str::trim).find(|l| l.ends_with('?') || l.ends_with("?**")).unwrap_or("");
@@ -642,6 +650,13 @@ mod tests {
         v["items"].as_array().unwrap().iter().find(|i| i["type"] == kind).unwrap_or_else(|| panic!("no {kind} item in {v:#}"))
     }
 
+    /// A run's reply as the chat records it: a `run_start` marker saying whether the user started the run, then the text.
+    fn reply(st: &AppState, agent_id: &str, for_user: bool, text: &str) {
+        let rid = uuid::Uuid::new_v4().to_string();
+        crate::agents::add_msg(st, agent_id, Some(&rid), "system", "run_start", "user", json!({ "trigger": "user", "for_user": for_user }));
+        crate::agents::add_msg(st, agent_id, Some(&rid), "assistant", "text", text, json!({}));
+    }
+
     #[test]
     fn redacts_things_that_look_like_secrets() {
         let s = "export GH=ghp_abcdefghijklmnopqrstuvwxyz123456 then curl -H 'Authorization: Bearer abc.def-123' \
@@ -680,8 +695,8 @@ mod tests {
         let done = mk("Measure sizes", "done", "user", json!({ "summary": "**15 GB** after cleanup." }));
         mk("Subtask", "done", &orch.id, json!({}));
         // An agent ended its reply with a question; another one was answered after its question.
-        crate::agents::add_msg(&st, &dev.id, None, "assistant", "text", "I found two options.\n\nShould I use B2 or S3?", json!({}));
-        crate::agents::add_msg(&st, &orch.id, None, "assistant", "text", "Want me to start?", json!({}));
+        reply(&st, &dev.id, true, "I found two options.\n\nShould I use B2 or S3?");
+        reply(&st, &orch.id, true, "Want me to start?");
         crate::agents::add_msg(&st, &orch.id, None, "user", "text", "yes", json!({}));
         // A grill question on Orchestrator.
         crate::grill::mcp_call(&st, &orch, "grill_round", &json!({ "topic": "Pricing", "questions": [{ "text": "Who pays?", "speak": "Who pays?", "recommendation": "The team lead" }] })).unwrap().unwrap();
@@ -790,5 +805,45 @@ mod tests {
         assert!(same_site(&h(Some("same-origin"))).is_ok());
         assert!(same_site(&h(Some("cross-site"))).is_err());
         assert!(same_site(&h(Some("same-site"))).is_err());
+    }
+
+    #[test]
+    fn only_a_run_you_started_asks_you_something_and_only_your_message_answers_it() {
+        let st = state();
+        let (dev, qa) = (agent(&st, "Dev"), agent(&st, "QA"));
+        let questions = |st: &AppState| {
+            let push = collect(st).unwrap().iter().map(to_push).filter(|p| p.kind == "question").count();
+            let items = snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "question").filter_map(|i| i["agent"]["name"].as_str().map(String::from)).collect::<Vec<_>>();
+            assert_eq!(push, items.len(), "the push follows the item");
+            items
+        };
+
+        // Another agent started the run: no item, no push. Neither for a reply outside any run.
+        let from_qa = json!({ "from_agent": { "id": qa.id, "name": "QA" } });
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Can you check the build?", from_qa.clone());
+        reply(&st, &dev.id, false, "Which branch should I build?");
+        crate::agents::add_msg(&st, &qa.id, None, "assistant", "text", "Anything else?", json!({}));
+        assert!(questions(&st).is_empty());
+
+        // A run the user started (a message or a schedule) still asks.
+        reply(&st, &dev.id, true, "Should I use B2 or S3?");
+        assert_eq!(questions(&st), ["Dev"]);
+
+        // An agent's message after the question doesn't answer it; the user's does.
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Status update: CI is green.", from_qa);
+        assert_eq!(questions(&st), ["Dev"]);
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "S3", json!({}));
+        assert!(questions(&st).is_empty());
+
+        // A long run: its marker is past the loaded messages, so it's looked up, walking back from the reply.
+        let rid = "long-run";
+        let start = crate::agents::add_msg(&st, &dev.id, Some(rid), "system", "run_start", "user", json!({ "for_user": true })).unwrap();
+        for i in 0..40 {
+            crate::agents::add_msg(&st, &dev.id, Some(rid), "assistant", "tool_use", &format!("step {i}"), json!({}));
+        }
+        let r = crate::agents::add_msg(&st, &dev.id, Some(rid), "assistant", "text", "Ready to merge?", json!({})).unwrap();
+        assert_eq!(questions(&st), ["Dev"]);
+        assert_eq!(st.db.run_start(&dev.id, rid, r.id).unwrap().map(|m| m.id), Some(start.id));
+        assert!(st.db.run_start(&dev.id, rid, start.id).unwrap().is_none(), "only markers before the reply");
     }
 }

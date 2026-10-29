@@ -19,8 +19,26 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(a.intervalMinutes, 60)
         XCTAssertEqual(a.running, true)
         XCTAssertEqual(a.contextTokens, 12000)
+        XCTAssertEqual(a.sessionId, "abc")
         XCTAssertNotNil(a.lastRunAt)
         XCTAssertNil(a.nextRunAt)
+    }
+
+    /// `/agents/{id}/sessions`: the start time is Claude Code's transcript timestamp.
+    func testPastSessions() throws {
+        let json = """
+        {"sessions":[{"id":"s2","started_at":"2026-10-21T13:01:02.123Z","first_message":"Check the login flow",
+         "from_agent":"Loft Lead","context_tokens":48000},
+         {"id":"s1","started_at":"2026-10-20T09:00:00.000Z","first_message":"Hi","from_agent":null,"context_tokens":null}],
+         "current":"s2"}
+        """
+        let p = try JSONCoding.decoder.decode(PastSessions.self, from: Data(json.utf8))
+        XCTAssertEqual(p.sessions.map(\.id), ["s2", "s1"])
+        XCTAssertEqual(p.current, "s2")
+        XCTAssertEqual(p.sessions[0].fromAgent, "Loft Lead")
+        XCTAssertEqual(p.sessions[0].contextTokens, 48000)
+        XCTAssertEqual(p.sessions[0].startedAt, JSONCoding.parseDate("2026-10-21T13:01:02.123Z"))
+        XCTAssertNil(p.sessions[1].contextTokens)
     }
 
     func testTask() throws {

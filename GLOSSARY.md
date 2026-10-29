@@ -24,9 +24,29 @@ _Avoid_: Orchestrator, manager, planner
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Session**:
+The conversation an agent carries from run to run until the user clears it; Compact summarises it in place. Every model call in a run resends the whole session, mostly from the prompt cache.
+_Avoid_: Conversation, thread
+
+**Memory**:
+A fact an agent keeps across sessions: a one-line title and a body. Every session starts with the titles of the agent's memories; the agent reads a body with `recall` when it needs it, and updates a memory instead of saving a near-copy.
+_Avoid_: Note, knowledge
+
+**Unread reply**:
+The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
+_Avoid_: Notification, new message, unread message
+
+**Subagent**:
+A short-lived Claude Code worker an agent starts inside a run for a side job (a search, a self-contained task). It ends with the run at the latest and never talks to the user.
+_Avoid_: Sub-agent, child agent, worker
+
 **Agent message**:
 A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
 _Avoid_: Ping, DM, hand-off
+
+**Draft**:
+A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached task. Each agent keeps its own until it is sent or the agent's context is cleared.
+_Avoid_: Unsent message, pending message
 
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.

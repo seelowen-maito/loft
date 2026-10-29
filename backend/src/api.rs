@@ -45,8 +45,9 @@ pub fn not_found() -> ApiError {
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
 fn agent_json(state: &AppState, a: &Agent) -> Value {
-    let mut v = serde_json::to_value(a).unwrap();
+    let mut v = agents::client_json(a);
     agents::run_fields(state, &a.id, &mut v);
+    v["unread_reply"] = json!(a.unread_reply());
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
     v
 }
@@ -317,6 +318,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         subagent_model: String::new(),
         max_subagents: None,
         grill_briefed: false,
+        memory_index: None,
         lead: false,
         role: String::new(),
         avatar: Avatar::generate(&id),
@@ -327,7 +329,10 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         last_run_at: None,
         next_run_at: None,
         total_cost_usd: 0.0,
+        session_cost_usd: 0.0,
         created_at: now(),
+        replied_at: None,
+        read_at: None,
         builtin: false,
         created_by,
     };
@@ -425,7 +430,11 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         }
     }
     let queued = is_running(&state, &id);
-    let meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
+    let mut meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
+    // Images go in before routing: a grill answer keeps them too.
+    if !m.images.is_empty() {
+        meta["images"] = json!(m.images);
+    }
     let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
     let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
@@ -438,9 +447,6 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         }
     };
     let mut meta = meta;
-    if !m.images.is_empty() {
-        meta["images"] = json!(m.images);
-    }
     let text = m.text.trim().to_string();
     // A task attached to the message, or task links in it: stored on the message, and the agent gets a short header.
     let attached = m.meta.as_ref().and_then(|v| v["task_id"].as_str()).map(|a| a.trim().to_lowercase());
@@ -480,6 +486,12 @@ pub async fn run_now(State(state): State<AppState>, Path(id): Path<String>) -> A
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/agents/{id}/read`: the user has seen this agent's chat; clears its Unread reply everywhere.
+pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let a = agents::mark_read(&state, &id)?.ok_or_else(not_found)?;
+    Ok(Json(agent_json(&state, &a)))
+}
+
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {
@@ -509,6 +521,11 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
             rt.queued.entry(id.clone()).or_default().push(format!(
                 "[Loft: the user restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]"
             ));
+            // The restarted run picks up the same work: if it was answering the user, so is this one.
+            // A queue already waiting runs next instead, and counts only if its own messages came from the user.
+            if info.for_user {
+                rt.queued_for_user.insert(id.clone());
+            }
         }
         rt.restarting.insert(id.clone());
     }
@@ -526,12 +543,14 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
     {
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(&id);
+        rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
     }
     let a = state.db.update_agent(&id, |a| {
         a.session_id = None;
         a.context_tokens = None;
         a.grill_briefed = false;
+        a.memory_index = None;
     })?.ok_or_else(not_found)?;
     let m = state.db.add_message(&id, None, "system", "clear", "Context cleared. Long-term memory carries over.", json!({}))?;
     state.emit(Event::Message { message: json!(m) });
@@ -551,6 +570,61 @@ pub async fn compact_session(State(state): State<AppState>, Path(id): Path<Strin
     }
     agents::compact(&state, &id, p["instructions"].as_str().unwrap_or("").trim());
     Ok(Json(json!({ "ok": true })))
+}
+
+/// `/resume`: the agent's past Sessions, from Claude Code's transcripts for its workspace, newest first.
+pub async fn list_sessions(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let dir = crate::sessions::transcripts_dir(&workspace(&state, &id));
+    let sessions = tokio::task::spawn_blocking(move || crate::sessions::list(&dir)).await.unwrap_or_default();
+    Ok(Json(json!({ "sessions": sessions, "current": a.session_id })))
+}
+
+#[derive(Deserialize)]
+pub struct ResumeSession {
+    session_id: String,
+}
+
+/// Makes a past Session the agent's own: its next run resumes it.
+pub async fn resume_session(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<ResumeSession>) -> ApiResult<Value> {
+    let dir = crate::sessions::transcripts_dir(&workspace(&state, &id));
+    resume_from(&state, &id, dir, b.session_id).await
+}
+
+pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::PathBuf, sid: String) -> ApiResult<Value> {
+    let a = state.db.get_agent(id)?.ok_or_else(not_found)?;
+    if is_running(state, id) {
+        return Err(ApiError(StatusCode::CONFLICT, "Agent is working. Stop it before resuming a Session.".into()));
+    }
+    if a.session_id.as_deref() == Some(sid.as_str()) {
+        return Err(bad("That's already the agent's Session."));
+    }
+    let s = tokio::task::spawn_blocking(move || crate::sessions::find(&dir, &sid))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "No such Session in this agent's transcripts.".into()))?;
+    {
+        let mut rt = state.rt.lock().unwrap();
+        rt.queued.remove(id);
+        rt.grill_queued.remove(id);
+    }
+    // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.
+    let total = state.db.session_total(id, &s.id)?;
+    let a = state.db.update_agent(id, |a| {
+        a.session_id = Some(s.id.clone());
+        a.session_cost_usd = total;
+        a.context_tokens = s.context_tokens;
+        a.grill_briefed = false;
+        a.memory_index = None;
+    })?.ok_or_else(not_found)?;
+    let day = s.started_at.get(..10).unwrap_or(&s.started_at);
+    let m = state.db.add_message(id, None, "system", "resume", &format!("Resumed the Session from {day}."), json!({
+        "session_id": s.id, "started_at": s.started_at, "first_message": s.first_message,
+    }))?;
+    state.emit(Event::Message { message: json!(m) });
+    emit_agent(state, &a);
+    Ok(Json(agent_json(state, &a)))
 }
 
 pub async fn clear_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -577,6 +651,8 @@ pub async fn list_memories(State(state): State<AppState>, Path(id): Path<String>
 
 #[derive(Deserialize)]
 pub struct NewMemory {
+    title: String,
+    #[serde(default)]
     content: String,
     #[serde(default)]
     tags: String,
@@ -584,10 +660,13 @@ pub struct NewMemory {
 
 pub async fn add_memory(State(state): State<AppState>, Path(id): Path<String>, Json(m): Json<NewMemory>) -> ApiResult<Value> {
     state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    if m.content.trim().is_empty() {
-        return Err(bad("empty memory"));
+    let title = m.title.trim();
+    if title.is_empty() || title.contains('\n') {
+        return Err(bad("a memory needs a one-line title"));
     }
-    let mem = state.db.add_memory(&id, m.content.trim(), m.tags.trim())?;
+    // A memory added with only a title keeps the title as its body too.
+    let content = if m.content.trim().is_empty() { title } else { m.content.trim() };
+    let mem = state.db.add_memory(&id, title, content, m.tags.trim())?;
     state.emit(Event::Memory { agent_id: id });
     Ok(Json(json!(mem)))
 }

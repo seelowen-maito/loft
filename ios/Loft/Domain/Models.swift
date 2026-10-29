@@ -32,6 +32,24 @@ struct Agent: Codable, Identifiable, Hashable {
     /// Background tasks the agent is waiting on after it already replied (e.g. "Run the QA suite").
     var waitingOn: [String]? = nil
     var waitingSince: Date? = nil
+    /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
+    var sessionId: String? = nil
+}
+
+/// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
+struct PastSession: Codable, Identifiable, Hashable {
+    let id: String
+    var startedAt: Date
+    var firstMessage: String
+    /// The agent that sent `firstMessage`, when another agent started the Session.
+    var fromAgent: String?
+    var contextTokens: Int?
+}
+
+/// An agent's past Sessions, newest first, and which one is its Session now.
+struct PastSessions: Codable, Hashable {
+    var sessions: [PastSession]
+    var current: String?
 }
 
 struct Avatar: Codable, Hashable {
@@ -44,7 +62,7 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     var runId: String?
     /// user | assistant | system
     var role: String
-    /// text | thinking | tool_use | tool_result | permission | error | notice | run_start | run_end | clear | compact
+    /// text | thinking | tool_use | tool_result | permission | error | notice | run_start | run_end | clear | compact | resume
     var kind: String
     var content: String
     var meta: JSONValue?
@@ -53,6 +71,8 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// Set when another agent sent this message rather than the user.
     var fromAgentName: String? { meta?["from_agent"]?["name"]?.stringValue }
     var fromAgentId: String? { meta?["from_agent"]?["id"]?.stringValue }
+    /// An FYI from another agent: shown at once, read on the agent's next Run, without waking it (#112).
+    var isFYI: Bool { role == "user" && fromAgentName != nil && meta?["fyi"] == .bool(true) }
     /// Another agent's reply to an @-mention, copied into this chat (#92).
     var isMentionReply: Bool { meta?["mention_reply"] == .bool(true) }
     /// The agents your message @-mentioned, and whether it went only to them (the chat's agent wasn't woken).
@@ -266,9 +286,13 @@ struct AgentSummary: Codable, Hashable, Identifiable {
     }
 }
 
-/// Context windows Loft's web UI warns at (Claude Code's default 200k window).
+/// The context size warning, like the web's.
 enum ContextWindow {
-    static let warnAt = 200_000
+    /// Past this many tokens in context a Session leaves the smart zone: the same limit grills compact at.
+    static let warnAt = 80_000
+
+    /// Whether the context size shows in the warning color.
+    static func warns(_ tokens: Int) -> Bool { tokens >= warnAt }
 }
 
 struct VoiceCleanResponse: Codable {

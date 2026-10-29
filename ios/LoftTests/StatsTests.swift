@@ -26,6 +26,14 @@ final class StatsTests: XCTestCase {
         XCTAssertEqual(e.level, "warm")
     }
 
+    func testContextWarnsFrom80k() {
+        XCTAssertEqual(ContextWindow.warnAt, 80_000)
+        XCTAssertFalse(ContextWindow.warns(0))
+        XCTAssertFalse(ContextWindow.warns(79_999), "below 80k is neutral")
+        XCTAssertTrue(ContextWindow.warns(80_000), "80k itself warns")
+        XCTAssertTrue(ContextWindow.warns(250_000))
+    }
+
     func testUsageError() throws {
         let u = try JSONCoding.decoder.decode(PlanUsage.self, from: Data(#"{"error":"not logged in","windows":[]}"#.utf8))
         XCTAssertEqual(u.error, "not logged in")

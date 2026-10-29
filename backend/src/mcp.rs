@@ -14,8 +14,49 @@ use crate::avatar::Avatar;
 use crate::db::Agent;
 use crate::state::{AppState, Event};
 
-fn tools() -> Value {
+/// The two kinds of Agent message, as `message_agent` explains them to the sender.
+const KINDS: &str = "`needs_action` when the recipient must act now (review, fix, decide, or tell the user something they must act on): it wakes them, right away or after their current run. `fyi` when they only need to know: it shows in their chat at once but doesn't wake them; they read it at the start of their next run and don't reply to it.";
+
+/// Words and phrases that only acknowledge. A message made of nothing else (plus
+/// punctuation, emoji and the recipient's name) carries nothing the recipient needs.
+const ACKS: &[&str] = &[
+    "thanks", "thank you", "thx", "ty", "tysm", "cheers", "much appreciated", "appreciated", "appreciate it",
+    "so much", "very much", "a lot", "again", "for the update", "for the review", "for the heads up", "for letting me know",
+    "ok", "okay", "k", "kk", "alright", "all right", "sure", "cool", "great", "perfect", "nice", "awesome", "all good",
+    "got it", "gotcha", "understood", "noted", "roger", "roger that", "ack", "acknowledged", "copy", "copy that",
+    "will do", "sounds good", "sounds great", "makes sense", "on it", "no problem", "np",
+    // Waiting and standing by only as whole phrases: a bare "wait" or "next" is an instruction.
+    "standing by", "waiting", "waiting for you", "waiting for your next", "waiting for your next task", "waiting for your next message",
+    "waiting for your next instructions", "ill wait", "i will wait", "will wait", "ill be here", "i will be here", "im here",
+    "im on it", "ill do it", "ready for the next", "ready for the next task", "ready for the next one", "ready for your next task",
+    "ready when you are", "let me know", "if you need anything", "if you need anything else", "and",
+];
+
+/// Whether `text` is only an acknowledgement, matched as plain words: no model call.
+fn only_acknowledges(text: &str, to: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase().replace(['\'', '\u{2019}'], "").split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+    };
+    let mut phrases: Vec<Vec<String>> = ACKS.iter().map(|p| words(p)).chain([words(to)]).filter(|p| !p.is_empty()).collect();
+    phrases.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let (text, mut i) = (words(text), 0);
+    while i < text.len() {
+        match phrases.iter().find(|p| text[i..].starts_with(p)) {
+            Some(p) => i += p.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn tools(state: &AppState) -> Value {
     let mut all = base_tools();
+    // With the messaging rules off, every message wakes its recipient, so the kind is optional.
+    if !state.settings.get().messaging_rules {
+        for t in all.as_array_mut().unwrap().iter_mut().filter(|t| t["name"] == "message_agent") {
+            t["inputSchema"]["required"] = json!(["agent", "text"]);
+        }
+    }
     all.as_array_mut().unwrap().extend(crate::tasks::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::setup::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
@@ -28,18 +69,28 @@ fn base_tools() -> Value {
     json!([
         {
             "name": "remember",
-            "description": "Save a durable long-term memory. It persists across conversations and session resets.",
+            "description": "Save a durable long-term memory. It persists across conversations and session resets. Its title goes in your system prompt's memory index from your next session; the body is read with recall. First check your memory index (and recall): if a memory already covers this fact, change it with update instead of saving a near-copy.",
             "inputSchema": { "type": "object", "properties": {
-                "content": { "type": "string", "description": "The fact to remember, short and self-contained." },
+                "title": { "type": "string", "description": "One line that says what the memory is about, under 80 chars." },
+                "content": { "type": "string", "description": "The body: the fact to remember, short and self-contained." },
                 "tags": { "type": "string", "description": "Optional comma-separated tags." }
-            }, "required": ["content"] }
+            }, "required": ["title", "content"] }
         },
         {
             "name": "recall",
-            "description": "Search long-term memory. Omit query to list everything.",
+            "description": "Search long-term memory by title and body; returns each match's id, date, title and body, last saved or updated first, like your memory index. Omit query to list everything.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" }
             } }
+        },
+        {
+            "name": "update",
+            "description": "Rewrite a memory in place by its id (the #number), so a fact that changes (a status, a decision) stays one memory. Pass a new title, a new body, or both; what you omit stays.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "title": { "type": "string", "description": "New one-line title, under 80 chars." },
+                "content": { "type": "string", "description": "New body, short and self-contained." }
+            }, "required": ["id"] }
         },
         {
             "name": "forget",
@@ -97,11 +148,12 @@ fn base_tools() -> Value {
         },
         {
             "name": "message_agent",
-            "description": "Send a message to another agent. Returns as soon as it is delivered; it doesn't wait for an answer. The other agent runs (right away, or after its current run) and answers, if it does, with a message of its own that arrives here as a new turn.",
+            "description": format!("Send a message to another agent. Returns as soon as it is delivered; it doesn't wait for an answer. Every message has a kind: {KINDS} A needs-action message is answered, if at all, with a message of its own that arrives here as a new turn."),
             "inputSchema": { "type": "object", "properties": {
                 "agent": { "type": "string", "description": "The recipient's id or name." },
-                "text": { "type": "string", "description": "The message." }
-            }, "required": ["agent", "text"] }
+                "text": { "type": "string", "description": "The message." },
+                "kind": { "type": "string", "enum": ["needs_action", "fyi"], "description": "needs_action: the recipient must act now; it wakes them. fyi: they only need to know; they read it on their next run." }
+            }, "required": ["agent", "text", "kind"] }
         },
         {
             "name": "approval_prompt",
@@ -167,11 +219,17 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
     let s = |k: &str| args[k].as_str().unwrap_or("").to_string();
     match name {
         "remember" => {
-            let content = s("content");
-            if content.trim().is_empty() {
-                return tool_error("content is required");
+            let (title, content) = (s("title"), s("content"));
+            if title.trim().is_empty() {
+                return tool_error("title is required: one line that says what the memory is about");
             }
-            match state.db.add_memory(agent_id, content.trim(), s("tags").trim()) {
+            if title.trim().contains('\n') {
+                return tool_error("title must be one line; put the details in content");
+            }
+            if content.trim().is_empty() {
+                return tool_error("content is required: the memory's body");
+            }
+            match state.db.add_memory(agent_id, title.trim(), content.trim(), s("tags").trim()) {
                 Ok(m) => {
                     state.emit(Event::Memory { agent_id: agent_id.into() });
                     text(format!("Saved memory #{}", m.id))
@@ -190,10 +248,41 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(ms) if ms.is_empty() => text("No matching memories."),
                 Ok(ms) => text(
                     ms.iter()
-                        .map(|m| format!("#{} ({}) [{}] {}", m.id, &m.created_at[..10], m.tags, m.content))
+                        .rev()
+                        .map(|m| {
+                            let tags = if m.tags.is_empty() { String::new() } else { format!(" [{}]", m.tags) };
+                            let saved = m.updated_at.as_deref().unwrap_or(&m.created_at);
+                            format!("#{} ({}){} {}\n{}", m.id, &saved[..10], tags, m.title, m.content)
+                        })
                         .collect::<Vec<_>>()
-                        .join("\n"),
+                        .join("\n\n"),
                 ),
+                Err(e) => tool_error(e.to_string()),
+            }
+        }
+        "update" => {
+            let Some(id) = args["id"].as_i64().or_else(|| s("id").trim_start_matches('#').parse().ok()) else {
+                return tool_error("id is required");
+            };
+            let (title, content) = (args["title"].as_str().map(str::trim), args["content"].as_str().map(str::trim));
+            if title.is_none() && content.is_none() {
+                return tool_error("pass a new title, a new content, or both");
+            }
+            if title.is_some_and(str::is_empty) {
+                return tool_error("title can't be empty; omit it to keep the current one");
+            }
+            if title.is_some_and(|t| t.contains('\n')) {
+                return tool_error("title must be one line; put the details in content");
+            }
+            if content.is_some_and(str::is_empty) {
+                return tool_error("content can't be empty; omit it to keep the current one, or use forget");
+            }
+            match state.db.update_memory(agent_id, id, title, content) {
+                Ok(Some(m)) => {
+                    state.emit(Event::Memory { agent_id: agent_id.into() });
+                    text(format!("Updated memory #{}", m.id))
+                }
+                Ok(None) => tool_error("No memory with that id."),
                 Err(e) => tool_error(e.to_string()),
             }
         }
@@ -295,6 +384,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         ("assistant", "tool_use") => format!("{} (tool)", a.name),
                         (_, "error") => "error".into(),
                         (_, "clear") => return Some(format!("[{}] --- context cleared ---", &m.created_at[..16])),
+                        (_, "resume") => return Some(format!("[{}] --- {} ---", &m.created_at[..16], m.content.trim_end_matches('.'))),
                         _ => return None,
                     };
                     Some(format!("[{}] {who}: {}", &m.created_at[..16], clip(&m.content, 2000)))
@@ -317,6 +407,24 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             let Ok(Some(from)) = state.db.get_agent(agent_id) else {
                 return tool_error("agent not found");
             };
+            let rules = state.settings.get().messaging_rules;
+            if rules && only_acknowledges(&body, &to.name) {
+                return tool_error(format!(
+                    "Not sent: this message only acknowledges (thanks, ok, got it, standing by…), and {} doesn't need it. Send a message only when it carries a finding, report, verdict or request; otherwise send nothing. If it answers a question, say what you decided.",
+                    to.name
+                ));
+            }
+            // With the messaging rules off, every message wakes its recipient, as before kinds existed.
+            let fyi = match (rules, s("kind").as_str()) {
+                (false, _) | (true, "needs_action") => false,
+                (true, "fyi") => true,
+                (true, "") => return tool_error(format!("Not sent: kind is required. Use {KINDS}")),
+                (true, k) => return tool_error(format!("Not sent: kind {k:?} isn't one of the two. Use {KINDS}")),
+            };
+            if fyi {
+                agents::fyi_from_agent(state, &from, &to, body.trim());
+                return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));
+            }
             let busy = agents::is_running(state, &to.id);
             agents::message_from_agent(state, &from, &to, body.trim());
             text(if busy {
@@ -371,7 +479,7 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
             "instructions": "Loft: your memory, status, avatar, and permission tools."
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": tools(&state) }),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -388,4 +496,391 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
         }
     };
     Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::tests::{fake_claude_state, until};
+    use crate::agents::{enqueue, is_running, workspace};
+    use std::time::Duration;
+
+    fn said(r: &Value) -> (&str, bool) {
+        (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn remember_needs_a_title_and_a_body() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let r = call_tool(&st, &a.id, "remember", json!({ "content": "Deploys go through staging" })).await;
+        let (t, err) = said(&r);
+        assert!(err && t.contains("title is required"), "{t}");
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": "Deploys", "content": " " })).await;
+        assert!(said(&r).1);
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": "Two\nlines", "content": "x" })).await;
+        assert!(said(&r).1);
+        assert!(st.db.list_memories(&a.id).unwrap().is_empty());
+        let r = call_tool(&st, &a.id, "remember", json!({ "title": " Deploys go through staging ", "content": "Every deploy goes to staging first." })).await;
+        assert!(!said(&r).1);
+        let m = &st.db.list_memories(&a.id).unwrap()[0];
+        assert_eq!((m.title.as_str(), m.content.as_str()), ("Deploys go through staging", "Every deploy goes to staging first."));
+    }
+
+    #[tokio::test]
+    async fn recall_matches_title_or_body_and_returns_the_body() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let d = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "ops").unwrap();
+        let r = st.db.add_memory(&a.id, "Release day", "Releases ship on Friday mornings.", "").unwrap();
+        let recall = |q: &'static str| { let st = st.clone(); let id = a.id.clone(); async move { said(&call_tool(&st, &id, "recall", json!({ "query": q })).await).0.to_string() } };
+        let by_title = recall("deploys").await;
+        assert_eq!(by_title, format!("#{} ({}) [ops] Deploys\nEvery deploy goes to staging first.", d.id, &d.created_at[..10]));
+        let by_body = recall("friday").await;
+        assert!(by_body.starts_with(&format!("#{} ", r.id)) && by_body.ends_with("Releases ship on Friday mornings."), "{by_body}");
+        let all = recall("").await;
+        assert!(all.contains("staging first.") && all.contains("Friday mornings."), "{all}");
+        assert_eq!(recall("nothing like it").await, "No matching memories.");
+    }
+
+    #[tokio::test]
+    async fn recall_lists_the_last_saved_or_updated_first() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let status = st.db.add_memory(&a.id, "Release status", "Release is in QA.", "").unwrap();
+        let deploys = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "").unwrap();
+        let ids = |text: String| text.split("\n\n").map(|m| m.split(' ').next().unwrap().to_string()).collect::<Vec<_>>();
+        let all = said(&call_tool(&st, &a.id, "recall", json!({})).await).0.to_string();
+        assert_eq!(ids(all), [format!("#{}", deploys.id), format!("#{}", status.id)], "newest first");
+        call_tool(&st, &a.id, "update", json!({ "id": status.id, "content": "Release shipped." })).await;
+        let all = said(&call_tool(&st, &a.id, "recall", json!({})).await).0.to_string();
+        assert_eq!(ids(all), [format!("#{}", status.id), format!("#{}", deploys.id)], "the updated one moves up");
+    }
+
+    #[tokio::test]
+    async fn update_rewrites_only_that_memory_and_only_the_given_parts() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let b = crate::tasks::tests::agent(&st, "Other");
+        let status = st.db.add_memory(&a.id, "Release status", "Release is in QA.", "").unwrap();
+        let other = st.db.add_memory(&a.id, "Deploys", "Every deploy goes to staging first.", "").unwrap();
+        let theirs = st.db.add_memory(&b.id, "Theirs", "Not yours.", "").unwrap();
+
+        let r = call_tool(&st, &a.id, "update", json!({ "id": status.id, "content": "Release shipped on Friday." })).await;
+        assert_eq!(said(&r), (format!("Updated memory #{}", status.id).as_str(), false));
+        let r = call_tool(&st, &a.id, "update", json!({ "id": format!("#{}", status.id), "title": " Release shipped " })).await;
+        assert!(!said(&r).1);
+        let ms = st.db.list_memories(&a.id).unwrap();
+        assert_eq!(ms.len(), 2);
+        assert_eq!((ms[1].id, ms[1].title.as_str(), ms[1].content.as_str()), (status.id, "Release shipped", "Release shipped on Friday."), "updated, so newest");
+        assert_eq!((ms[0].title.as_str(), ms[0].content.as_str()), (other.title.as_str(), other.content.as_str()));
+
+        for bad in [
+            json!({ "id": 9999, "title": "x" }),
+            json!({ "id": theirs.id, "title": "Mine now" }),
+            json!({ "id": status.id }),
+            json!({ "id": status.id, "title": " " }),
+            json!({ "id": status.id, "title": "Two\nlines" }),
+            json!({ "id": status.id, "content": "" }),
+            json!({ "title": "No id" }),
+        ] {
+            let r = call_tool(&st, &a.id, "update", bad.clone()).await;
+            assert!(said(&r).1, "{bad}");
+        }
+        let r = call_tool(&st, &a.id, "update", json!({ "id": theirs.id, "title": "Mine now" })).await;
+        assert_eq!(said(&r).0, "No memory with that id.");
+        assert_eq!(st.db.list_memories(&b.id).unwrap()[0].title, "Theirs");
+        assert_eq!(st.db.list_memories(&a.id).unwrap()[1].title, "Release shipped");
+    }
+
+    async fn message(st: &AppState, from: &Agent, args: Value) -> Value {
+        call_tool(st, &from.id, "message_agent", args).await
+    }
+
+    /// Each prompt the fake claude got, in order.
+    fn prompts(st: &AppState, a: &Agent) -> Vec<String> {
+        let log = std::fs::read_to_string(workspace(st, &a.id).join("prompts.log")).unwrap_or_default();
+        log.split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
+    }
+
+    async fn run(st: &AppState, a: &Agent, text: &str) -> String {
+        let n = prompts(st, a).len();
+        enqueue(st, &a.id, Some(text.into()), "user");
+        until("the run", 10, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
+        prompts(st, a).pop().unwrap()
+    }
+
+    fn rules_off(st: &AppState) {
+        let mut s = st.settings.get();
+        s.messaging_rules = false;
+        st.settings.save(s).unwrap();
+    }
+
+    fn hint(from: &Agent) -> String {
+        format!("To answer {}, call `mcp__loft__message_agent`", from.name)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_without_a_kind_is_rejected_with_both_kinds_explained() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        for kind in [None, Some("urgent")] {
+            let mut args = json!({ "agent": to.name, "text": "Review PR #12" });
+            if let Some(k) = kind {
+                args["kind"] = json!(k);
+            }
+            let r = message(&st, &from, args).await;
+            let err = r["content"][0]["text"].as_str().unwrap();
+            assert_eq!(r["isError"], json!(true));
+            assert!(err.starts_with("Not sent") && err.contains("`needs_action` when the recipient must act now") && err.contains("`fyi` when they only need to know"), "{err}");
+        }
+        assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && !is_running(&st, &to.id));
+        // The tool says so up front.
+        let tool = tools(&st).as_array().unwrap().iter().find(|t| t["name"] == "message_agent").unwrap().clone();
+        assert_eq!(tool["inputSchema"]["required"], json!(["agent", "text", "kind"]));
+        assert!(tool["description"].as_str().unwrap().contains(KINDS));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn needs_action_starts_a_run_with_the_reply_hint() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
+        assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        let p = &prompts(&st, &to)[0];
+        assert!(p.contains("[Message from agent Lead") && p.contains("Review PR #12") && p.contains(&hint(&from)), "{p}");
+        let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().find(|m| m.role == "user").unwrap();
+        assert_eq!((m.content.as_str(), m.meta.get("fyi")), ("Review PR #12", None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_fyi_starts_no_run_and_reaches_the_next_run_only() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let r = message(&st, &from, json!({ "agent": to.name, "text": "Committed abc123 on main", "kind": "fyi" })).await;
+        assert_eq!(r["content"][0]["text"], json!("Delivered as FYI. Worker will read it at the start of its next run."));
+        // In the chat at once, marked, with no run.
+        let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().find(|m| m.role == "user").unwrap();
+        assert_eq!((m.content.as_str(), m.meta["fyi"].clone(), m.meta["from_agent"]["name"].clone()), ("Committed abc123 on main", json!(true), json!("Lead")));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!is_running(&st, &to.id) && prompts(&st, &to).is_empty());
+
+        // Whatever starts the next run (here the user), the FYI comes first, without the reply hint.
+        let p = run(&st, &to, "what's next?").await;
+        assert!(p.starts_with("[FYI from agent Lead") && p.contains("Committed abc123 on main") && p.ends_with("what's next?"), "{p}");
+        assert!(!p.contains(&hint(&from)) && !p.contains("mcp__loft__message_agent"), "{p}");
+        // Only once.
+        let p = run(&st, &to, "and now?").await;
+        assert!(!p.contains("Committed abc123"), "{p}");
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_fyis_stay_out_of_agent_payloads() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let mut events = st.events.subscribe();
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        agents::set_status_text(&st, &to.id, "reading");
+        let mut updates = 0;
+        while let Ok(e) = events.try_recv() {
+            let v = serde_json::to_string(&e).unwrap();
+            assert!(!v.contains("Merged #12") || v.starts_with(r#"{"type":"message""#), "{v}");
+            updates += v.contains("agent_updated") as usize;
+        }
+        assert!(updates > 0);
+        let a = st.db.get_agent(&to.id).unwrap().unwrap();
+        assert!(!serde_json::to_string(&a).unwrap().contains("Merged #12"));
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_prompt_takes_the_newest_fyis_in_order_and_counts_the_rest() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        for i in 1..=25 {
+            agents::fyi_from_agent(&st, &from, &to, &format!("Note number {i}."));
+        }
+        let p = run(&st, &to, "go").await;
+        assert!(p.starts_with("[5 older FYIs from agents were left out; the newest 20 follow.]\n\n"), "{p}");
+        let at = |i: usize| p.find(&format!("Note number {i}.")).unwrap_or_else(|| panic!("note {i}: {p}"));
+        assert!((1..=5).all(|i| !p.contains(&format!("Note number {i}."))), "{p}");
+        assert!((6..25).all(|i| at(i) < at(i + 1)) && p.ends_with("go"), "{p}");
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_fyis_survive_clear_and_resume() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let fyi = |text: &'static str| message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" }));
+        run(&st, &to, "first").await;
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
+
+        // Resumed: the next run goes on in the same session.
+        fyi("Tests pass on abc123").await;
+        let p = run(&st, &to, "resumed run").await;
+        assert!(p.contains("Tests pass on abc123"), "{p}");
+        let starts: Vec<_> = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "run_start").collect();
+        assert_eq!(starts.last().unwrap().meta["resumed"], json!(true));
+
+        // Cleared: the session is dropped, the FYI isn't.
+        fyi("Merged #12").await;
+        assert!(crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(to.id.clone())).await.is_ok());
+        let p = run(&st, &to, "fresh run").await;
+        assert!(p.contains("Merged #12") && !p.contains("Tests pass on abc123"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_the_global_setting_off_every_message_wakes_as_before() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        rules_off(&st);
+        let tool = tools(&st).as_array().unwrap().iter().find(|t| t["name"] == "message_agent").unwrap().clone();
+        assert_eq!(tool["inputSchema"]["required"], json!(["agent", "text"]));
+        for (i, args) in [json!({ "agent": to.id, "text": "no kind" }), json!({ "agent": to.id, "text": "said fyi", "kind": "fyi" })].into_iter().enumerate() {
+            let r = message(&st, &from, args.clone()).await;
+            assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
+            until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > i).await;
+            let p = &prompts(&st, &to)[i];
+            assert!(p.contains(args["text"].as_str().unwrap()) && p.contains(&hint(&from)), "{p}");
+        }
+        assert!(st.db.list_messages(&to.id, 50, None).unwrap().iter().all(|m| m.meta.get("fyi").is_none()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_fyi_is_lost_to_concurrent_writes_of_the_same_agent() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        // The recipient's own run writes its status while FYIs to it arrive.
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let (st, from, to) = (st.clone(), from.clone(), to.clone());
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        agents::fyi_from_agent(&st, &from, &to, &format!("fyi {t}-{i}"));
+                        agents::set_status_text(&st, &to.id, &format!("step {t}-{i}"));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 400);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_and_avatar_runs_leave_fyis_for_the_next_real_run() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        run(&st, &to, "first").await;
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        agents::compact(&st, &to.id, "");
+        until("the compact run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert_eq!(prompts(&st, &to)[1], "/compact");
+        agents::design_avatar(&st, &to.id, "a robot");
+        until("the avatar run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        assert!(!prompts(&st, &to)[2].contains("Merged #12"));
+        let p = run(&st, &to, "next").await;
+        assert!(p.starts_with("[FYI from agent Lead") && p.contains("Merged #12"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_fails_to_start_keeps_its_fyis() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        let bin = st.settings.get().claude_bin;
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        enqueue(&st, &to.id, Some("go".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+        // Put back ahead of one that arrived after the failed run took it.
+        message(&st, &from, json!({ "agent": to.id, "text": "Released v2", "kind": "fyi" })).await;
+        let mut s = st.settings.get();
+        s.claude_bin = bin;
+        st.settings.save(s).unwrap();
+        let p = run(&st, &to, "again").await;
+        assert!(p.find("Merged #12").unwrap() < p.find("Released v2").unwrap(), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_fails_after_claude_has_its_prompt_delivers_its_fyis_once() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        // "garbled" fails the run with an error after claude got the prompt; "crash" ends it without a result.
+        for (i, how) in ["garbled", "crash"].into_iter().enumerate() {
+            message(&st, &from, json!({ "agent": to.id, "text": format!("Merged #{i}"), "kind": "fyi" })).await;
+            let n = prompts(&st, &to).len();
+            enqueue(&st, &to.id, Some(how.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
+            assert!(prompts(&st, &to)[n].contains(&format!("Merged #{i}")));
+            assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0, "{how}");
+            let p = run(&st, &to, "again").await;
+            assert!(!p.contains("Merged #"), "{how}: {p}");
+        }
+        assert!(st.db.list_messages(&to.id, 100, None).unwrap().iter().filter(|m| m.kind == "error").count() >= 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_session_that_never_acted_on_the_prompt_keeps_its_fyis() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        run(&st, &to, "first").await;
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
+        message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
+        // The resumed claude has the prompt but no session; the fresh retry can't start.
+        let n = prompts(&st, &to).len();
+        enqueue(&st, &to.id, Some("session-gone".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        assert!(prompts(&st, &to)[n].contains("Merged #12"));
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
+        let bin = st.settings.get().claude_bin;
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let p = run(&st, &to, "again").await;
+        assert!(p.contains("Merged #12"), "{p}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        for text in ["Thanks!", "ok 👍", "Got it, standing by.", "Thank you so much, Worker!", "👍", "Noted. Waiting for your next task.", "Sounds good, will do", "I’ll wait", "Roger that 🫡", "Thanks, I'm on it. Waiting for your next instructions.", "ok, ready for the next one"] {
+            for kind in ["fyi", "needs_action"] {
+                let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": kind })).await;
+                let err = r["content"][0]["text"].as_str().unwrap();
+                assert_eq!(r["isError"], json!(true), "{text}");
+                assert!(err.starts_with("Not sent: this message only acknowledges") && err.contains("finding, report, verdict or request"), "{err}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && st.db.count_pending_fyis(&to.id).unwrap() == 0 && !is_running(&st, &to.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_with_substance_goes_through_even_with_thanks() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
+        for text in texts {
+            let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
+            assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
+        }
+        assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_the_global_setting_off_nothing_is_refused() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        rules_off(&st);
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "Thanks!" })).await;
+        assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        assert!(prompts(&st, &to)[0].contains("Thanks!"));
+    }
 }
