@@ -9,6 +9,7 @@ struct TaskDetailView: View {
     @State private var busy = false
     @State private var confirmCancel = false
     @State private var confirmDelete = false
+    @State private var confirmPublish = false
     @State private var pickAgent = false
     @State private var notice: String?
     /// Opened from a link or a push before the app has this task (a cold start, or a new task): look it up first.
@@ -80,14 +81,21 @@ struct TaskDetailView: View {
                     LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
                     // Its project's repo gets it as a GitHub issue; the server says why when it can't.
                     if !t.project.isEmpty, !t.state.isClosed {
-                        Button {
-                            act {
-                                let p = try await store.publishTask(t.id)
-                                notice = p.github.map { "Published as \($0.shortName)." }
-                            }
-                        } label: { Label("Publish to GitHub", systemImage: "arrow.up.forward.square") }
+                        Button { confirmPublish = true } label: { Label("Publish to GitHub", systemImage: "arrow.up.forward.square") }
                         .disabled(!store.canWrite || busy)
                         .accessibilityIdentifier("publishTask")
+                        // As on the web: say where it goes before a possibly public issue is created.
+                        .confirmationDialog("Publish to GitHub?", isPresented: $confirmPublish, titleVisibility: .visible) {
+                            Button("Publish") {
+                                act {
+                                    let p = try await store.publishTask(t.id)
+                                    notice = p.github.map { "Published as \($0.shortName)." }
+                                }
+                            }
+                            .accessibilityIdentifier("confirmPublish")
+                        } message: {
+                            Text("It becomes an issue in the \(t.project) project's GitHub repo, which may be public.")
+                        }
                     }
                 }
                 if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
