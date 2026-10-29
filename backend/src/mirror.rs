@@ -1263,4 +1263,38 @@ mod tests {
         assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "comment_approval"));
     }
 
+    #[tokio::test]
+    async fn post_on_github_says_where_a_comment_goes_agent_or_not() {
+        let st = state();
+        let fake = own_fake(&st);
+        let id = one_mirrored(&st, &fake, "gh-flag", "octo/gh-flag", "2026-10-02T00:00:00Z").await;
+        fake.route("POST", "/repos/octo/gh-flag/issues/1/comments", 201, json!({ "id": 801 }));
+        let mut s = st.settings.get();
+        s.comment_approval = [("gh-flag".to_string(), "all".to_string())].into();
+        st.settings.save(s).unwrap();
+        assert!(st.db.get_task(&id).unwrap().unwrap().agent_id.is_none());
+        let post = |b: Value| {
+            let st = st.clone();
+            let id = id.clone();
+            async move {
+                let body: crate::tasks::CommentBody = serde_json::from_value(b).unwrap();
+                let _ = crate::tasks::add_comment(State(st), axum::extract::Path(id), Json(body)).await.unwrap();
+            }
+        };
+
+        // Nobody works on it: a sent comment still goes to GitHub, unless it says not to.
+        post(json!({ "text": "Shipping Friday", "send": true })).await;
+        post(json!({ "text": "Only for Loft", "send": true, "github": false })).await;
+        post(json!({ "text": "A private note", "send": false })).await;
+        post(json!({ "text": "Tell GitHub anyway", "send": false, "github": true })).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let posted: Vec<Value> = fake.seen("/repos/octo/gh-flag/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "body": "Shipping Friday" }), json!({ "body": "Tell GitHub anyway" })]);
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        let private = |text: &str| thread.iter().find(|c| c.text == text).unwrap().meta["private"].clone();
+        assert_eq!(private("Shipping Friday"), json!(false));
+        assert_eq!(private("A private note"), json!(true));
+    }
+
 }

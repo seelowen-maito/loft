@@ -50,7 +50,7 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     // Progress notes, status entries, private notes and the note handed over with the work stay in Loft,
     // whatever the approval mode.
     let mut auto = false;
-    let loft_only = meta["private"] == true || meta["handoff"] == true;
+    let loft_only = meta["private"] == true || meta["handoff"] == true || meta["loft_only"] == true;
     if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB && !loft_only {
         auto = match state.settings.get().approval_mode(&t.project) {
             "all" => true,
@@ -608,6 +608,8 @@ pub struct CommentBody {
     /// Deliver it to the task's agent (default). False keeps it as a private note on the task.
     #[serde(default = "yes")]
     send: bool,
+    /// On a mirrored issue: post it on GitHub too, after approval. Defaults to `send`, agent or not.
+    github: Option<bool>,
     /// On a finished task: reopen it and run it again with this comment as the instruction.
     #[serde(default)]
     reopen: bool,
@@ -650,8 +652,12 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
     }
     let deliver = b.send && agent.is_some();
+    let to_github = t.github.is_some() && b.github.unwrap_or(b.send);
     let mut meta = client_id.map_or(json!({}), |c| json!({ "client_id": c }));
-    meta["private"] = json!(!deliver);
+    meta["private"] = json!(!deliver && !to_github);
+    if !to_github {
+        meta["loft_only"] = json!(true);
+    }
     let who = mentioned(&state, "user", text);
     if !who.is_empty() {
         meta["mentions"] = json!(who.iter().map(|a| a.id.clone()).collect::<Vec<_>>());
@@ -1134,12 +1140,12 @@ pub(crate) mod tests {
             mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "note": note }), find).unwrap().unwrap();
         }
         mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "status": "done", "summary": "Fixed." }), find).unwrap().unwrap();
-        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, reopen: false })).await.unwrap();
+        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
         let c = c["comment"].clone();
         // A retried post isn't added twice.
-        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, reopen: false })).await.unwrap();
+        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
         assert_eq!((code, again["comment"]["id"].clone()), (StatusCode::OK, c["id"].clone()));
-        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, reopen: false })).await.is_err());
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, github: None, reopen: false })).await.is_err());
 
         let Json(thread) = list_comments(State(st.clone()), Path(t.id.clone()), Query(CommentsQuery { limit: None, before: None })).await.unwrap();
         let rows: Vec<(String, String)> = thread.as_array().unwrap().iter().map(|c| (c["kind"].as_str().unwrap().into(), c["text"].as_str().unwrap().into())).collect();
@@ -1164,7 +1170,7 @@ pub(crate) mod tests {
     }
 
     fn comment(text: &str, send: bool, reopen: bool) -> Json<CommentBody> {
-        Json(CommentBody { text: text.into(), client_id: None, send, reopen })
+        Json(CommentBody { text: text.into(), client_id: None, send, github: None, reopen })
     }
 
     /// An agent marked busy, so whatever reaches it is queued instead of starting a real claude run.

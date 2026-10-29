@@ -242,6 +242,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   const box = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(box, text, 2);
   const [send, setSend] = useState(true);
+  const [github, setGithub] = useState(true);
   const [reopen, setReopen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -266,12 +267,14 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
     setError(null);
     try {
       const sending = !!agent && send;
-      const r = await api.commentTask(t.id, v, { send: sending, reopen: sending && finished && reopen });
+      const posting = !!t.github && github;
+      const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && finished && reopen });
       setText("");
       setReopen(false);
       setNote(
         r.task ? `Reopened; ${agent!.name} is on it${r.queued ? " after its current run" : ""}.`
         : r.delivered_to ? `Sent to ${agent!.name}${r.queued ? "; it reads it after its current run" : ""}.`
+        : posting ? "Saved; it goes to GitHub once approved."
         : "Saved as a private note.",
       );
     } catch (e) {
@@ -281,7 +284,7 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
     }
   };
 
-  const label = !agent || !send ? "Add note" : finished && reopen ? "Reopen and send" : `Send to ${agent.name}`;
+  const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : finished && reopen ? "Reopen and send" : `Send to ${agent.name}`;
   return (
     <div className="space-y-2">
       <div className="rounded-2xl border border-line-strong bg-ink-850 p-2 pl-3 transition focus-within:border-accent/40">
@@ -312,7 +315,13 @@ export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
               Reopen and run again
             </label>
           )}
-          {(!agent || !send) && <span className="font-mono text-[11px] text-fg-3">Private: no agent is told.</span>}
+          {t.github && (
+            <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="After approval, per the project's comment setting">
+              <input type="checkbox" checked={github} onChange={(e) => setGithub(e.target.checked)} className="accent-[var(--color-accent)]" />
+              Post on GitHub
+            </label>
+          )}
+          {(!agent || !send) && !(t.github && github) && <span className="font-mono text-[11px] text-fg-3">Private: no agent is told.</span>}
           <button className={cx("ml-auto", agent && send ? "btn-primary" : "btn")} disabled={!text.trim() || busy} onClick={post}>
             <ArrowUp className="size-3.5" /> {label}
           </button>
