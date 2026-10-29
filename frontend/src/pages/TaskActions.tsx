@@ -4,7 +4,7 @@ import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, Us
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { useAutoGrow } from "../lib/autoGrow";
-import { atQuery, insertMention, mentionGroups } from "../lib/mentionPicker";
+import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
 import { MentionMenu } from "../components/MentionMenu";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
@@ -256,6 +256,7 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
   const groups = query === undefined || closedAt === text ? [] : mentionGroups(agents, t.project, query);
   const flat = groups.flatMap((g) => g.agents);
   const marks: Record<string, string> = { ...(t.created_by ? { [t.created_by]: "created it" } : {}), ...(t.agent_id ? { [t.agent_id]: "on this issue" } : {}) };
+  const told = mentionedIn(text, agents);
   const pick = (a: Agent) => {
     setText((v) => insertMention(v, a));
     box.current?.focus();
@@ -344,7 +345,11 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
               Reopen and run again
             </label>
           )}
-          {(!agent || !send) && <span className="font-mono text-[11px] text-fg-3">Private: no agent is told.</span>}
+          {(!agent || !send) && (
+            <span className="font-mono text-[11px] text-fg-3">
+              {told.length > 0 ? `Private: only ${told.map((a) => `@${a.name}`).join(", ")} ${told.length > 1 ? "are" : "is"} told.` : "Private: no agent is told."}
+            </span>
+          )}
           <button className={cx("ml-auto", agent && send ? "btn-primary" : "btn")} disabled={!text.trim() || busy} onClick={post}>
             <ArrowUp className="size-3.5" /> {label}
           </button>

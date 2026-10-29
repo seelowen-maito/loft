@@ -16,7 +16,7 @@ export function MentionMenu({ groups, index, marks, onHover, onPick }: {
   return (
     <div className="mb-2 max-h-72 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Mention an agent">
       {groups.map((g, gi) => (
-        <Fragment key={g.title}>
+        <Fragment key={`group:${g.title}`}>
           <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", gi > 0 && "border-t border-line")}>{g.title}</div>
           {g.agents.map((a) => {
             const n = ++i;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { atQuery, insertMention, mentionGroups } from "../src/lib/mentionPicker.ts";
+import { atQuery, insertMention, mentionedIn, mentionGroups } from "../src/lib/mentionPicker.ts";
 
 const a = (name: string, project: string) => ({ id: name.toLowerCase().replace(/\s/g, "-"), name, project }) as never;
 const team = [a("Loft Dev", "loft"), a("Loft Dev 2", "loft"), a("Loft QA", "loft"), a("Web Dev", "shop"), a("Planner", "")];
@@ -32,4 +32,13 @@ test("the @ query is read at the end of the text, at the start of a word only", 
 test("picking inserts the full name the backend resolves, replacing what was typed", () => {
   assert.equal(insertMention("please @Lo", team[0]), "please @Loft Dev ");
   assert.equal(insertMention("@", team[3]), "@Web Dev ");
+});
+
+test("a mention counts only where the backend resolves it", () => {
+  const who = (text: string) => mentionedIn(text, team).map((x: { name: string }) => x.name);
+  assert.deepEqual(who("ping @loft dev, please"), ["Loft Dev"]);
+  assert.deepEqual(who("@Loft Dev 2 and @Web Dev."), ["Loft Dev 2", "Web Dev"], "the longer name uses its @ up, Loft Dev is not also told");
+  assert.deepEqual(who("@Web Developer"), []);
+  assert.deepEqual(who("see @Web Dev/notes.md"), []);
+  assert.deepEqual(who("mail me@Planner"), []);
 });
