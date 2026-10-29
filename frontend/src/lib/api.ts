@@ -354,6 +354,14 @@ export type Settings = {
 
 export type ApprovalMode = "ask" | "own" | "all";
 
+/** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
+export type MacAccess = {
+  items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
+  binary: string | null;
+  adhoc_signed: boolean | null;
+  host: string | null;
+};
+
 export type SettingsView = {
   settings: Settings;
   github_token_set: boolean;
@@ -418,6 +426,8 @@ export const api = {
   update: () => req<UpdateStatus>("GET", "/update"),
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
+  /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
