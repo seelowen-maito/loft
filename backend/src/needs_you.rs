@@ -253,6 +253,32 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // Closed on GitHub while an agent works on it: the user decides.
+    for t in tasks.iter().filter(|t| t.state() == "open" && crate::tasks::is_active(t) && t.github.as_ref().is_some_and(|g| g.state == "closed")) {
+        let g = t.github.as_ref().unwrap();
+        let base = format!("/api/issues/{}", t.id);
+        items.push(Item {
+            id: format!("closed_on_github:{}:{}", t.id, g.updated_at),
+            kind: "closed_on_github",
+            urgency: 2,
+            agent: t.agent_id.as_deref().and_then(name),
+            task_id: Some(t.id.clone()),
+            title: text(&t.title, MAX_TITLE),
+            reason: text(&format!("#{} was closed on GitHub while it's being worked on.", g.number), MAX_REASON),
+            text: String::new(),
+            created_at: t.updated_at.clone(),
+            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            actions: vec![
+                action("deny", "Cancel issue", "POST", format!("{base}/cancel"), json!({})),
+                action("approve", &format!("Keep working (reopens #{})", g.number), "POST", format!("{base}/keep-working"), json!({})),
+                open_task(&t.id),
+            ],
+            push: (format!("#{} was closed on GitHub", g.number), t.title.clone()),
+            project: (!t.project.is_empty()).then(|| t.project.clone()),
+            pr: None,
+        });
+    }
+
     // Comments on mirrored issues waiting to go to GitHub. Nobody is blocked, so it's worth a look, not urgent.
     // Auto-approved ones are on their way and need nobody.
     for c in state.db.task_comments_on_github("pending").map_err(e)?.into_iter().filter(|c| c.meta["github"]["auto"] != true) {

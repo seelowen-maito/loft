@@ -107,6 +107,10 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     if keep_push {
         s.push = state.settings.get().push;
     }
+    // Older clients don't know the global auto-publish switch: they keep it.
+    if s.auto_publish_all.is_none() {
+        s.auto_publish_all = state.settings.get().auto_publish_all;
+    }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),
         _ => state.settings.get().github_token,

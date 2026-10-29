@@ -93,7 +93,7 @@ export type Task = {
   /** Derived from status: done and cancelled are closed. Read-only. */
   state: "open" | "closed";
   /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
-  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string } | null;
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -363,11 +363,9 @@ export type Settings = {
   auto_update: boolean;
   show_simulator: boolean;
   messaging_rules: boolean;
-  /** Projects whose new Loft issues are published to GitHub as they're made. */
-  auto_publish: string[];
-  /** Per project: ask (every comment waits for approval), own (yours go straight) or all. */
-  comment_approval: Record<string, ApprovalMode>;
-  /** The mode of projects not in comment_approval. */
+  /** Publish new Loft issues to GitHub as they're made (projects with a GitHub repo). */
+  auto_publish_all: boolean;
+  /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
 };
 
@@ -508,8 +506,9 @@ export const api = {
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
-  /** `send`: deliver to the task's agent (else a private note); `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; reopen: boolean }) =>
+  /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
+   * `reopen`: run a finished task again with it. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
@@ -522,6 +521,8 @@ export const api = {
   deleteTask: (id: string) => req<{ ok: boolean }>("DELETE", `/issues/${id}`),
   /** Publish to GitHub: creates the GitHub issue for a Loft-only issue and links them. */
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
+  /** Closed on GitHub while being worked on: go on, and reopen it there. */
+  keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

@@ -17,6 +17,7 @@ import { ContextSize } from "./ContextSize";
 import { ResumeDialog } from "./ResumeDialog";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
+import { ATTACH } from "../../lib/attach";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
@@ -528,8 +529,8 @@ export function Chat({
               <button
                 className={cx("btn-ghost size-8 shrink-0 justify-center p-0", (pickingTask || taskId) && "text-accent")}
                 onClick={() => setPickingTask((p) => !p)}
-                aria-label="Attach a task"
-                title="Attach a task"
+                aria-label={ATTACH}
+                title={ATTACH}
                 aria-expanded={pickingTask}
               >
                 <ListTodo className="size-4" />

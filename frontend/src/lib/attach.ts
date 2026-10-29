@@ -2,6 +2,9 @@ import { useState, type Dispatch, type DragEvent, type SetStateAction } from "re
 import { api } from "./api";
 import type { Attachment } from "./useDraft";
 
+/** The action that attaches an issue (Loft or GitHub) to a chat message: label, button and picker title. */
+export const ATTACH = "Attach an issue";
+
 /** The API's limits: 3.75 MB raw (5 MB base64), and it scales anything bigger than 1568 px down anyway. */
 const MAX_IMAGE_BYTES = 3_750_000;
 const MAX_IMAGE_EDGE = 1568;

@@ -4,11 +4,14 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
-import { filtersToParams, parseFilters, type IssueFilters, type Source } from "../lib/issueFilters";
+import { filtersToParams, parseFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
-import { CommentBox, NewTaskDialog, TaskActions } from "./TaskActions";
+import { Origin } from "../components/Origin";
+import { filterIssues, SOURCES } from "../lib/issueFilter";
+import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
+import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -29,29 +32,6 @@ const STATUS_TONE: Record<string, string> = {
   done: "text-good",
   cancelled: "text-fg-3",
 };
-
-const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
-
-const SOURCES: { key: Source; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "loft", label: "Loft" },
-  { key: "github", label: "GitHub" },
-];
-
-/** Where an issue lives: the Loft house for a Loft-only one, GitHub's mark for one mirroring GitHub. */
-function Origin({ github }: { github: boolean }) {
-  return github ? (
-    <svg viewBox="0 0 16 16" className="size-3 shrink-0 text-fg-2" fill="currentColor" role="img" aria-label="On GitHub">
-      <title>On GitHub</title>
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 8 8" className="size-3 shrink-0 text-accent" shapeRendering="crispEdges" fill="currentColor" role="img" aria-label="Loft only">
-      <title>Loft only</title>
-      <path d="M3 0h2v1H3zM2 1h4v1H2zM1 2h6v1H1zM0 3h8v1H0zM1 4h1v4H1zM6 4h1v4H6zM2 7h4v1H2zM3 5h2v2H3z" />
-    </svg>
-  );
-}
 
 const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
 
@@ -127,17 +107,7 @@ export default function TasksPage() {
   const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
   const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
   const filtered = useMemo(() => {
-    const q = filters.q.toLowerCase();
-    // "#42" finds the issue mirroring GitHub #42, and only it.
-    const number = /^#\d+$/.test(q) ? Number(q.slice(1)) : null;
-    return (tasks ?? []).filter(
-      (t) =>
-        (number !== null ? t.github?.number === number : !q || t.title.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.labels.some((l) => l.toLowerCase().includes(q)) || t.owner.toLowerCase() === q.replace(/^@/, "")) &&
-        (source === "all" || (source === "github") === !!t.github) &&
-        (!project || t.project === project) &&
-        (!agentId || t.agent_id === agentId) &&
-        (!mine || t.created_by === "user"),
-    );
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || t.created_by === "user"));
   }, [tasks, filters.q, project, agentId, mine, source]);
 
   const groups = useMemo(
@@ -149,7 +119,7 @@ export default function TasksPage() {
           .sort((a, b) =>
             g.key === "closed"
               ? (b.completed_at ?? b.updated_at).localeCompare(a.completed_at ?? a.updated_at)
-              : PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || b.updated_at.localeCompare(a.updated_at),
+              : compareOpen(a, b),
           ),
       })),
     [filtered],
@@ -238,7 +208,7 @@ export default function TasksPage() {
                 </button>
                 {!folded &&
                   g.tasks.slice(0, g.key === "closed" ? 50 : undefined).map((t) => (
-                    <TaskRow key={t.id} task={t} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/tasks/${t.id}`, search: params.toString() })} />
+                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/tasks/${t.id}`, search: params.toString() })} />
                   ))}
               </section>
             );
@@ -264,7 +234,7 @@ export default function TasksPage() {
   );
 }
 
-function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent; active: boolean; onOpen: () => void }) {
+function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; agent?: Agent; active: boolean; onOpen: () => void; progress: { done: number; total: number } | null }) {
   return (
     <button onClick={onOpen} className={cx("flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors", active ? "bg-white/[0.06]" : "hover:bg-white/[0.03]")}>
       <StateIcon task={t} className="mt-0.5 size-3.5 shrink-0" />
@@ -279,6 +249,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
           {t.github && <span className="text-fg-2">· #{t.github.number}</span>}
+          {progress && <span className="text-fg-2" title="Tickets done of this spec's tickets">· {progress.done}/{progress.total} done</span>}
           {agent && <>· {agent.name}</>}
           {t.project && <>· {t.project}</>}
           {(t.priority === "high" || t.priority === "urgent") && <span className="text-warn">· {t.priority}</span>}
@@ -293,6 +264,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
 
 function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
+  const [editAsked, setEditAsked] = useState(0);
   // Links keep the list's filters (they're in the URL).
   const { search } = useLocation();
   useEffect(() => {
@@ -345,7 +317,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
           {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
         </div>
-        {(t.labels.length > 0 || t.owner) && (
+        {!t.github && (t.labels.length > 0 || t.owner) && (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
             {t.labels.length > 0 && (
               <div className="flex flex-wrap items-center gap-1">
@@ -362,9 +334,14 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} repo={repos[t.project]} />
+          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
         </div>
       </header>
+
+      {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
+      {t.state === "open" && !t.agent_id && !isSpec(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
+      {t.state === "open" && !t.github && <PublishCard task={t} repo={repos[t.project]} onEdit={() => setEditAsked((n) => n + 1)} />}
+      {t.github && <OwnedBy task={t} agent={agent} deps={deps} />}
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
@@ -402,8 +379,43 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </ol>
         )}
         <div className="mt-4">
-          <CommentBox task={t} agent={agent} />
+          <CommentBox task={t} agent={agent} agents={agents} />
         </div>
+      </section>
+    </div>
+  );
+}
+
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5 text-[13px]">
+      <span className="text-fg-3">{label}</span>
+      <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-fg-2">{children}</span>
+    </div>
+  );
+}
+
+/** A mirrored issue's fields, split by who owns them: GitHub (edits go there) and Loft (never sent). */
+function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Task[] }) {
+  const g = t.github!;
+  const open = deps.filter((d) => d.state === "open").length;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <section className="panel p-4">
+        <div className="eyebrow mb-2">On GitHub · {g.repo}#{g.number}</div>
+        <Fact label="State">{g.state === "open" ? <><CircleDot className="size-3.5 text-good" /> Open</> : <><CircleCheck className="size-3.5 text-merged" /> Closed</>}</Fact>
+        <Fact label="Labels">{t.labels.length ? t.labels.map((l) => <LabelChip key={l} name={l} />) : <span className="text-fg-3">none</span>}</Fact>
+        <Fact label="Owner">{t.owner ? <><UserRound className="size-3.5 text-fg-3" /> <span className="font-mono">{t.owner}</span></> : <span className="text-fg-3">nobody</span>}</Fact>
+        <Fact label="Blocked by">{deps.length ? `${open} open of ${deps.length}` : <span className="text-fg-3">nothing</span>}</Fact>
+        <div className="mt-2 font-mono text-[10.5px] text-fg-3">Title, description, labels, owner, open/closed and links live on GitHub; edits here go there.</div>
+      </section>
+      <section className="panel p-4">
+        <div className="eyebrow mb-2">In Loft</div>
+        <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
+        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.lead} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
+        <Fact label="Priority">{t.priority}</Fact>
+        <Fact label="When done">closes #{g.number} on GitHub</Fact>
+        <div className="mt-2 font-mono text-[10.5px] text-fg-3">Who works on it, its progress, priority and notes stay in Loft.</div>
       </section>
     </div>
   );

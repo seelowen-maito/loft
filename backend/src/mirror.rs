@@ -297,6 +297,8 @@ fn link(repo: &str, i: &Value) -> GithubLink {
         url: i["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{repo}/issues/{number}")),
         state: i["state"].as_str().unwrap_or("open").to_string(),
         updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
+        sub_total: i["sub_issues_summary"]["total"].as_i64().unwrap_or(0),
+        sub_done: i["sub_issues_summary"]["completed"].as_i64().unwrap_or(0),
     }
 }
 
@@ -314,11 +316,16 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             }
             // Open/closed follows GitHub only when GitHub moved: a Loft close still being written isn't undone.
             let moved = t.github.as_ref().is_some_and(|g| g.state != l.state) && t.state() != l.state;
+            // Closed on GitHub while an agent works on it: the work isn't stopped behind the user's back.
+            // The issue stays open, the mismatch is shown (`github.state` closed, issue open) and asked about.
+            let working = crate::tasks::is_active(&t);
             let status = match (moved, l.state.as_str()) {
+                (true, "closed") if working => None,
                 (true, "closed") => Some(if i["state_reason"] == "not_planned" { "cancelled" } else { "done" }),
                 (true, _) => Some("inbox"),
                 _ => None,
             };
+            let closed_under_work = moved && working && l.state == "closed";
             t.title = if title.is_empty() { t.title } else { title };
             t.description = description;
             t.labels = labels;
@@ -334,6 +341,10 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
                 if let Some(s) = status {
                     let text = match s { "done" => "Closed on GitHub", "cancelled" => "Closed on GitHub as not planned", _ => "Reopened on GitHub" };
                     crate::tasks::log_status(state, &t, FROM_GITHUB, text);
+                }
+                if closed_under_work {
+                    let n = t.github.as_ref().map_or(0, |g| g.number);
+                    crate::tasks::log_status(state, &t, FROM_GITHUB, &format!("#{n} was closed on GitHub while it's being worked on: cancel it, or keep working (reopens #{n})"));
                 }
                 report.updated += 1;
             }
@@ -385,7 +396,7 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
         return Ok(t);
     }
     if t.project.trim().is_empty() {
-        return Err("This Loft issue has no project, so there's no GitHub repo to publish it to.".into());
+        return Err("Pick a project first: this Loft issue has no project, so there's no GitHub repo to publish it to.".into());
     }
     let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| format!("{e}, so there's no GitHub repo to publish it to."))?;
     if crate::github::token(state).is_none() {
@@ -424,14 +435,39 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
     Ok(t)
 }
 
+/// `POST /api/issues/{id}/keep-working`: the answer to "closed on GitHub while being worked on": the
+/// work goes on and the GitHub issue is reopened, so both sides agree again.
+pub async fn keep_working(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiError> {
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    let Some(repo) = t.github.as_ref().map(|g| g.repo.clone()) else {
+        return Err(crate::api::bad("It isn't on GitHub, so there's nothing to reopen."));
+    };
+    // Held like a sync or an edit, so a poll can't apply GitHub's close in between; then checked again.
+    let cursor = state.mirror.cursor(&repo);
+    let _held = cursor.lock().await;
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    if !crate::tasks::is_active(&t) {
+        return Err(crate::api::bad("Nobody is working on it now, so there's nothing to keep working on."));
+    }
+    let Some(g) = t.github.clone().filter(|g| g.state == "closed" && t.state() == "open") else {
+        return Err(crate::api::bad("It isn't closed on GitHub, so there's nothing to reopen."));
+    };
+    let path = format!("/repos/{}/issues/{}", g.repo, g.number);
+    let v = crate::github::request(&state, reqwest::Method::PATCH, &path, Some(json!({ "state": "open" }))).await.map_err(|e| crate::api::bad(format!("Couldn't reopen #{} on GitHub: {e}", g.number)))?;
+    keep_link(&state, &g.repo, &v);
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    crate::tasks::log_status(&state, &t, "user", &format!("Kept working; #{} reopened on GitHub", g.number));
+    Ok(Json(json!(t)))
+}
+
 /// `POST /api/issues/{id}/publish`
 pub async fn publish_route(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiError> {
     publish(&state, &id, "user").await.map(|t| Json(json!(t))).map_err(crate::api::bad)
 }
 
-/// Publishes a new Loft issue in the background when its project has auto-publish on.
+/// Publishes a new Loft issue in the background when auto-publish is on.
 pub fn auto_publish(state: &AppState, t: &Task) {
-    if t.github.is_some() || !state.settings.get().auto_publish.iter().any(|p| p == t.project.trim()) {
+    if t.github.is_some() || state.settings.get().auto_publish_all != Some(true) {
         return;
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
@@ -594,7 +630,13 @@ fn patch(before: &Task, after: &Task) -> Value {
 /// it, GitHub wins: its version is brought in instead. A failure is noted in the thread, never fatal.
 pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
     let Some(g) = after.github.clone() else { return };
-    let body = patch(before, after);
+    let mut body = patch(before, after);
+    // Already closed on GitHub (cancelling after "closed while being worked on"): leave GitHub's reason as it is.
+    if g.state == "closed" && body["state"] == "closed" {
+        let o = body.as_object_mut().unwrap();
+        o.remove("state");
+        o.remove("state_reason");
+    }
     let fields = body.as_object().is_some_and(|o| !o.is_empty());
     if !fields && !links_changed(before, after) {
         return;
@@ -817,7 +859,7 @@ pub(crate) mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!((&t["title"], &t["description"], &t["labels"], &t["owner"]), (&json!("Retry cap"), &json!("Body of Retry cap"), &json!(["bug"]), &json!("octo-dev")));
         assert_eq!((&t["project"], &t["status"], &t["state"], &t["created_by"]), (&json!("mir-open"), &json!("inbox"), &json!("open"), &json!("github")));
-        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z" }));
+        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0 }));
         let thread = st.db.list_task_comments(t["id"].as_str().unwrap(), 10, None).unwrap();
         assert_eq!(thread[0].text, "Mirrored from GitHub #1");
 
@@ -1193,7 +1235,7 @@ pub(crate) mod tests {
         project(&st, "pub-auto", Some("https://github.com/octo/pub-auto"));
         project(&st, "pub-plain", None);
         let mut s = st.settings.get();
-        s.auto_publish = vec!["pub-auto".into(), "pub-plain".into()];
+        s.auto_publish_all = Some(true);
         st.settings.save(s).unwrap();
         fake.route("POST", "/repos/octo/pub-auto/issues", 201, gh(repo, 3, "Auto", "open", "2026-10-28T10:00:00Z"));
 
@@ -1295,48 +1337,151 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_approval_mode_decides_which_comments_go_straight_to_github() {
+    async fn the_global_approval_mode_decides_which_comments_go_straight_to_github() {
         let st = state();
         let fake = own_fake(&st);
         let a = crate::tasks::tests::agent(&st, "Builder");
         let mut ids = HashMap::new();
-        for (p, repo) in [("ap-ask", "octo/ap-ask"), ("ap-own", "octo/ap-own"), ("ap-all", "octo/ap-all")] {
+        for (p, repo) in [("ap-one", "octo/ap-one"), ("ap-two", "octo/ap-two")] {
             let id = one_mirrored(&st, &fake, p, repo, "2026-10-02T00:00:00Z").await;
             let _ = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "agent_id": a.id }))).await.unwrap();
             fake.route("POST", &format!("/repos/{repo}/issues/1/comments"), 201, json!({ "id": 700 }));
             ids.insert(p, id);
         }
-        let mut s = st.settings.get();
-        assert_eq!((s.comment_approval_default.as_str(), s.approval_mode("ap-ask")), ("ask", "ask"), "the default asks");
-        s.comment_approval = [("ap-own".to_string(), "own".to_string()), ("ap-all".to_string(), "all".to_string())].into();
-        st.settings.save(s).unwrap();
         let posts = |repo: &str| fake.seen(&format!("/repos/{repo}/issues/1/comments")).into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
+        let set_mode = |m: &str| {
+            let mut s = st.settings.get();
+            s.comment_approval_default = m.into();
+            // Old per-project choices are ignored.
+            s.comment_approval = [("ap-one".to_string(), "all".to_string())].into();
+            st.settings.save(s).unwrap();
+        };
 
-        // Ask: both wait.
-        let u = comment_by(&st, &ids["ap-ask"], &a, true, "ask: mine").await;
-        let g = comment_by(&st, &ids["ap-ask"], &a, false, "ask: agent's").await;
-        assert_eq!((settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone()), (json!("pending"), json!("pending")));
-        // Own: yours goes, the agent's waits.
-        let u = comment_by(&st, &ids["ap-own"], &a, true, "own: mine").await;
-        let g = comment_by(&st, &ids["ap-own"], &a, false, "own: agent's").await;
-        assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
-        assert_eq!(settled(&st, g.id).await, json!({ "state": "pending" }));
-        // All: both go, labelled auto-approved.
-        let u = comment_by(&st, &ids["ap-all"], &a, true, "all: mine").await;
-        let g = comment_by(&st, &ids["ap-all"], &a, false, "all: agent's").await;
-        assert_eq!((settled(&st, u.id).await["auto"].clone(), settled(&st, g.id).await["state"].clone()), (json!(true), json!("posted")));
+        // Ask (the default): every comment in every project waits.
+        assert_eq!(st.settings.get().approval_mode(), "ask");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "ask: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "ask: agent's").await;
+            assert_eq!((settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone()), (json!("pending"), json!("pending")));
+        }
+        assert!(posts("octo/ap-one").is_empty() && posts("octo/ap-two").is_empty());
 
-        assert!(posts("octo/ap-ask").is_empty());
-        assert_eq!(posts("octo/ap-own"), [json!({ "body": "own: mine" })]);
-        assert_eq!(posts("octo/ap-all"), [json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
-        let waiting: Vec<String> = crate::needs_you::collect(&st).unwrap().into_iter().filter(|i| i.kind == "comment_approval").map(|i| i.task_id.unwrap()).collect();
-        assert_eq!(waiting, [ids["ap-ask"].clone(), ids["ap-ask"].clone(), ids["ap-own"].clone()]);
+        // Own: yours goes, the agent's waits, in both projects.
+        set_mode("own");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "own: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "own: agent's").await;
+            assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
+            assert_eq!(settled(&st, g.id).await, json!({ "state": "pending" }));
+        }
+        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" })]);
 
-        // A project with no mode of its own takes the default, here changed to own.
-        let mut s = st.settings.get();
-        s.comment_approval_default = "own".into();
-        st.settings.save(s).unwrap();
-        assert_eq!(st.settings.get().approval_mode("ap-new"), "own");
+        // All: both go, labelled auto-approved, in both projects.
+        set_mode("all");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "all: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "all: agent's").await;
+            assert_eq!((settled(&st, u.id).await["auto"].clone(), settled(&st, g.id).await["state"].clone()), (json!(true), json!("posted")));
+        }
+        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" }), json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
+
+        // Anything unknown asks.
+        set_mode("sometimes");
+        assert_eq!(st.settings.get().approval_mode(), "ask");
+    }
+
+
+    #[tokio::test]
+    async fn an_issue_takes_its_agents_project_and_one_without_a_project_says_so() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/pub-proj";
+        project(&st, "pub-proj", Some("https://github.com/octo/pub-proj"));
+        let mut dev = crate::tasks::tests::agent(&st, "Dev");
+        dev.project = "pub-proj".into();
+        st.db.save_agent(&dev).unwrap();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+
+        // Through the API and the Lead's create_issue: no project given, the assignee's.
+        let (code, Json(v)) = crate::tasks::create_task(State(st.clone()), Json(json!({ "title": "Via API", "agent_id": dev.id }))).await.unwrap();
+        assert_eq!((code.as_u16(), &v["project"]), (201, &json!("pub-proj")));
+        crate::tasks::mcp_call(&st, &lead, "create_issue", &json!({ "title": "Via Lead", "agent": "Dev" }), |k: &str| if k == "Dev" { Ok(dev.clone()) } else { Err(k.to_string()) }).unwrap().unwrap();
+        let by_lead = st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Via Lead").unwrap();
+        assert_eq!(by_lead.project, "pub-proj");
+        // An explicit project wins.
+        let (_, Json(v)) = crate::tasks::create_task(State(st.clone()), Json(json!({ "title": "Mine", "agent_id": dev.id, "project": "other" }))).await.unwrap();
+        assert_eq!(v["project"], "other");
+
+        // No project: Publish is refused with the reason, and GitHub isn't asked.
+        let (bare, _) = crate::tasks::create(&st, &json!({ "title": "Bare" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(bare.id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("Pick a project first"), "{}", err.1);
+        assert!(fake.seen("/").is_empty());
+
+        // Set the project through PATCH (both names): then it publishes.
+        let Json(v) = crate::tasks::update(State(st.clone()), axum::extract::Path(bare.id.clone()), Json(json!({ "project": "pub-proj" }))).await.unwrap();
+        assert_eq!(v["project"], "pub-proj");
+        fake.route("POST", "/repos/octo/pub-proj/issues", 201, gh(repo, 5, "Bare", "open", "2026-10-29T00:00:00Z"));
+        let Json(v) = publish_route(State(st.clone()), axum::extract::Path(bare.id)).await.unwrap();
+        assert_eq!(v["github"]["number"], 5);
+    }
+
+    #[tokio::test]
+    async fn closed_on_github_while_being_worked_on_asks_the_user_instead() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cw";
+        let id = one_mirrored(&st, &fake, "cw", repo, "2026-10-02T00:00:00Z").await;
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+
+        // Someone closes it on GitHub mid-work.
+        fake.route("GET", "/repos/octo/cw/issues", 200, json!([gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z")]));
+        fake.route("GET", "/repos/octo/cw/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
+        sync_project(&st, "cw", true).await.unwrap();
+        let t = st.db.get_task(&id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.state(), t.github.as_ref().unwrap().state.as_str()), ("in_progress", "open", "closed"), "the work isn't stopped");
+        assert!(st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("#1 was closed on GitHub while it's being worked on")));
+        let items = crate::needs_you::collect(&st).unwrap();
+        let ask: Vec<_> = items.iter().filter(|i| i.kind == "closed_on_github").collect();
+        assert_eq!(ask.len(), 1);
+
+        // Keep working: GitHub reopens it, and the question goes away.
+        fake.route("PATCH", "/repos/octo/cw/issues/1", 200, gh(repo, 1, "Retry cap", "open", "2026-10-06T00:00:00Z"));
+        let Json(v) = keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        assert_eq!((&v["status"], &v["github"]["state"]), (&json!("in_progress"), &json!("open")));
+        let patched: Vec<Value> = fake.seen("/repos/octo/cw/issues/1").into_iter().filter(|r| r.method == "PATCH").map(|r| r.body).collect();
+        assert_eq!(patched, [json!({ "state": "open" })]);
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "closed_on_github"));
+        assert!(keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.is_err(), "nothing to reopen now");
+
+        // Not being worked on (here: cancelled): Keep working is refused and GitHub isn't asked.
+        let before = fake.seen("/repos/octo/cw/issues/1").len();
+        let mut t = st.db.get_task(&id).unwrap().unwrap();
+        t.status = "ready".into();
+        t.github.as_mut().unwrap().state = "closed".into();
+        st.db.save_task(&t).unwrap();
+        let err = keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("Nobody is working on it now"), "{}", err.1);
+        assert_eq!(fake.seen("/repos/octo/cw/issues/1").len(), before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_a_github_close_leaves_githubs_reason_alone() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cw2";
+        let id = one_mirrored(&st, &fake, "cw2", repo, "2026-10-02T00:00:00Z").await;
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        fake.route("GET", "/repos/octo/cw2/issues", 200, json!([]));
+        fake.route("GET", "/repos/octo/cw2/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
+        sync_project(&st, "cw2", true).await.unwrap();
+        let _ = crate::tasks::cancel(State(st.clone()), axum::extract::Path(id.clone()), None).await.unwrap();
+        assert_eq!(st.db.get_task(&id).unwrap().unwrap().status, "cancelled");
+        assert!(fake.seen("/repos/octo/cw2/issues/1").iter().all(|r| r.method == "GET"), "no PATCH: it was already closed");
     }
 
 
@@ -1434,7 +1579,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "priv", repo, "2026-10-02T00:00:00Z").await;
         fake.route("POST", "/repos/octo/priv/issues/1/comments", 201, json!({ "id": 800 }));
         let mut s = st.settings.get();
-        s.comment_approval = [("priv".to_string(), "all".to_string())].into();
+        s.comment_approval_default = "all".into();
         st.settings.save(s).unwrap();
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
@@ -1458,4 +1603,69 @@ pub(crate) mod tests {
         assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "comment_approval"));
     }
 
+    #[tokio::test]
+    async fn post_on_github_says_where_a_comment_goes_agent_or_not() {
+        let st = state();
+        let fake = own_fake(&st);
+        let id = one_mirrored(&st, &fake, "gh-flag", "octo/gh-flag", "2026-10-02T00:00:00Z").await;
+        fake.route("POST", "/repos/octo/gh-flag/issues/1/comments", 201, json!({ "id": 801 }));
+        let mut s = st.settings.get();
+        s.comment_approval_default = "all".into();
+        st.settings.save(s).unwrap();
+        assert!(st.db.get_task(&id).unwrap().unwrap().agent_id.is_none());
+        let post = |b: Value| {
+            let st = st.clone();
+            let id = id.clone();
+            async move {
+                let body: crate::tasks::CommentBody = serde_json::from_value(b).unwrap();
+                let _ = crate::tasks::add_comment(State(st), axum::extract::Path(id), Json(body)).await.unwrap();
+            }
+        };
+
+        // Nobody works on it: a sent comment still goes to GitHub, unless it says not to.
+        post(json!({ "text": "Shipping Friday", "send": true })).await;
+        post(json!({ "text": "Only for Loft", "send": true, "github": false })).await;
+        post(json!({ "text": "A private note", "send": false })).await;
+        post(json!({ "text": "Tell GitHub anyway", "send": false, "github": true })).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let posted: Vec<Value> = fake.seen("/repos/octo/gh-flag/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "body": "Shipping Friday" }), json!({ "body": "Tell GitHub anyway" })]);
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        let private = |text: &str| thread.iter().find(|c| c.text == text).unwrap().meta["private"].clone();
+        assert_eq!(private("Shipping Friday"), json!(false));
+        assert_eq!(private("A private note"), json!(true));
+    }
+
+
+    #[tokio::test]
+    async fn a_spec_keeps_githubs_sub_issue_count_and_is_never_run_as_one_task() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/spec";
+        project(&st, "spec", Some("https://github.com/octo/spec"));
+        let mut one = gh(repo, 42, "Checkout spec", "open", "2026-10-02T00:00:00Z");
+        one["labels"] = json!([{ "name": "spec" }]);
+        // #43 is closed and not mirrored; #44 and #45 are open. GitHub counts all three.
+        one["sub_issues_summary"] = json!({ "total": 3, "completed": 1, "percent_completed": 33 });
+        fake.route("GET", "/repos/octo/spec/issues", 200, json!([one, gh(repo, 44, "Store", "open", "2026-10-02T00:00:00Z"), gh(repo, 45, "UI", "open", "2026-10-02T00:00:00Z")]));
+        fake.route("GET", "/repos/octo/spec/issues/42/sub_issues", 200, json!([{ "number": 44, "id": 4400 }, { "number": 45, "id": 4500 }]));
+        sync_project(&st, "spec", true).await.unwrap();
+
+        let spec = linked(&st, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == 42)).unwrap();
+        let g = spec.github.as_ref().unwrap();
+        assert_eq!((g.sub_total, g.sub_done), (3, 1), "GitHub's own numbers, not the two mirrored children");
+        assert_eq!(mirrored(&st, repo)[0]["github"]["sub_total"], 3);
+
+        // The spec is never handed to an agent as one task; nothing starts.
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
+        assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
+        assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
+        // GitHub labels are case-insensitive: "Spec" is a spec too.
+        let mut other = st.db.get_task(&spec.id).unwrap().unwrap();
+        other.labels = vec!["SPEC".into()];
+        st.db.save_task(&other).unwrap();
+        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+    }
 }

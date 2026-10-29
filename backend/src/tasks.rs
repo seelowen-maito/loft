@@ -50,9 +50,9 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     // Progress notes, status entries, private notes and the note handed over with the work stay in Loft,
     // whatever the approval mode.
     let mut auto = false;
-    let loft_only = meta["private"] == true || meta["handoff"] == true;
+    let loft_only = meta["private"] == true || meta["handoff"] == true || meta["loft_only"] == true;
     if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB && !loft_only {
-        auto = match state.settings.get().approval_mode(&t.project) {
+        auto = match state.settings.get().approval_mode() {
             "all" => true,
             "own" => author == "user",
             _ => false,
@@ -79,7 +79,7 @@ pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
 }
 
-fn is_active(t: &Task) -> bool {
+pub(crate) fn is_active(t: &Task) -> bool {
     matches!(t.status.as_str(), "in_progress" | "blocked" | "waiting_approval")
 }
 
@@ -252,8 +252,14 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
         return Err("title is required".into());
     }
     apply_fields(state, &mut t, p)?;
-    if t.agent_id.is_some() {
+    if let Some(a) = t.agent_id.as_deref() {
         t.kind = "work".into();
+        // No project given: the agent's, so the issue can be published to its repo.
+        if t.project.is_empty()
+            && let Ok(Some(agent)) = state.db.get_agent(a)
+        {
+            t.project = agent.project.trim().to_string();
+        }
     }
     t.status = match p.get("status").and_then(|v| v.as_str()) {
         Some(s) if ["inbox", "ready"].contains(&s) => s.into(),
@@ -311,6 +317,9 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     }
     if is_closed(&t) {
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is {}. Reopen it before running it again.", t.status)));
+    }
+    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
+        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
     }
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
@@ -376,6 +385,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/comments", at_get(list_comments).post(add_comment))
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
+        .route("/{id}/keep-working", post(crate::mirror::keep_working))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
 }
@@ -622,6 +632,8 @@ pub struct CommentBody {
     /// Deliver it to the task's agent (default). False keeps it as a private note on the task.
     #[serde(default = "yes")]
     send: bool,
+    /// On a mirrored issue: post it on GitHub too, after approval. Defaults to `send`, agent or not.
+    github: Option<bool>,
     /// On a finished task: reopen it and run it again with this comment as the instruction.
     #[serde(default)]
     reopen: bool,
@@ -664,8 +676,12 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
     }
     let deliver = b.send && agent.is_some();
+    let to_github = t.github.is_some() && b.github.unwrap_or(b.send);
     let mut meta = client_id.map_or(json!({}), |c| json!({ "client_id": c }));
-    meta["private"] = json!(!deliver);
+    meta["private"] = json!(!deliver && !to_github);
+    if !to_github {
+        meta["loft_only"] = json!(true);
+    }
     let who = mentioned(&state, "user", text);
     if !who.is_empty() {
         meta["mentions"] = json!(who.iter().map(|a| a.id.clone()).collect::<Vec<_>>());
@@ -988,7 +1004,8 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                     p[k] = json!(s(k));
                 }
             }
-            if s("project").is_empty() && !me.project.is_empty() {
+            // No project given: the assignee's (in `create`), else the creating agent's.
+            if s("project").is_empty() && assignee.is_none() && !me.project.is_empty() {
                 p["project"] = json!(me.project);
             }
             let (t, _) = create(state, &p, &me.id)?;
@@ -1157,12 +1174,12 @@ pub(crate) mod tests {
             mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "note": note }), find).unwrap().unwrap();
         }
         mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "status": "done", "summary": "Fixed." }), find).unwrap().unwrap();
-        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, reopen: false })).await.unwrap();
+        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
         let c = c["comment"].clone();
         // A retried post isn't added twice.
-        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, reopen: false })).await.unwrap();
+        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
         assert_eq!((code, again["comment"]["id"].clone()), (StatusCode::OK, c["id"].clone()));
-        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, reopen: false })).await.is_err());
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, github: None, reopen: false })).await.is_err());
 
         let Json(thread) = list_comments(State(st.clone()), Path(t.id.clone()), Query(CommentsQuery { limit: None, before: None })).await.unwrap();
         let rows: Vec<(String, String)> = thread.as_array().unwrap().iter().map(|c| (c["kind"].as_str().unwrap().into(), c["text"].as_str().unwrap().into())).collect();
@@ -1187,7 +1204,7 @@ pub(crate) mod tests {
     }
 
     fn comment(text: &str, send: bool, reopen: bool) -> Json<CommentBody> {
-        Json(CommentBody { text: text.into(), client_id: None, send, reopen })
+        Json(CommentBody { text: text.into(), client_id: None, send, github: None, reopen })
     }
 
     /// An agent marked busy, so whatever reaches it is queued instead of starting a real claude run.
@@ -1243,7 +1260,7 @@ pub(crate) mod tests {
         }
         // A mirrored issue, so it's also clear a mention doesn't wait for GitHub approval.
         let (mut t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": worker.id }), "user").unwrap();
-        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into() });
+        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into(), ..Default::default() });
         st.db.save_task(&t).unwrap();
 
         // You mention the reviewer in a private note: it reaches the reviewer, tagged with the issue, and not the worker.
