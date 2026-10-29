@@ -40,6 +40,10 @@ _Avoid_: Notification, new message, unread message
 A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
 _Avoid_: Ping, DM, hand-off
 
+**Draft**:
+A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached task. Each agent keeps its own until it is sent or the agent's context is cleared.
+_Avoid_: Unsent message, pending message
+
 **Task**:
 An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
 _Avoid_: Ticket, job, issue
