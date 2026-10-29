@@ -47,10 +47,12 @@ test("only a whole name is a mention", () => {
   assert.deepEqual(mentionRanges("@Loft Devx", AGENTS), []);
   assert.deepEqual(mentionRanges("@Loft Dev-ops", AGENTS), []);
   assert.deepEqual(mentionRanges("@Web Developer here", AGENTS), [[0, 14]], "longest name wins");
+  assert.deepEqual(mentionRanges("@Loft Dev hi", ["Loft", "Loft Dev"]), [[0, 9]], "longest name wins, whatever the order");
 });
 
 test("an email, a file path or an unknown agent isn't a mention", () => {
   assert.deepEqual(mentionRanges("mail sam@QA.com", AGENTS), []);
+  assert.deepEqual(mentionRanges("sam@QA hi", AGENTS), [], "only an @ that starts a word");
   assert.deepEqual(mentionRanges("read @qa/report.md and @QA.txt", AGENTS), []);
   assert.deepEqual(mentionRanges("ask @QA. Thanks", AGENTS), [[4, 7]], "a closing period still mentions");
   assert.deepEqual(mentionRanges("@Nobody hi", AGENTS), []);

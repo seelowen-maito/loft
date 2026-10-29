@@ -35,7 +35,7 @@ export function mentionRanges(text: string, agents: string[]): [number, number][
  * `agents`, for the overlay that colours them. */
 export function highlightParts(text: string, commands: string[], agents: string[]): { text: string; accent: boolean }[] {
   const command = commandSpan(text, commands);
-  const ranges = [...(command > 0 ? [[0, command] as [number, number]] : []), ...mentionRanges(text, agents).filter(([s]) => s >= command)];
+  const ranges = [...(command > 0 ? [[0, command] as [number, number]] : []), ...mentionRanges(text, agents)];
   const parts: { text: string; accent: boolean }[] = [];
   let at = 0;
   for (const [s, e] of ranges) {
