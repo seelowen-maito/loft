@@ -212,6 +212,25 @@ struct HBTask: Codable, Identifiable, Hashable {
     var isDelegated: Bool { createdBy != "user" }
 }
 
+/// An entry in a Loft issue's thread (backend db.rs `TaskComment`): a comment, an agent's note, or a status change.
+struct TaskComment: Codable, Identifiable, Hashable {
+    let id: Int64
+    var taskId: String
+    /// "user", an agent's id, or "github" for a comment that came from the GitHub issue.
+    var author: String
+    /// comment | note | status
+    var kind: String
+    var text: String
+    var meta: JSONValue?
+    var createdAt: Date
+
+    /// Where it stands with GitHub, on a mirrored issue: pending (waits for your approval), posted, kept
+    /// (stays in Loft) or from_github. Nil when the issue isn't on GitHub.
+    var githubState: String? { meta?["github"]?["state"]?.stringValue }
+    /// The GitHub login, or an agent's name, as the server put it.
+    var authorName: String? { meta?["author_name"]?.stringValue }
+}
+
 struct ActivityItem: Codable, Identifiable, Hashable {
     let id: String
     var type: String

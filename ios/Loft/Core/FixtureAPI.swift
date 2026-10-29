@@ -621,6 +621,53 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
+    /// t1's thread: a GitHub comment, a status change, an agent's note, a comment waiting for GitHub (the Needs you
+    /// item's 77) and one of yours already posted.
+    private var comments: [TaskComment] = {
+        let now = Date()
+        func c(_ id: Int64, _ author: String, _ kind: String, _ text: String, _ minutes: Double, _ meta: JSONValue? = nil) -> TaskComment {
+            TaskComment(id: id, taskId: "t1", author: author, kind: kind, text: text, meta: meta, createdAt: now.addingTimeInterval(-minutes * 60))
+        }
+        return [
+            c(70, "github", "comment", "Can the sync time show in the user's time zone?", 50, ["author_name": "octo-dev", "github": ["state": "from_github"]]),
+            c(71, "user", "status", "Started by Orchestrator", 40),
+            c(72, "be", "note", "3 of 4 endpoints done", 20, ["author_name": "Backend Agent"]),
+            c(77, "be", "comment", "Backend is done: 4 endpoints with tests. iOS screen next.", 2, ["author_name": "Backend Agent", "github": ["state": "pending"]]),
+            c(78, "user", "comment", "Yes, local time with the zone name.", 1, ["github": ["state": "posted"]]),
+        ]
+    }()
+
+    func taskComments(id: String) async throws -> [TaskComment] {
+        try check()
+        return locked { comments.filter { $0.taskId == id } }
+    }
+
+    func addTaskComment(id: String, text: String, clientId: String) async throws {
+        try check()
+        locked {
+            let mirrored = taskList.first { $0.id == id }?.github != nil
+            comments.append(TaskComment(id: (comments.map(\.id).max() ?? 0) + 1, taskId: id, author: "user", kind: "comment", text: text,
+                                        meta: mirrored ? ["github": ["state": "pending"]] : nil, createdAt: Date()))
+        }
+    }
+
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            if let text { comments[i].text = text }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "posted"]]
+        }
+    }
+
+    func keepComment(taskId: String, commentId: Int64) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "kept"]]
+        }
+    }
+
     /// As the server: a Loft-only issue in a project gets the next number on octo/<project>.
     func publishTask(id: String) async throws -> HBTask {
         try check()

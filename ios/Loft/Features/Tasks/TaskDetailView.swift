@@ -169,6 +169,8 @@ struct TaskDetailView: View {
                 }
             }
 
+            TaskThreadSection(task: t)
+
             let history = store.activity.filter { $0.taskId == t.id }
             if !history.isEmpty {
                 Section("History") {
