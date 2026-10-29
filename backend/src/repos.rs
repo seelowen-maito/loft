@@ -15,13 +15,27 @@ use tokio::process::Command;
 use crate::state::AppState;
 
 const ACTIVITY_DAYS: i64 = 182;
-const GIT_TTL: Duration = Duration::from_secs(30);
-const GITHUB_TTL: Duration = Duration::from_secs(300);
+const GIT_TTL: Duration = Duration::from_secs(120);
+/// The Repos page's GitHub numbers are kept this long; its Refresh button asks again sooner.
+const GITHUB_TTL: Duration = Duration::from_secs(15 * 60);
+/// Stars, forks, watchers and the description change rarely: read every few hours.
+const META_TTL: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Default)]
 pub struct RepoCache {
     git: Mutex<Option<(Instant, Vec<RepoSummary>)>>,
-    github: Mutex<HashMap<String, (Instant, GithubInfo)>>,
+    github: Mutex<HashMap<String, Cached>>,
+}
+
+/// A repo's GitHub numbers as last read, with what's needed to ask again cheaply.
+#[derive(Clone)]
+struct Cached {
+    at: Instant,
+    info: GithubInfo,
+    /// ETag of the open issues and PRs list: unchanged, it answers a free 304.
+    etag: Option<String>,
+    /// When the repo's own numbers (stars, description...) were read.
+    meta_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -437,32 +451,36 @@ fn to_item(v: &Value) -> GithubItem {
     }
 }
 
-async fn fetch_github(state: &AppState, slug: &str) -> GithubInfo {
-    let mut info = GithubInfo { slug: slug.into(), ..Default::default() };
-    let (p_repo, p_pulls, p_issues) = (
-        format!("/repos/{slug}"),
-        format!("/repos/{slug}/pulls?state=open&per_page=30"),
-        format!("/repos/{slug}/issues?state=open&per_page=30"),
-    );
-    let (repo, pulls, issues) = tokio::join!(gh_get(state, &p_repo), gh_get(state, &p_pulls), gh_get(state, &p_issues));
-    match repo {
-        Ok(r) => {
-            info.stars = r["stargazers_count"].as_i64().unwrap_or(0);
-            info.forks = r["forks_count"].as_i64().unwrap_or(0);
-            info.watchers = r["subscribers_count"].as_i64().unwrap_or(0);
-            info.default_branch = r["default_branch"].as_str().unwrap_or("").into();
-            info.description = r["description"].as_str().map(Into::into);
+/// A repo's open PRs and issues with one conditional request (the issues list holds both), and its
+/// own numbers only when they're older than `META_TTL`. `prev` is the last read, kept on a 304.
+async fn fetch_github(state: &AppState, slug: &str, prev: Option<Cached>) -> Cached {
+    let mut c = prev.unwrap_or(Cached { at: Instant::now(), info: GithubInfo { slug: slug.into(), ..Default::default() }, etag: None, meta_at: None });
+    c.info.error = None;
+    if c.meta_at.is_none_or(|t| t.elapsed() >= META_TTL) {
+        match gh_get(state, &format!("/repos/{slug}")).await {
+            Ok(r) => {
+                c.info.stars = r["stargazers_count"].as_i64().unwrap_or(0);
+                c.info.forks = r["forks_count"].as_i64().unwrap_or(0);
+                c.info.watchers = r["subscribers_count"].as_i64().unwrap_or(0);
+                c.info.default_branch = r["default_branch"].as_str().unwrap_or("").into();
+                c.info.description = r["description"].as_str().map(Into::into);
+                c.meta_at = Some(Instant::now());
+            }
+            Err(e) => c.info.error = Some(e.to_string()),
         }
-        Err(e) => info.error = Some(e.to_string()),
     }
-    if let Ok(Value::Array(p)) = pulls {
-        info.pulls = p.iter().map(to_item).collect();
+    match crate::github::get_if_changed(state, &format!("/repos/{slug}/issues?state=open&per_page=60"), c.etag.as_deref()).await {
+        Ok(Some((Value::Array(items), etag))) => {
+            let (pulls, issues): (Vec<&Value>, Vec<&Value>) = items.iter().partition(|v| v.get("pull_request").is_some());
+            c.info.pulls = pulls.into_iter().take(30).map(to_item).collect();
+            c.info.issues = issues.into_iter().take(30).map(to_item).collect();
+            c.etag = etag;
+        }
+        Ok(_) => {}
+        Err(e) => c.info.error = Some(e.to_string()),
     }
-    if let Ok(Value::Array(i)) = issues {
-        // The issues endpoint also returns PRs; drop those.
-        info.issues = i.iter().filter(|v| v.get("pull_request").is_none()).map(to_item).collect();
-    }
-    info
+    c.at = Instant::now();
+    c
 }
 
 pub async fn github(state: &AppState, force: bool) -> HashMap<String, GithubInfo> {
@@ -474,26 +492,27 @@ pub async fn github(state: &AppState, force: bool) -> HashMap<String, GithubInfo
         for r in &repos {
             let Some(slug) = &r.github else { continue };
             match cache.get(slug) {
-                Some((at, info)) if !force && at.elapsed() < GITHUB_TTL => {
-                    out.insert(r.name.clone(), info.clone());
+                Some(c) if !force && c.at.elapsed() < GITHUB_TTL => {
+                    out.insert(r.name.clone(), c.info.clone());
                 }
-                _ => todo.push((r.name.clone(), slug.clone())),
+                c => todo.push((r.name.clone(), slug.clone(), c.cloned())),
             }
         }
     }
-    let fetched = futures::future::join_all(todo.into_iter().map(|(name, slug)| {
+    let fetched = futures::future::join_all(todo.into_iter().map(|(name, slug, prev)| {
         let state = state.clone();
         async move {
-            let info = crate::github::as_source("repos", fetch_github(&state, &slug)).await;
-            (name, slug, info)
+            let c = crate::github::as_source("repos", fetch_github(&state, &slug, prev)).await;
+            (name, slug, c)
         }
     }))
     .await;
     let mut cache = state.repos.github.lock().unwrap();
-    for (name, slug, info) in fetched {
-        // Don't cache failures for long; they're usually rate limits.
+    for (name, slug, c) in fetched {
+        let info = c.info.clone();
+        // Don't cache failures; they're usually rate limits.
         if info.error.is_none() {
-            cache.insert(slug, (Instant::now(), info.clone()));
+            cache.insert(slug, c);
         }
         out.insert(name, info);
     }
@@ -553,4 +572,37 @@ mod tests {
         assert!(read_sites(&dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[tokio::test]
+    async fn the_repos_page_reads_a_repo_with_one_conditional_request() {
+        use serde_json::json;
+        let st = crate::mirror::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        crate::mirror::tests::project(&st, "rp-one", Some("https://github.com/octo/rp-one"));
+        fake.route("GET", "/repos/octo/rp-one", 200, json!({ "stargazers_count": 7, "forks_count": 1, "subscribers_count": 2, "default_branch": "main", "description": "Notes" }));
+        fake.in_turn("GET", "/repos/octo/rp-one/issues", vec![
+            (200, json!([
+                { "number": 4, "title": "Fix login", "html_url": "https://github.com/octo/rp-one/pull/4", "draft": true, "pull_request": {}, "user": { "login": "a" } },
+                { "number": 3, "title": "Login fails", "html_url": "https://github.com/octo/rp-one/issues/3", "user": { "login": "b" } },
+            ])),
+            (304, serde_json::Value::Null),
+        ]);
+        fake.with_headers("GET", "/repos/octo/rp-one/issues", &[("etag", "\"r1\"")]);
+
+        let first = super::github(&st, false).await;
+        let info = &first["rp-one"];
+        assert_eq!((info.stars, info.pulls.len(), info.issues.len(), info.pulls[0].draft, info.issues[0].number), (7, 1, 1, true, 3));
+        assert_eq!(fake.seen("/").len(), 2, "the repo, then one list for its PRs and issues");
+
+        // Opening the page again within the cache reads nothing.
+        super::github(&st, false).await;
+        assert_eq!(fake.seen("/").len(), 2);
+        // The Refresh button asks again with the ETag: a free 304 keeps the lists; the repo's numbers aren't read again.
+        let again = super::github(&st, true).await;
+        assert_eq!((again["rp-one"].pulls.len(), again["rp-one"].issues.len(), again["rp-one"].stars), (1, 1, 7));
+        let seen = fake.seen("/");
+        assert_eq!(seen.len(), 3);
+        assert_eq!((seen[2].path.as_str(), &seen[2].headers["if-none-match"]), ("/repos/octo/rp-one/issues?state=open&per_page=60", &json!("\"r1\"")));
+    }
+
 }
