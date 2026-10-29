@@ -6,8 +6,19 @@ import SwiftUI
 struct VoiceSessionView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
     @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage(VoiceVariant.key) private var variantRaw = VoiceVariant.current.rawValue
     let dismiss: () -> Void
+
+    private var variant: VoiceVariant { VoiceVariant(rawValue: variantRaw.lowercased()) ?? .current }
+
+    /// Style E after Send: the full-screen status, when there is one. A mic failure keeps the usual failure screen.
+    private var status: VoiceStatus? {
+        guard variant == .e else { return nil }
+        let s = VoiceStatus.of(voice.phase, undoPending: voice.autoSendAt != nil, posting: !store.pending(for: agentId).isEmpty)
+        return s == .failed && voice.failedSend == nil ? nil : s
+    }
 
     @State private var showOriginal = false
     @State private var draft = ""
@@ -22,13 +33,19 @@ struct VoiceSessionView: View {
             header
             questionCard
             Group {
+                if let status {
+                    VoiceStatusView(status: status, dismiss: dismiss)
+                } else if variant == .e, [.idle, .preparing, .listening, .paused, .cleaning].contains(voice.phase) {
+                    dictate
+                } else {
                 switch voice.phase {
                 case .idle, .preparing, .listening, .paused: listening
                 case .cleaning: cleaning
                 case .review: review
                 case .sending: working
-                case .speaking: speaking
+                case .speaking, .replied: speaking
                 case .failed(let message): failed(message)
+                }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -36,6 +53,14 @@ struct VoiceSessionView: View {
         .background(Theme.background.ignoresSafeArea())
         .onChange(of: voice.phase, initial: true) { _, p in
             if p == .review { loadDraft() }
+            // Style E: the tidied text goes to the chat's message box, to read there; sending it brings the status back.
+            if p == .review, variant == .e, voice.autoSendAt == nil, let id = voice.agentId {
+                let text = voice.cleaned ?? voice.raw
+                voice.discard()
+                VoicePresentation.shared.statusAgentId = id
+                router.openChat(id, draft: text)
+                dismiss()
+            }
         }
         .confirmationDialog("Discard what you said?", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("Discard", role: .destructive) { voice.discard(); dismiss() }
@@ -126,6 +151,7 @@ struct VoiceSessionView: View {
         case .review: voice.autoSendAt != nil ? "Sending…" : "Review before sending"
         case .sending: "Sent"
         case .speaking: "Replying"
+        case .replied: "Replied"
         case .failed: "Something went wrong"
         }
     }
@@ -219,6 +245,28 @@ struct VoiceSessionView: View {
         }
         .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.12),
                                      .init(color: .black, location: 1)], startPoint: .top, endPoint: .bottom))
+    }
+
+    // MARK: Style E: dictate
+
+    private var dictate: some View {
+        VStack(spacing: 20) {
+            RecentAgentsRow()
+            Spacer(minLength: 0)
+            if voice.phase == .cleaning {
+                ProgressView("Tidying up…")
+                Text(voice.raw).font(.body).foregroundStyle(.secondary).lineLimit(6).padding(.horizontal, Theme.gutter)
+            } else {
+                CaptionTranscript(committed: voice.committed, live: voice.live)
+            }
+            Spacer(minLength: 0)
+            VoiceBars(level: voice.level, active: voice.phase == .listening).frame(height: 60).scaleEffect(0.6)
+            HoldToTalkButton(listening: voice.phase == .listening) { Task { await voice.finish() } }
+                .disabled(voice.raw.isEmpty || voice.phase == .cleaning)
+            Text("Tap or let go when you're done: it lands in the message box to send.")
+                .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .padding(.horizontal, Theme.gutter).padding(.bottom, 12)
+        }
     }
 
     // MARK: Cleaning
@@ -411,6 +459,8 @@ struct VoiceSessionView: View {
 @MainActor @Observable final class VoicePresentation {
     static let shared = VoicePresentation()
     var shown = false
+    /// Style E: the chat whose message box holds a dictation; sending it there opens the status screen.
+    var statusAgentId: String?
 }
 
 struct VoicePresenter: ViewModifier {
