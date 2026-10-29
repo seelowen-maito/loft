@@ -23,11 +23,11 @@ pub struct Settings {
     /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
     pub show_simulator: bool,
     /// Publish new Loft issues to GitHub as they're made (only projects with a GitHub repo can). Off by default.
-    /// `None` until `migrate_auto_publish` has turned the old per-project `auto_publish` list into this.
+    /// `None` until `migrate_github_settings` has turned the old per-project `auto_publish` list into this.
     pub auto_publish_all: Option<bool>,
     /// Old per-project list, no longer read. Kept so clients that still send it keep working.
     pub auto_publish: Vec<String>,
-    /// Old per-project modes, no longer read; see `auto_publish`.
+    /// Old per-project modes: folded into `comment_approval_default` by the migration, then empty and no longer read.
     pub comment_approval: std::collections::HashMap<String, String>,
     /// When comments on mirrored issues go to GitHub, for every project: `ask` (every one waits for approval),
     /// `own` (yours go straight, agents' wait) or `all` (everything goes straight). Was the per-project fallback.
@@ -125,14 +125,20 @@ impl Store {
         Ok(())
     }
 
-    /// Turns the old per-project `auto_publish` list into the global switch, once. It's on only if it was on
-    /// for every project in `with_repo` (those with a GitHub repo), so nothing goes public that didn't before.
-    pub fn migrate_auto_publish(&self, with_repo: &[String]) -> Result<()> {
+    /// Turns the old per-project settings into the global ones, once (while `auto_publish_all` is unset).
+    /// Auto-publish is on only if it was on for every project in `with_repo` (those with a GitHub repo).
+    /// The comment mode becomes the strictest of the old default and every per-project override
+    /// (ask < own < all), and the overrides are cleared. So nothing goes public that didn't before.
+    pub fn migrate_github_settings(&self, with_repo: &[String]) -> Result<()> {
         let mut s = self.get();
         if s.auto_publish_all.is_some() {
             return Ok(());
         }
         s.auto_publish_all = Some(!with_repo.is_empty() && with_repo.iter().all(|p| s.auto_publish.contains(p)));
+        let rank = |m: &str| ["ask", "own", "all"].iter().position(|x| *x == m).unwrap_or(0);
+        let strictest = s.comment_approval.values().chain([&s.comment_approval_default]).min_by_key(|m| rank(m)).unwrap();
+        s.comment_approval_default = ["ask", "own", "all"][rank(strictest)].into();
+        s.comment_approval.clear();
         self.save(s)
     }
 
@@ -161,7 +167,7 @@ mod tests {
 
     fn migrated(old: &str, with_repo: &[&str]) -> Option<bool> {
         let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", {old} }}"#));
-        s.migrate_auto_publish(&with_repo.iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap();
+        s.migrate_github_settings(&with_repo.iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap();
         s.get().auto_publish_all
     }
 
@@ -178,12 +184,30 @@ mod tests {
     #[test]
     fn the_migration_runs_once_and_the_old_mode_becomes_the_global_one() {
         let s = store(r#"{ "projects_dir": "PROJECTS", "auto_publish": ["a"], "comment_approval_default": "own", "comment_approval": { "a": "all" } }"#);
-        s.migrate_auto_publish(&["a".into()]).unwrap();
+        s.migrate_github_settings(&["a".into()]).unwrap();
         assert_eq!((s.get().auto_publish_all, s.get().approval_mode()), (Some(true), "own"));
         let mut now = s.get();
         now.auto_publish_all = Some(false);
         s.save(now).unwrap();
-        s.migrate_auto_publish(&["a".into()]).unwrap();
+        s.migrate_github_settings(&["a".into()]).unwrap();
         assert_eq!(s.get().auto_publish_all, Some(false), "a later choice isn't overwritten");
+    }
+
+    #[test]
+    fn the_comment_mode_becomes_the_strictest_of_the_old_default_and_every_override() {
+        let mode = |default: &str, overrides: &str| {
+            let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", "comment_approval_default": "{default}", "comment_approval": {{ {overrides} }} }}"#));
+            s.migrate_github_settings(&[]).unwrap();
+            assert!(s.get().comment_approval.is_empty(), "the old overrides are cleared");
+            s.get().approval_mode().to_string()
+        };
+        assert_eq!(mode("all", r#""sensitive": "ask""#), "ask", "an ask override can't be widened by an all default");
+        assert_eq!(mode("own", r#""sensitive": "ask""#), "ask");
+        assert_eq!(mode("all", r#""a": "own", "b": "all""#), "own");
+        assert_eq!(mode("ask", r#""a": "all""#), "ask", "an all override doesn't widen an ask default");
+        assert_eq!(mode("own", ""), "own", "no overrides: unchanged");
+        assert_eq!(mode("all", ""), "all");
+        assert_eq!(mode("ask", ""), "ask");
+        assert_eq!(mode("all", r#""odd": "sometimes""#), "ask", "an unknown value asks");
     }
 }
