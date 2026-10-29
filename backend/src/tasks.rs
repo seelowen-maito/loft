@@ -904,11 +904,19 @@ fn mentioned(state: &AppState, author: &str, text: &str) -> Vec<Agent> {
 /// Hands a thread comment to each agent it @mentions (but `skip`, who already got it), tagged with the
 /// issue, the way a user comment reaches the issue's agent. Nothing waits for GitHub approval for this.
 fn deliver_mentions(state: &AppState, t: &Task, c: &TaskComment, who: &[Agent], skip: Option<&str>) {
-    let from = if c.author == "user" { String::new() } else { format!("{} wrote: ", c.meta["author_name"].as_str().unwrap_or("An agent")) };
+    // An agent's mention reaches the other agent as a message from that agent, never as the user's.
+    let sender = (c.author != "user").then(|| state.db.get_agent(&c.author).ok().flatten()).flatten();
     for a in who.iter().filter(|a| Some(a.id.as_str()) != skip) {
-        agents::add_msg(state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{from}{}", t.id, t.title, c.text), json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id }));
-        // A mention wakes the agent like a user comment does; who wrote it is in the prompt.
-        agents::wake(state, &a.id, comment_prompt(t, &format!("{from}{}", c.text)), "user");
+        let mut meta = json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id });
+        let prompt = match &sender {
+            Some(from) => {
+                meta["from_agent"] = json!({ "id": from.id, "name": from.name });
+                format!("[Message from agent {} (id {}), not from the user]\n{}", from.name, from.id, comment_prompt(t, &c.text))
+            }
+            None => comment_prompt(t, &c.text),
+        };
+        agents::add_msg(state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{}", t.id, t.title, c.text), meta);
+        agents::wake(state, &a.id, prompt, if sender.is_some() { "agent" } else { "user" });
     }
 }
 
@@ -1231,7 +1239,13 @@ pub(crate) mod tests {
         assert!(out.ends_with("and sent it to Worker."), "{out}");
         let last = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
         assert_eq!((last.author.as_str(), last.text.as_str()), (reviewer.id.as_str(), "Looks fine. @Worker ship it"));
-        assert!(queued(&st, &worker).contains("Reviewer wrote: Looks fine. @Worker ship it"), "{}", queued(&st, &worker));
+        // From the reviewer, as an agent message: never as the user.
+        let q = queued(&st, &worker);
+        assert!(q.starts_with(&format!("[Message from agent Reviewer (id {}), not from the user]", reviewer.id)) && q.contains("Looks fine. @Worker ship it"), "{q}");
+        let m = st.db.list_messages(&worker.id, 10, None).unwrap().into_iter().last().unwrap();
+        assert_eq!(m.meta["from_agent"]["id"], json!(reviewer.id));
+        // The user's own mention still arrives as the user's.
+        assert!(!queued(&st, &reviewer).contains("[Message from agent"));
 
         // Someone neither on it nor mentioned is refused.
         assert!(mcp_call(&st, &stranger, "comment_issue", &json!({ "id": t.id, "text": "hi" }), none).unwrap().is_err());
