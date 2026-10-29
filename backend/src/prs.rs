@@ -205,12 +205,116 @@ pub async fn poller(state: AppState) {
             let Ok(prs) = state.db.list_pull_requests(None) else { continue };
             // An open app (the web or a phone) is someone looking.
             let watched = state.events.receiver_count() > 0;
-            for pr in prs.into_iter().filter(|p| due(p, watched)) {
-                let _ = refresh(&state, &pr.id).await;
+            let due: Vec<PullRequest> = prs.into_iter().filter(|p| due(p, watched)).collect();
+            for chunk in due.chunks(BATCH) {
+                if let Err(e) = refresh_batch(&state, chunk).await
+                    && !github::is_paused(&e)
+                {
+                    tracing::warn!("pull requests: {e}");
+                }
             }
         }
     })
     .await
+}
+
+/// PRs read in one GraphQL query; the query costs about one point however many it holds.
+const BATCH: usize = 20;
+
+/// What the poller reads of each PR, the same fields `apply` and `checks` give the card.
+const PR_FIELDS: &str = "number title url state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName \
+    author { login } additions deletions changedFiles commits { totalCount } comments { totalCount } reviewThreads { totalCount } \
+    mergedBy { login } mergedAt closedAt \
+    baseRepository { squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed } \
+    last: commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { \
+    __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } }";
+
+/// One GraphQL query for all these PRs, instead of a pull, a check-runs and a status request each.
+/// A PR GitHub no longer has is marked gone. The REST `refresh` stays for clicks and merges.
+async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
+    let parts: Vec<String> = prs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pr)| {
+            let (owner, name) = pr.slug.split_once('/')?;
+            Some(format!("p{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {PR_FIELDS} }} }}", json!(owner), json!(name), pr.number))
+        })
+        .collect();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let v = github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": format!("query {{ {} }}", parts.join(" ")) }))).await?;
+    for (i, pr) in prs.iter().enumerate() {
+        let Some(mut pr) = state.db.get_pull_request(&pr.id)? else { continue };
+        let key = format!("p{i}");
+        let node = &v["data"][&key]["pullRequest"];
+        if node.is_null() {
+            // Not found (or no access), as GitHub reports in `errors` next to the data; anything else waits a tick.
+            let missing = v["errors"].as_array().is_some_and(|es| es.iter().any(|e| e["path"][0] == key.as_str() && e["type"] == "NOT_FOUND"));
+            if !missing {
+                continue;
+            }
+            pr.gone = true;
+            pr.error = Some("This pull request is gone from GitHub (deleted, or its repo is), so Loft stopped checking it.".into());
+        } else {
+            apply_graphql(&mut pr, node);
+            pr.error = None;
+        }
+        pr.checked_at = Some(now());
+        state.db.save_pull_request(&pr)?;
+        emit(state, &pr);
+    }
+    Ok(())
+}
+
+/// The GraphQL PR onto the card, as `apply` and `checks` do with the REST answers.
+fn apply_graphql(pr: &mut PullRequest, n: &Value) {
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    pr.title = s(&n["title"]);
+    if let Some(u) = n["url"].as_str() {
+        pr.url = u.into();
+    }
+    pr.draft = n["isDraft"].as_bool().unwrap_or(false);
+    pr.state = s(&n["state"]).to_lowercase();
+    pr.mergeable = match n["mergeable"].as_str() {
+        Some("MERGEABLE") => Some(true),
+        Some("CONFLICTING") => Some(false),
+        _ => None,
+    };
+    pr.mergeable_state = s(&n["mergeStateStatus"]).to_lowercase();
+    pr.head_ref = s(&n["headRefName"]);
+    pr.head_sha = s(&n["headRefOid"]);
+    pr.base_ref = s(&n["baseRefName"]);
+    pr.author = s(&n["author"]["login"]);
+    pr.additions = n["additions"].as_i64().unwrap_or(0);
+    pr.deletions = n["deletions"].as_i64().unwrap_or(0);
+    pr.changed_files = n["changedFiles"].as_i64().unwrap_or(0);
+    pr.commits = n["commits"]["totalCount"].as_i64().unwrap_or(0);
+    pr.comments = n["comments"]["totalCount"].as_i64().unwrap_or(0) + n["reviewThreads"]["totalCount"].as_i64().unwrap_or(0);
+    pr.merged_by = n["mergedBy"]["login"].as_str().map(Into::into);
+    pr.merged_at = n["mergedAt"].as_str().map(Into::into);
+    pr.closed_at = n["closedAt"].as_str().map(Into::into);
+    let repo = &n["baseRepository"];
+    let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
+    pr.merge_methods = [("squash", "squashMergeAllowed"), ("merge", "mergeCommitAllowed"), ("rebase", "rebaseMergeAllowed")]
+        .iter()
+        .filter(|(_, k)| allowed(k))
+        .map(|(m, _)| m.to_string())
+        .collect();
+    let (mut passed, mut failed, mut pending) = (0, 0, 0);
+    let contexts = &n["last"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"];
+    for c in contexts.as_array().into_iter().flatten() {
+        match (c["__typename"].as_str(), c["status"].as_str(), c["conclusion"].as_str(), c["state"].as_str()) {
+            (Some("CheckRun"), Some("COMPLETED"), Some("SUCCESS" | "NEUTRAL" | "SKIPPED"), _) => passed += 1,
+            (Some("CheckRun"), Some("COMPLETED"), _, _) => failed += 1,
+            (Some("CheckRun"), _, _, _) => pending += 1,
+            (_, _, _, Some("SUCCESS")) => passed += 1,
+            (_, _, _, Some("PENDING" | "EXPECTED")) => pending += 1,
+            _ => failed += 1,
+        }
+    }
+    pr.checks = json!({ "total": passed + failed + pending, "passed": passed, "failed": failed, "pending": pending });
+    pr.checks_sha = pr.head_sha.clone();
 }
 
 /// Does `pr` get polled this tick: open and not gone, every tick while someone looks at a non-draft,
@@ -338,4 +442,53 @@ mod tests {
         let waiting = RETRYING.lock().unwrap().as_ref().map_or(0, |s| s.iter().filter(|i| **i == pr.id).count());
         assert_eq!(waiting, 1);
     }
+
+    fn gql_pr(n: i64, state: &str, sha: &str, checks: Value) -> Value {
+        json!({ "pullRequest": {
+            "number": n, "title": format!("PR {n}"), "url": format!("https://github.com/octo/pr-batch/pull/{n}"), "state": state,
+            "isDraft": false, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefName": "b", "headRefOid": sha,
+            "baseRefName": "main", "author": { "login": "octo" }, "additions": 3, "deletions": 1, "changedFiles": 2,
+            "commits": { "totalCount": 1 }, "comments": { "totalCount": 2 }, "reviewThreads": { "totalCount": 1 },
+            "mergedBy": null, "mergedAt": null, "closedAt": null,
+            "baseRepository": { "squashMergeAllowed": true, "mergeCommitAllowed": false, "rebaseMergeAllowed": true },
+            "last": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": { "nodes": checks } } } }] },
+        } })
+    }
+
+    #[tokio::test]
+    async fn the_poller_reads_every_open_pr_in_one_graphql_query() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let mut prs = vec![];
+        for n in [1, 2, 3] {
+            let pr = PullRequest { id: format!("pr-batch-{n}"), agent_id: a.id.clone(), slug: "octo/pr-batch".into(), number: n, state: "open".into(), created_at: now(), ..Default::default() };
+            st.db.save_pull_request(&pr).unwrap();
+            prs.push(pr);
+        }
+        let checks = json!([
+            { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS" },
+            { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null },
+            { "__typename": "StatusContext", "state": "FAILURE" },
+        ]);
+        fake.route("POST", "/graphql", 200, json!({
+            "data": { "p0": gql_pr(1, "OPEN", "aaa", checks), "p1": gql_pr(2, "MERGED", "bbb", json!([])), "p2": { "pullRequest": null } },
+            "errors": [{ "type": "NOT_FOUND", "path": ["p2", "pullRequest"], "message": "Could not resolve to a PullRequest with the number of 3." }],
+        }));
+
+        refresh_batch(&st, &prs).await.unwrap();
+        assert_eq!(fake.seen("/").len(), 1, "one request for three PRs, no REST calls");
+        let q = fake.seen("/graphql")[0].body["query"].as_str().unwrap().to_string();
+        assert!(q.contains(r#"p0: repository(owner: "octo", name: "pr-batch") { pullRequest(number: 1)"#) && q.contains("p2:"), "{q}");
+
+        let get = |n: i64| st.db.get_pull_request(&format!("pr-batch-{n}")).unwrap().unwrap();
+        let one = get(1);
+        assert_eq!((one.title.as_str(), one.state.as_str(), one.mergeable, one.mergeable_state.as_str(), one.head_sha.as_str()), ("PR 1", "open", Some(true), "clean", "aaa"));
+        assert_eq!(one.checks, json!({ "total": 3, "passed": 1, "failed": 1, "pending": 1 }));
+        assert_eq!((one.comments, one.merge_methods.clone(), one.checks_sha.as_str()), (3, vec!["squash".to_string(), "rebase".to_string()], "aaa"));
+        assert_eq!(get(2).state, "merged");
+        let gone = get(3);
+        assert!(gone.gone && !due(&gone, true), "not found: gone, and not polled again");
+    }
+
 }
