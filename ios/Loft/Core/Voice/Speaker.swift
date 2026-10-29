@@ -60,6 +60,10 @@ final class Speaker: NSObject {
         self.hasMore = hasMore
         endedBy = nil
         isSpeaking = true
+        if TestMode.holdReading {
+            await withCheckedContinuation { c in finished = c }
+            return endedBy
+        }
         let u = AVSpeechUtterance(string: spoken)
         u.voice = Self.voice(for: spoken)
         u.prefersAssistiveTechnologySettings = true

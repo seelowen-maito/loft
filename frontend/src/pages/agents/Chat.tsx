@@ -2,16 +2,19 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtNum, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
+import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
 import { GrillBar } from "./GrillBar";
+import { SubagentBar } from "./SubagentBar";
 import { GrillRound } from "./GrillRound";
 import { PlanCard } from "./PlanCard";
+import { ContextSize } from "./ContextSize";
+import { ResumeDialog } from "./ResumeDialog";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
 import { ATTACH } from "../../lib/attach";
@@ -20,6 +23,13 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
+import { useDraft } from "../../lib/useDraft";
+import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { AttachmentTile } from "../../components/AttachmentTile";
+import { useMention } from "../../components/MentionMenu";
+import { highlightParts } from "../../lib/commandHighlight";
+import { FyiMark } from "./FyiMark";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -78,6 +88,7 @@ type Command = { name: string; description: string };
 const COMMANDS: Command[] = [
   { name: "/clear", description: "Clear the conversation context and start fresh. Memory is kept." },
   { name: "/compact", description: "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary." },
+  { name: "/resume", description: "Go back to one of this agent's past sessions." },
   { name: "/code", description: "Open this agent's workspace folder in VS Code." },
   { name: "/grill", description: "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it." },
 ];
@@ -102,16 +113,14 @@ export function Chat({
   /** Extra buttons at the end of the header, e.g. the inspector toggle. */
   headerActions?: React.ReactNode;
 }) {
-  const [text, setText] = useState("");
+  const { text, setText, attachments, setAttachments, images, taskId, setTaskId, putDraft, removeImage } = useDraft(agent.id);
   const [sending, setSending] = useState(false);
   const [cmdError, setCmdError] = useState<string | null>(null);
   const [cmdNote, setCmdNote] = useState<string | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showEarlier, setShowEarlier] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [resuming, setResuming] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
-  // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
-  const [dragDepth, setDragDepth] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(composer, text, 1);
@@ -131,37 +140,19 @@ export function Chat({
   const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
+  const overlay = useRef<HTMLDivElement>(null);
+  // The overlay follows the textarea's scroll, also when it appears on text that's already scrolled.
+  useLayoutEffect(() => {
+    if (overlay.current && composer.current) overlay.current.scrollTop = composer.current.scrollTop;
+  });
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
   // Only agents in the same project: the backend doesn't deliver to others.
-  const atToken = /(?:^|\s)@([^\s@]*)$/.exec(text)?.[1];
-  const mentionQuery = atToken?.toLowerCase();
-  const agentMatches =
-    mentionQuery === undefined ? [] : agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim() && a.name.toLowerCase().startsWith(mentionQuery)).slice(0, 6);
-  const fileDir = atToken === undefined ? undefined : atToken.slice(0, atToken.lastIndexOf("/") + 1);
-  const filePrefix = atToken?.slice(fileDir?.length ?? 0).toLowerCase() ?? "";
-  const [listing, setListing] = useState<{ typed: string; dir: string; entries: { name: string; dir: boolean }[] }>();
-  useEffect(() => {
-    if (fileDir === undefined) return;
-    let live = true;
-    api.ls(agent.id, fileDir).then(
-      (r) => live && setListing({ typed: fileDir, ...r }),
-      () => live && setListing({ typed: fileDir, dir: "", entries: [] }),
-    );
-    return () => {
-      live = false;
-    };
-  }, [agent.id, fileDir]);
-  const fileMatches =
-    listing && listing.typed === fileDir
-      ? listing.entries.filter((e) => e.name.toLowerCase().startsWith(filePrefix) && (filePrefix.startsWith(".") || !e.name.startsWith("."))).slice(0, 50)
-      : [];
-  type Pick = { agent: Agent } | { file: { name: string; dir: boolean } };
-  const mentionMatches: Pick[] = [...agentMatches.map((a) => ({ agent: a })), ...fileMatches.map((f) => ({ file: f }))];
-  // A folder keeps the menu open on its contents, like tab completion in a shell.
-  const mention = (p: Pick) =>
-    setText((t) => t.replace(/@[^\s@]*$/, "agent" in p ? `@${p.agent.name} ` : `@${fileDir}${p.file.name}${p.file.dir ? "/" : " "}`));
+  const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
+  const mention = useMention(agent.id, text, setText, mentionable);
+  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name));
+  const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
     const m = new Map<string, PullRequest[]>();
@@ -180,9 +171,7 @@ export function Chat({
   useEffect(() => {
     stick.current = true;
     setShowEarlier(false);
-    // Uploads belong to the agent they were pasted for.
-    setAttachments((a) => (a.forEach((x) => URL.revokeObjectURL(x.preview)), []));
-    setDragDepth(0);
+    drop.reset();
     setCmdError(null);
     setCmdNote(null);
   }, [agent.id]);
@@ -207,7 +196,7 @@ export function Chat({
     setCmdError(null);
     try {
       await api.resetSession(agent.id);
-      setText("");
+      putDraft(agent.id, EMPTY_DRAFT);
       stick.current = true;
     } catch (e) {
       setCmdError((e as Error).message);
@@ -219,7 +208,7 @@ export function Chat({
   const clearWith = useCallback(async (next: string) => {
     setCmdError(null);
     await api.resetSession(agent.id);
-    setText(next);
+    putDraft(agent.id, { ...EMPTY_DRAFT, text: next });
     stick.current = true;
     composer.current?.focus();
   }, [agent.id]);
@@ -228,7 +217,7 @@ export function Chat({
     setCmdError(null);
     try {
       await api.compact(agent.id, instructions);
-      setText("");
+      putDraft(agent.id, EMPTY_DRAFT);
       stick.current = true;
     } catch (e) {
       setCmdError((e as Error).message);
@@ -239,7 +228,7 @@ export function Chat({
     setCmdError(null);
     try {
       const r = await api.openEditor(agent.id);
-      setText("");
+      putDraft(agent.id, { ...loadDraft(agent.id), text: "" });
       setCmdNote(r.url ? `Opening ${r.path} in VS Code over Remote-SSH` : `Opened ${r.path} in VS Code`);
     } catch (e) {
       setCmdError((e as Error).message);
@@ -252,7 +241,7 @@ export function Chat({
     stick.current = true;
     try {
       await api.grillStart(agent.id, topic ? `Grill me on ${topic}` : "Grill me");
-      setText("");
+      putDraft(agent.id, { ...loadDraft(agent.id), text: "" });
     } catch (e) {
       setCmdError((e as Error).message);
     } finally {
@@ -265,6 +254,10 @@ export function Chat({
     if (name === "/clear") return clearContext();
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor();
+    if (name === "/resume") {
+      setText("");
+      return setResuming(true);
+    }
     if (name === "/grill") {
       // Picked from the menu: leave room for the topic; Enter again starts it.
       setText("/grill ");
@@ -274,34 +267,14 @@ export function Chat({
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
-  const addImages = (all: File[]) => {
-    const images = all.filter((f) => f.type.startsWith("image/"));
-    const files = images.slice(0, MAX_IMAGES - attachments.length);
-    setCmdError(
-      files.length < images.length ? `Up to ${MAX_IMAGES} images per message.`
-      : images.length < all.length ? "Only images can be attached." : null,
-    );
-    for (const f of files) {
-      const key = crypto.randomUUID();
-      setAttachments((a) => [...a, { key, preview: URL.createObjectURL(f) }]);
-      const update = (u: Partial<Attachment>) => setAttachments((a) => a.map((x) => (x.key === key ? { ...x, ...u } : x)));
-      prepareImage(f)
-        .then((blob) => api.upload(agent.id, blob))
-        .then((r) => update({ file: r.file }), (e) => update({ error: (e as Error).message }));
-    }
-  };
+  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments));
 
-  const removeImage = (key: string) =>
-    setAttachments((a) => a.filter((x) => (x.key === key ? (URL.revokeObjectURL(x.preview), false) : true)));
-
+  const drop = useFileDrop(addImages);
   const uploading = attachments.some((a) => !a.file && !a.error);
   const failed = attachments.some((a) => a.error);
-  const images = attachments.flatMap((a) => (a.file ? [a.file] : []));
 
-  const [taskId, setTaskId] = useState<string | null>(null);
   const [pickingTask, setPickingTask] = useState(false);
   useEffect(() => {
-    setTaskId(null);
     setPickingTask(false);
   }, [agent.id]);
 
@@ -315,9 +288,7 @@ export function Chat({
       stick.current = true;
       try {
         await api.send(agent.id, v, images, taskId ?? undefined);
-        setText("");
-        setTaskId(null);
-        setAttachments((a) => (a.forEach((x) => URL.revokeObjectURL(x.preview)), []));
+        putDraft(agent.id, EMPTY_DRAFT);
       } catch (e) {
         setCmdError((e as Error).message);
       } finally {
@@ -335,8 +306,7 @@ export function Chat({
     stick.current = true;
     try {
       await api.send(agent.id, v, [], taskId ?? undefined);
-      setText("");
-      setTaskId(null);
+      putDraft(agent.id, EMPTY_DRAFT);
     } finally {
       setSending(false);
     }
@@ -368,17 +338,9 @@ export function Chat({
   return (
     <div
       className="relative flex h-full min-w-0 flex-col"
-      onDragEnter={(e) => e.dataTransfer.types.includes("Files") && setDragDepth((d) => d + 1)}
-      onDragLeave={(e) => e.dataTransfer.types.includes("Files") && setDragDepth((d) => Math.max(0, d - 1))}
-      onDragOver={(e) => e.dataTransfer.types.includes("Files") && e.preventDefault()}
-      onDrop={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
-        e.preventDefault();
-        setDragDepth(0);
-        addImages([...e.dataTransfer.files]);
-      }}
+      {...drop.handlers}
     >
-      {dragDepth > 0 && (
+      {drop.dragging && (
         <div className="pointer-events-none absolute inset-3 z-20 grid place-items-center rounded-2xl border-2 border-dashed border-accent/50 bg-ink-950/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-fg-2">
             <ImagePlus className="size-7 text-accent" />
@@ -397,7 +359,7 @@ export function Chat({
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
             <StatusPill agent={agent} />
-            {/* Schedule and context size are details: on a phone the status line gets the room. */}
+            {/* The schedule is a detail: on a phone the status line gets the room. The context size stays, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
@@ -405,14 +367,7 @@ export function Chat({
               <Clock className="size-3" /> {fmtSchedule(agent)}
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
-            {agent.context_tokens != null && (
-              <span
-                className={cx("shrink-0 font-mono text-[11px] tabular-nums max-md:hidden", agent.context_tokens >= 200_000 ? "text-warn" : "text-fg-3")}
-                title={`${agent.context_tokens.toLocaleString()} tokens in context as of the last reply. Every turn resends it, so a big context uses your limits faster; /compact shrinks it.`}
-              >
-                context {fmtNum(agent.context_tokens)}
-              </span>
-            )}
+            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -523,6 +478,7 @@ export function Chat({
               </button>
             </div>
           )}
+          <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
             <TaskPicker
@@ -534,51 +490,7 @@ export function Chat({
               onClose={() => setPickingTask(false)}
             />
           )}
-          {mentionMatches.length > 0 && (
-            <div className="mb-2 max-h-80 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Mention an agent or a file">
-              {mentionMatches.map((p, i) => (
-                <Fragment key={"agent" in p ? p.agent.id : p.file.name}>
-                  {"file" in p && i === agentMatches.length && (
-                    <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{listing?.dir ? `${listing.dir}/` : "./"}</div>
-                  )}
-                  <button
-                    role="option"
-                    aria-selected={i === menuIndex}
-                    ref={(el) => {
-                      if (i === menuIndex) el?.scrollIntoView({ block: "nearest" });
-                    }}
-                    onMouseEnter={() => setMenuIndex(i)}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      mention(p);
-                    }}
-                    className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === menuIndex && "bg-white/[0.06]")}
-                  >
-                    {"agent" in p ? (
-                      <>
-                        <Sticker avatar={p.agent.avatar} lead={p.agent.lead} size={20} />
-                        <span className="text-[13px]">{p.agent.name}</span>
-                        <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
-                      </>
-                    ) : (
-                      <>
-                        {p.file.dir ? <Folder className="size-4 shrink-0 text-fg-3" /> : <FileText className="size-4 shrink-0 text-fg-3" />}
-                        <span className="truncate font-mono text-[12.5px]">
-                          {p.file.name}
-                          {p.file.dir && "/"}
-                        </span>
-                      </>
-                    )}
-                  </button>
-                  {"agent" in p && i === agentMatches.length - 1 && (
-                    <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">
-                      The message also goes to them, and their reply shows here. Start with @… to send it only to them.
-                    </div>
-                  )}
-                </Fragment>
-              ))}
-            </div>
-          )}
+          {mention.menu && <div className="mb-2">{mention.menu}</div>}
           {matches.length > 0 && (
             <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
               {matches.map((c, i) => (
@@ -607,7 +519,7 @@ export function Chat({
             )}
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-2 px-2 pb-2 pt-1">
-                {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} />)}
+                {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} onMissing={() => removeImage(a.key)} />)}
               </div>
             )}
             <div className="flex items-end gap-2">
@@ -635,65 +547,65 @@ export function Chat({
                   e.target.value = "";
                 }}
               />
-              <textarea
-                ref={composer}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onPaste={(e) => {
-                  const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
-                  if (files.length === 0) return;
-                  // Copying an image from a page also puts its address on the clipboard: take just the image.
-                  e.preventDefault();
-                  addImages(files);
-                }}
-                onKeyDown={(e) => {
-                  if (mentionMatches.length > 0) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : mentionMatches.length - 1)) % mentionMatches.length);
-                      return;
+              {/* A known command and @mentions of agents are drawn in the accent colour by an overlay behind the
+                  textarea, whose own text turns transparent: the caret, selection, paste and auto-grow stay the textarea's own. */}
+              <div className="relative min-w-0 flex-1">
+                {highlighted && (
+                  <div
+                    ref={overlay}
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words py-1.5 text-[14px] text-fg"
+                  >
+                    {highlight.map((p, i) => (p.accent ? <span key={i} className="text-accent">{p.text}</span> : p.text))}
+                  </div>
+                )}
+                <textarea
+                  ref={composer}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onScroll={(e) => overlay.current && (overlay.current.scrollTop = e.currentTarget.scrollTop)}
+                  onPaste={(e) => {
+                    const files = pastedImages(e);
+                    if (files.length > 0) addImages(files);
+                  }}
+                  onKeyDown={(e) => {
+                    if (mention.onKeyDown(e)) return;
+                    if (matches.length > 0) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
+                        return;
+                      }
+                      if (e.key === "Tab") {
+                        e.preventDefault();
+                        setText(matches[menuIndex].name);
+                        return;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        runCommand(matches[menuIndex].name);
+                        return;
+                      }
                     }
-                    if ((e.key === "Tab" || e.key === "Enter") && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      mention(mentionMatches[Math.min(menuIndex, mentionMatches.length - 1)]);
-                      return;
-                    }
-                  }
-                  if (matches.length > 0) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
-                      return;
-                    }
-                    if (e.key === "Tab") {
-                      e.preventDefault();
-                      setText(matches[menuIndex].name);
+                    if (e.key === "Escape" && slash) {
+                      setText("");
                       return;
                     }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault();
-                      runCommand(matches[menuIndex].name);
-                      return;
+                      send();
                     }
+                  }}
+                  rows={1}
+                  placeholder={
+                    watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
+                    : running ? `${agent.name} is working. Your message will be delivered next.`
+                    : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
+                    : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                   }
-                  if (e.key === "Escape" && slash) {
-                    setText("");
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-                rows={1}
-                placeholder={
-                  watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
-                  : running ? `${agent.name} is working. Your message will be delivered next.`
-                  : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
-                  : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
-                }
-                className="flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"
-              />
+                  className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
+                />
+              </div>
               <button
                 className="btn-primary size-8 justify-center p-0"
                 disabled={(!text.trim() && images.length === 0) || uploading || failed || sending}
@@ -709,10 +621,11 @@ export function Chat({
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
             <span className="max-md:hidden">↵ send · ⇧↵ newline · / commands</span>
-            <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · ${agent.total_cost_usd.toFixed(2)} spent</span>
+            <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
           </div>
         </div>
       </div>
+      {resuming && <ResumeDialog agentId={agent.id} running={running} onClose={() => setResuming(false)} />}
     </div>
   );
 }
@@ -761,6 +674,17 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       </div>
     );
   }
+  if (m.kind === "resume") {
+    return (
+      <div className="flex items-center gap-3 py-2">
+        <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
+        <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80" title={m.meta?.first_message}>
+          /resume · resumed the Session from {new Date(m.meta?.started_at ?? m.created_at).toLocaleDateString(undefined, { dateStyle: "medium" })} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
+      </div>
+    );
+  }
   if (m.kind === "compact") {
     const k = (n: unknown) => (typeof n === "number" ? `${Math.round(n / 1000)}k` : "?");
     return (
@@ -792,7 +716,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex justify-end gap-2 font-mono text-[10.5px] text-fg-3">
         {secs && <span>{secs}s</span>}
         {m.meta?.num_turns != null && <span>· {m.meta.num_turns} turns</span>}
-        {m.meta?.cost_usd != null && <span>· ${Number(m.meta.cost_usd).toFixed(3)}</span>}
+        {m.meta?.cost_usd != null && <span title="Estimated at API list prices">· est. ${Number(m.meta.cost_usd).toFixed(3)}</span>}
       </div>
     );
   }
@@ -819,7 +743,10 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     return (
       <div className="flex justify-end gap-3 pt-2">
         <div className="flex max-w-[80%] flex-col items-end">
-          <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{from?.name ?? m.meta.from_agent.name} → {agent.name}</div>
+          <div className="relative mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
+            <FyiMark m={m} agentName={agent.name} />
+            {from?.name ?? m.meta.from_agent.name} → {agent.name}
+          </div>
           <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
           <div className="mt-1.5">
             <MessageTasks m={m} />
@@ -950,67 +877,4 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
       )}
     </div>
   );
-}
-
-/** A pasted image: shown at once from `preview`, sendable once uploaded (`file`). */
-type Attachment = { key: string; preview: string; file?: string; error?: string };
-
-function AttachmentTile({ a, onRemove }: { a: Attachment; onRemove: () => void }) {
-  const [loaded, setLoaded] = useState(false);
-  const busy = !a.file && !a.error;
-  return (
-    <div
-      className={cx("group relative size-24 overflow-hidden rounded-xl border bg-ink-950", a.error ? "border-bad/50" : "border-line")}
-      title={a.error}
-    >
-      <img
-        src={a.preview}
-        alt="Pasted image"
-        onLoad={() => setLoaded(true)}
-        className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
-      />
-      {busy && (
-        <div className="absolute inset-0 grid place-items-center" role="status" aria-label="Uploading image">
-          <Loader2 className="size-5 animate-spin text-fg-2" />
-        </div>
-      )}
-      {a.error && (
-        <div className="absolute inset-0 grid place-items-center bg-bad/10">
-          <AlertCircle className="size-5 text-bad" />
-        </div>
-      )}
-      <button
-        onClick={onRemove}
-        aria-label="Remove image"
-        className="absolute right-1 top-1 grid size-5 place-items-center rounded-full bg-ink-950/80 text-fg-2 opacity-0 transition hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
-      >
-        <X className="size-3" />
-      </button>
-    </div>
-  );
-}
-
-/** The API's limits: 3.75 MB raw (5 MB base64), and it scales anything bigger than 1568 px down anyway. */
-const MAX_IMAGE_BYTES = 3_750_000;
-const MAX_IMAGE_EDGE = 1568;
-const MAX_IMAGES = 10;
-const SENDABLE = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
-/** The image as-is when the API takes it, else redrawn to fit: PNG keeps screenshots sharp, JPEG if that's still too big. */
-async function prepareImage(f: File): Promise<Blob> {
-  const bmp = await createImageBitmap(f).catch(() => {
-    throw new Error("Couldn't read this image");
-  });
-  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bmp.width, bmp.height));
-  if (scale === 1 && f.size <= MAX_IMAGE_BYTES && SENDABLE.includes(f.type)) return f;
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(bmp.width * scale);
-  canvas.height = Math.round(bmp.height * scale);
-  canvas.getContext("2d")!.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-  const encode = (type: string, q?: number) => new Promise<Blob | null>((r) => canvas.toBlob(r, type, q));
-  const png = await encode("image/png");
-  if (png && png.size <= MAX_IMAGE_BYTES) return png;
-  const jpeg = await encode("image/jpeg", 0.85);
-  if (jpeg && jpeg.size <= MAX_IMAGE_BYTES) return jpeg;
-  throw new Error("Image is too large");
 }

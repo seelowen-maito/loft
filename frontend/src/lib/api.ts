@@ -48,17 +48,33 @@ export type Agent = {
   /** Background tasks the agent waits on after it has replied, and since when. */
   waiting_on?: string[];
   waiting_since?: string | null;
+  /** Subagents the agent itself started in the current run that haven't returned yet. */
+  subagents?: RunningSubagent[];
+  /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
+  unread_reply?: boolean;
 };
+
+export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
 export type Message = {
   id: number;
   agent_id: string;
   run_id: string | null;
   role: "user" | "assistant" | "system" | "tool";
-  kind: "text" | "thinking" | "tool_use" | "tool_result" | "permission" | "error" | "notice" | "run_start" | "run_end" | "clear" | "compact";
+  kind: "text" | "thinking" | "tool_use" | "tool_result" | "permission" | "error" | "notice" | "run_start" | "run_end" | "clear" | "compact" | "resume";
   content: string;
   meta: Record<string, any>;
   created_at: string;
+};
+
+/** One of an agent's past Sessions, from Claude Code's transcripts (`/api/agents/{id}/sessions`). */
+export type PastSession = {
+  id: string;
+  started_at: string;
+  first_message: string;
+  /** The agent that sent `first_message`, when another agent started the Session. */
+  from_agent: string | null;
+  context_tokens: number | null;
 };
 
 export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waiting_approval" | "done" | "failed" | "cancelled";
@@ -147,6 +163,8 @@ export type GrillQuestion = {
   accepted: boolean;
   /** Carried over unanswered: the round it was first asked in. */
   from_round: number | null;
+  /** Uploads sent with a typed answer or comment. Missing from older Loft versions. */
+  images?: string[];
 };
 
 /** An interview (grill) the agent is running, in rounds; `GET /agents/{id}/grill`. */
@@ -199,7 +217,7 @@ export type PushDevice = {
 /** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
 export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
 
-export type Memory = { id: number; agent_id: string; content: string; tags: string; created_at: string };
+export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 
 export type PermissionRequest = {
   id: string;
@@ -344,6 +362,7 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
+  messaging_rules: boolean;
   /** Publish new Loft issues to GitHub as they're made (projects with a GitHub repo). */
   auto_publish_all: boolean;
   /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
@@ -351,6 +370,28 @@ export type Settings = {
 };
 
 export type ApprovalMode = "ask" | "own" | "all";
+
+/** GitHub's rate limit as its last answers said (`reset` in Unix seconds), and Loft's requests this hour by source. */
+export type GithubBudget = {
+  resources: Record<string, { limit: number; remaining: number; used: number; reset: number }>;
+  by_source: Record<string, { requests: number; not_modified: number }>;
+  window_reset: number | null;
+};
+
+/** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
+export type MirrorSync = {
+  connected: boolean;
+  projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
+  skipped: { project: string; reason: string }[];
+};
+
+/** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
+export type MacAccess = {
+  items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
+  binary: string | null;
+  adhoc_signed: boolean | null;
+  host: string | null;
+};
 
 export type SettingsView = {
   settings: Settings;
@@ -416,10 +457,13 @@ export const api = {
   update: () => req<UpdateStatus>("GET", "/update"),
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
+  /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
@@ -448,10 +492,12 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** The user has seen this chat: clears its Unread reply in every browser. */
+  markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
-  syncIssues: () => req<{ connected: boolean; projects: { project: string; repo: string; error?: string }[] }>("POST", "/issues/sync", {}),
+  syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
@@ -486,17 +532,19 @@ export const api = {
     req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
   /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
-  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false) =>
-    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
+  grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false, images: string[] = []) =>
+    req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, images, meta: { grill: { role: "answer", session_id: sessionId, question_id: questionId, discuss } } }),
   /** Asks a Planning agent for a grill; the backend opens the session. */
   grillStart: (agentId: string, text: string) =>
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
+  sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
+  resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
   randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
-  addMemory: (id: string, content: string, tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { content, tags }),
+  addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
   /** Opens the workspace in VS Code; on a remote loft, via a Remote-SSH link handed to the local VS Code. */
   openEditor: async (id: string) => {

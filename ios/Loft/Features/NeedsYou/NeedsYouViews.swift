@@ -143,7 +143,7 @@ struct NeedsYouRow: View {
             assist = await OnDeviceFeatures.needsYouAssist(item)
         }
         .sheet(item: Binding(get: { answering.map(AnswerDraft.init) }, set: { answering = $0?.text })) { draft in
-            NeedsYouAnswerSheet(item: item, text: draft.text) { text in
+            NeedsYouAnswerSheet(item: item, text: draft.text, sendLabel: item.type == "comment_approval" ? "Approve" : "Send") { text in
                 guard let a = item.answerAction else { return }
                 run(a, text: text)
             }
@@ -167,7 +167,7 @@ struct NeedsYouRow: View {
                         }
                     }
                 case "answer":
-                    Button(a.label) { answering = "" }.buttonStyle(.borderedProminent).controlSize(.small)
+                    Button(a.label) { answering = a.draft }.buttonStyle(.borderedProminent).controlSize(.small)
                 case "deny":
                     Button(a.label, role: .destructive) { run(a) }.buttonStyle(.bordered).controlSize(.small).disabled(busy)
                 default:
@@ -219,6 +219,7 @@ private struct AnswerDraft: Identifiable {
 private struct NeedsYouAnswerSheet: View {
     let item: NeedsYouItem
     @State var text: String
+    var sendLabel = "Send"
     let send: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -226,7 +227,7 @@ private struct NeedsYouAnswerSheet: View {
         NavigationStack {
             Form {
                 Section { Text(item.text).font(.footnote).foregroundStyle(.secondary) }
-                Section("Your reply") {
+                Section(item.type == "comment_approval" ? "Comment to post on GitHub" : "Your reply") {
                     TextField("Reply…", text: $text, axis: .vertical).lineLimit(2...8).accessibilityIdentifier("needsYouAnswerField")
                 }
             }
@@ -235,7 +236,7 @@ private struct NeedsYouAnswerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Send") { send(text); dismiss() }
+                    Button(sendLabel) { send(text); dismiss() }
                         .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("needsYouAnswerSend")
                 }

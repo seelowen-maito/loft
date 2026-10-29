@@ -47,14 +47,24 @@ pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
 }
 
 pub fn emit_agent(state: &AppState, a: &Agent) {
-    let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+    let mut v = client_json(a);
     run_fields(state, &a.id, &mut v);
+    v["unread_reply"] = json!(a.unread_reply());
     state.emit(Event::AgentUpdated { agent: v });
 }
 
+/// The agent as clients see it: without the frozen memory index, which only claude needs.
+pub fn client_json(a: &Agent) -> Value {
+    let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("memory_index");
+    }
+    v
+}
+
 /// `running`, plus how the current run is doing: `last_output_at` (the last event from claude),
-/// and `waiting_on` / `waiting_since` while the agent has replied but waits on background tasks.
-/// Clients show "waiting" or "no activity for N min" from these, with a restart.
+/// `waiting_on` / `waiting_since` while the agent has replied but waits on background tasks, and the
+/// `subagents` it has running. Clients show "waiting" or "no activity for N min" from these, with a restart.
 pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     let rt = state.rt.lock().unwrap();
     let info = rt.runs.get(agent_id);
@@ -62,6 +72,44 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["last_output_at"] = json!(info.map(|i| &i.last_output_at));
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
+    v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
+}
+
+/// Pushes the agent's run fields after they changed outside a database update.
+fn emit_run(state: &AppState, agent_id: &str) {
+    if let Ok(Some(a)) = state.db.get_agent(agent_id) {
+        emit_agent(state, &a);
+    }
+}
+
+/// After the reply, what the run still waits on: every background task in the status line, the shells and
+/// monitors in `waiting_on`. Pushes the change.
+fn show_waiting(state: &AppState, agent_id: &str, bg: &[(String, String)], shells: &[String]) {
+    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+        i.waiting_on = shells.to_vec();
+    }
+    if bg.is_empty() {
+        emit_run(state, agent_id);
+    } else {
+        let names = bg.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>().join(", ");
+        set_status_text(state, agent_id, &format!("Waiting on: {names}"));
+    }
+}
+
+/// A run the user started has ended with a reply or an error: the agent has an Unread reply.
+fn mark_replied(state: &AppState, agent_id: &str) {
+    if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.replied_at = Some(now())) {
+        emit_agent(state, &a);
+    }
+}
+
+/// The user has seen the agent's chat: clear its Unread reply in every client.
+pub fn mark_read(state: &AppState, agent_id: &str) -> Result<Option<Agent>> {
+    let a = state.db.update_agent(agent_id, |a| a.read_at = Some(now()))?;
+    if let Some(a) = &a {
+        emit_agent(state, a);
+    }
+    Ok(a)
 }
 
 pub fn is_running(state: &AppState, agent_id: &str) -> bool {
@@ -92,34 +140,12 @@ fn set_context_tokens(state: &AppState, agent_id: &str, n: Option<u64>) {
     }
 }
 
-/// Context size from the end of a Claude Code session transcript: the last main-thread reply's input,
-/// or the compacted size if a compaction came after it.
-fn transcript_context(sid: &str) -> Option<u64> {
-    let projects = dirs::home_dir()?.join(".claude/projects");
-    let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{sid}.jsonl"))).find(|p| p.exists())?;
-    let mut last = None;
-    for line in std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(file).ok()?)).map_while(Result::ok) {
-        let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
-        match (ev["type"].as_str(), ev["subtype"].as_str()) {
-            (Some("assistant"), _) if !ev["isSidechain"].as_bool().unwrap_or(false) => {
-                let u = &ev["message"]["usage"];
-                if u.is_object() {
-                    last = Some(["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum());
-                }
-            }
-            (Some("system"), Some("compact_boundary")) => last = ev["compactMetadata"]["postTokens"].as_u64(),
-            _ => {}
-        }
-    }
-    last
-}
-
 /// Fill in context sizes for agents that haven't replied since this field was added.
 pub async fn backfill_context(state: AppState) {
     let Ok(agents) = state.db.list_agents() else { return };
     for a in agents.into_iter().filter(|a| a.context_tokens.is_none()) {
         let Some(sid) = a.session_id.clone() else { continue };
-        let n = tokio::task::spawn_blocking(move || transcript_context(&sid)).await.ok().flatten();
+        let n = tokio::task::spawn_blocking(move || crate::sessions::context_of(&sid)).await.ok().flatten();
         set_context_tokens(&state, &a.id, n);
     }
 }
@@ -279,23 +305,53 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
 
 // ---- prompt assembly --------------------------------------------------
 
+/// The agent's current memories as they go in the system prompt. Runs use the copy frozen when the
+/// Session started (`Agent::memory_index`), so this is only built again for a new Session.
+fn memory_block(state: &AppState, agent_id: &str) -> String {
+    memory_index(&state.db.list_memories(agent_id).unwrap_or_default())
+}
+
+/// About 3,000 tokens of titles, at roughly 4 characters a token.
+const MEMORY_INDEX_CHARS: usize = 12_000;
+
+/// Titles only, last saved or updated first, up to `MEMORY_INDEX_CHARS`; the bodies and any older memories are
+/// read with `recall`.
+fn memory_index(memories: &[crate::db::Memory]) -> String {
+    if memories.is_empty() {
+        return "(no memories yet)".to_string();
+    }
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for m in memories.iter().rev() {
+        let line = format!("- #{} {}", m.id, m.title);
+        used += line.chars().count() + 1;
+        if used > MEMORY_INDEX_CHARS {
+            break;
+        }
+        lines.push(line);
+    }
+    let older = memories.len() - lines.len();
+    if older > 0 {
+        lines.push(format!("({older} older memor{}: use `mcp__loft__recall` to reach them.)", if older == 1 { "y" } else { "ies" }));
+    }
+    lines.join("\n")
+}
+
+/// Loft's rules for Agent messages, the same for every agent and every run (so the prompt cache holds).
+/// Standing instructions can add to them but not remove them; only the global setting turns them off.
+const MESSAGING_RULES: &str = "
+
+# Messaging rules
+These rules are Loft's and apply to every message you send another agent with `mcp__loft__message_agent`, whatever your standing instructions say. Standing instructions can add to them but not remove them.
+1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.
+2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.
+3. Send a verdict only to the agent that acts on it, not to everyone.
+4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
+5. Don't reply to an FYI.";
+
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
-    let memories = state.db.list_memories(&a.id).unwrap_or_default();
-    let mem_block = if memories.is_empty() {
-        "(no memories yet)".to_string()
-    } else {
-        // Keep the prompt bounded; older memories stay reachable via recall.
-        let skip = memories.len().saturating_sub(80);
-        memories[skip..]
-            .iter()
-            .map(|m| {
-                let tags = if m.tags.is_empty() { String::new() } else { format!(" [{}]", m.tags) };
-                format!("- #{} ({}){}: {}", m.id, &m.created_at[..10], tags, m.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
     let schedule = if a.interval_minutes > 0 {
         let mut s = format!("You are woken up autonomously every {} minutes.", a.interval_minutes);
         if !a.quiet_hours.is_empty() {
@@ -351,10 +407,10 @@ The user usually reads this chat from another device, where `localhost` doesn't 
 - iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath build`, then `xcrun simctl install booted <path to .app>` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
-You have persistent memory that survives across conversations and session resets. Current memories:
+You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
 {mem_block}
 
-Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Keep each memory short and self-contained. Use `mcp__loft__forget` to remove stale ones and `mcp__loft__recall` to search.
+Read a memory's full body with `mcp__loft__recall` when its title looks relevant; it searches titles and bodies. Use `mcp__loft__remember` for durable facts worth keeping: user preferences, decisions, project facts, and what you did and why. Give each memory a one-line title and a short, self-contained body. When a fact changes or a memory already covers it, rewrite that memory with `mcp__loft__update` instead of saving a near-copy. Use `mcp__loft__forget` to remove stale ones.
 
 # Loft tools
 - `mcp__loft__set_status`: a short, live, present-tense line shown next to your avatar (e.g. "Reading CI logs for the API"). Update it when you start a distinct phase of work.
@@ -367,7 +423,7 @@ Use `mcp__loft__remember` for durable facts worth keeping: user preferences, dec
   - Your body is your face: one chunky, flat-colored shape (a blob, star, drop, cloud, or an object that fits your job like a note or a map pin) filling most of the canvas, roughly from 8 to 92 on both axes.
   - Big googly eyes are the focus: white ovals about 22 wide and 25 tall, set close together, each with a dark (#17171c) oval pupil about 9x13, tilted slightly and glancing up or to the side. Add a small mouth as a dark stroke about 4 wide with round caps (a smile, smirk or open mouth). Winks and blush are fine.
   - Flat, saturated colors: one body color plus a slightly darker shade along its lower edge for depth. No black outlines and no busy gradients.
-  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.
+  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.{messaging}
 
 # Subagents
 {subagents}{grill}
@@ -377,6 +433,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         name = a.name,
         subagents = subagents,
         grill = crate::grill::prompt_section(),
+        messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
         title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
@@ -405,15 +462,22 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) }
     });
+    // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
+    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
-    start(state, agent_id, prompt, trigger);
+    start(state, agent_id, prompt, trigger, for_user);
     msg
 }
 
 /// Run the agent with `prompt` (queued behind a running run) without recording a user message.
 /// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees).
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
-    start(state, agent_id, Some(prompt), trigger);
+    start(state, agent_id, Some(prompt), trigger, false);
+}
+
+/// `wake` for the user's own words recorded elsewhere (a task comment sent to the agent): its reply is an Unread reply.
+pub fn wake_for_user(state: &AppState, agent_id: &str, prompt: String) {
+    start(state, agent_id, Some(prompt), "user", true);
 }
 
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
@@ -422,7 +486,7 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
         "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, title, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
         brief = brief.trim()
     );
-    start(state, agent_id, Some(prompt), "avatar");
+    start(state, agent_id, Some(prompt), "avatar", false);
 }
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors.
@@ -437,7 +501,7 @@ fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, rol
 /// shown as a user message; the `compact` marker it produces is.
 pub fn compact(state: &AppState, agent_id: &str, instructions: &str) {
     let cmd = if instructions.is_empty() { "/compact".to_string() } else { format!("/compact {instructions}") };
-    start(state, agent_id, Some(cmd), "compact");
+    start(state, agent_id, Some(cmd), "compact", false);
 }
 
 /// Deliver a message from one agent to another. It shows in the recipient's chat
@@ -455,10 +519,42 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
         name = from.name,
         id = from.id,
     );
-    start(state, &to.id, Some(prompt), "agent");
+    start(state, &to.id, Some(prompt), "agent", false);
 }
 
-fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str) {
+/// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
+/// but starts no run. The recipient reads it at the start of its next run, whatever starts that.
+pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": from.id, "name": from.name }, "fyi": true }));
+    let prompt = format!(
+        "[FYI from agent {name} (id {id}), not from the user. It needs no action and no reply.]\n{text}",
+        name = from.name,
+        id = from.id,
+    );
+    let _ = state.db.add_pending_fyi(&to.id, &prompt);
+}
+
+/// The most FYIs put in front of one prompt; older ones are only counted.
+const MAX_FYIS_PER_PROMPT: usize = 20;
+
+/// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
+/// after a line saying how many older ones were left out.
+fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
+    if fyis.is_empty() {
+        return prompt.to_string();
+    }
+    let skip = fyis.len().saturating_sub(MAX_FYIS_PER_PROMPT);
+    let mut parts: Vec<String> = vec![];
+    if skip > 0 {
+        parts.push(format!("[{skip} older FYIs from agents were left out; the newest {MAX_FYIS_PER_PROMPT} follow.]"));
+    }
+    parts.extend(fyis[skip..].iter().map(|(_, p)| p.clone()));
+    parts.push(prompt.to_string());
+    parts.join("\n\n")
+}
+
+/// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
+fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -472,6 +568,9 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
+                if for_user {
+                    rt.queued_for_user.insert(agent_id.to_string());
+                }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
                 w.notify_one();
@@ -487,13 +586,25 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
     tokio::spawn(async move {
         let mut prompt = prompt;
         let mut trigger = trigger;
+        let mut for_user = for_user;
         loop {
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, kill.clone()).await {
+            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            let full = with_fyis(&fyis, &prompt);
+            let mut delivered = false;
+            if let Err(e) = run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+                // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
+                if !delivered {
+                    let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+                }
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
+                if for_user {
+                    mark_replied(&state, &agent_id);
+                }
             }
             let next = {
                 let mut rt = state.rt.lock().unwrap();
@@ -503,9 +614,10 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                         if let Some(g) = g {
                             rt.grill_queued.insert(agent_id.clone(), g);
                         }
-                        Some((q.join("\n\n"), "user"))
+                        let u = rt.queued_for_user.remove(&agent_id);
+                        Some((q.join("\n\n"), "user", u))
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill")),
+                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
                     _ => {
                         rt.running.remove(&agent_id);
                         None
@@ -513,9 +625,10 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
                 }
             };
             match next {
-                Some((p, t)) => {
+                Some((p, t, u)) => {
                     prompt = p;
                     trigger = t;
+                    for_user = u;
                 }
                 None => break,
             }
@@ -557,6 +670,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
         n if n.starts_with("mcp__loft__") => match &n[15..] {
             "remember" => "Saving a memory".into(),
             "recall" => "Searching memory".into(),
+            "update" => "Updating a memory".into(),
             "forget" => "Forgetting a memory".into(),
             "set_avatar" => "Redrawing avatar".into(),
             "get_avatar" => "Looking in the mirror".into(),
@@ -672,18 +786,35 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd
 }
 
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, kill: Arc<Notify>) -> Result<()> {
+/// Points the agent at Claude session `sid`. A different session than its last one brings the running
+/// total last recorded for it (0 for a new one), so the next run's cost is only what that run adds.
+fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
+    let same = state.db.get_agent(agent_id)?.is_some_and(|a| a.session_id.as_deref() == Some(sid));
+    let seed = if same { None } else { Some(state.db.session_total(agent_id, sid)?) };
+    state.db.update_agent(agent_id, |a| {
+        a.session_id = Some(sid.to_string());
+        if let Some(t) = seed {
+            a.session_cost_usd = t;
+        }
+    })?;
+    Ok(())
+}
+
+/// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
     let mut resume = true;
     loop {
-        match run_process(state, agent_id, prompt, trigger, kill.clone(), resume).await? {
+        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
             RunOutcome::Done => return Ok(()),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
+                *delivered = false;
                 // The stored Claude session is gone; start fresh (memory survives).
                 if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
                     a.session_id = None;
                     a.context_tokens = None;
                     a.grill_briefed = false;
+                    a.memory_index = None;
                 }) {
                     emit_agent(state, &a);
                 }
@@ -716,10 +847,17 @@ async fn run_process(
     agent_id: &str,
     prompt: &str,
     trigger: &str,
+    for_user: bool,
     kill: Arc<Notify>,
     resume: bool,
+    delivered: &mut bool,
 ) -> Result<RunOutcome> {
-    let agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+    if !resume || agent.session_id.is_none() || agent.memory_index.is_none() {
+        // A new Session (or the first run since Clear or Compact): freeze its memories for the runs to come.
+        let block = memory_block(state, agent_id);
+        agent = state.db.update_agent(agent_id, |a| a.memory_index = Some(block))?.unwrap_or(agent);
+    }
     let quiet = trigger == "grill" || trigger == "avatar";
     // Set once the run has called a grill tool: the tools post what the user sees, so any text the agent
     // writes after that (models narrate despite being told not to) would only repeat or spoil it.
@@ -744,7 +882,7 @@ async fn run_process(
     })? {
         emit_agent(state, &a);
     }
-    run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some() }));
+    run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
     let mut cmd = build_command(state, &agent, resume);
@@ -758,6 +896,7 @@ async fn run_process(
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
     }
+    *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
     let stderr_task = tokio::spawn(async move {
@@ -777,13 +916,15 @@ async fn run_process(
     // Claude Code background tasks (shells, monitors, background subagents) still running: id -> description.
     // claude -p stays alive for them and starts another turn when one finishes.
     let mut bg: Vec<(String, String)> = Vec::new();
+    // The shells and monitors among them, which the waiting bar names; the subagent bar shows the subagents.
+    let mut shells: Vec<String> = Vec::new();
     // Set at a final result with no background tasks left: claude should exit by then, or it is stopped.
     let mut exit_by: Option<tokio::time::Instant> = None;
     // The agent has given its reply (a result) and hasn't started another turn since.
     let mut replied = false;
     let mut held_end: Option<Value> = None;
     let preempt = Arc::new(Notify::new());
-    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), ..Default::default() });
+    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
     loop {
         let waiting = replied && !bg.is_empty();
         let line = tokio::select! {
@@ -830,8 +971,7 @@ async fn run_process(
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
                     if let Some(sid) = ev["session_id"].as_str() {
-                        let sid = sid.to_string();
-                        state.db.update_agent(agent_id, |a| a.session_id = Some(sid))?;
+                        set_session(state, agent_id, sid)?;
                     }
                 }
                 // Manual /compact and Claude Code's own auto-compaction both land here.
@@ -842,16 +982,52 @@ async fn run_process(
                     }));
                     set_context_tokens(state, agent_id, m["post_tokens"].as_u64());
                     // The summary may have dropped the grill instructions: the next grill run resends them.
-                    state.db.update_agent(agent_id, |a| a.grill_briefed = false)?;
+                    // The cache is rebuilt after a compaction anyway, so the next run takes fresh memories.
+                    state.db.update_agent(agent_id, |a| {
+                        a.grill_briefed = false;
+                        a.memory_index = None;
+                    })?;
                 }
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
                 }
+                // Ties a subagent's Agent call to its task, and says whether it runs in the background.
+                Some("task_started") | Some("task_updated") => {
+                    let use_id = ev["tool_use_id"].as_str();
+                    let task_id = ev["task_id"].as_str();
+                    let background = ev["is_backgrounded"].as_bool().or(ev["patch"]["is_backgrounded"].as_bool()) == Some(true);
+                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                        for s in i.subagents.iter_mut().filter(|s| use_id == Some(s.id.as_str()) || (task_id.is_some() && s.task_id.as_deref() == task_id)) {
+                            s.task_id = task_id.map(String::from).or(s.task_id.take());
+                            s.background |= background;
+                        }
+                    }
+                }
                 Some("background_tasks_changed") => {
-                    bg = ev["tasks"]
-                        .as_array()
-                        .map(|ts| ts.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), t["description"].as_str().unwrap_or("background task").to_string())).collect())
-                        .unwrap_or_default();
+                    let tasks = ev["tasks"].as_array().cloned().unwrap_or_default();
+                    let desc = |t: &Value| t["description"].as_str().unwrap_or("background task").to_string();
+                    bg = tasks.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), desc(t))).collect();
+                    shells = tasks.iter().filter(|t| t["task_type"] != "local_agent").map(desc).collect();
+                    // A launched background subagent runs until the list drops it. Without its task id, until
+                    // no subagent the agent started itself is left.
+                    let any_own = tasks.iter().any(|t| t["task_type"] == "local_agent" && t["parent_task_id"].is_null());
+                    let ended = state.rt.lock().unwrap().runs.get_mut(agent_id).is_some_and(|i| {
+                        let n = i.subagents.len();
+                        i.subagents.retain(|s| {
+                            !s.launched
+                                || match &s.task_id {
+                                    Some(t) => bg.iter().any(|(id, _)| id == t),
+                                    None => any_own,
+                                }
+                        });
+                        i.subagents.len() < n
+                    });
+                    if ended && !replied {
+                        emit_run(state, agent_id);
+                    }
+                    if replied {
+                        show_waiting(state, agent_id, &bg, &shells);
+                    }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
                         exit_by = Some(tokio::time::Instant::now() + FOLLOW_UP_GRACE);
@@ -906,6 +1082,15 @@ async fn run_process(
                             let summary = tool_summary(name, &b["input"]);
                             if let Some(id) = b["id"].as_str() {
                                 tool_calls.insert(id.to_string(), (name.to_string(), b["input"].clone()));
+                                // Only the agent's own subagents count; one a subagent starts runs inside it.
+                                if sub.is_none() && matches!(name, "Agent" | "Task") {
+                                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                                        let s = |k: &str| b["input"][k].as_str().unwrap_or("").to_string();
+                                        let background = b["input"]["run_in_background"].as_bool() == Some(true);
+                                        i.subagents.push(crate::state::Subagent { id: id.to_string(), description: s("description"), kind: s("subagent_type"), started_at: now(), task_id: None, background, launched: false });
+                                    }
+                                    emit_run(state, agent_id);
+                                }
                             }
                             // Grill tools post what the user sees themselves; their rows would only clutter the interview.
                             let hide = quiet || name.starts_with("mcp__loft__grill_");
@@ -932,6 +1117,20 @@ async fn run_process(
                         let full = result_text(&b["content"]);
                         let use_id = b["tool_use_id"].as_str().unwrap_or("").to_string();
                         let ok = !b["is_error"].as_bool().unwrap_or(false);
+                        // A background subagent's result only says it launched; it ends when the task list drops it.
+                        let ended = state.rt.lock().unwrap().runs.get_mut(agent_id).is_some_and(|i| {
+                            let n = i.subagents.len();
+                            i.subagents.retain_mut(|s| {
+                                if s.id == use_id && s.background {
+                                    s.launched = true;
+                                }
+                                s.id != use_id || s.background
+                            });
+                            i.subagents.len() < n
+                        });
+                        if ended {
+                            emit_run(state, agent_id);
+                        }
                         if let Some((name, input)) = tool_calls.get(&use_id) {
                             if ok && crate::prs::creates_pr(name, input) {
                                 for (slug, n) in crate::github::extract_pr_links(&full) {
@@ -958,12 +1157,10 @@ async fn run_process(
                 if replied && bg.is_empty() {
                     exit_by = Some(tokio::time::Instant::now() + EXIT_GRACE);
                 } else if replied {
-                    let names = bg.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>().join(", ");
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
-                        i.waiting_on = bg.iter().map(|(_, d)| d.clone()).collect();
                         i.waiting_since = Some(now());
                     }
-                    set_status_text(state, agent_id, &format!("Waiting on: {names}"));
+                    show_waiting(state, agent_id, &bg, &shells);
                     let mut rt = state.rt.lock().unwrap();
                     rt.waiting.insert(agent_id.to_string(), preempt.clone());
                     if rt.queued.get(agent_id).is_some_and(|q| !q.is_empty()) || rt.grill_queued.get(agent_id).is_some_and(|q| !q.is_empty()) {
@@ -971,11 +1168,14 @@ async fn run_process(
                         preempt.notify_one();
                     }
                 }
-                let cost = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                // On --resume Claude Code reports the session's running total; the run cost what it added.
+                let total = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                let mut cost = total;
                 if let Some(sid) = ev["session_id"].as_str() {
-                    let sid = sid.to_string();
+                    set_session(state, agent_id, sid)?;
                     state.db.update_agent(agent_id, |a| {
-                        a.session_id = Some(sid);
+                        cost = crate::db::run_cost(total, a.session_cost_usd);
+                        a.session_cost_usd = total;
                         a.total_cost_usd += cost;
                     })?;
                 }
@@ -986,6 +1186,8 @@ async fn run_process(
                 }
                 let end = json!({
                     "cost_usd": cost,
+                    "session_cost_usd": total,
+                    "session_id": ev["session_id"],
                     "duration_ms": ev["duration_ms"],
                     "num_turns": ev["num_turns"],
                     "is_error": ev["is_error"],
@@ -1003,10 +1205,13 @@ async fn run_process(
         }
     }
 
-    {
+    let had_subagents = {
         let mut rt = state.rt.lock().unwrap();
         rt.waiting.remove(agent_id);
-        rt.runs.remove(agent_id);
+        rt.runs.remove(agent_id).is_some_and(|i| !i.subagents.is_empty())
+    };
+    if had_subagents {
+        emit_run(state, agent_id);
     }
     if let Some(end) = held_end {
         run_msg(quiet, state, agent_id, rid, "system", "run_end", "", end);
@@ -1052,6 +1257,9 @@ async fn run_process(
     }
     let (st, text) = if !killed && !got_result { ("error", "Last run failed") } else { ("idle", "") };
     set_status(state, agent_id, st, text);
+    if for_user && !quiet && (!last_text.is_empty() || run_error.is_some()) {
+        mark_replied(state, agent_id);
+    }
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
     }
@@ -1115,7 +1323,7 @@ pub async fn scheduler(state: AppState) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1141,6 +1349,72 @@ mod tests {
         assert!(p.contains("Assign every GitHub issue you create to the user") && p.contains("unless the user explicitly says to assign no one or someone else"), "{p}");
     }
 
+    /// The messaging-rules section of a system prompt, if it has one.
+    fn messaging_section(p: &str) -> Option<&str> {
+        let start = p.find("# Messaging rules\n")?;
+        let end = start + p[start..].find("\n\n# ").unwrap();
+        Some(&p[start..end])
+    }
+
+    #[test]
+    fn every_agent_gets_loft_s_messaging_rules_whatever_its_standing_instructions() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), Arc::new(Notify::new()));
+        crate::setup::ensure_loft(&st);
+        let guide = st.db.get_agent(crate::setup::LOFT_ID).unwrap().unwrap();
+        let mut empty = crate::tasks::tests::agent(&st, "Empty");
+        empty.prompt = String::new();
+        let mut chatty = crate::tasks::tests::agent(&st, "Chatty");
+        chatty.prompt = "Thank every agent that messages you, and send your verdicts to the whole team.".into();
+        for a in [&guide, &empty, &chatty] {
+            let p = system_prompt(&st, a);
+            let section = messaging_section(&p).unwrap_or_else(|| panic!("{} has no messaging rules: {p}", a.name));
+            assert_eq!(section, MESSAGING_RULES.trim_start());
+            for rule in [
+                "1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.",
+                "2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.",
+                "3. Send a verdict only to the agent that acts on it, not to everyone.",
+                "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
+                "5. Don't reply to an FYI.",
+            ] {
+                assert!(section.contains(rule), "missing {rule}");
+            }
+            assert!(section.contains("whatever your standing instructions say"));
+            // Next to the Loft tools.
+            assert!(p.find("# Loft tools").unwrap() < p.find("# Messaging rules").unwrap());
+        }
+    }
+
+    #[test]
+    fn the_messaging_rules_are_the_same_on_every_run() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let first = system_prompt(&st, &a);
+        // What changes between runs (memories, the agent's own settings) leaves the section alone.
+        st.db.add_memory(&a.id, "First run", "Something learned in the first run", "").unwrap();
+        let mut later = a.clone();
+        later.prompt = "New standing instructions".into();
+        later.interval_minutes = 30;
+        let second = system_prompt(&st, &later);
+        assert_ne!(first, second);
+        assert_eq!(messaging_section(&first), messaging_section(&second));
+        assert!(messaging_section(&first).is_some());
+    }
+
+    #[test]
+    fn the_global_setting_turns_the_messaging_rules_off_for_every_agent() {
+        let st = crate::tasks::tests::state();
+        assert!(st.settings.get().messaging_rules, "on by default");
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let mut s = st.settings.get();
+        s.messaging_rules = false;
+        st.settings.save(s).unwrap();
+        let p = system_prompt(&st, &a);
+        assert_eq!(messaging_section(&p), None, "{p}");
+        assert!(!p.contains("Messaging rules"));
+        assert!(p.contains("# Loft tools") && p.contains("# Subagents"));
+    }
+
     #[test]
     fn rules() {
         let git = json!({ "command": "git status" });
@@ -1156,14 +1430,41 @@ mod tests {
         assert_eq!(suggest_rule("Bash", &json!({ "command": "npm test" })), "Bash(npm *)");
     }
 
-    /// Stands in for `claude -p`: logs each prompt to `prompts.log` in the workspace, replies, and then
+    /// Stands in for `claude -p`: logs each prompt to `prompts.log` and system prompt to `system.log` in the
+    /// workspace (a compaction for `/compact`), replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
-/// "busy" never replies, "slow" replays an empty result first.
+    /// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question,
+    /// "delegate" starts an Explore subagent, which starts one of its own, and waits for a `go` file before the
+/// subagent returns and for `go2` before the reply; "orphan" replies with a subagent that never returned.
+/// "bg-agent" launches two background subagents next to a shell and a monitor; the task list drops one subagent at
+/// `go` and the other with the monitor at `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started,
+/// "early" also replies right after the launch).
+/// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
+    /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
-echo '{"type":"system","subtype":"init","session_id":"s1"}'
+case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
+  chmod -x "$0"
+  echo 'No conversation found with session ID: s1' >&2
+  exit 1;;
+esac;;
+esac
+while [ $# -gt 0 ]; do
+  [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
+  [ "$1" = --resume ] && echo "$2" >> resumed.log
+  shift
+done
+cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
+sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
+: "${cost:=0}" "${sid:=s1}"
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+case "$prompt" in /compact*)
+  echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
+esac
+case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
@@ -1173,11 +1474,50 @@ case "$prompt" in *slow*)
   echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
   sleep 1;;
 esac
-case "$prompt" in *linger*)
+case "$prompt" in *fail*)
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+  exit 1;;
+esac
+case "$prompt" in *delegate*|*orphan*)
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Find the parser","subagent_type":"Explore","prompt":"x"}}]}}'
+  echo '{"type":"assistant","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_use","id":"n1","name":"Agent","input":{"description":"Nested","subagent_type":"general-purpose","prompt":"y"}}]}}';;
+esac
+case "$prompt" in *delegate*)
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"user","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"n1","content":"nested done"}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a1","content":"found it"}]}}'
+  while [ ! -f go2 ]; do sleep 0.05; done;;
+esac
+case "$prompt" in *bg-agent*)
+  for i in 1 2; do
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b'$i'","name":"Agent","input":{"description":"Audit '$i'","subagent_type":"Explore","prompt":"x","run_in_background":true}}]}}'
+  done
+  echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"m1","task_type":"monitor","description":"Watch the logs"},{"task_id":"t1","task_type":"local_agent","subagent_type":"Explore","description":"Audit 1"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+  for i in 1 2; do
+    case "$prompt" in *no-task-id*) ;; *)
+      echo '{"type":"system","subtype":"task_started","task_id":"t'$i'","tool_use_id":"b'$i'","description":"Audit '$i'","task_type":"local_agent","is_backgrounded":true}';;
+    esac
+    echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b'$i'","content":"Async agent launched successfully."}]}}'
+  done
+  case "$prompt" in *early*)
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"launched"}]}}'
+    echo '{"type":"result","subtype":"success","result":"launched","num_turns":1,"session_id":"s1","total_cost_usd":0}';;
+  esac
+  case "$prompt" in *linger*) ;; *)
+    while [ ! -f go ]; do sleep 0.05; done
+    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"m1","task_type":"monitor","description":"Watch the logs"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+    while [ ! -f go2 ]; do sleep 0.05; done
+    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"}]}'
+    while [ ! -f go3 ]; do sleep 0.05; done;;
+  esac;;
+esac
+case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"started"}]}}'
-echo '{"type":"result","subtype":"success","result":"started","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+reply=started
+case "$prompt" in *ask*) reply='Which one?';; esac
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$reply"'"}]}}'
+echo '{"type":"result","subtype":"success","result":"'"$reply"'","num_turns":1,"session_id":"'"$sid"'","total_cost_usd":'"$cost"'}'
 case "$prompt" in *linger*|*hang*)
   trap 'kill $!; echo yes > terminated; exit 143' TERM
   sleep 600 &
@@ -1185,7 +1525,7 @@ case "$prompt" in *linger*|*hang*)
 esac
 "#;
 
-    fn fake_claude_state() -> (AppState, Agent) {
+    pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let bin = dir.join("fake-claude");
@@ -1200,7 +1540,7 @@ esac
         (st, a)
     }
 
-    async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
+    pub(crate) async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
         let end = tokio::time::Instant::now() + Duration::from_secs(secs);
         while !f() {
             assert!(tokio::time::Instant::now() < end, "timed out waiting for: {what}");
@@ -1210,6 +1550,198 @@ esac
 
     fn status_text(st: &AppState, id: &str) -> String {
         st.db.get_agent(id).unwrap().unwrap().status_text
+    }
+
+    /// The memory part of each system prompt the fake claude was started with, in order.
+    fn memory_parts(st: &AppState, id: &str) -> Vec<String> {
+        let log = std::fs::read_to_string(workspace(st, id).join("system.log")).unwrap_or_default();
+        log.split("\n---\n")
+            .filter_map(|p| Some(p.split_once("# Long-term memory")?.1.split_once("# Loft tools")?.0.to_string()))
+            .collect()
+    }
+
+    async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
+        enqueue(st, id, Some(text.into()), "user");
+        until("the run", 10, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_part_stays_the_same_for_a_session_and_is_rebuilt_after_clear_and_compact() {
+        let (st, a) = fake_claude_state();
+        let first = st.db.add_memory(&a.id, "Deploys go through staging", "Every deploy goes to staging first.", "").unwrap();
+        run(&st, &a.id, "hello", 1).await;
+
+        // Saved by the agent or in the Memory tab, changes wait for the next Session.
+        st.db.add_memory(&a.id, "User prefers short replies", "Keep chat replies to a few lines.", "").unwrap();
+        st.db.delete_memory(&a.id, first.id).unwrap();
+        run(&st, &a.id, "again", 2).await;
+        let parts = memory_parts(&st, &a.id);
+        assert_eq!(parts[0], parts[1]);
+        assert!(parts[1].contains("Deploys go through staging") && !parts[1].contains("short replies"), "{}", parts[1]);
+
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        run(&st, &a.id, "after clear", 3).await;
+        let parts = memory_parts(&st, &a.id);
+        assert!(parts[2].contains("short replies") && !parts[2].contains("Deploys go through staging"), "{}", parts[2]);
+
+        st.db.add_memory(&a.id, "Release on Fridays", "Releases ship on Friday mornings.", "").unwrap();
+        compact(&st, &a.id, "");
+        until("the compaction", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 4).await;
+        assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
+        run(&st, &a.id, "after compact", 5).await;
+        assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_run_costs_what_it_added_to_the_session() {
+        let (st, a) = fake_claude_state();
+        let costs = || -> Vec<f64> {
+            let mut msgs = st.db.list_messages(&a.id, 200, None).unwrap();
+            msgs.sort_by_key(|m| m.id);
+            msgs.iter().filter(|m| m.kind == "run_end").map(|m| (m.meta["cost_usd"].as_f64().unwrap() * 1e6).round() / 1e6).collect()
+        };
+        // Claude Code reports the resumed session's running total.
+        let s1 = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        for (i, c) in ["0.005", "0.006", "0.007"].iter().enumerate() {
+            run(&st, &a.id, &format!("sid={s1} cost={c}"), i + 1).await;
+        }
+        assert_eq!(costs(), vec![0.005, 0.001, 0.001]);
+        assert!((st.db.get_agent(&a.id).unwrap().unwrap().total_cost_usd - 0.007).abs() < 1e-9);
+
+        // After a Clear the new session counts from 0, even when its total tops the old one's.
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        run(&st, &a.id, "sid=s2 cost=0.009", 4).await;
+        run(&st, &a.id, "sid=s2 cost=0.010", 5).await;
+        assert_eq!(costs()[3..], [0.009, 0.001]);
+
+        // Resuming the first session picks up from its last total, not from 0.
+        let dir = crate::sessions::tests::tmp();
+        crate::sessions::tests::write(&dir, s1, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"hello"}}"#]);
+        let _ = crate::api::resume_from(&st, &a.id, dir, s1.into()).await.unwrap();
+        run(&st, &a.id, &format!("sid={s1} cost=0.008"), 6).await;
+        // A total that went down is a fresh session: it counts whole, never negative.
+        run(&st, &a.id, &format!("sid={s1} cost=0.002"), 7).await;
+        assert_eq!(costs()[5..], [0.001, 0.002]);
+        let a = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!((a.total_cost_usd - 0.020).abs() < 1e-9, "{}", a.total_cost_usd);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resuming_a_past_session_resumes_it_with_a_fresh_memory_index() {
+        let (st, a) = fake_claude_state();
+        st.db.add_memory(&a.id, "Deploys go through staging", "Every deploy goes to staging first.", "").unwrap();
+        run(&st, &a.id, "hello", 1).await;
+        st.db.add_memory(&a.id, "User prefers short replies", "Keep chat replies to a few lines.", "").unwrap();
+
+        let dir = crate::sessions::tests::tmp();
+        let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        crate::sessions::tests::write(&dir, past, &[
+            r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":120000}}}"#,
+        ]);
+        let resume = |sid: &str| crate::api::resume_from(&st, &a.id, dir.clone(), sid.into());
+        assert_eq!(resume("feed-404").await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        assert_eq!(resume(past).await.unwrap_err().0, axum::http::StatusCode::CONFLICT, "not while it runs");
+        st.rt.lock().unwrap().running.remove(&a.id);
+
+        let _ = resume(past).await.unwrap();
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!(now.session_id.as_deref(), Some(past));
+        assert_eq!(now.context_tokens, Some(120010), "the header shows the resumed Session's size");
+        let marker = st.db.list_messages(&a.id, 50, None).unwrap().into_iter().find(|m| m.kind == "resume").unwrap();
+        assert_eq!(marker.content, "Resumed the Session from 2026-10-20.");
+        assert_eq!(resume(past).await.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST, "already its Session");
+
+        run(&st, &a.id, "where were we?", 2).await;
+        let resumed = std::fs::read_to_string(workspace(&st, &a.id).join("resumed.log")).unwrap();
+        assert_eq!(resumed.lines().last(), Some(past), "the next run resumes the picked Session");
+        assert!(memory_parts(&st, &a.id)[1].contains("short replies"), "the memory index is built afresh");
+    }
+
+    /// A transcripts folder holding one past Session, and that Session's id.
+    fn past_session() -> (std::path::PathBuf, String) {
+        let dir = crate::sessions::tests::tmp();
+        let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
+        crate::sessions::tests::write(&dir, past, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#]);
+        (dir, past.into())
+    }
+
+    #[tokio::test]
+    async fn resuming_a_past_session_drops_the_queued_messages() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        {
+            let mut rt = st.rt.lock().unwrap();
+            rt.queued.insert(a.id.clone(), vec!["deploy to staging".into()]);
+            rt.grill_queued.insert(a.id.clone(), vec!["[Loft: grill round]".into()]);
+        }
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past).await.unwrap();
+        let rt = st.rt.lock().unwrap();
+        assert!(rt.queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.queued.get(&a.id));
+        assert!(rt.grill_queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.grill_queued.get(&a.id));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_past_session_briefs_the_next_grill_again() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Lead");
+        assert!(crate::grill::with_brief(&st, &a.id, "round 1".into()).contains("# Planning: grilling"));
+        assert_eq!(crate::grill::with_brief(&st, &a.id, "round 2".into()), "round 2", "briefed in this Session");
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past).await.unwrap();
+        assert!(crate::grill::with_brief(&st, &a.id, "round 3".into()).contains("# Planning: grilling"), "the resumed Session never had it");
+    }
+
+    #[test]
+    fn memory_index_lists_titles_newest_first_and_never_bodies() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        assert!(system_prompt(&st, &a).contains("(no memories yet)"));
+        let old = st.db.add_memory(&a.id, "Deploys go through staging", "BODY-ONE every deploy goes to staging first.", "ops").unwrap();
+        let new = st.db.add_memory(&a.id, "User prefers short replies", "BODY-TWO keep replies to a few lines.", "").unwrap();
+        let p = system_prompt(&st, &a);
+        let (o, n) = (format!("- #{} Deploys go through staging", old.id), format!("- #{} User prefers short replies", new.id));
+        assert!(p.find(&n).unwrap() < p.find(&o).unwrap(), "newest first: {p}");
+        assert!(!p.contains("BODY-") && !p.contains("older memor"), "{p}");
+    }
+
+    #[test]
+    fn memory_index_keeps_the_newest_that_fit_and_says_how_many_older_exist() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ids: Vec<i64> = (0..400).map(|i| st.db.add_memory(&a.id, &format!("Status of epic {i:03}: {}", "x".repeat(40)), "body", "").unwrap().id).collect();
+        let block = memory_block(&st, &a.id);
+        assert!(block.chars().count() <= MEMORY_INDEX_CHARS + 100, "about 3k tokens");
+        let lines: Vec<&str> = block.lines().collect();
+        let listed = lines.len() - 1;
+        assert!(listed > 100 && listed < 400, "{listed}");
+        assert!(lines[0].starts_with(&format!("- #{} Status of epic 399", ids[399])));
+        assert!(lines[listed - 1].contains(&format!("epic {:03}", 400 - listed)), "the newest ones, without gaps");
+        assert_eq!(*lines.last().unwrap(), format!("({} older memories: use `mcp__loft__recall` to reach them.)", 400 - listed));
+    }
+
+    #[test]
+    fn an_updated_memory_moves_to_the_top_of_the_index() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ids: Vec<i64> = (0..400).map(|i| st.db.add_memory(&a.id, &format!("Status of epic {i:03}: {}", "x".repeat(40)), "body", "").unwrap().id).collect();
+        st.db.update_memory(&a.id, ids[0], None, Some("Epic 000 shipped.")).unwrap();
+        let block = memory_block(&st, &a.id);
+        let lines: Vec<&str> = block.lines().collect();
+        assert!(lines[0].starts_with(&format!("- #{} Status of epic 000", ids[0])), "{}", lines[0]);
+        assert!(lines[1].starts_with(&format!("- #{} Status of epic 399", ids[399])));
+        assert!(!block.contains(&format!("- #{} ", ids[1])), "an old untouched one falls out");
+        assert_eq!(*lines.last().unwrap(), format!("({} older memories: use `mcp__loft__recall` to reach them.)", 400 - (lines.len() - 1)));
+    }
+
+    #[test]
+    fn clients_never_see_the_frozen_memory_index() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Worker");
+        a.memory_index = Some("- #1 secret".into());
+        assert!(client_json(&a).get("memory_index").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1282,13 +1814,138 @@ esac
         enqueue(&st, &a.id, Some("linger".into()), "user");
         until("the reply", 10, || fields(&st, &a.id)["waiting_on"] == json!(["Run the QA suite"])).await;
         let v = fields(&st, &a.id);
+        assert_eq!(v["subagents"], json!([]), "a background shell isn't a subagent");
         assert!(v["running"] == json!(true) && v["waiting_since"].is_string() && v["last_output_at"].is_string(), "{v}");
         let r = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert!(r.is_ok());
         until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
-        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null }));
+        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [] }));
         let log = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
         assert!(log.contains("restarted your last run (it was waiting on Run the QA suite)"), "{log}");
+    }
+
+    fn subagents(st: &AppState, id: &str) -> Vec<Value> {
+        fields(st, id)["subagents"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The `subagents` of every agent-updated event pushed for the agent, from now on.
+    fn pushed_subagents(st: &AppState, id: &str) -> Arc<std::sync::Mutex<Vec<Value>>> {
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let (mut events, id, out) = (st.events.subscribe(), id.to_string(), seen.clone());
+        tokio::spawn(async move {
+            while let Ok(ev) = events.recv().await {
+                let ev = serde_json::to_value(ev).unwrap();
+                if ev["type"] == "agent_updated" && ev["agent"]["id"] == json!(id) {
+                    out.lock().unwrap().push(json!({ "running": ev["agent"]["running"], "ids": ev["agent"]["subagents"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect::<Vec<_>>() }));
+                }
+            }
+        });
+        seen
+    }
+
+    fn last_push(seen: &std::sync::Mutex<Vec<Value>>) -> Value {
+        seen.lock().unwrap().last().cloned().unwrap_or_default()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_json_shows_its_running_subagents() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let pushed = pushed_subagents(&st, &a.id);
+        enqueue(&st, &a.id, Some("delegate".into()), "user");
+        until("the nested call", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
+        let subs = subagents(&st, &a.id);
+        assert_eq!(subs.len(), 1, "the subagent's own Agent call isn't counted: {subs:?}");
+        assert!(subs[0]["id"] == "a1" && subs[0]["description"] == "Find the parser" && subs[0]["type"] == "Explore" && subs[0]["started_at"].is_string(), "{subs:?}");
+        until("the start pushed", 10, || last_push(&pushed)["ids"] == json!(["a1"])).await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the subagent's result", 10, || subagents(&st, &a.id).is_empty()).await;
+        assert!(is_running(&st, &a.id), "the result ends the subagent, not the run");
+        // Nothing else changes before `go2`: only the result's own push can tell clients.
+        until("the result pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_run_ending_clears_its_subagents() {
+        let (st, a) = fake_claude_state();
+        let pushed = pushed_subagents(&st, &a.id);
+        enqueue(&st, &a.id, Some("orphan".into()), "user");
+        until("the run to end", 10, || !is_running(&st, &a.id) && st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "run_end")).await;
+        assert!(subagents(&st, &a.id).is_empty());
+        let seen = pushed.lock().unwrap().clone();
+        let started = seen.iter().position(|p| p["ids"] == json!(["a1"])).expect("the subagent was pushed while the run went on");
+        let cleared = seen[started..].iter().position(|p| p["ids"] == json!([])).expect("the run's end was pushed") + started;
+        assert_eq!(seen[cleared]["running"], json!(true), "the end of the run itself clears them, before the agent goes idle: {seen:?}");
+
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("delegate".into()), "user");
+        until("the subagent", 10, || subagents(&st, &a.id).len() == 1).await;
+        assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
+        until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
+        assert!(subagents(&st, &a.id).is_empty());
+    }
+
+    fn subagent_ids(st: &AppState, id: &str) -> Vec<Value> {
+        subagents(st, id).iter().map(|s| s["id"].clone()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_subagent_counts_until_the_task_list_drops_it() {
+        for prompt in ["bg-agent", "bg-agent no-task-id"] {
+            let (st, a) = fake_claude_state();
+            let ws = workspace(&st, &a.id);
+            let pushed = pushed_subagents(&st, &a.id);
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the launch results", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.content.contains("launched successfully")).count() == 2).await;
+            assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")], "{prompt}: the launch doesn't end them, and the shell isn't a subagent");
+            std::fs::write(ws.join("go"), "").unwrap();
+            if prompt == "bg-agent" {
+                until("the task list to drop b1 only", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+                until("the drop pushed", 10, || last_push(&pushed)["ids"] == json!(["b2"])).await;
+            }
+            // Without task ids, they end together once no subagent of the agent's own is listed.
+            std::fs::write(ws.join("go2"), "").unwrap();
+            until("the task list to drop them", 10, || subagents(&st, &a.id).is_empty()).await;
+            until("the drop pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
+            std::fs::write(ws.join("go3"), "").unwrap();
+            until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_waiting_bar_names_shells_and_follows_the_task_list() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let status = || st.db.get_agent(&a.id).unwrap().unwrap().status_text;
+        enqueue(&st, &a.id, Some("bg-agent early".into()), "user");
+        until("the reply", 10, || fields(&st, &a.id)["waiting_since"].is_string()).await;
+        // The subagent bar shows the subagents; the waiting bar only the shell and the monitor.
+        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite", "Watch the logs"]));
+        assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")]);
+        assert_eq!(status(), "Waiting on: Run the QA suite, Watch the logs, Audit 1, Audit 2");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the task list to drop b1", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+        until("the status to drop it", 10, || status() == "Waiting on: Run the QA suite, Watch the logs, Audit 2").await;
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("the status to drop b2 and the monitor", 10, || status() == "Waiting on: Run the QA suite").await;
+        assert!(subagents(&st, &a.id).is_empty());
+        assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
+        std::fs::write(ws.join("go3"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_message_stopping_the_run_clears_its_background_subagents() {
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("bg-agent linger".into()), "user");
+        until("the reply", 10, || !fields(&st, &a.id)["waiting_on"].as_array().unwrap().is_empty()).await;
+        assert_eq!(subagents(&st, &a.id).len(), 2, "still running after the reply");
+        enqueue(&st, &a.id, Some("next".into()), "user");
+        until("the new message to run", 10, || !is_running(&st, &a.id)).await;
+        assert!(workspace(&st, &a.id).join("terminated").exists());
+        assert!(subagents(&st, &a.id).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1376,5 +2033,202 @@ esac
         assert!(ws.join("terminated").exists());
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
         assert_eq!((a.status.as_str(), a.session_id.as_deref()), ("idle", Some("s1")));
+    }
+
+    fn unread(st: &AppState, id: &str) -> bool {
+        st.db.get_agent(id).unwrap().unwrap().unread_reply()
+    }
+
+    fn send(st: &AppState, id: &str, text: &str) -> impl std::future::Future<Output = crate::api::ApiResult<Value>> {
+        crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap()))
+    }
+
+    async fn idle(st: &AppState, id: &str) {
+        until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_to_the_user_is_unread_until_marked_read_everywhere() {
+        let (st, a) = fake_claude_state();
+        assert!(!unread(&st, &a.id));
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let got = crate::api::get_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(got["unread_reply"], json!(true));
+
+        let mut events = st.events.subscribe();
+        let r = crate::api::mark_read(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(r["unread_reply"], json!(false));
+        let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
+        assert_eq!((ev["type"].clone(), ev["agent"]["id"].clone(), ev["agent"]["unread_reply"].clone()), (json!("agent_updated"), json!(a.id), json!(false)), "other browsers hear about it");
+        assert!(crate::api::mark_read(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errors_and_scheduled_runs_leave_an_unread_reply() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "fail").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content == "boom"));
+        assert!(unread(&st, &a.id), "an error answers the user too");
+
+        let b = crate::tasks::tests::agent(&st, "Scheduled");
+        enqueue(&st, &b.id, None, "schedule");
+        idle(&st, &b.id).await;
+        assert!(unread(&st, &b.id));
+
+        let c = crate::tasks::tests::agent(&st, "Run now");
+        let _ = crate::api::run_now(axum::extract::State(st.clone()), axum::extract::Path(c.id.clone())).await.ok().unwrap();
+        idle(&st, &c.id).await;
+        assert!(unread(&st, &c.id), "Run now is the user starting it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_cannot_start_leaves_an_unread_reply() {
+        let (st, a) = fake_claude_state();
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_comment_sent_to_the_agent_counts() {
+        let (st, a) = fake_claude_state();
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Fix it", "agent_id": a.id }), "user").unwrap();
+        let body = serde_json::from_value(json!({ "text": "Any update?" })).unwrap();
+        let _ = crate::tasks::add_comment(axum::extract::State(st.clone()), axum::extract::Path(t.id.clone()), axum::Json(body)).await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("Any update?"));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runs_started_only_by_agents_leave_none() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "status?");
+        idle(&st, &a.id).await;
+        assert!(!unread(&st, &a.id), "a direct message from an agent");
+
+        // Queued while the agent is busy: it runs next with trigger "user", but no message of the user's started it.
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        message_from_agent(&st, &lead, &a, "and this");
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("and this"));
+        assert!(!unread(&st, &a.id), "an agent's message queued behind a run");
+
+        design_avatar(&st, &a.id, "a fox");
+        idle(&st, &a.id).await;
+        wake(&st, &a.id, "[Loft: grill] next round".into(), "grill");
+        idle(&st, &a.id).await;
+        assert!(!unread(&st, &a.id), "avatar and grill runs are quiet");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_run_mixing_the_users_message_and_an_agents_counts() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        message_from_agent(&st, &lead, &a, "from the lead");
+        let _ = send(&st, &a.id, "from me").await.ok().unwrap();
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(unread(&st, &a.id));
+    }
+
+    async fn restart(st: &AppState, id: &str) {
+        let _ = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string())).await.ok().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restarted_run_keeps_answering_the_user() {
+        let (st, a) = fake_claude_state();
+        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &a.id)).await;
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(unread(&st, &a.id), "the restarted run's reply");
+
+        let b = crate::tasks::tests::agent(&st, "Failing");
+        let _ = send(&st, &b.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &b.id)).await;
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+        restart(&st, &b.id).await;
+        idle(&st, &b.id).await;
+        assert!(st.db.list_messages(&b.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
+        assert!(unread(&st, &b.id), "the restarted run's error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restarting_an_agents_run_leaves_none() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "busy");
+        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(!unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restarting_runs_whats_queued_as_whoever_sent_it() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let asked = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "question");
+        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        // My run is restarted with only an agent's message queued: that message runs next, as the agent's.
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the run to start", 10, || running(&st, &a.id)).await;
+        message_from_agent(&st, &lead, &a, "ask");
+        restart(&st, &a.id).await;
+        idle(&st, &a.id).await;
+        assert!(!std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
+        assert!(!unread(&st, &a.id) && !asked(&st), "only an agent sent the queued message");
+
+        // My message is queued: it still counts.
+        let b = crate::tasks::tests::agent(&st, "Mine");
+        message_from_agent(&st, &lead, &b, "busy");
+        until("the run to start", 10, || running(&st, &b.id)).await;
+        let _ = send(&st, &b.id, "hello").await.ok().unwrap();
+        restart(&st, &b.id).await;
+        idle(&st, &b.id).await;
+        assert!(unread(&st, &b.id), "my queued message");
+
+        // Mine and an agent's queued together: still counts.
+        let c = crate::tasks::tests::agent(&st, "Mixed");
+        message_from_agent(&st, &lead, &c, "busy");
+        until("the run to start", 10, || running(&st, &c.id)).await;
+        message_from_agent(&st, &lead, &c, "hello");
+        let _ = send(&st, &c.id, "hello").await.ok().unwrap();
+        restart(&st, &c.id).await;
+        idle(&st, &c.id).await;
+        assert!(unread(&st, &c.id), "my message among the queued ones");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_run_the_user_started_asks_them_something() {
+        let (st, a) = fake_claude_state();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let asked = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "question");
+        message_from_agent(&st, &lead, &a, "ask");
+        idle(&st, &a.id).await;
+        assert_eq!(st.db.list_messages(&a.id, 50, None).unwrap().iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone()), Some("Which one?".into()));
+        assert!(!asked(&st), "an agent started the run");
+
+        let _ = send(&st, &a.id, "ask").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(asked(&st));
     }
 }

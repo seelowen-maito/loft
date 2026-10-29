@@ -785,7 +785,23 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
-    func resetSession(_ agentId: String) async throws { try await requireWrite().resetSession(agentId: agentId) }
+    func resetSession(_ agentId: String) async throws {
+        try await requireWrite().resetSession(agentId: agentId)
+        // As for restart: the header's "no session" shouldn't wait for the live stream.
+        if let list = try? await api?.agents() { agents = list }
+    }
+    func compact(_ agentId: String) async throws { try await requireWrite().compact(agentId: agentId) }
+
+    func pastSessions(_ agentId: String) async throws -> PastSessions {
+        guard let api else { throw APIError.notConfigured }
+        return try await api.sessions(agentId: agentId)
+    }
+
+    /// Resume: the server emits the agent and the chat's marker; take both now anyway, without a live stream.
+    func resumeSession(_ agentId: String, sessionId: String) async throws {
+        upsert(&agents, try await requireWrite().resumeSession(agentId: agentId, sessionId: sessionId))
+        try? await loadConversation(agentId)
+    }
 
     /// "Set up the team with loft" on an end-of-planning card. The server sends the setup message once and marks
     /// the card sent, so a second tap, an app restart or the web having sent it already sends nothing more.

@@ -29,3 +29,10 @@ test("an empty box takes the minimum, however far its placeholder wraps", () => 
 test("fractional heights round to the nearest line", () => {
   assert.deepEqual(fitRows(3 * LINE + 2, LINE, false, 1), { rows: 3, scroll: false });
 });
+
+test("a grill answer grows to 5 lines, then scrolls, and shrinks back", () => {
+  assert.deepEqual(fitRows(3 * LINE, LINE, false, 1, 5), { rows: 3, scroll: false });
+  assert.deepEqual(fitRows(5 * LINE, LINE, false, 1, 5), { rows: 5, scroll: false });
+  assert.deepEqual(fitRows(9 * LINE, LINE, false, 1, 5), { rows: 5, scroll: true });
+  assert.deepEqual(fitRows(LINE, LINE, false, 1, 5), { rows: 1, scroll: false });
+});

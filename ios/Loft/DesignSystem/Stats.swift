@@ -85,16 +85,23 @@ struct UsageMeter: View {
 
 // MARK: - Context
 
-/// "ctx 182k": an agent's context size, amber past the 200k window like the web UI.
+/// "ctx 182k": an agent's context size, amber from 80k (out of the smart zone) like the web UI. "ctx —" while a
+/// Session's size isn't known yet, and "no session" without one (as after Clear).
 struct ContextChip: View {
-    let tokens: Int
+    let tokens: Int?
+    var session = true
 
-    private var over: Bool { tokens >= ContextWindow.warnAt }
+    private var over: Bool { tokens.map(ContextWindow.warns) ?? false }
+
+    private var text: String {
+        guard session else { return "no session" }
+        return "ctx \(tokens.map(Self.short) ?? "—")"
+    }
 
     var body: some View {
         HStack(spacing: 3) {
             if over { Image(systemName: "exclamationmark.triangle.fill") }
-            Text("ctx \(Self.short(tokens))").monospacedDigit()
+            Text(text).monospacedDigit()
         }
         .font(.caption2.weight(.semibold))
         .fixedSize()
@@ -103,8 +110,9 @@ struct ContextChip: View {
         .foregroundStyle(over ? Theme.attention : .secondary)
         .background((over ? Theme.attention : Color.secondary).opacity(0.15), in: Capsule())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Context \(Self.short(tokens)) tokens" + (over ? ", over the 200k window" : ""))
-        .accessibilityIdentifier(over ? "contextChipOver" : "contextChip")
+        .accessibilityLabel(!session ? "No session" : tokens.map { "Context \(Self.short($0)) tokens" + (over ? ", past the 80k smart zone" : "") }
+                            ?? "Context size not known yet")
+        .accessibilityIdentifier(!session ? "contextChipNone" : over ? "contextChipOver" : "contextChip")
     }
 
     static func short(_ n: Int) -> String {

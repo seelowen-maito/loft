@@ -31,10 +31,21 @@ final class LoftUITests: XCTestCase {
 
     private func openQAChat(_ app: XCUIApplication) {
         app.tabBars.buttons["Agents"].tap()
-        let row = app.buttons["agentRow-QA Agent"].firstMatch
-        XCTAssertTrue(row.appears(timeout: 5))
-        row.tap()
+        openAgent("QA Agent", app)
         app.buttons["chatWithAgent"].tap()
+    }
+
+    /// Taps an agent's row in the Agents list, first scrolling it clear of the floating tab bar: on smaller
+    /// phones the last rows sit under it, and a tap there lands on the tab bar.
+    private func openAgent(_ name: String, _ app: XCUIApplication) {
+        let row = app.buttons["agentRow-\(name)"].firstMatch
+        XCTAssertTrue(row.appears(timeout: 5))
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<4 where row.frame.maxY > bar.frame.minY - 8 {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -200)))
+        }
+        row.tap()
     }
 
     private func composerValue(_ app: XCUIApplication) -> String? { app.textFields["composerField"].value as? String }
@@ -48,7 +59,7 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Connected"].appears(timeout: 5))
         // Servers with `needs_you` (the fixture) show the "Needs you" card instead of "Needs your attention".
-        XCTAssertTrue(app.staticTexts["Needs you · 8"].appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Needs you · 9"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Backend Agent wants to use Bash"].exists)
         XCTAssertTrue(app.staticTexts["Active work"].exists)
         let chip = any("macTemperature", app)
@@ -91,8 +102,8 @@ final class LoftUITests: XCTestCase {
         app.tabBars.buttons["Agents"].tap()
         let warning = any("contextChipOver", app)
         XCTAssertTrue(warning.appears(timeout: 5))
-        XCTAssertTrue(warning.label.hasSuffix("over the 200k window"))
-        app.buttons["agentRow-Backend Agent"].firstMatch.tap()
+        XCTAssertTrue(warning.label.hasSuffix("past the 80k smart zone"))
+        openAgent("Backend Agent", app)
         XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Implement backend endpoints"].exists)
         back(app)
@@ -152,6 +163,21 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(mic.appears(timeout: 5))
         mic.press(forDuration: 0.8)
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+    }
+
+    /// Agent messages in the fixture chat: the FYI one carries the mark (and says so to VoiceOver), the needs-action one doesn't.
+    func testFYIMarkOnlyOnFYIAgentMessages() {
+        let app = launch()
+        openOrchestratorChat(app)
+        let fyi = app.staticTexts["Backend Agent, FYI: Merged #40 on main; the endpoints are live."]
+        XCTAssertTrue(fyi.appears(timeout: 5), "VoiceOver reads the FYI message with FYI in its label")
+        let marks = app.staticTexts.matching(identifier: "fyiMark")
+        XCTAssertTrue(marks.matching(NSPredicate(format: "label == 'FYI'")).firstMatch.exists, "the mark shows in the chat")
+        XCTAssertEqual(fyi.identifier, "fyiMark", "the mark sits on the FYI message")
+        let needsAction = app.staticTexts["Backend Agent: Please review PR #41 before I merge it."]
+        XCTAssertTrue(needsAction.exists)
+        XCTAssertNotEqual(needsAction.identifier, "fyiMark", "no mark on a needs-action message")
+        XCTAssertFalse(marks.matching(NSPredicate(format: "label CONTAINS 'PR #41'")).firstMatch.exists)
     }
 
     /// The Talk button: a tap talks to the Orchestrator; the long-press menu talks to another agent or dictates.
@@ -346,6 +372,84 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(any("submitPrompt", app).exists, "no question after an explicit send")
     }
 
+    /// The chat header's context size: neutral under 80k, amber from it, and a menu with Compact and Clear that
+    /// only works while the agent is idle. The 80k rule itself is StatsTests.testContextWarnsFrom80k.
+    func testContextMenuCompactsAndClears() {
+        let app = launch()
+        openQAChat(app)
+        let menu = app.buttons["contextMenu"]
+        XCTAssertTrue(menu.appears(timeout: 5))
+        XCTAssertTrue(any("contextChip", app).exists, "12k is neutral")
+        menu.tap()
+        let compact = app.buttons["contextCompact"]
+        XCTAssertTrue(compact.appears(timeout: 3))
+        XCTAssertTrue(compact.isEnabled)
+        XCTAssertTrue(app.buttons["contextClear"].isEnabled)
+        compact.tap()
+        XCTAssertTrue(compact.disappears(timeout: 3))
+        XCTAssertFalse(app.alerts.firstMatch.exists, "compacting went through")
+
+        back(app)
+        back(app)
+        openOrchestratorChat(app)
+        XCTAssertTrue(menu.appears(timeout: 5))
+        XCTAssertTrue(any("contextChipOver", app).exists, "182k warns")
+        menu.tap()
+        XCTAssertTrue(compact.appears(timeout: 3))
+        XCTAssertFalse(compact.isEnabled, "the Orchestrator is working")
+        XCTAssertFalse(app.buttons["contextClear"].isEnabled)
+        // A menu shows its plain text as a disabled item, not a static text.
+        XCTAssertTrue(app.descendants(matching: .any)["Stop the agent first."].firstMatch.exists)
+    }
+
+    /// "Resume a session" in the context menu (#106): the past Sessions, newest first with the current one not
+    /// pickable; picking one shows the Resumed marker. After Clear the header reads "no session" and still offers
+    /// Resume; while the agent works it's off, with "Stop the agent first.".
+    func testContextMenuResumesASession() {
+        let app = launch()
+        openQAChat(app)
+        let menu = app.buttons["contextMenu"]
+        XCTAssertTrue(menu.appears(timeout: 5))
+        menu.tap()
+        let resume = app.buttons["contextResume"]
+        XCTAssertTrue(resume.appears(timeout: 3))
+        resume.tap()
+
+        let current = app.buttons["pastSession-s-qa"]
+        let old = app.buttons["pastSession-s-qa-old"]
+        let older = app.buttons["pastSession-s-qa-older"]
+        XCTAssertTrue(old.appears(timeout: 5))
+        XCTAssertFalse(current.isEnabled, "the current Session")
+        XCTAssertTrue(current.frame.minY < old.frame.minY && old.frame.minY < older.frame.minY, "newest first")
+        XCTAssertTrue(old.label.contains("Run the smoke tests on the settings page"))
+        XCTAssertTrue(older.label.contains("Orchestrator: "), "another agent's Session names it")
+        old.tap()
+        XCTAssertTrue(old.disappears(timeout: 3))
+        let day = Date().addingTimeInterval(-3 * 86_400).formatted(date: .abbreviated, time: .omitted)
+        XCTAssertTrue(text(containing: "Resumed the Session from \(day)", app).appears(timeout: 5))
+        XCTAssertEqual(any("contextChip", app).label, "Context 48k tokens", "the resumed Session's size")
+
+        menu.tap()
+        app.buttons["contextClear"].tap()
+        XCTAssertTrue(any("contextChipNone", app).appears(timeout: 5), "no session")
+        menu.tap()
+        XCTAssertTrue(resume.appears(timeout: 3))
+        XCTAssertFalse(app.buttons["contextCompact"].exists, "nothing to compact")
+        XCTAssertFalse(app.buttons["contextClear"].exists)
+        resume.tap()
+        XCTAssertTrue(old.appears(timeout: 5))
+        XCTAssertTrue(current.isEnabled, "no current Session after Clear")
+        app.buttons["Cancel"].tap()
+
+        back(app)
+        back(app)
+        openOrchestratorChat(app)
+        menu.tap()
+        XCTAssertTrue(resume.appears(timeout: 3))
+        XCTAssertFalse(resume.isEnabled, "the Orchestrator is working")
+        XCTAssertTrue(app.descendants(matching: .any)["Stop the agent first."].firstMatch.exists)
+    }
+
     func testInstantAcknowledgementAfterSending() {
         // QA Agent is idle, so the row comes from the send, not from a run already in progress.
         let app = launch(["-fixture-dictation", "Run the smoke tests, send it now"])
@@ -359,8 +463,9 @@ final class LoftUITests: XCTestCase {
     /// Picking up the reply without an event is StoreTests.testAReplyWithoutAnEventIsStillPickedUp; this checks
     /// the screen reads it even when the dictation was sent with a tap.
     func testAReplyToADictatedMessageIsReadAloudEvenWhenSentWithATap() {
-        // QA Agent is idle, so the reply ends the wait; the fixture sends no live event for it.
-        let app = launch(["-fixture-dictation", "Run the smoke tests", "-fixture-replies", "-voiceHandsFree", "NO"])
+        // QA Agent is idle, so the reply ends the wait; the fixture sends no live event for it. The reading is held
+        // until Stop: the Simulator's voice can end (or fail to start) before the bar is ever seen.
+        let app = launch(["-fixture-dictation", "Run the smoke tests", "-fixture-replies", "-voiceHandsFree", "NO", "-hold-reading"])
         openQAChat(app)
         let no = app.buttons["submitPromptNo"]
         XCTAssertTrue(no.appears(timeout: 5))
@@ -368,7 +473,13 @@ final class LoftUITests: XCTestCase {
         app.buttons["sendButton"].tap()
         // The reply comes half a second after the send and is found by the store's first refetch, a second in.
         XCTAssertTrue(app.staticTexts["Done. I ran it and everything passed."].appears(timeout: 5))
-        XCTAssertTrue(any("readAloudBar", app).appears(timeout: 5), "reading starts soon after the reply shows")
+        // With no run seen, the reply is read once nothing new has come for 2 s (LoftStore.waitForReply), checked
+        // every half second: about 3 s after it shows, more on a busy Simulator.
+        let bar = any("readAloudBar", app)
+        XCTAssertTrue(bar.appears(timeout: 10), "reading starts once the reply has settled")
+        // The bar's identifier covers its buttons, so Stop is found by its label.
+        app.buttons.matching(identifier: "readAloudBar")["Stop"].tap()
+        XCTAssertTrue(bar.disappears(timeout: 5))
     }
 
     func testRunWatchRestart() {
@@ -459,9 +570,7 @@ final class LoftUITests: XCTestCase {
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
         let app = launch(["-fixture-risky-permission", "-fixture-explain", "Sends your commits to the main branch on GitHub."])
         app.tabBars.buttons["Agents"].tap()
-        let row = app.buttons["agentRow-Backend Agent"].firstMatch
-        XCTAssertTrue(row.appears(timeout: 5))
-        row.tap()
+        openAgent("Backend Agent", app)
         app.buttons["chatWithAgent"].tap()
         let risks = any("permissionRisks", app)
         XCTAssertTrue(risks.appears(timeout: 5), "the risks show without asking")
@@ -476,7 +585,7 @@ final class LoftUITests: XCTestCase {
 
     func testNeedsYouGroupsPullRequestsByProject() {
         let app = launch(["-fixture-needs-you-projects"])
-        XCTAssertTrue(app.staticTexts["Needs you · 11"].firstMatch.appears(timeout: 5), "8 items, with the one PR swapped for four")
+        XCTAssertTrue(app.staticTexts["Needs you · 12"].firstMatch.appears(timeout: 5), "9 items, with the one PR swapped for four")
         app.buttons["needsYouSeeAll"].firstMatch.tap()
         let loft = app.buttons["needsYouProject-loft"]
         XCTAssertTrue(loft.appears(timeout: 5))

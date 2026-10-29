@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
-import { api, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
+import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
+import { filtersToParams, parseFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
-import { filterIssues, SOURCES, type Source } from "../lib/issueFilter";
+import { filterIssues, SOURCES } from "../lib/issueFilter";
 import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
@@ -32,7 +33,6 @@ const STATUS_TONE: Record<string, string> = {
   cancelled: "text-fg-3",
 };
 
-
 const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
 
 /** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
@@ -51,21 +51,32 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [repos, setRepos] = useState<Record<string, string>>({});
-  // The old Issues tab's links arrive as ?source=github, or ?q=#42&project=api.
-  const [params] = useSearchParams();
-  const [query, setQuery] = useState(params.get("q") ?? "");
-  const [project, setProject] = useState(params.get("project") ?? "");
-  const [source, setSource] = useState<Source>((params.get("source") as Source) ?? "all");
-  const [agentId, setAgentId] = useState("");
-  const [mine, setMine] = useState(false);
-  const [showClosed, setShowClosed] = useState(false);
+  // The filters live in the URL (lib/issueFilters), so back/forward, reload and shared links keep them.
+  // A click is a history step; typing replaces the entry, once it pauses.
+  const [params, setParams] = useSearchParams();
+  const filters = useMemo(() => parseFilters(params), [params]);
+  const setFilter = useCallback(
+    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => filtersToParams({ ...parseFilters(cur), ...change }), { replace }),
+    [setParams],
+  );
+  const [query, setQuery] = useState(filters.q);
+  // Back/forward to another search shows it in the box.
+  useEffect(() => setQuery(filters.q), [filters.q]);
+  useEffect(() => {
+    if (query.trim() === filters.q) return;
+    const id = setTimeout(() => setFilter({ q: query }, true), 300);
+    return () => clearTimeout(id);
+  }, [query, filters.q, setFilter]);
+  const { source, mine, closed: showClosed } = filters;
   const [creating, setCreating] = useState(false);
 
   const [syncing, setSyncing] = useState(false);
+  // The last read of GitHub, so the list can say why GitHub's issues aren't there (rate limit, no repo...).
+  const [mirror, setMirror] = useState<MirrorSync | null>(null);
   // Opening the list, and the refresh button, read the projects' GitHub issues; changes arrive as events.
   const sync = useCallback(() => {
     setSyncing(true);
-    api.syncIssues().catch(() => {}).finally(() => setSyncing(false));
+    api.syncIssues().then(setMirror).catch(() => {}).finally(() => setSyncing(false));
   }, []);
   useEffect(() => {
     api.tasks().then(setTasks);
@@ -92,9 +103,12 @@ export default function TasksPage() {
 
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
+  // An agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
+  const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
+  const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
   const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], query, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || t.created_by === "user"));
-  }, [tasks, query, project, agentId, mine, source]);
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || t.created_by === "user"));
+  }, [tasks, filters.q, project, agentId, mine, source]);
 
   const groups = useMemo(
     () =>
@@ -142,25 +156,35 @@ export default function TasksPage() {
           <div className="flex flex-wrap gap-2">
             <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
               {SOURCES.map((s) => (
-                <button key={s.key} onClick={() => setSource(s.key)} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
+                <button key={s.key} onClick={() => setFilter({ source: s.key })} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
                   {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
                 </button>
               ))}
             </div>
-            <select value={project} onChange={(e) => setProject(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Project">
+            <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
               <option value="">All projects</option>
               {projects.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
-            <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
+            <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
               <option value="">All agents</option>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
-            <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setMine((m) => !m)} aria-pressed={mine}>
+            <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
               Created by me
             </button>
           </div>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-6">
+          {mirror?.projects.filter((p) => p.error).map((p) => (
+            <div key={p.project} className="mx-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
+              <span className="text-fg">Couldn't read {p.repo}.</span> {p.error}
+            </div>
+          ))}
+          {mirror && mirror.skipped.length > 0 && (
+            <div className="px-3 font-mono text-[10.5px] text-fg-3" title={mirror.skipped.map((s) => `${s.project}: ${s.reason}`).join("\n")}>
+              Not mirrored from GitHub: {mirror.skipped.map((s) => s.project).join(", ")} (no GitHub repo{mirror.connected ? "" : " or token"})
+            </div>
+          )}
           {tasks === null && <div className="px-3 font-mono text-[12px] text-fg-3">Loading…</div>}
           {tasks?.length === 0 && (
             <div className="flex flex-col items-center px-6 py-16 text-center text-fg-3">
@@ -175,7 +199,7 @@ export default function TasksPage() {
               <section key={g.key}>
                 <button
                   className="flex w-full items-center gap-1.5 px-3 py-1 text-left font-mono text-[10.5px] uppercase tracking-wider text-fg-3"
-                  onClick={() => g.key === "closed" && setShowClosed((s) => !s)}
+                  onClick={() => g.key === "closed" && setFilter({ closed: !showClosed })}
                   disabled={g.key !== "closed"}
                 >
                   {g.key === "closed" && <ChevronRight className={cx("size-3 transition-transform", showClosed && "rotate-90")} />}
@@ -184,7 +208,7 @@ export default function TasksPage() {
                 </button>
                 {!folded &&
                   g.tasks.slice(0, g.key === "closed" ? 50 : undefined).map((t) => (
-                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate(`/tasks/${t.id}`)} />
+                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/tasks/${t.id}`, search: params.toString() })} />
                   ))}
               </section>
             );
@@ -241,6 +265,8 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
 function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
+  // Links keep the list's filters (they're in the URL).
+  const { search } = useLocation();
   useEffect(() => {
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
@@ -265,12 +291,12 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
-      <Link to="/tasks" className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
+      <Link to={{ pathname: "/tasks", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
         <ArrowLeft className="size-3" /> All issues
       </Link>
       <header className="space-y-2">
         {parent && (
-          <Link to={`/tasks/${parent.id}`} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+          <Link to={{ pathname: `/tasks/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
             Part of {parent.title} <ChevronRight className="size-3" />
           </Link>
         )}
@@ -407,12 +433,13 @@ function Block({ title, text, tone }: { title: string; text: string; tone?: stri
 }
 
 function TaskLinks({ title, tasks }: { title: string; tasks: Task[] }) {
+  const { search } = useLocation();
   return (
     <section>
       <div className="eyebrow mb-2">{title}</div>
       <div className="space-y-1">
         {tasks.map((x) => (
-          <Link key={x.id} to={`/tasks/${x.id}`} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
+          <Link key={x.id} to={{ pathname: `/tasks/${x.id}`, search }} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
             <StateIcon task={x} className="size-3 shrink-0" />
             <span className="truncate">{x.title}</span>
           </Link>

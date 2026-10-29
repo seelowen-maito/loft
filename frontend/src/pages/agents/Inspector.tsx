@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Brain, Code2, Copy, Dices, File, Folder, FolderGit2, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, Dices, File, Folder, FolderGit2, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
 } from "lucide-react";
 import { api, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
@@ -444,20 +444,25 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
 
 function MemoryTab({ agent }: { agent: Agent }) {
   const [mems, setMems] = useState<Memory[] | null>(null);
-  const [text, setText] = useState("");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [open, setOpen] = useState<Set<number>>(new Set());
   const [q, setQ] = useState("");
   const load = useCallback(() => { api.memories(agent.id).then(setMems); }, [agent.id]);
   useEffect(load, [load]);
   useServerEvents(useCallback((e: ServerEvent) => { if (e.type === "memory" && e.agent_id === agent.id) load(); }, [agent.id, load]));
-  const visible = (mems ?? []).filter((m) => !q || (m.content + m.tags).toLowerCase().includes(q.toLowerCase())).reverse();
+  const visible = (mems ?? []).filter((m) => !q || (m.title + m.content + m.tags).toLowerCase().includes(q.toLowerCase())).reverse();
   return (
     <div className="space-y-4 p-5">
       <p className="text-[12.5px] leading-relaxed text-fg-2">
-        Long-term memory is private to {agent.name}. It survives new sessions and is loaded into every run. The agent writes here with its <code className="font-mono text-[11.5px]">remember</code> tool.
+        Long-term memory is private to {agent.name}. It survives new sessions and is loaded when a session starts, so what you add or delete here reaches the agent's prompt from its next session. The agent writes here with its <code className="font-mono text-[11.5px]">remember</code> tool.
       </p>
-      <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) api.addMemory(agent.id, text).then(() => setText("")); }}>
-        <input className="input" placeholder="Teach it something…" value={text} onChange={(e) => setText(e.target.value)} />
-        <button className="btn shrink-0" type="submit"><Plus className="size-3.5" /></button>
+      <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); if (title.trim()) api.addMemory(agent.id, title, body).then(() => { setTitle(""); setBody(""); }); }}>
+        <div className="flex gap-2">
+          <input className="input" placeholder="Teach it something: a one-line title" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <button className="btn shrink-0" type="submit" disabled={!title.trim()} aria-label="Add memory"><Plus className="size-3.5" /></button>
+        </div>
+        {title.trim() && <textarea className="input min-h-[64px] resize-y" placeholder="Details (optional): the agent reads them with recall" value={body} onChange={(e) => setBody(e.target.value)} />}
       </form>
       {(mems?.length ?? 0) > 6 && <input className="input py-1.5" placeholder="Search memories" value={q} onChange={(e) => setQ(e.target.value)} />}
       {!mems && <div className="skeleton h-24 rounded-xl" />}
@@ -465,8 +470,16 @@ function MemoryTab({ agent }: { agent: Agent }) {
       <ul className="space-y-2">
         {visible.map((m) => (
           <li key={m.id} className="group rounded-xl border border-line bg-ink-850/60 px-3 py-2.5">
-            <div className="text-[13px] leading-snug">{m.content}</div>
-            <div className="mt-1.5 flex items-center gap-2 font-mono text-[10.5px] text-fg-3">
+            <button
+              className="flex w-full items-start gap-1.5 text-left text-[13px] leading-snug"
+              aria-expanded={open.has(m.id)}
+              onClick={() => setOpen((o) => { const n = new Set(o); if (!n.delete(m.id)) n.add(m.id); return n; })}
+            >
+              <ChevronRight className={cx("mt-0.5 size-3.5 shrink-0 text-fg-3 transition", open.has(m.id) && "rotate-90")} />
+              <span>{m.title}</span>
+            </button>
+            {open.has(m.id) && <div className="mt-1.5 whitespace-pre-wrap pl-5 text-[12.5px] leading-relaxed text-fg-2">{m.content}</div>}
+            <div className="mt-1.5 flex items-center gap-2 pl-5 font-mono text-[10.5px] text-fg-3">
               <span>#{m.id}</span>
               <span>{timeAgo(m.created_at)}</span>
               {m.tags && m.tags.split(",").map((t) => <span key={t} className="chip py-0 text-[10px]">{t.trim()}</span>)}

@@ -98,6 +98,22 @@ pub fn prompt(text: &str, meta: &Value) -> String {
     p
 }
 
+/// Markers (as in `prompt`) for `files`, in order, while their total stays under a message's limit. The rest
+/// are left out: the grill's round prompt also lists every image's path, so the agent can still read them.
+pub fn markers(state: &AppState, agent_id: &str, files: &[String]) -> String {
+    let mut total = 0;
+    let mut out = String::new();
+    for f in files {
+        let Some(size) = std::fs::metadata(dir(state, agent_id).join(f)).ok().map(|m| m.len()) else { continue };
+        if total + size > MAX_MESSAGE_BYTES {
+            break;
+        }
+        total += size;
+        out.push_str(&format!("\n{MARK}{f}]"));
+    }
+    out
+}
+
 /// A stream-json user message for `prompt` if it carries image markers; `None` means send it as plain text.
 pub fn stdin_line(state: &AppState, agent_id: &str, prompt: &str) -> Option<String> {
     if !prompt.contains(MARK) {

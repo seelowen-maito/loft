@@ -24,7 +24,7 @@ pub enum Event {
     System { system: serde_json::Value },
     Grill { session: serde_json::Value },
     TaskComment { comment: serde_json::Value },
-    /// Loft published issues on a project's repo; the Issues tab refetches.
+    /// Loft published issues on a project's repo.
     Issues { project: String },
     /// The "needs you" list changed: its size, how many are urgent, and the item ids.
     NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
@@ -49,6 +49,30 @@ pub struct RunInfo {
     /// Background tasks the agent waits on after its reply, and since when.
     pub waiting_on: Vec<String>,
     pub waiting_since: Option<String>,
+    /// Subagents the agent itself started (Agent tool calls) that haven't returned yet.
+    pub subagents: Vec<Subagent>,
+    /// The run answers the user, so a Restart carries that over to the run it starts.
+    pub for_user: bool,
+}
+
+/// A running subagent, as clients show it above the composer.
+#[derive(Clone, serde::Serialize)]
+pub struct Subagent {
+    /// The Agent tool call's id.
+    pub id: String,
+    pub description: String,
+    /// The subagent type, e.g. Explore or general-purpose.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub started_at: String,
+    /// Claude Code's task id for it, from its task_started.
+    #[serde(skip)]
+    pub task_id: Option<String>,
+    /// Runs in the background: its tool result only says it launched.
+    #[serde(skip)]
+    pub background: bool,
+    #[serde(skip)]
+    pub launched: bool,
 }
 
 #[derive(Default)]
@@ -57,6 +81,9 @@ pub struct Runtime {
     pub running: HashMap<String, Arc<Notify>>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
+    /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
+    /// for an Unread reply
+    pub queued_for_user: std::collections::HashSet<String>,
     /// agent id -> grill prompts waiting for the current run; run quietly after user work
     pub grill_queued: HashMap<String, Vec<String>>,
     /// agent id -> wake-up for a run that has replied but waits on a Claude Code background task;
@@ -85,6 +112,8 @@ pub struct AppState {
     pub gh_token: Arc<crate::github::TokenCache>,
     /// Spaces out write requests to GitHub.
     pub gh_pace: Arc<crate::github::Pace>,
+    /// What's left of GitHub's rate limit, and Loft's requests by source.
+    pub gh_budget: Arc<crate::github::Budget>,
     pub update: Arc<Mutex<crate::updater::UpdateStatus>>,
     pub settings: Arc<crate::settings::Store>,
     /// Last Claude plan usage reading.

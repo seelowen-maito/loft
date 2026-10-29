@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,10 @@ pub struct Agent {
     /// or compacted, so the next grill run sends them again.
     #[serde(default)]
     pub grill_briefed: bool,
+    /// The memory part of its system prompt, built when its Session starts and resent unchanged by every
+    /// run of that Session, so saving a memory doesn't break the prompt cache. Clear and Compact drop it.
+    #[serde(default)]
+    pub memory_index: Option<String>,
     /// Leads its team (the agents sharing its project): at most one per project.
     #[serde(default)]
     pub lead: bool,
@@ -61,6 +66,9 @@ pub struct Agent {
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
     pub total_cost_usd: f64,
+    /// The running total Claude Code last reported for `session_id`, so a run's cost is what it added.
+    #[serde(default)]
+    pub session_cost_usd: f64,
     pub created_at: String,
     /// Loft's own agent: always present, and the user can't delete it.
     #[serde(default)]
@@ -68,6 +76,23 @@ pub struct Agent {
     /// The agent that created this one, if an agent did. None when the user did.
     #[serde(default)]
     pub created_by: Option<String>,
+    /// When the last run the user started (by a message or a schedule) ended with a reply or an error.
+    #[serde(default)]
+    pub replied_at: Option<String>,
+    /// The user's read mark: they have seen its chat up to here, in any client.
+    #[serde(default)]
+    pub read_at: Option<String>,
+}
+
+impl Agent {
+    /// An Unread reply: a run the user started ended after their read mark.
+    pub fn unread_reply(&self) -> bool {
+        let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+        match (at(&self.replied_at), at(&self.read_at)) {
+            (Some(r), Some(read)) => r > read,
+            (r, _) => r.is_some(),
+        }
+    }
 }
 
 /// A weekly window with no autonomous wake-ups, in this Mac's local time.
@@ -112,9 +137,25 @@ pub struct TaskComment {
 pub struct Memory {
     pub id: i64,
     pub agent_id: String,
+    /// One line, listed in the agent's system prompt.
+    pub title: String,
+    /// The full text, read with `recall`.
     pub content: String,
     pub tags: String,
     pub created_at: String,
+    /// When `update` last rewrote it; memories never updated (or saved before this existed) have none.
+    pub updated_at: Option<String>,
+}
+
+/// A title for a memory saved before titles existed: its first line, cut at about 80 characters.
+pub fn title_from(content: &str) -> String {
+    let line = content.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.chars().count() <= 80 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(80).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).trim_end();
+    format!("{cut}…")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +211,12 @@ pub struct PullRequest {
     pub error: Option<String>,
     pub checked_at: Option<String>,
     pub created_at: String,
+    /// GitHub's ETag for the PR, so an unchanged one costs a free 304.
+    pub etag: Option<String>,
+    /// The head commit `checks` were read for; settled checks there aren't read again.
+    pub checks_sha: String,
+    /// GitHub answered 404/410: the PR (or its repo) is gone, so it's no longer polled.
+    pub gone: bool,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -212,6 +259,24 @@ pub struct Task {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+fn read_agent(c: &Connection, id: &str) -> Result<Option<Agent>> {
+    let data: Option<String> = c.query_row("SELECT data FROM agents WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+    Ok(match data {
+        Some(d) => Some(serde_json::from_str(&d)?),
+        None => None,
+    })
+}
+
+fn write_agent(c: &Connection, a: &Agent) -> Result<()> {
+    c.execute(
+        "INSERT INTO agents (id, data, created_at, position)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), 0) + 1 FROM agents))
+         ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        params![a.id, serde_json::to_string(a)?, a.created_at],
+    )?;
+    Ok(())
 }
 
 /// Where a mirrored Loft issue lives on GitHub, and what Loft last read of it there.
@@ -295,9 +360,11 @@ CREATE INDEX IF NOT EXISTS messages_agent ON messages(agent_id, id);
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS memories_agent ON memories(agent_id, id);
 CREATE TABLE IF NOT EXISTS permissions (
@@ -358,7 +425,100 @@ CREATE TABLE IF NOT EXISTS published_issues (
     created_at TEXT NOT NULL,
     PRIMARY KEY(slug, kind, key)
 );
+CREATE TABLE IF NOT EXISTS pending_fyis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
 "#;
+
+/// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
+/// Each one becomes its difference from the previous run end of the same session, keeping the reported
+/// total as `session_cost_usd`, which also marks it done; the agent's lifetime total is then recomputed.
+/// Old run ends don't name their session: a Resume marker does, and a cleared or fresh session runs
+/// unnamed until the next one, except the last, which is the agent's current session.
+fn per_run_costs(conn: &Connection) -> Result<()> {
+    let agents: Vec<(String, String)> = {
+        let mut st = conn.prepare(
+            "SELECT id, data FROM agents WHERE id IN (SELECT agent_id FROM messages WHERE kind = 'run_end'
+               AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL)",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (agent_id, data) in agents {
+        let current = serde_json::from_str::<Value>(&data).ok().and_then(|d| d["session_id"].as_str().map(String::from));
+        let tx = conn.unchecked_transaction()?;
+        let rows: Vec<(i64, String, Value)> = {
+            let mut st = tx.prepare(
+                "SELECT id, kind, meta FROM messages WHERE agent_id = ?1 AND kind IN ('run_start', 'run_end', 'clear', 'resume') ORDER BY id",
+            )?;
+            let rows = st
+                .query_map([&agent_id], |r| Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null))))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        // The session the runs belong to (None while unnamed), its last total, and each named session's last total.
+        let mut sid: Option<String> = None;
+        let mut prev = 0.0;
+        let mut totals: HashMap<String, f64> = HashMap::new();
+        let mut unnamed: Vec<(i64, Value)> = vec![];
+        for (id, kind, mut meta) in rows {
+            match kind.as_str() {
+                "clear" => (sid, prev, unnamed) = (None, 0.0, vec![]),
+                "run_start" if meta["resumed"] == Value::Bool(false) => (sid, prev, unnamed) = (None, 0.0, vec![]),
+                "resume" => {
+                    sid = meta["session_id"].as_str().map(String::from);
+                    prev = sid.as_ref().and_then(|s| totals.get(s)).copied().unwrap_or(0.0);
+                    unnamed.clear();
+                }
+                "run_end" => {
+                    // A stopped run reported nothing.
+                    let Some(total) = meta["cost_usd"].as_f64() else { continue };
+                    if let Some(total) = meta["session_cost_usd"].as_f64() {
+                        prev = total;
+                    } else {
+                        meta["cost_usd"] = run_cost(total, prev).into();
+                        meta["session_cost_usd"] = total.into();
+                        match &sid {
+                            Some(s) => meta["session_id"] = s.as_str().into(),
+                            None => unnamed.push((id, meta.clone())),
+                        }
+                        tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
+                        prev = total;
+                    }
+                    if let Some(s) = &sid {
+                        totals.insert(s.clone(), prev);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (None, Some(cur)) = (&sid, &current) {
+            for (id, mut meta) in unnamed {
+                meta["session_id"] = cur.as_str().into();
+                tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
+            }
+        }
+        tx.execute(
+            "UPDATE agents SET data = json_set(data, '$.total_cost_usd',
+                 (SELECT COALESCE(sum(json_extract(meta, '$.cost_usd')), 0.0) FROM messages WHERE agent_id = ?1 AND kind = 'run_end'),
+                 '$.session_cost_usd', ?2)
+             WHERE id = ?1",
+            params![agent_id, prev],
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// What a run added to its session, given the running total it reported and the one before it.
+/// A total that went down is a fresh session, so all of it is this run's.
+pub fn run_cost(total: f64, prev: f64) -> f64 {
+    if total >= prev { total - prev } else { total }
+}
 
 fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
     let meta: String = r.get(6)?;
@@ -378,9 +538,11 @@ fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: r.get(0)?,
         agent_id: r.get(1)?,
-        content: r.get(2)?,
-        tags: r.get(3)?,
-        created_at: r.get(4)?,
+        title: r.get(2)?,
+        content: r.get(3)?,
+        tags: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
     })
 }
 
@@ -401,6 +563,33 @@ impl Db {
             conn.execute("ALTER TABLE grill_sessions ADD COLUMN status TEXT NOT NULL DEFAULT ''", [])?;
             conn.execute("UPDATE grill_sessions SET status = COALESCE(json_extract(data, '$.status'), '')", [])?;
         }
+        // Memories saved before titles existed get their first line as title, once; the text stays the body.
+        let has_title: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'title'", [], |r| r.get(0))?;
+        if !has_title {
+            conn.execute("ALTER TABLE memories ADD COLUMN title TEXT NOT NULL DEFAULT ''", [])?;
+            let old: Vec<(i64, String)> = {
+                let mut st = conn.prepare("SELECT id, content FROM memories")?;
+                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (id, content) in old {
+                conn.execute("UPDATE memories SET title = ?1 WHERE id = ?2", params![title_from(&content), id])?;
+            }
+        }
+        // Memories saved before updates were timed have none, so they keep their creation order.
+        let has_updated: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'updated_at'", [], |r| r.get(0))?;
+        if !has_updated {
+            conn.execute("ALTER TABLE memories ADD COLUMN updated_at TEXT", [])?;
+        }
+        // FYIs used to wait in the agent's `data`; move any still there to their table, once.
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO pending_fyis (agent_id, prompt, created_at)
+                 SELECT a.id, j.value, a.created_at FROM agents a, json_each(a.data, '$.pending_fyis') j ORDER BY a.id, j.key;
+             UPDATE agents SET data = json_remove(data, '$.pending_fyis') WHERE json_type(data, '$.pending_fyis') IS NOT NULL;
+             COMMIT;",
+        )?;
+        per_run_costs(&conn)?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
         let unroled: Vec<String> = {
@@ -446,35 +635,76 @@ impl Db {
     }
 
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
-        let c = self.0.lock().unwrap();
-        let data: Option<String> = c
-            .query_row("SELECT data FROM agents WHERE id = ?1", [id], |r| r.get(0))
-            .optional()?;
-        Ok(match data {
-            Some(d) => Some(serde_json::from_str(&d)?),
-            None => None,
-        })
+        read_agent(&self.0.lock().unwrap(), id)
     }
 
     pub fn save_agent(&self, a: &Agent) -> Result<()> {
-        let c = self.0.lock().unwrap();
-        c.execute(
-            "INSERT INTO agents (id, data, created_at, position)
-             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), 0) + 1 FROM agents))
-             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            params![a.id, serde_json::to_string(a)?, a.created_at],
-        )?;
-        Ok(())
+        write_agent(&self.0.lock().unwrap(), a)
     }
 
-    /// Read-modify-write an agent under the connection lock's ordering.
+    /// Read-modify-write an agent under one hold of the connection lock, so concurrent updates
+    /// (a status write and a context-token write, say) can't overwrite each other. `f` must not use the db.
     pub fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> Result<Option<Agent>> {
-        let Some(mut a) = self.get_agent(id)? else {
+        let c = self.0.lock().unwrap();
+        let Some(mut a) = read_agent(&c, id)? else {
             return Ok(None);
         };
         f(&mut a);
-        self.save_agent(&a)?;
+        write_agent(&c, &a)?;
         Ok(Some(a))
+    }
+
+    /// The running total Claude Code last reported for one of the agent's sessions; 0 when none of its runs was recorded.
+    pub fn session_total(&self, agent_id: &str, session_id: &str) -> Result<f64> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT json_extract(meta, '$.session_cost_usd') FROM messages
+             WHERE agent_id = ?1 AND kind = 'run_end' AND json_extract(meta, '$.session_id') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![agent_id, session_id],
+            |r| r.get::<_, Option<f64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .unwrap_or(0.0))
+    }
+
+    /// Queue an FYI's prompt text for the agent's next run.
+    pub fn add_pending_fyi(&self, agent_id: &str, prompt: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT INTO pending_fyis (agent_id, prompt, created_at) VALUES (?1, ?2, ?3)", params![agent_id, prompt, now()])?;
+        Ok(())
+    }
+
+    /// Remove and return the agent's pending FYIs, oldest first, as (id, prompt).
+    pub fn take_pending_fyis(&self, agent_id: &str) -> Result<Vec<(i64, String)>> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let fyis = {
+            let mut st = tx.prepare("SELECT id, prompt FROM pending_fyis WHERE agent_id = ?1 ORDER BY id")?;
+            let rows = st.query_map([agent_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [agent_id])?;
+        tx.commit()?;
+        Ok(fyis)
+    }
+
+    /// Put taken FYIs back under their old ids, so they stay ahead of any that arrived since.
+    pub fn restore_pending_fyis(&self, agent_id: &str, fyis: &[(i64, String)]) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for (id, prompt) in fyis {
+            tx.execute("INSERT OR IGNORE INTO pending_fyis (id, agent_id, prompt, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, agent_id, prompt, now()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_pending_fyis(&self, agent_id: &str) -> Result<usize> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT COUNT(*) FROM pending_fyis WHERE agent_id = ?1", [agent_id], |r| r.get::<_, i64>(0))? as usize)
     }
 
     /// Store the roster order. Ids not listed keep their position.
@@ -495,6 +725,7 @@ impl Db {
         c.execute("DELETE FROM memories WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
         Ok(())
     }
 
@@ -826,6 +1057,19 @@ impl Db {
         .optional()?)
     }
 
+    /// The `run_start` marker of run `run_id`, before message `before`: its meta says what started the run.
+    /// Walks back from `before`, so it costs the run's length, not the agent's history.
+    pub fn run_start(&self, agent_id: &str, run_id: &str, before: i64) -> Result<Option<Message>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT id, agent_id, run_id, role, kind, content, meta, created_at FROM messages
+             WHERE agent_id = ?1 AND id < ?3 AND run_id = ?2 AND kind = 'run_start' ORDER BY id DESC LIMIT 1",
+            params![agent_id, run_id, before],
+            message_from_row,
+        )
+        .optional()?)
+    }
+
     /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or
     /// it was already sent, so two clicks can't both send it.
     pub fn mark_team_setup_sent(&self, agent_id: &str, id: i64) -> Result<bool> {
@@ -860,26 +1104,29 @@ impl Db {
 
     // ---- memories -----------------------------------------------------
 
-    pub fn add_memory(&self, agent_id: &str, content: &str, tags: &str) -> Result<Memory> {
+    pub fn add_memory(&self, agent_id: &str, title: &str, content: &str, tags: &str) -> Result<Memory> {
         let c = self.0.lock().unwrap();
         let created_at = now();
         c.execute(
-            "INSERT INTO memories (agent_id, content, tags, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![agent_id, content, tags, created_at],
+            "INSERT INTO memories (agent_id, title, content, tags, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_id, title, content, tags, created_at],
         )?;
         Ok(Memory {
             id: c.last_insert_rowid(),
             agent_id: agent_id.into(),
+            title: title.into(),
             content: content.into(),
             tags: tags.into(),
             created_at,
+            updated_at: None,
         })
     }
 
+    /// Oldest first by when each was last saved or updated, so an updated memory counts as new.
     pub fn list_memories(&self, agent_id: &str) -> Result<Vec<Memory>> {
         let c = self.0.lock().unwrap();
         let mut st = c.prepare(
-            "SELECT id, agent_id, content, tags, created_at FROM memories WHERE agent_id = ?1 ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories WHERE agent_id = ?1 ORDER BY coalesce(updated_at, created_at), id",
         )?;
         let rows = st.query_map([agent_id], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -889,11 +1136,29 @@ impl Db {
         let c = self.0.lock().unwrap();
         let like = format!("%{}%", query.to_lowercase());
         let mut st = c.prepare(
-            "SELECT id, agent_id, content, tags, created_at FROM memories
-             WHERE agent_id = ?1 AND (lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY id",
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories
+             WHERE agent_id = ?1 AND (lower(title) LIKE ?2 OR lower(content) LIKE ?2 OR lower(tags) LIKE ?2) ORDER BY coalesce(updated_at, created_at), id",
         )?;
         let rows = st.query_map(params![agent_id, like], memory_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Rewrites the title and/or body of one of the agent's memories; `None` keeps that part.
+    /// Returns `None` when the agent has no memory with that id.
+    pub fn update_memory(&self, agent_id: &str, id: i64, title: Option<&str>, content: Option<&str>) -> Result<Option<Memory>> {
+        let c = self.0.lock().unwrap();
+        let n = c.execute(
+            "UPDATE memories SET title = coalesce(?3, title), content = coalesce(?4, content), updated_at = ?5 WHERE agent_id = ?1 AND id = ?2",
+            params![agent_id, id, title, content, now()],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(
+            "SELECT id, agent_id, title, content, tags, created_at, updated_at FROM memories WHERE id = ?1",
+            [id],
+            memory_from_row,
+        )?))
     }
 
     pub fn delete_memory(&self, agent_id: &str, id: i64) -> Result<bool> {
@@ -1113,6 +1378,104 @@ mod tests {
     }
 
     #[test]
+    fn stored_running_totals_become_per_run_costs_once() {
+        let path = std::env::temp_dir().join(format!("loft-costs-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            let mut a = agent("a");
+            a.session_id = Some("Z".into());
+            db.save_agent(&a).unwrap();
+            // As runs before #164 stored them: each run end holds the session's running total.
+            let run = |resumed: bool, cost: Option<f64>| {
+                db.add_message("a", None, "system", "run_start", "user", serde_json::json!({ "resumed": resumed })).unwrap();
+                let end = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c }));
+                db.add_message("a", None, "system", "run_end", "", end).unwrap();
+            };
+            let marker = |kind: &str, sid: Option<&str>| {
+                db.add_message("a", None, "system", kind, "", serde_json::json!({ "session_id": sid })).unwrap();
+            };
+            run(false, Some(0.005));
+            run(true, Some(0.006));
+            run(true, None);
+            run(true, Some(0.007));
+            run(false, Some(0.002)); // a fresh session
+            marker("clear", None);
+            run(false, Some(0.004));
+            marker("resume", Some("X")); // never run here: its whole total counts
+            run(true, Some(0.010));
+            run(true, Some(0.012));
+            marker("resume", Some("Y"));
+            run(true, Some(0.003));
+            marker("resume", Some("X")); // back to X: from its last total
+            run(true, Some(0.015));
+            marker("clear", None);
+            run(false, Some(0.002)); // the agent's current session, Z
+        }
+        let costs = |db: &Db| -> Vec<f64> {
+            let mut m = db.list_messages("a", 100, None).unwrap();
+            m.sort_by_key(|m| m.id);
+            m.iter().filter_map(|m| (m.kind == "run_end").then(|| m.meta["cost_usd"].as_f64()).flatten()).map(|c| (c * 1e6).round() / 1e6).collect()
+        };
+        let want = vec![0.005, 0.001, 0.001, 0.002, 0.004, 0.010, 0.002, 0.003, 0.003, 0.002];
+        let db = Db::open(&path).unwrap();
+        assert_eq!(costs(&db), want);
+        let a = db.get_agent("a").unwrap().unwrap();
+        assert!((a.total_cost_usd - 0.033).abs() < 1e-9, "{}", a.total_cost_usd);
+        assert_eq!(a.session_cost_usd, 0.002, "the next run of the session counts from its last total");
+        // Named sessions keep their last total for a later Resume.
+        assert_eq!(db.session_total("a", "X").unwrap(), 0.015);
+        assert_eq!(db.session_total("a", "Z").unwrap(), 0.002);
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(costs(&db), want, "running it again changes nothing");
+        assert!((db.get_agent("a").unwrap().unwrap().total_cost_usd - 0.033).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fyis_kept_in_agent_data_move_to_their_table_in_order() {
+        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            db.save_agent(&agent("a")).unwrap();
+            db.save_agent(&agent("b")).unwrap();
+            // As the branch before #117 stored them.
+            let c = db.0.lock().unwrap();
+            c.execute("UPDATE agents SET data = json_set(data, '$.pending_fyis', json('[\"first\",\"second\"]')) WHERE id = 'a'", []).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        db.add_pending_fyi("a", "third").unwrap();
+        let prompts = |v: Vec<(i64, String)>| v.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+        assert_eq!(prompts(db.take_pending_fyis("a").unwrap()), ["first", "second", "third"]);
+        assert!(db.take_pending_fyis("b").unwrap().is_empty());
+        let data: String = db.0.lock().unwrap().query_row("SELECT data FROM agents WHERE id = 'a'", [], |r| r.get(0)).unwrap();
+        assert!(!data.contains("pending_fyis"), "{data}");
+        // Opening again moves nothing twice.
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restored_fyis_go_back_ahead_of_newer_ones_and_leave_with_their_agent() {
+        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        db.save_agent(&agent("a")).unwrap();
+        db.add_pending_fyi("a", "first").unwrap();
+        db.add_pending_fyi("a", "second").unwrap();
+        let taken = db.take_pending_fyis("a").unwrap();
+        // One arrives while the run that took them fails.
+        db.add_pending_fyi("a", "third").unwrap();
+        db.restore_pending_fyis("a", &taken).unwrap();
+        let prompts = |v: Vec<(i64, String)>| v.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+        assert_eq!(prompts(db.take_pending_fyis("a").unwrap()), ["first", "second", "third"]);
+
+        db.add_pending_fyi("a", "fourth").unwrap();
+        db.delete_agent("a").unwrap();
+        assert_eq!(db.count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
         let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
         let session = |id: &str, agent: &str, status: &str, at: &str| {
@@ -1152,6 +1515,37 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.active_grill("a").unwrap().unwrap().id, "new");
         assert_eq!(db.open_grills().unwrap().len(), 2);
+        drop(db);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    #[test]
+    fn older_memories_get_their_first_line_as_title_and_keep_their_text() {
+        let path = std::env::temp_dir().join(format!("loft-memories-{}.db", uuid::Uuid::new_v4()));
+        let long = "Deploys go through staging first and only then to production, after the smoke tests pass on it\nmore";
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);").unwrap();
+            for content in ["User prefers short replies", "\n  Two lines  \nThe second one", long] {
+                c.execute("INSERT INTO memories (agent_id, content, created_at) VALUES ('a', ?1, '2026-01-01')", [content]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let ms = db.list_memories("a").unwrap();
+        let titles: Vec<&str> = ms.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, ["User prefers short replies", "Two lines", "Deploys go through staging first and only then to production, after the smoke…"]);
+        assert!(titles[2].chars().count() <= 81);
+        assert_eq!(ms[2].content, long, "the whole text stays the body");
+        assert!(ms.iter().all(|m| m.updated_at.is_none()), "never updated, so they keep their creation order");
+        // Opening again changes nothing; new memories keep the title they were given.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.list_memories("a").unwrap()[1].title, "Two lines");
+        let m = db.add_memory("a", "Release on Fridays", "Releases ship on Friday mornings.", "").unwrap();
+        assert_eq!(db.search_memories("a", "release").unwrap()[0].id, m.id, "matches the title");
+        assert_eq!(db.search_memories("a", "MORNINGS").unwrap()[0].id, m.id, "matches the body");
         drop(db);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));

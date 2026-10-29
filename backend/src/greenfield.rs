@@ -54,7 +54,8 @@ pub fn needs_repo(state: &AppState, a: &Agent) -> bool {
 }
 
 fn project_dir(state: &AppState, a: &Agent) -> PathBuf {
-    state.settings.boot().projects_dir.join(a.project.trim())
+    // Inside the projects folder only; a project that can't be one gets a path that never exists.
+    crate::repos::project_dir(state, &a.project).unwrap_or_else(|| state.settings.boot().projects_dir.join(".loft-no-such-project"))
 }
 
 /// The project folder, when it is one that still needs a GitHub repo, and whether it is a git repo already.

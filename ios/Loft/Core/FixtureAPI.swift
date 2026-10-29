@@ -56,7 +56,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil) -> Agent {
             Agent(id: id, name: name, title: nil, project: project, model: "opus", effort: nil, permissionMode: "auto",
                   intervalMinutes: 60, status: status, statusText: text, running: running, lastRunAt: ago(last),
-                  nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil)
+                  nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil,
+                  sessionId: ctx == nil ? nil : "s-\(id)")
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
@@ -133,6 +134,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   meta: ["task_id": "t6", "task_role": "brief"]),
                 m(7, "orch", "user", "text", "[Task t2] “Implement backend endpoints”, which you delegated to me, is now done: All 4 endpoints are in, with tests.", 12,
                   meta: ["task_id": "t2", "task_role": "report", "task_status": "done", "from_agent": ["id": "be", "name": "Backend Agent"]]),
+                // Agent messages: needs action, and an FYI read on the next run (#112).
+                m(12, "orch", "user", "text", "Please review PR #41 before I merge it.", 9, meta: ["from_agent": ["id": "be", "name": "Backend Agent"]]),
+                m(13, "orch", "user", "text", "Merged #40 on main; the endpoints are live.", 8, meta: ["from_agent": ["id": "be", "name": "Backend Agent"], "fyi": true]),
                 m(8, "orch", "user", "text", "[Task t4] “Test the integrated flow”, which you delegated to me, is now blocked: Waiting for the backend and iOS work", 6,
                   meta: ["task_id": "t4", "task_role": "report", "task_status": "blocked", "from_agent": ["id": "qa", "name": "QA Agent"]]),
             ],
@@ -260,8 +264,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private func endGrill(_ s: inout GrillSession, setupSent: Bool = false) {
         s.state = .ended
         grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
-        let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/octo/site/issues/\(n)")!) }
-        let card = EndCard(repo: "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
+        // `-fixture-plan-in-loft`: a plan kept in Loft, its issues linked as `/tasks/<id>` (the fixture's t1, t2, t3).
+        let inLoft = ProcessInfo.processInfo.arguments.contains("-fixture-plan-in-loft")
+        let issue = { (n: Int, t: String) in
+            EndCard.Issue(number: n, title: t, url: URL(string: inLoft ? "/tasks/t\(n - 39)" : "https://github.com/octo/site/issues/\(n)")!)
+        }
+        let card = EndCard(repo: inLoft ? "" : "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
                            nextMessage: "Implement spec #40: hand the ready tickets to the team", missingRoles: ["reviewer"],
                            setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet.",
                                         sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil))
@@ -509,7 +517,58 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func testPush(token: String) async throws { try check() }
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
 
-    func resetSession(agentId: String) async throws { try check() }
+    func resetSession(agentId: String) async throws {
+        try check()
+        locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { return }
+            agentList[i].sessionId = nil
+            agentList[i].contextTokens = nil
+            nextId += 1
+            msgs[agentId, default: []].append(ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "system", kind: "clear",
+                                                          content: "Context cleared.", meta: nil, createdAt: Date()))
+        }
+    }
+    func compact(agentId: String) async throws { try check() }
+
+    /// Every agent's Sessions: its first one, then two older ones, the oldest started by the Orchestrator.
+    func sessions(agentId: String) async throws -> PastSessions {
+        try check()
+        return locked { PastSessions(sessions: Self.pastSessions(agentId), current: agentList.first { $0.id == agentId }?.sessionId) }
+    }
+
+    private static func pastSessions(_ agentId: String) -> [PastSession] {
+        let now = Date()
+        return [
+            PastSession(id: "s-\(agentId)", startedAt: now.addingTimeInterval(-3600), firstMessage: "Fix the login bug",
+                        fromAgent: nil, contextTokens: 12_000),
+            PastSession(id: "s-\(agentId)-old", startedAt: now.addingTimeInterval(-3 * 86_400), firstMessage: "Run the smoke tests on the settings page",
+                        fromAgent: nil, contextTokens: 48_000),
+            PastSession(id: "s-\(agentId)-older", startedAt: now.addingTimeInterval(-9 * 86_400), firstMessage: "Check the login flow before the release",
+                        fromAgent: "Orchestrator", contextTokens: 96_000),
+        ]
+    }
+
+    func resumeSession(agentId: String, sessionId: String) async throws -> Agent {
+        try check()
+        return try locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { throw APIError.server(status: 404, message: "Not Found") }
+            if agentList[i].running == true {
+                throw APIError.server(status: 409, message: "Agent is working. Stop it before resuming a Session.")
+            }
+            if agentList[i].sessionId == sessionId { throw APIError.server(status: 400, message: "That's already the agent's Session.") }
+            guard let s = Self.pastSessions(agentId).first(where: { $0.id == sessionId }) else {
+                throw APIError.server(status: 404, message: "No such Session in this agent's transcripts.")
+            }
+            agentList[i].sessionId = s.id
+            agentList[i].contextTokens = s.contextTokens
+            nextId += 1
+            let started = s.startedAt.ISO8601Format()
+            msgs[agentId, default: []].append(ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "system", kind: "resume",
+                                                          content: "Resumed the Session from \(started.prefix(10)).",
+                                                          meta: .object(["session_id": .string(s.id), "started_at": .string(started)]), createdAt: Date()))
+            return agentList[i]
+        }
+    }
 
     func restartRun(agentId: String) async throws {
         try check()

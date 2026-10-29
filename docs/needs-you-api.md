@@ -48,7 +48,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `permission` | 3 | A permission prompt is pending | approve, approve_always, deny, open |
 | `task_approval` | 3 | Task in `waiting_approval` | answer, open, dismiss |
 | `task_blocked` | 2 | Task `blocked` (reason = its error) | answer, open, dismiss |
-| `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days) | answer, open, dismiss |
+| `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
 | `task_failed` | 1 | Task `failed` | answer, retry (reopen and send), open, dismiss |

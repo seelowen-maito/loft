@@ -8,10 +8,10 @@ mod github;
 mod github_inbox;
 mod greenfield;
 mod grill;
-mod issues;
 mod needs_you;
 mod planning;
 mod guard;
+mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
@@ -19,6 +19,7 @@ mod prs;
 mod push;
 mod repos;
 mod schedule;
+mod sessions;
 mod settings;
 mod setup;
 mod signing;
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         gh_token: Arc::new(github::TokenCache::default()),
         gh_pace: Arc::new(github::Pace::default()),
+        gh_budget: Arc::new(Default::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
         settings: Arc::new(settings::Store::load(&data_dir)?),
         usage: Arc::new(usage::Cache::default()),
@@ -102,16 +104,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
+        .route("/system/mac-access", post(mac_access::check))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
-        // A project's GitHub issues, read live. `/issues` is the Loft issues list now.
-        .route("/github/issues", get(issues::list))
-        .route("/github/issues/{number}", get(issues::get))
-        .route("/github/issues/{number}/send", post(issues::send))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
@@ -122,9 +121,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
+        .route("/agents/{id}/read", post(api::mark_read))
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
+        .route("/agents/{id}/sessions", get(api::list_sessions))
+        .route("/agents/{id}/resume-session", post(api::resume_session))
         .route("/agents/{id}/avatar/randomize", post(api::randomize_avatar))
         .route("/agents/{id}/memories", get(api::list_memories).post(api::add_memory))
         .route("/agents/{id}/memories/{mid}", delete(api::delete_memory))
@@ -156,6 +158,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/pull-requests", get(api::list_pull_requests))
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
+        .route("/github/budget", get(github::budget))
+        // GitHub requests a person's page or click makes count as `user` (a poller's have their own source).
+        .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| github::as_source("user", next.run(req))))
         .layer(axum::middleware::from_fn(guard::same_origin_writes));
 
     // Serve the built frontend when present (production mode).

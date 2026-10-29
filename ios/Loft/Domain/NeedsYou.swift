@@ -59,6 +59,9 @@ struct NeedsYouAction: Codable, Hashable {
     var body: JSONValue?
     var target: Target?
 
+    /// The text an answer starts from: what the server put in its body ("Edit and approve" on a comment), or nothing.
+    var draft: String { body?["text"]?.stringValue ?? "" }
+
     /// An HTTP action (anything but `open`).
     var isRequest: Bool { method != nil && path != nil }
 
