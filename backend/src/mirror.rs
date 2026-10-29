@@ -1389,7 +1389,7 @@ mod tests {
         let id = one_mirrored(&st, &fake, "priv", repo, "2026-10-02T00:00:00Z").await;
         fake.route("POST", "/repos/octo/priv/issues/1/comments", 201, json!({ "id": 800 }));
         let mut s = st.settings.get();
-        s.comment_approval = [("priv".to_string(), "all".to_string())].into();
+        s.comment_approval_default = "all".into();
         st.settings.save(s).unwrap();
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
@@ -1420,7 +1420,7 @@ mod tests {
         let id = one_mirrored(&st, &fake, "gh-flag", "octo/gh-flag", "2026-10-02T00:00:00Z").await;
         fake.route("POST", "/repos/octo/gh-flag/issues/1/comments", 201, json!({ "id": 801 }));
         let mut s = st.settings.get();
-        s.comment_approval = [("gh-flag".to_string(), "all".to_string())].into();
+        s.comment_approval_default = "all".into();
         st.settings.save(s).unwrap();
         assert!(st.db.get_task(&id).unwrap().unwrap().agent_id.is_none());
         let post = |b: Value| {
