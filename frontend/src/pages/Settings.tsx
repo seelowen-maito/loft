@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type ApprovalMode, type Settings, type SettingsView } from "../lib/api";
+import { api, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
@@ -49,6 +49,71 @@ function ModeSelect({ value, onChange }: { value: ApprovalMode; onChange: (m: Ap
     <select value={value} onChange={(e) => onChange(e.target.value as ApprovalMode)} className="input">
       {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
     </select>
+  );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  prs: "Pull request cards",
+  mirror: "Issue mirror",
+  repos: "Repos page",
+  inbox: "GitHub inbox",
+  user: "Your clicks",
+  agent: "Agents' Loft tools",
+  other: "Other",
+};
+
+/** What's left of GitHub's hourly limit (shared with the agents' own `gh`), and where Loft's requests went. */
+function GithubUsage() {
+  const [b, setB] = useState<GithubBudget | null>(null);
+  useEffect(() => {
+    const load = () => api.githubBudget().then(setB).catch(() => {});
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, []);
+  const at = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
+  return (
+    <Section title="GitHub API">
+      {!b || Object.keys(b.resources).length === 0 ? (
+        <p className="text-[12.5px] text-fg-3">No answer from GitHub yet since Loft started.</p>
+      ) : (
+        <div className="space-y-3">
+          {Object.entries(b.resources).map(([name, r]) => (
+            <div key={name} className="space-y-1">
+              <div className="flex items-baseline justify-between text-[13px]">
+                <span className="text-fg">{name === "core" ? "REST" : name === "graphql" ? "GraphQL" : name}: {r.remaining.toLocaleString()} of {r.limit.toLocaleString()} left</span>
+                <span className="font-mono text-[11px] text-fg-3">resets {at(r.reset)}</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-ink-700">
+                <div className={cx("h-full rounded-full", r.remaining / r.limit < 0.1 ? "bg-bad" : r.remaining / r.limit < 0.3 ? "bg-warn" : "bg-good")} style={{ width: `${Math.max(0, Math.min(100, (r.remaining / r.limit) * 100))}%` }} />
+              </div>
+            </div>
+          ))}
+          <p className="text-[11.5px] text-fg-3">The limit is per GitHub account, so the agents' own <code className="font-mono">gh</code> commands use it too.</p>
+          {rows.length > 0 && (
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-left font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
+                  <th className="py-1 font-normal">Loft's requests this hour</th>
+                  <th className="py-1 text-right font-normal">counted</th>
+                  <th className="py-1 text-right font-normal">free (304)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(([s, c]) => (
+                  <tr key={s} className="border-t border-line">
+                    <td className="py-1.5 text-fg-2">{SOURCE_LABELS[s] ?? s}</td>
+                    <td className="py-1.5 text-right font-mono">{c.requests}</td>
+                    <td className="py-1.5 text-right font-mono text-fg-3">{c.not_modified}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -194,6 +259,8 @@ export default function SettingsPage() {
             </div>
           </Field>
         </Section>
+
+        <GithubUsage />
 
         <Section title="Updates">
           <Toggle

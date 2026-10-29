@@ -373,6 +373,20 @@ export type Settings = {
 
 export type ApprovalMode = "ask" | "own" | "all";
 
+/** GitHub's rate limit as its last answers said (`reset` in Unix seconds), and Loft's requests this hour by source. */
+export type GithubBudget = {
+  resources: Record<string, { limit: number; remaining: number; used: number; reset: number }>;
+  by_source: Record<string, { requests: number; not_modified: number }>;
+  window_reset: number | null;
+};
+
+/** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
+export type MirrorSync = {
+  connected: boolean;
+  projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
+  skipped: { project: string; reason: string }[];
+};
+
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
@@ -451,6 +465,7 @@ export const api = {
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
@@ -484,7 +499,7 @@ export const api = {
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
-  syncIssues: () => req<{ connected: boolean; projects: { project: string; repo: string; error?: string }[] }>("POST", "/issues/sync", {}),
+  syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),

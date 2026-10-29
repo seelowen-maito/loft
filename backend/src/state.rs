@@ -24,7 +24,7 @@ pub enum Event {
     System { system: serde_json::Value },
     Grill { session: serde_json::Value },
     TaskComment { comment: serde_json::Value },
-    /// Loft published issues on a project's repo; the Issues tab refetches.
+    /// Loft published issues on a project's repo.
     Issues { project: String },
     /// The "needs you" list changed: its size, how many are urgent, and the item ids.
     NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
@@ -112,6 +112,8 @@ pub struct AppState {
     pub gh_token: Arc<crate::github::TokenCache>,
     /// Spaces out write requests to GitHub.
     pub gh_pace: Arc<crate::github::Pace>,
+    /// What's left of GitHub's rate limit, and Loft's requests by source.
+    pub gh_budget: Arc<crate::github::Budget>,
     pub update: Arc<Mutex<crate::updater::UpdateStatus>>,
     pub settings: Arc<crate::settings::Store>,
     /// Last Claude plan usage reading.

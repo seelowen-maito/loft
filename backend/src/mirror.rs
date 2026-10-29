@@ -24,8 +24,8 @@ use crate::db::{GithubLink, Task, now};
 use crate::state::AppState;
 
 const POLL_EVERY: Duration = Duration::from_secs(120);
-/// Every this many polls, a full read instead of only the changes: 15 × 2 minutes.
-const FULL_EVERY: u64 = 15;
+/// Every this many polls, a full read instead of only the changes: 30 × 2 minutes, hourly.
+const FULL_EVERY: u64 = 30;
 /// Pages of 100 open issues read per repo at most.
 const MAX_PAGES: usize = 10;
 /// `created_by` of a Loft issue the mirror made.
@@ -35,6 +35,8 @@ pub const FROM_GITHUB: &str = "github";
 #[derive(Default)]
 pub struct Mirror {
     repos: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Cursor>>>>,
+    /// Why each skipped project was last skipped, so the log says it once, not every poll.
+    skipped: std::sync::Mutex<HashMap<String, String>>,
 }
 
 /// Where the change poll of one repo stands.
@@ -65,12 +67,54 @@ pub struct Report {
     pub error: Option<String>,
 }
 
+/// The projects the agents belong to, A–Z (case-insensitive), each once.
+pub(crate) fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
+    let mut ps: Vec<String> = state.db.list_agents()?.iter().map(|a| a.project.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    ps.sort();
+    ps.dedup();
+    ps.sort_by_key(|p| p.to_lowercase());
+    Ok(ps)
+}
+
+/// Why `project` isn't mirrored, if it isn't: no GitHub token, or no GitHub repo. Logged the first
+/// time (and whenever the reason changes), so a project that silently stays out can be explained.
+pub async fn skip_reason(state: &AppState, project: &str) -> Option<String> {
+    let why = if crate::github::token(state).is_none() {
+        Some("GitHub isn't connected (no token in Settings, no `gh auth login`)".to_string())
+    } else {
+        crate::repos::github_repo(state, project).await.err()
+    };
+    let mut said = state.mirror.skipped.lock().unwrap();
+    match &why {
+        Some(w) if said.get(project) != Some(w) => {
+            tracing::info!("mirror: not mirroring {project}: {w}");
+            said.insert(project.to_string(), w.clone());
+        }
+        None => {
+            said.remove(project);
+        }
+        _ => {}
+    }
+    why
+}
+
 /// Polls every project's repo; the first round and every `FULL_EVERY`th are full reads.
 pub async fn poller(state: AppState) {
+    crate::github::as_source("mirror", poll(state)).await
+}
+
+async fn poll(state: AppState) {
     let mut round: u64 = 0;
     loop {
         let full = round.is_multiple_of(FULL_EVERY);
-        for p in crate::issues::projects(&state).unwrap_or_default() {
+        // Projects that share a repo read it once.
+        let mut read = HashSet::new();
+        for p in projects(&state).unwrap_or_default() {
+            if let Ok(repo) = crate::repos::github_repo(&state, &p).await
+                && !read.insert(repo.to_lowercase())
+            {
+                continue;
+            }
             let _ = sync_project(&state, &p, full).await;
         }
         round += 1;
@@ -81,9 +125,9 @@ pub async fn poller(state: AppState) {
 /// A full read of one project, in the background: after Loft publishes there, for example.
 pub fn spawn_sync(state: &AppState, project: &str) {
     let (state, project) = (state.clone(), project.trim().to_string());
-    tokio::spawn(async move {
+    tokio::spawn(crate::github::as_source("mirror", async move {
         let _ = sync_project(&state, &project, true).await;
-    });
+    }));
 }
 
 #[derive(Deserialize, Default)]
@@ -92,34 +136,52 @@ pub struct SyncBody {
     project: Option<String>,
 }
 
-/// `POST /api/issues/sync`: a full read now, of one project or all; what the list does on open and refresh.
+/// `POST /api/issues/sync`: what changed on GitHub, now, for one project or all; what the list does on
+/// open and refresh. A change poll, so a quiet repo costs a free 304; a repo never read yet gets a full read.
 pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>>) -> Result<Json<Value>, ApiError> {
     let wanted = body.and_then(|b| b.0.project).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-    let projects = crate::issues::projects(&state)?;
+    let projects = projects(&state)?;
     if let Some(p) = &wanted
         && !projects.contains(p)
     {
         return Err(crate::api::not_found());
     }
-    let mut out = vec![];
+    let (mut out, mut skipped) = (vec![], vec![]);
+    let mut read: HashMap<String, Report> = HashMap::new();
     for p in projects.iter().filter(|p| wanted.as_ref().is_none_or(|w| w == *p)) {
-        if let Some(r) = sync_project(&state, p, true).await {
-            out.push(r);
+        // A project on a repo already read this time reports that read instead of reading it again.
+        if let Ok(repo) = crate::repos::github_repo(&state, p).await
+            && let Some(r) = read.get(&repo.to_lowercase())
+        {
+            out.push(Report { project: p.clone(), ..r.clone() });
+            continue;
+        }
+        match sync_project(&state, p, false).await {
+            Some(r) => {
+                read.insert(r.repo.to_lowercase(), r.clone());
+                out.push(r)
+            }
+            None => skipped.push(json!({ "project": p, "reason": skip_reason(&state, p).await })),
         }
     }
-    Ok(Json(json!({ "connected": crate::github::token(&state).is_some(), "projects": out })))
+    Ok(Json(json!({ "connected": crate::github::token(&state).is_some(), "projects": out, "skipped": skipped })))
 }
 
 /// Syncs one project. None when there's nothing to mirror: no token, or no GitHub repo.
 pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option<Report> {
-    crate::github::token(state)?;
+    if skip_reason(state, project).await.is_some() {
+        return None;
+    }
     let repo = crate::repos::github_repo(state, project).await.ok()?;
     let mut report = Report { project: project.into(), repo: repo.clone(), ..Default::default() };
     let cursor = state.mirror.cursor(&repo);
     let mut cursor = cursor.lock().await;
     let result = if full || cursor.since.is_none() { full_read(state, project, &repo, &mut cursor, &mut report).await } else { changes(state, project, &repo, &mut cursor, &mut report).await };
     if let Err(e) = result {
-        tracing::warn!("mirror {repo}: {e}");
+        // Paused for the rate limit is expected and says so in the list; it isn't worth a warning each tick.
+        if !crate::github::is_paused(&e) {
+            tracing::warn!("mirror {repo}: {e}");
+        }
         report.error = Some(e.to_string());
     }
     Some(report)
@@ -139,13 +201,20 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
     }
     let mut newest = cursor.since.clone().unwrap_or_default();
     let mut seen = HashSet::new();
+    let mut touched = vec![];
     for i in open.iter().filter(|i| i.get("pull_request").is_none()) {
         seen.insert(i["number"].as_i64().unwrap_or(0));
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
+        let before = report.created + report.updated;
         apply(state, project, repo, i, report);
+        if report.created + report.updated > before {
+            touched.push(i);
+        }
     }
-    // After every issue is in, so a link to one listed later still resolves.
-    for i in open.iter().filter(|i| i.get("pull_request").is_none()) {
+    // Links and comments only for issues that are new or changed since the last read: an unchanged
+    // issue costs no more requests, which keeps a full read (on every list open) cheap. After every
+    // issue is in, so a link to one listed later still resolves.
+    for i in touched {
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
     }
@@ -543,13 +612,15 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
             }
             return Ok(());
         }
-        if fields {
-            crate::github::request(state, reqwest::Method::PATCH, &path, Some(body)).await?;
+        let patched = if fields { Some(crate::github::request(state, reqwest::Method::PATCH, &path, Some(body)).await?) } else { None };
+        let parents = links_to_github(state, &g, &now_there, before, after).await?;
+        // Remember what GitHub says now, so the next poll (or edit) doesn't take Loft's own write for a
+        // change: the PATCH answer has it, unless a link written after it moved the issue on again.
+        match patched.filter(|_| !links_changed(before, after)) {
+            Some(v) => keep_link(state, &g.repo, &v),
+            None => refresh_link(state, &g.repo, g.number).await,
         }
-        let mut touched = vec![g.number];
-        touched.extend(links_to_github(state, &g, &now_there, before, after).await?);
-        // Remember what GitHub says now, so the next poll (or edit) doesn't take Loft's own write for a change.
-        for n in touched {
+        for n in parents {
             refresh_link(state, &g.repo, n).await;
         }
         anyhow::Ok(())
@@ -568,7 +639,7 @@ pub fn spawn_write_through(state: &AppState, before: Task, after: Task) {
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
     let state = state.clone();
-    rt.spawn(async move { write_through(&state, &before, &after).await });
+    rt.spawn(crate::github::as_source("mirror", async move { write_through(&state, &before, &after).await }));
 }
 
 fn links_changed(before: &Task, after: &Task) -> bool {
@@ -612,9 +683,16 @@ async fn links_to_github(state: &AppState, g: &GithubLink, now_there: &Value, be
 
 /// Reads issue #n again and keeps GitHub's `updated_at` (and state) on the Loft issue that mirrors it.
 async fn refresh_link(state: &AppState, repo: &str, n: i64) {
-    let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await else { return };
+    if let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await {
+        keep_link(state, repo, &v);
+    }
+}
+
+/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it.
+fn keep_link(state: &AppState, repo: &str, v: &Value) {
+    let Some(n) = v["number"].as_i64() else { return };
     if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
-        t.github = Some(link(repo, &v));
+        t.github = Some(link(repo, v));
         if state.db.save_task(&t).is_ok() {
             crate::tasks::emit(state, &t);
         }
@@ -679,10 +757,36 @@ fn url_encode(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::tests::own_fake;
-    use crate::issues::tests::{project, state};
+    use crate::github::tests::state_with_token;
+
+    /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
+    pub(crate) fn state() -> AppState {
+        let st = state_with_token();
+        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects, "github_token": "test-token" }).to_string()).unwrap();
+        AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st }
+    }
+
+    /// An agent on `project`, whose folder is a git repo with this `origin` (none: not a repo at all).
+    pub(crate) fn project(st: &AppState, project: &str, origin: Option<&str>) {
+        let mut a = crate::tasks::tests::agent(st, &format!("{project}-dev"));
+        a.project = project.into();
+        st.db.save_agent(&a).unwrap();
+        let Some(o) = origin else { return };
+        let dir = st.settings.boot().projects_dir.join(project);
+        assert!(dir.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        if !o.is_empty() {
+            git(&["remote", "add", "origin", o]);
+        }
+    }
 
     fn gh(repo: &str, n: i64, title: &str, state: &str, updated: &str) -> Value {
         json!({
@@ -814,7 +918,12 @@ mod tests {
         let before = json!(t);
 
         let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
-        assert_eq!(v, json!({ "connected": true, "projects": [] }));
+        // Skipped, and each says why, so a project that stays out of the list can be explained.
+        assert_eq!(v["projects"], json!([]));
+        let why: Vec<(String, String)> = v["skipped"].as_array().unwrap().iter().map(|s| (s["project"].as_str().unwrap().into(), s["reason"].as_str().unwrap().into())).collect();
+        assert_eq!(why.len(), 2);
+        assert!(why.iter().any(|(p, r)| p == "mir-local" && r == "The project mir-local has no `origin` remote"), "{why:?}");
+        assert!(why.iter().any(|(p, r)| p == "mir-plain" && r.ends_with("mir-plain isn't a git repo")), "{why:?}");
         assert!(fake.seen("/").is_empty(), "nothing asked of GitHub");
         assert_eq!(json!(st.db.get_task(&t.id).unwrap().unwrap()), before);
         assert_eq!(st.db.list_tasks().unwrap().len(), 1);
@@ -1230,6 +1339,92 @@ mod tests {
         assert_eq!(st.settings.get().approval_mode("ap-new"), "own");
     }
 
+
+    #[tokio::test]
+    async fn a_rate_limited_first_read_is_reported_and_the_next_poll_mirrors() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/rl-first";
+        project(&st, "rl-first", Some("https://github.com/octo/rl-first"));
+        // GitHub's core limit is used up when Loft starts (by agents' `gh`, other tools on the token...).
+        fake.in_turn("GET", "/repos/octo/rl-first/issues", vec![
+            (403, json!({ "message": "API rate limit exceeded for user ID 1." })),
+            (200, json!([gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z")])),
+        ]);
+        fake.with_headers("GET", "/repos/octo/rl-first/issues", &[("retry-after", "900")]);
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        assert!(v["projects"][0]["error"].as_str().unwrap().contains("rate limit"), "the list can say why it's empty: {v}");
+        assert!(mirrored(&st, repo).is_empty());
+        // The next poll is a full read again (nothing was read yet), and it mirrors.
+        let r = sync_project(&st, "rl-first", false).await.unwrap();
+        assert_eq!((r.created, r.error), (1, None));
+        let first = fake.seen("/repos/octo/rl-first/issues?");
+        assert!(first.iter().all(|r| r.path.contains("state=open") && r.headers["if-none-match"] == ""), "no stale since or ETag before a first read");
+    }
+
+    #[tokio::test]
+    async fn a_full_read_of_unchanged_issues_reads_no_links_or_comments() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cheap";
+        project(&st, "cheap", Some("https://github.com/octo/cheap"));
+        let mut one = gh(repo, 1, "Spec", "open", "2026-10-02T00:00:00Z");
+        one["comments"] = json!(3);
+        one["sub_issues_summary"] = json!({ "total": 2, "completed": 0 });
+        one["issue_dependencies_summary"] = json!({ "blocked_by": 1, "total_blocked_by": 1 });
+        fake.route("GET", "/repos/octo/cheap/issues", 200, json!([one]));
+        for what in ["comments", "sub_issues", "dependencies/blocked_by"] {
+            fake.route("GET", &format!("/repos/octo/cheap/issues/1/{what}"), 200, json!([]));
+        }
+        sync_project(&st, "cheap", true).await.unwrap();
+        let after_first = fake.seen("/repos/octo/cheap/issues/1/").len();
+        assert_eq!(after_first, 3, "a new issue's links and comments are read once");
+        // Opening the list again (a full read each time) with nothing changed on GitHub: one request each.
+        for _ in 0..5 {
+            sync_project(&st, "cheap", true).await.unwrap();
+        }
+        assert_eq!(fake.seen("/repos/octo/cheap/issues/1/").len(), after_first);
+        assert_eq!(fake.seen("/repos/octo/cheap/issues?").len(), 6);
+    }
+
+
+    #[tokio::test]
+    async fn opening_the_list_asks_only_what_changed_and_a_shared_repo_is_read_once() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/rl-less";
+        project(&st, "less-web", Some("https://github.com/octo/rl-less"));
+        project(&st, "less-ios", Some("git@github.com:octo/rl-less.git"));
+        fake.route("GET", "/repos/octo/rl-less/issues", 200, json!([gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z")]));
+
+        // First open: the repo was never read, so a full read; both projects report it, one request.
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!(v["projects"].as_array().unwrap().len(), 2);
+        assert_eq!(v["projects"][0]["created"].as_i64().unwrap() + v["projects"][1]["created"].as_i64().unwrap(), 2, "{v}");
+        let lists = || fake.seen("/repos/octo/rl-less/issues?");
+        assert_eq!(lists().len(), 1);
+        assert!(lists()[0].path.contains("state=open"));
+
+        // Opening it again: the change poll, not a full read.
+        let _ = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!(lists().len(), 2);
+        assert!(lists()[1].path.contains("state=all") && lists()[1].path.contains("since="), "{}", lists()[1].path);
+        assert_eq!(mirrored(&st, repo).len(), 1, "no duplicate for the second project");
+    }
+
+    #[tokio::test]
+    async fn an_edit_keeps_the_patch_answer_instead_of_reading_the_issue_again() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/wt-reuse";
+        let id = one_mirrored(&st, &fake, "wt-reuse", repo, "2026-10-02T00:00:00Z").await;
+        fake.route("GET", "/repos/octo/wt-reuse/issues/1", 200, gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z"));
+        fake.route("PATCH", "/repos/octo/wt-reuse/issues/1", 200, gh(repo, 1, "Capped", "open", "2026-10-07T00:00:00Z"));
+        let Json(v) = crate::tasks::update(State(st.clone()), axum::extract::Path(id), Json(json!({ "title": "Capped" }))).await.unwrap();
+        assert_eq!(v["github"]["updated_at"], "2026-10-07T00:00:00Z");
+        let gets = fake.seen("/repos/octo/wt-reuse/issues/1").into_iter().filter(|r| r.method == "GET").count();
+        assert_eq!(gets, 1, "only the conflict check before writing");
+    }
 
     #[tokio::test]
     async fn private_notes_and_handoff_notes_never_go_to_github_whatever_the_mode() {

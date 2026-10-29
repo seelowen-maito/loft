@@ -483,7 +483,7 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            call_tool(&state, &agent_id, name, args).await
+            crate::github::as_source("agent", call_tool(&state, &agent_id, name, args)).await
         }
         "resources/list" => json!({ "resources": [] }),
         "prompts/list" => json!({ "prompts": [] }),

@@ -1117,6 +1117,7 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             gh_token: Arc::new(Default::default()),
             gh_pace: Arc::new(Default::default()),
+            gh_budget: Arc::new(Default::default()),
             update: Arc::new(Mutex::new(Default::default())),
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
             usage: Arc::new(Default::default()),
@@ -1234,7 +1235,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_at_mention_in_the_thread_reaches_that_agent_who_can_answer_there() {
-        let st = crate::issues::tests::state();
+        let st = crate::mirror::tests::state();
         let fake = crate::github::tests::own_fake(&st);
         let (worker, reviewer, stranger) = (agent(&st, "Worker"), agent(&st, "Reviewer"), agent(&st, "Stranger"));
         for a in [&worker, &reviewer, &stranger] {
