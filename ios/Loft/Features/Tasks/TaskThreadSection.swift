@@ -25,7 +25,8 @@ struct TaskThreadSection: View {
                 }
             }
             HStack(alignment: .bottom) {
-                TextField(task.github == nil ? "Comment…" : "Comment (asks before it goes to GitHub)…", text: $draft, axis: .vertical)
+                // No promise about GitHub here: the server's approval setting decides whether a comment waits or goes.
+                TextField("Comment…", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .accessibilityIdentifier("threadField")
                 Button {
