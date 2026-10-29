@@ -3,6 +3,7 @@ import { RotateCw } from "lucide-react";
 import { api, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
+import { MacAccess } from "./MacAccess";
 import { cx } from "../lib/format";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
@@ -308,6 +309,8 @@ export default function SettingsPage() {
         </Section>
 
         <PushSettings />
+
+        <MacAccess />
 
         {(dirty || err) && (
           <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">

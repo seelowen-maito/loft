@@ -1228,7 +1228,7 @@ pub(crate) mod tests {
         let comment_posts = || fake.seen("/repos/octo/cm-flow/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
 
         // Yours and an agent's: in the thread at once, not on GitHub yet, both in Needs you. The agent isn't blocked.
-        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ship it Friday", "send": false })).unwrap();
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ship it Friday", "send": true })).unwrap();
         let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
         let out = crate::tasks::mcp_call(&st, &a, "comment_issue", &json!({ "id": id, "text": "Done with the cap" }), |k: &str| Err(k.to_string())).unwrap();
         assert!(out.is_ok(), "{out:?}");
@@ -1275,7 +1275,7 @@ pub(crate) mod tests {
     /// Posts a comment by `who` ("user" or an agent) on `id`; its thread entry once it's there.
     async fn comment_by(st: &AppState, id: &str, who: &crate::db::Agent, user: bool, text: &str) -> crate::db::TaskComment {
         if user {
-            let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": text, "send": false })).unwrap();
+            let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": text, "send": true })).unwrap();
             let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.to_string()), Json(body)).await.unwrap();
         } else {
             crate::tasks::mcp_call(st, who, "comment_issue", &json!({ "id": id, "text": text }), |k: &str| Err(k.to_string())).unwrap().unwrap();
@@ -1424,6 +1424,38 @@ pub(crate) mod tests {
         assert_eq!(v["github"]["updated_at"], "2026-10-07T00:00:00Z");
         let gets = fake.seen("/repos/octo/wt-reuse/issues/1").into_iter().filter(|r| r.method == "GET").count();
         assert_eq!(gets, 1, "only the conflict check before writing");
+    }
+
+    #[tokio::test]
+    async fn private_notes_and_handoff_notes_never_go_to_github_whatever_the_mode() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/priv";
+        let id = one_mirrored(&st, &fake, "priv", repo, "2026-10-02T00:00:00Z").await;
+        fake.route("POST", "/repos/octo/priv/issues/1/comments", 201, json!({ "id": 800 }));
+        let mut s = st.settings.get();
+        s.comment_approval = [("priv".to_string(), "all".to_string())].into();
+        st.settings.save(s).unwrap();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+
+        // Handed over with a note, then a private note: in Loft, never queued for GitHub, never posted.
+        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", None).unwrap();
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ask Tom about the deadline", "send": false })).unwrap();
+        let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
+        // A comment meant for the issue still goes (mode: all).
+        let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Shipping Friday", "send": true })).unwrap();
+        let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let thread = st.db.list_task_comments(&id, 50, None).unwrap();
+        for text in ["The staging password is in 1Password", "Ask Tom about the deadline"] {
+            let c = thread.iter().find(|c| c.text == text).unwrap();
+            assert!(c.meta["github"].is_null(), "{text}: {:?}", c.meta);
+        }
+        let posted: Vec<Value> = fake.seen("/repos/octo/priv/issues/1/comments").into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect();
+        assert_eq!(posted, [json!({ "body": "Shipping Friday" })]);
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "comment_approval"));
     }
 
 }

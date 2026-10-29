@@ -260,8 +260,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private func endGrill(_ s: inout GrillSession, setupSent: Bool = false) {
         s.state = .ended
         grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
-        let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/octo/site/issues/\(n)")!) }
-        let card = EndCard(repo: "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
+        // `-fixture-plan-in-loft`: a plan kept in Loft, its issues linked as `/tasks/<id>` (the fixture's t1, t2, t3).
+        let inLoft = ProcessInfo.processInfo.arguments.contains("-fixture-plan-in-loft")
+        let issue = { (n: Int, t: String) in
+            EndCard.Issue(number: n, title: t, url: URL(string: inLoft ? "/tasks/t\(n - 39)" : "https://github.com/octo/site/issues/\(n)")!)
+        }
+        let card = EndCard(repo: inLoft ? "" : "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
                            nextMessage: "Implement spec #40: hand the ready tickets to the team", missingRoles: ["reviewer"],
                            setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet.",
                                         sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil))

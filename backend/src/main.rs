@@ -11,6 +11,7 @@ mod grill;
 mod needs_you;
 mod planning;
 mod guard;
+mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
@@ -96,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
+        .route("/system/mac-access", post(mac_access::check))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))

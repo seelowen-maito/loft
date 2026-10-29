@@ -6,7 +6,7 @@ import Foundation
 enum FixtureNeedsYou {
     static let json = #"""
 {
- "count": 8,
+ "count": 9,
  "generated_at": "2026-10-23T14:37:36.766739+00:00",
  "items": [
   {
@@ -322,6 +322,26 @@ enum FixtureNeedsYou {
    "text": "→  · +0 −0 in 0 files",
    "title": "o/r#7: Fix it",
    "type": "pr_ready",
+   "urgency": 1
+  },
+  {
+   "actions": [
+    {"body": {}, "kind": "approve", "label": "Approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
+    {"body": {"text": "Backend is done: 4 endpoints with tests. iOS screen next."}, "kind": "answer", "label": "Edit and approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
+    {"body": {}, "kind": "deny", "label": "Keep in Loft", "method": "POST", "path": "/api/issues/t1/comments/77/keep"},
+    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t1"}}
+   ],
+   "age_seconds": 120,
+   "agent": {"id": "be", "name": "Backend Agent"},
+   "created_at": "2026-10-23T14:35:36.763574+00:00",
+   "id": "comment:77",
+   "links": [{"label": "Task", "path": "/tasks/t1"}],
+   "project": "loft",
+   "reason": "Not on GitHub yet: approve to post it on octo/loft#42.",
+   "task_id": "t1",
+   "text": "Backend is done: 4 endpoints with tests. iOS screen next.",
+   "title": "Backend Agent's comment on Implement settings functionality",
+   "type": "comment_approval",
    "urgency": 1
   },
   {

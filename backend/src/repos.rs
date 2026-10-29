@@ -136,7 +136,14 @@ pub struct GithubItem {
     pub updated_at: String,
 }
 
+/// Git processes running at once. The Repos scan asks 9 things of every repo in parallel; with a few
+/// dozen repos that's hundreds of processes and pipes, past launchd's 256 open files, so spawns failed
+/// ("spawning git") and repos showed no GitHub remote.
+const GIT_AT_ONCE: usize = 16;
+static GIT_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GIT_AT_ONCE);
+
 pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let _slot = GIT_SLOTS.acquire().await?;
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -150,15 +157,68 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A project name as Loft stores it: a name or tag, or a folder path relative to the projects folder
+/// (`work/isa`, as the Repos scan names nested repos). Never absolute, never `..`, `.` or empty parts,
+/// so it can't name a folder outside the projects folder.
+pub fn project_name(raw: &str) -> Result<String, String> {
+    let p = raw.trim();
+    if p.is_empty() {
+        return Ok(String::new());
+    }
+    let bad = p.chars().count() > 100
+        || p.starts_with(['/', '\\', '~'])
+        || p.contains('\\')
+        || p.chars().any(char::is_control)
+        || p.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+        || Path::new(p).is_absolute();
+    if bad {
+        return Err("project must be a name, or a folder inside the projects folder (no `..`, no absolute path)".into());
+    }
+    Ok(p.to_string())
+}
+
+/// The folder of `project` inside the projects folder, resolved (symlinks too); None when it isn't one.
+/// Agents' workspaces are never a project, even where they sit inside the projects folder: an agent
+/// can make a repo there with any origin.
+pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf> {
+    let name = project_name(project).ok().filter(|n| !n.is_empty())?;
+    let root = state.settings.boot().projects_dir.canonicalize().ok()?;
+    let dir = root.join(&name).canonicalize().ok()?;
+    let workspaces = state.cfg.storage_dir.canonicalize().unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
+}
+
+/// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
+/// could point the project at any repo on the Mac (and its origin).
+fn own_git_dir(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir())
+}
+
 /// `owner/repo` of a project from its folder's `origin`; the error says what's missing, without a full stop.
 pub async fn github_repo(state: &AppState, project: &str) -> Result<String, String> {
     let project = project.trim();
-    let dir = state.settings.boot().projects_dir.join(project);
+    project_name(project)?;
+    let Some(dir) = project_dir(state, project) else {
+        return Err(format!("The project folder {} isn't a git repo", state.settings.boot().projects_dir.join(project).display()));
+    };
     if !dir.join(".git").exists() {
         return Err(format!("The project folder {} isn't a git repo", dir.display()));
     }
+    if !own_git_dir(&dir) {
+        return Err(format!("The project folder {}'s .git isn't a folder of its own (a symlink, a worktree or a submodule), so Loft won't publish from it", dir.display()));
+    }
     let remote = git(&dir, &["remote", "get-url", "origin"]).await.map_err(|_| format!("The project {project} has no `origin` remote"))?;
-    github_slug(&remote).ok_or_else(|| format!("The project {project}'s `origin` ({}) isn't on GitHub", remote.trim()))
+    github_slug(&remote).ok_or_else(|| format!("The project {project}'s `origin` ({}) isn't on GitHub", strip_userinfo(remote.trim())))
+}
+
+/// A remote URL without the `user:token@` part, for messages.
+fn strip_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..host_end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
 }
 
 /// Parse `owner/repo` from any GitHub remote URL form.
@@ -603,6 +663,117 @@ mod tests {
         let seen = fake.seen("/");
         assert_eq!(seen.len(), 3);
         assert_eq!((seen[2].path.as_str(), &seen[2].headers["if-none-match"]), ("/repos/octo/rp-one/issues?state=open&per_page=60", &json!("\"r1\"")));
+    }
+
+    #[test]
+    fn a_project_name_never_leaves_the_projects_folder() {
+        use super::project_name;
+        for ok in ["loft", "work/isa", "Laufey & Gustavo", " api ", ""] {
+            assert!(project_name(ok).is_ok(), "{ok}");
+        }
+        for bad in ["../x", "..", "a/../b", "/Users/me/secret", "~/repo", "a//b", "./a", "a/", "C:\\x", "a\\..\\b"] {
+            assert!(project_name(bad).is_err(), "{bad}");
+        }
+        assert_eq!(super::strip_userinfo("https://user:ghp_secret@github.com/o/r.git"), "https://github.com/o/r.git");
+        assert_eq!(super::strip_userinfo("https://gitlab.com/o/r.git"), "https://gitlab.com/o/r.git");
+        assert_eq!(super::strip_userinfo("git@gitlab.com:o/r.git"), "git@gitlab.com:o/r.git");
+    }
+
+    #[tokio::test]
+    async fn a_project_outside_the_projects_folder_reaches_no_repo_and_no_github() {
+        use serde_json::json;
+        let st = crate::mirror::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        // A repo outside the projects folder, with a GitHub origin, reachable by `..`, an absolute path or a symlink.
+        let outside = st.settings.boot().projects_dir.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&outside).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/victim/private"]);
+        std::os::unix::fs::symlink(&outside, st.settings.boot().projects_dir.join("link")).unwrap();
+        for p in ["../outside", outside.to_str().unwrap(), "link"] {
+            assert!(super::github_repo(&st, p).await.is_err(), "{p}");
+        }
+
+        // Through the API: refused for an issue and an agent.
+        assert!(crate::tasks::create_task(axum::extract::State(st.clone()), axum::Json(json!({ "title": "x", "project": "../outside" }))).await.is_err());
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "x" }), "user").unwrap();
+        assert!(crate::tasks::update(axum::extract::State(st.clone()), axum::extract::Path(t.id.clone()), axum::Json(json!({ "project": outside.to_str().unwrap() }))).await.is_err());
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let mut patched = a.clone();
+        assert!(crate::api::tests::apply_project(&mut patched, "../outside").is_err());
+
+        // A project stored before this check (or through the symlink) still can't publish there.
+        let mut old = st.db.get_task(&t.id).unwrap().unwrap();
+        old.project = "link".into();
+        st.db.save_task(&old).unwrap();
+        assert!(crate::mirror::publish(&st, &t.id, "user").await.is_err());
+        assert!(fake.seen("/").is_empty(), "no GitHub call");
+    }
+
+
+    #[tokio::test]
+    async fn a_project_cant_borrow_another_repos_origin_from_inside_the_projects_folder() {
+        let st = crate::mirror::tests::state();
+        let projects = st.settings.boot().projects_dir.clone();
+        // Agents' workspaces inside the projects folder, as with ~/dev/loft/agent-local-storage.
+        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage") };
+        let st = crate::state::AppState { cfg: std::sync::Arc::new(cfg), ..st };
+        let fake = crate::github::tests::own_fake(&st);
+        let git_in = |d: &std::path::Path, args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap().status.success());
+        // A repo outside the projects folder, with a GitHub origin.
+        let outside = projects.parent().unwrap().join("outside2");
+        std::fs::create_dir_all(&outside).unwrap();
+        git_in(&outside, &["init", "-q"]);
+        git_in(&outside, &["remote", "add", "origin", "https://github.com/victim/private"]);
+
+        // 1. A project whose .git is a symlink to that repo's .git.
+        let linked = projects.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(outside.join(".git"), linked.join(".git")).unwrap();
+        // 2. A project whose .git is a `gitdir:` file pointing there.
+        let gitfile = projects.join("gitfile");
+        std::fs::create_dir_all(&gitfile).unwrap();
+        std::fs::write(gitfile.join(".git"), format!("gitdir: {}\n", outside.join(".git").display())).unwrap();
+        // 3. A repo an agent made in its own workspace, which is inside the projects folder.
+        let evil = st.cfg.storage_dir.join("agent-1").join("evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        git_in(&evil, &["init", "-q"]);
+        git_in(&evil, &["remote", "add", "origin", "https://github.com/victim/private"]);
+
+        for p in ["linked", "gitfile"] {
+            let e = super::github_repo(&st, p).await.unwrap_err();
+            assert!(e.contains("isn't a folder of its own"), "{p}: {e}");
+        }
+        let p = "loft/agent-local-storage/agent-1/evil";
+        assert!(super::project_dir(&st, p).is_none(), "an agent's workspace is never a project");
+        assert!(super::github_repo(&st, p).await.is_err());
+        // A real repo inside the projects folder still works.
+        let real = projects.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        git_in(&real, &["init", "-q"]);
+        git_in(&real, &["remote", "add", "origin", "git@github.com:octo/real.git"]);
+        assert_eq!(super::github_repo(&st, "real").await.unwrap(), "octo/real");
+        assert!(fake.seen("/").is_empty());
+    }
+
+    #[tokio::test]
+    async fn many_repos_scanned_at_once_never_fail_to_spawn_git() {
+        // Run under `ulimit -n 256` (launchd's default) to see the old failure.
+        let root = std::env::temp_dir().join(format!("loft-spawn-{}", uuid::Uuid::new_v4()));
+        for n in 0..40 {
+            let d = root.join(format!("r{n}"));
+            std::fs::create_dir_all(&d).unwrap();
+            let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&d).args(args).output().unwrap().status.success());
+            git(&["init", "-q"]);
+            git(&["remote", "add", "origin", &format!("git@github.com:octo/r{n}.git")]);
+        }
+        // Like `list`: every repo summarised at once, 9 git calls each.
+        let all = futures::future::join_all(super::discover(&root).into_iter().map(|(n, d)| super::summarize(n, d))).await;
+        assert_eq!(all.len(), 40);
+        let failed: Vec<_> = all.iter().filter(|r| r.error.as_deref() == Some("spawning git") || r.github.is_none()).map(|r| r.name.clone()).collect();
+        assert!(failed.is_empty(), "{failed:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
 }

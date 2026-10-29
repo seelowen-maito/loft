@@ -75,6 +75,15 @@ final class GrillDecodingTests: XCTestCase {
         XCTAssertNil(full.grill?.endCard?.setup)
     }
 
+    /// A plan kept in Loft (`repo: ""`) links its issues as `/tasks/<id>`: they open in the app, GitHub links don't.
+    func testEndCardKeptInLoftLinksToLoftIssues() throws {
+        let m = try message(#"{"id": 14, "agent_id": "a", "role": "assistant", "kind": "text", "content": "x", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"role": "summary", "final": true, "end_card": {"repo": "", "spec": {"number": 1, "title": "Rounds", "url": "/tasks/6f1d"}, "tickets": [{"number": 2, "title": "Store", "url": "/tasks/9a2b"}], "next_message": "Implement the plan", "missing_roles": [], "setup": null}}}}"#)
+        let card = try XCTUnwrap(m.grill?.endCard)
+        XCTAssertEqual(card.spec?.loftTaskId, "6f1d")
+        XCTAssertEqual(card.tickets.map(\.loftTaskId), ["9a2b"])
+        XCTAssertNil(EndCard.Issue(number: 41, title: "Store", url: URL(string: "https://github.com/octo/x/issues/41")!).loftTaskId)
+    }
+
     func testSessionWithAnswerStates() throws {
         let json = #"""
         {"session": {"session_id": "g1", "agent_id": "lead", "state": "active", "end_reason": null, "topic": "pricing",

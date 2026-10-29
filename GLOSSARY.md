@@ -57,3 +57,21 @@ _Avoid_: Task, story, sub-task
 **Owner**:
 The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
+
+## Threads
+
+**Thread**:
+A Loft issue's entries, oldest first: comments, notes and status entries.
+_Avoid_: Timeline, history, log
+
+**Comment**:
+A thread entry someone wrote: the user, an agent, or someone on GitHub. On an issue that mirrors a GitHub issue, a Loft comment goes to GitHub only after the user approves it; GitHub's comments arrive in the thread.
+_Avoid_: Reply, message
+
+**Note**:
+An agent's progress update on a Loft issue, written as it works. It stays in Loft.
+_Avoid_: Comment, log entry
+
+**Status entry**:
+A thread entry Loft writes when something changes: created, started, done, reassigned, closed on GitHub. It stays in Loft.
+_Avoid_: Event, activity
