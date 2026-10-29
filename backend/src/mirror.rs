@@ -368,6 +368,16 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
 /// work goes on and the GitHub issue is reopened, so both sides agree again.
 pub async fn keep_working(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiError> {
     let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    let Some(repo) = t.github.as_ref().map(|g| g.repo.clone()) else {
+        return Err(crate::api::bad("It isn't on GitHub, so there's nothing to reopen."));
+    };
+    // Held like a sync or an edit, so a poll can't apply GitHub's close in between; then checked again.
+    let cursor = state.mirror.cursor(&repo);
+    let _held = cursor.lock().await;
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    if !crate::tasks::is_active(&t) {
+        return Err(crate::api::bad("Nobody is working on it now, so there's nothing to keep working on."));
+    }
     let Some(g) = t.github.clone().filter(|g| g.state == "closed" && t.state() == "open") else {
         return Err(crate::api::bad("It isn't closed on GitHub, so there's nothing to reopen."));
     };
@@ -1297,6 +1307,16 @@ mod tests {
         assert_eq!(patched, [json!({ "state": "open" })]);
         assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "closed_on_github"));
         assert!(keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.is_err(), "nothing to reopen now");
+
+        // Not being worked on (here: cancelled): Keep working is refused and GitHub isn't asked.
+        let before = fake.seen("/repos/octo/cw/issues/1").len();
+        let mut t = st.db.get_task(&id).unwrap().unwrap();
+        t.status = "ready".into();
+        t.github.as_mut().unwrap().state = "closed".into();
+        st.db.save_task(&t).unwrap();
+        let err = keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("Nobody is working on it now"), "{}", err.1);
+        assert_eq!(fake.seen("/repos/octo/cw/issues/1").len(), before);
     }
 
     #[tokio::test]
