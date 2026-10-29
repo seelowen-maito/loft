@@ -191,7 +191,7 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         a.name = v.trim().into();
     }
     if let Some(v) = str_field("title") { a.title = v; }
-    if let Some(v) = str_field("project") { a.project = v.trim().into(); }
+    if let Some(v) = str_field("project") { a.project = crate::repos::project_name(&v).map_err(bad)?; }
     if let Some(v) = str_field("personality") { a.personality = v; }
     if let Some(v) = str_field("prompt") { a.prompt = v; }
     if let Some(v) = str_field("model") { a.model = v; }
@@ -846,7 +846,12 @@ pub async fn open_editor(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// An agent PATCH of just its project, for other modules' tests.
+    pub(crate) fn apply_project(a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
+        apply_patch(a, &serde_json::json!({ "project": project }))
+    }
+
     use super::{apply_patch, is_plain_id};
 
     #[test]
