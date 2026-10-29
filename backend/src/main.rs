@@ -80,6 +80,12 @@ async fn main() -> anyhow::Result<()> {
         mirror: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
+    {
+        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
+        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+            tracing::warn!("GitHub settings migration: {e}");
+        }
+    }
     tokio::spawn(agents::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));

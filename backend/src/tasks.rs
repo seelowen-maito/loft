@@ -50,7 +50,7 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     // Progress notes and status entries stay in Loft.
     let mut auto = false;
     if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB {
-        auto = match state.settings.get().approval_mode(&t.project) {
+        auto = match state.settings.get().approval_mode() {
             "all" => true,
             "own" => author == "user",
             _ => false,

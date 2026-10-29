@@ -394,9 +394,9 @@ pub async fn publish_route(State(state): State<AppState>, axum::extract::Path(id
     publish(&state, &id, "user").await.map(|t| Json(json!(t))).map_err(crate::api::bad)
 }
 
-/// Publishes a new Loft issue in the background when its project has auto-publish on.
+/// Publishes a new Loft issue in the background when auto-publish is on.
 pub fn auto_publish(state: &AppState, t: &Task) {
-    if t.github.is_some() || !state.settings.get().auto_publish.iter().any(|p| p == t.project.trim()) {
+    if t.github.is_some() || state.settings.get().auto_publish_all != Some(true) {
         return;
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
@@ -1131,7 +1131,7 @@ mod tests {
         project(&st, "pub-auto", Some("https://github.com/octo/pub-auto"));
         project(&st, "pub-plain", None);
         let mut s = st.settings.get();
-        s.auto_publish = vec!["pub-auto".into(), "pub-plain".into()];
+        s.auto_publish_all = Some(true);
         st.settings.save(s).unwrap();
         fake.route("POST", "/repos/octo/pub-auto/issues", 201, gh(repo, 3, "Auto", "open", "2026-10-28T10:00:00Z"));
 
@@ -1233,48 +1233,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_approval_mode_decides_which_comments_go_straight_to_github() {
+    async fn the_global_approval_mode_decides_which_comments_go_straight_to_github() {
         let st = state();
         let fake = own_fake(&st);
         let a = crate::tasks::tests::agent(&st, "Builder");
         let mut ids = HashMap::new();
-        for (p, repo) in [("ap-ask", "octo/ap-ask"), ("ap-own", "octo/ap-own"), ("ap-all", "octo/ap-all")] {
+        for (p, repo) in [("ap-one", "octo/ap-one"), ("ap-two", "octo/ap-two")] {
             let id = one_mirrored(&st, &fake, p, repo, "2026-10-02T00:00:00Z").await;
             let _ = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "agent_id": a.id }))).await.unwrap();
             fake.route("POST", &format!("/repos/{repo}/issues/1/comments"), 201, json!({ "id": 700 }));
             ids.insert(p, id);
         }
-        let mut s = st.settings.get();
-        assert_eq!((s.comment_approval_default.as_str(), s.approval_mode("ap-ask")), ("ask", "ask"), "the default asks");
-        s.comment_approval = [("ap-own".to_string(), "own".to_string()), ("ap-all".to_string(), "all".to_string())].into();
-        st.settings.save(s).unwrap();
         let posts = |repo: &str| fake.seen(&format!("/repos/{repo}/issues/1/comments")).into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
+        let set_mode = |m: &str| {
+            let mut s = st.settings.get();
+            s.comment_approval_default = m.into();
+            // Old per-project choices are ignored.
+            s.comment_approval = [("ap-one".to_string(), "all".to_string())].into();
+            st.settings.save(s).unwrap();
+        };
 
-        // Ask: both wait.
-        let u = comment_by(&st, &ids["ap-ask"], &a, true, "ask: mine").await;
-        let g = comment_by(&st, &ids["ap-ask"], &a, false, "ask: agent's").await;
-        assert_eq!((settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone()), (json!("pending"), json!("pending")));
-        // Own: yours goes, the agent's waits.
-        let u = comment_by(&st, &ids["ap-own"], &a, true, "own: mine").await;
-        let g = comment_by(&st, &ids["ap-own"], &a, false, "own: agent's").await;
-        assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
-        assert_eq!(settled(&st, g.id).await, json!({ "state": "pending" }));
-        // All: both go, labelled auto-approved.
-        let u = comment_by(&st, &ids["ap-all"], &a, true, "all: mine").await;
-        let g = comment_by(&st, &ids["ap-all"], &a, false, "all: agent's").await;
-        assert_eq!((settled(&st, u.id).await["auto"].clone(), settled(&st, g.id).await["state"].clone()), (json!(true), json!("posted")));
+        // Ask (the default): every comment in every project waits.
+        assert_eq!(st.settings.get().approval_mode(), "ask");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "ask: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "ask: agent's").await;
+            assert_eq!((settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone()), (json!("pending"), json!("pending")));
+        }
+        assert!(posts("octo/ap-one").is_empty() && posts("octo/ap-two").is_empty());
 
-        assert!(posts("octo/ap-ask").is_empty());
-        assert_eq!(posts("octo/ap-own"), [json!({ "body": "own: mine" })]);
-        assert_eq!(posts("octo/ap-all"), [json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
-        let waiting: Vec<String> = crate::needs_you::collect(&st).unwrap().into_iter().filter(|i| i.kind == "comment_approval").map(|i| i.task_id.unwrap()).collect();
-        assert_eq!(waiting, [ids["ap-ask"].clone(), ids["ap-ask"].clone(), ids["ap-own"].clone()]);
+        // Own: yours goes, the agent's waits, in both projects.
+        set_mode("own");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "own: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "own: agent's").await;
+            assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
+            assert_eq!(settled(&st, g.id).await, json!({ "state": "pending" }));
+        }
+        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" })]);
 
-        // A project with no mode of its own takes the default, here changed to own.
-        let mut s = st.settings.get();
-        s.comment_approval_default = "own".into();
-        st.settings.save(s).unwrap();
-        assert_eq!(st.settings.get().approval_mode("ap-new"), "own");
+        // All: both go, labelled auto-approved, in both projects.
+        set_mode("all");
+        for p in ["ap-one", "ap-two"] {
+            let u = comment_by(&st, &ids[p], &a, true, "all: mine").await;
+            let g = comment_by(&st, &ids[p], &a, false, "all: agent's").await;
+            assert_eq!((settled(&st, u.id).await["auto"].clone(), settled(&st, g.id).await["state"].clone()), (json!(true), json!("posted")));
+        }
+        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" }), json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
+
+        // Anything unknown asks.
+        set_mode("sometimes");
+        assert_eq!(st.settings.get().approval_mode(), "ask");
     }
 
 
