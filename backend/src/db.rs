@@ -228,6 +228,9 @@ pub struct GithubLink {
     pub state: String,
     /// GitHub's `updated_at` for the issue when Loft last read it.
     pub updated_at: String,
+    /// GitHub's own count of its sub-issues (`sub_issues_summary`): all, and the closed ones. Zero when it has none.
+    pub sub_total: i64,
+    pub sub_done: i64,
 }
 
 impl Task {

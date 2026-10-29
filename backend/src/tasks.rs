@@ -318,6 +318,9 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     if is_closed(&t) {
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is {}. Reopen it before running it again.", t.status)));
     }
+    if t.labels.iter().any(|l| l == "spec") {
+        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
+    }
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
     let ts = now();
@@ -1227,7 +1230,7 @@ pub(crate) mod tests {
         }
         // A mirrored issue, so it's also clear a mention doesn't wait for GitHub approval.
         let (mut t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": worker.id }), "user").unwrap();
-        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into() });
+        t.github = Some(crate::db::GithubLink { repo: "octo/mention".into(), number: 3, id: 300, url: "https://github.com/octo/mention/issues/3".into(), state: "open".into(), updated_at: "2026-10-28T00:00:00Z".into(), ..Default::default() });
         st.db.save_task(&t).unwrap();
 
         // You mention the reviewer in a private note: it reaches the reviewer, tagged with the issue, and not the worker.

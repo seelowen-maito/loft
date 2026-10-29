@@ -10,7 +10,7 @@ import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { filterIssues, SOURCES, type Source } from "../lib/issueFilter";
 import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
-import { compareOpen, specProgress } from "../lib/issueOrder";
+import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -313,7 +313,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
-      {t.state === "open" && !t.agent_id && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
+      {t.state === "open" && !t.agent_id && !isSpec(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
       {t.state === "open" && !t.github && <PublishCard task={t} repo={repos[t.project]} onEdit={() => setEditAsked((n) => n + 1)} />}
       {t.github && <OwnedBy task={t} agent={agent} deps={deps} />}
 

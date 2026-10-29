@@ -26,3 +26,10 @@ test("a spec shows its tickets done of all, cancelled ones left out", () => {
   assert.equal(specProgress(row("lonely", { labels: ["spec"] }), all), null, "a spec with no tickets yet");
   assert.equal(isSpec(spec), true);
 });
+
+test("a spec's progress uses GitHub's own count, which includes closed sub-issues Loft doesn't mirror", () => {
+  const spec = { ...row("s", { labels: ["spec"] }), github: { sub_total: 3, sub_done: 1 } };
+  const kids = [row("a", { parent_id: "s" }), row("b", { parent_id: "s" })];
+  assert.deepEqual(specProgress(spec, [spec, ...kids]), { done: 1, total: 3 });
+  assert.deepEqual(specProgress({ ...spec, github: { sub_total: 0, sub_done: 0 } }, [spec, ...kids]), { done: 0, total: 2 }, "no GitHub count: the Loft sub-issues");
+});

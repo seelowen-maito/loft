@@ -228,6 +228,8 @@ fn link(repo: &str, i: &Value) -> GithubLink {
         url: i["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{repo}/issues/{number}")),
         state: i["state"].as_str().unwrap_or("open").to_string(),
         updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
+        sub_total: i["sub_issues_summary"]["total"].as_i64().unwrap_or(0),
+        sub_done: i["sub_issues_summary"]["completed"].as_i64().unwrap_or(0),
     }
 }
 
@@ -760,7 +762,7 @@ mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!((&t["title"], &t["description"], &t["labels"], &t["owner"]), (&json!("Retry cap"), &json!("Body of Retry cap"), &json!(["bug"]), &json!("octo-dev")));
         assert_eq!((&t["project"], &t["status"], &t["state"], &t["created_by"]), (&json!("mir-open"), &json!("inbox"), &json!("open"), &json!("github")));
-        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z" }));
+        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0 }));
         let thread = st.db.list_task_comments(t["id"].as_str().unwrap(), 10, None).unwrap();
         assert_eq!(thread[0].text, "Mirrored from GitHub #1");
 
@@ -1447,4 +1449,30 @@ mod tests {
         assert_eq!(private("A private note"), json!(true));
     }
 
+
+    #[tokio::test]
+    async fn a_spec_keeps_githubs_sub_issue_count_and_is_never_run_as_one_task() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/spec";
+        project(&st, "spec", Some("https://github.com/octo/spec"));
+        let mut one = gh(repo, 42, "Checkout spec", "open", "2026-10-02T00:00:00Z");
+        one["labels"] = json!([{ "name": "spec" }]);
+        // #43 is closed and not mirrored; #44 and #45 are open. GitHub counts all three.
+        one["sub_issues_summary"] = json!({ "total": 3, "completed": 1, "percent_completed": 33 });
+        fake.route("GET", "/repos/octo/spec/issues", 200, json!([one, gh(repo, 44, "Store", "open", "2026-10-02T00:00:00Z"), gh(repo, 45, "UI", "open", "2026-10-02T00:00:00Z")]));
+        fake.route("GET", "/repos/octo/spec/issues/42/sub_issues", 200, json!([{ "number": 44, "id": 4400 }, { "number": 45, "id": 4500 }]));
+        sync_project(&st, "spec", true).await.unwrap();
+
+        let spec = linked(&st, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == 42)).unwrap();
+        let g = spec.github.as_ref().unwrap();
+        assert_eq!((g.sub_total, g.sub_done), (3, 1), "GitHub's own numbers, not the two mirrored children");
+        assert_eq!(mirrored(&st, repo)[0]["github"]["sub_total"], 3);
+
+        // The spec is never handed to an agent as one task; nothing starts.
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
+        assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
+        assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
+    }
 }

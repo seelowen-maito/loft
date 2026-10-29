@@ -77,7 +77,7 @@ export type Task = {
   /** Derived from status: done and cancelled are closed. Read-only. */
   state: "open" | "closed";
   /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
-  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string } | null;
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
