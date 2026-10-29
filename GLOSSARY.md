@@ -36,6 +36,10 @@ _Avoid_: Note, knowledge
 The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
 _Avoid_: Notification, new message, unread message
 
+**Subagent**:
+A short-lived Claude Code worker an agent starts inside a run for a side job (a search, a self-contained task). It ends with the run at the latest and never talks to the user.
+_Avoid_: Sub-agent, child agent, worker
+
 **Agent message**:
 A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
 _Avoid_: Ping, DM, hand-off
