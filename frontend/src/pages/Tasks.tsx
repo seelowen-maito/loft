@@ -376,7 +376,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </ol>
         )}
         <div className="mt-4">
-          <CommentBox task={t} agent={agent} />
+          <CommentBox task={t} agent={agent} agents={agents} />
         </div>
       </section>
     </div>
