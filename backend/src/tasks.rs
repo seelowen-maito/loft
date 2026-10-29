@@ -47,9 +47,11 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
         meta["author_name"] = json!(who(state, author));
     }
     // A comment on a mirrored issue waits for the user's approval before it reaches GitHub (mirror.rs).
-    // Progress notes and status entries stay in Loft.
+    // Progress notes, status entries, private notes and the note handed over with the work stay in Loft,
+    // whatever the approval mode.
     let mut auto = false;
-    if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB {
+    let loft_only = meta["private"] == true || meta["handoff"] == true;
+    if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB && !loft_only {
         auto = match state.settings.get().approval_mode(&t.project) {
             "all" => true,
             "own" => author == "user",
@@ -325,7 +327,7 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     let by_id = by.map_or("user", |a| a.id.as_str());
     log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
     if !note.trim().is_empty() {
-        log(state, &t, by_id, "comment", note.trim(), json!({ "to_agent": agent.id }));
+        log(state, &t, by_id, "comment", note.trim(), json!({ "to_agent": agent.id, "handoff": true }));
     }
     let queued = is_running(state, &agent.id);
     let text = brief(state, &t, note);
@@ -1166,7 +1168,7 @@ pub(crate) mod tests {
     }
 
     /// An agent marked busy, so whatever reaches it is queued instead of starting a real claude run.
-    fn busy(st: &AppState, a: &Agent) {
+    pub(crate) fn busy(st: &AppState, a: &Agent) {
         st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
     }
 
@@ -1223,7 +1225,7 @@ pub(crate) mod tests {
         let m = st.db.list_messages(&reviewer.id, 10, None).unwrap().into_iter().last().unwrap();
         assert_eq!((m.meta["task_id"].clone(), m.meta["task_role"].clone()), (json!(t.id), json!("comment")));
         let c = st.db.list_task_comments(&t.id, 50, None).unwrap().pop().unwrap();
-        assert_eq!((&c.meta["mentions"], &c.meta["github"]["state"]), (&json!([reviewer.id]), &json!("pending")), "in Loft now, waiting for GitHub");
+        assert_eq!((&c.meta["mentions"], &c.meta["github"]), (&json!([reviewer.id]), &Value::Null), "a private note: in Loft, never queued for GitHub");
 
         // The reviewer answers on the issue, mentioning the worker: it lands in the thread and reaches the worker.
         let none = |k: &str| Err::<Agent, _>(k.to_string());
