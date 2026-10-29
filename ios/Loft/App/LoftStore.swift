@@ -825,6 +825,39 @@ final class LoftStore {
         return t
     }
 
+    func taskComments(_ id: String) async throws -> [TaskComment] { try await requireTasks().taskComments(id: id) }
+
+    func addTaskComment(_ id: String, text: String, github: Bool? = nil) async throws {
+        try await requireTasks().addTaskComment(id: id, text: text, clientId: UUID().uuidString, github: github)
+    }
+
+    /// Settings › GitHub issues, or nil when this server has none.
+    func issueSettings() async throws -> IssueSettings? {
+        IssueSettings(try await requireWrite().serverSettings())
+    }
+
+    /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
+    func saveIssueSettings(_ s: IssueSettings) async throws {
+        let api = try requireWrite()
+        _ = try await api.putServerSettings(s.applied(to: try await api.serverSettings()))
+    }
+
+    func approveComment(_ c: TaskComment, text: String? = nil) async throws {
+        try await requireTasks().approveComment(taskId: c.taskId, commentId: c.id, text: text)
+    }
+
+    func keepComment(_ c: TaskComment) async throws {
+        try await requireTasks().keepComment(taskId: c.taskId, commentId: c.id)
+    }
+
+    /// Publish a Loft-only issue to GitHub; it comes back with its GitHub link.
+    @discardableResult
+    func publishTask(_ id: String) async throws -> HBTask {
+        let t = try await requireTasks().publishTask(id: id)
+        upsert(&tasks, t)
+        return t
+    }
+
     func deleteTask(_ id: String) async throws {
         try await requireTasks().deleteTask(id: id)
         tasks.removeAll { $0.id == id }
