@@ -46,6 +46,15 @@ protocol LoftAPI: Sendable {
     func deleteTask(id: String) async throws
     func executeTask(id: String, agentId: String?, note: String) async throws -> ExecuteResponse
     func cancelTask(id: String, stopRun: Bool) async throws -> CancelResponse
+    /// Publish a Loft-only issue to its project's GitHub repo (spec #65); it comes back mirrored.
+    func publishTask(id: String) async throws -> HBTask
+    /// A Loft issue's thread, oldest first.
+    func taskComments(id: String) async throws -> [TaskComment]
+    /// Comment on a Loft issue; it goes to the issue's agent.
+    func addTaskComment(id: String, text: String, clientId: String) async throws
+    /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws
+    func keepComment(taskId: String, commentId: Int64) async throws
     func activity(limit: Int, before: Date?) async throws -> [ActivityItem]
     func usage() async throws -> PlanUsage
     func system() async throws -> SystemReading
@@ -234,6 +243,24 @@ struct LiveLoftAPI: LoftAPI {
         try decode(CancelResponse.self, try await send("POST", "/tasks/\(id)/cancel", body: ["stop_run": .bool(stopRun)]))
     }
 
+    func publishTask(id: String) async throws -> HBTask {
+        try decode(HBTask.self, try await send("POST", "/tasks/\(id)/publish", body: [:]))
+    }
+
+    func taskComments(id: String) async throws -> [TaskComment] { try await get("/tasks/\(id)/comments") }
+
+    func addTaskComment(id: String, text: String, clientId: String) async throws {
+        _ = try await send("POST", "/tasks/\(id)/comments", body: ["text": .string(text), "client_id": .string(clientId)])
+    }
+
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
+        _ = try await send("POST", "/tasks/\(taskId)/comments/\(commentId)/approve", body: text.map { ["text": .string($0)] } ?? [:])
+    }
+
+    func keepComment(taskId: String, commentId: Int64) async throws {
+        _ = try await send("POST", "/tasks/\(taskId)/comments/\(commentId)/keep", body: [:])
+    }
+
     func activity(limit: Int, before: Date?) async throws -> [ActivityItem] {
         var q = [URLQueryItem(name: "limit", value: String(limit))]
         if let before { q.append(URLQueryItem(name: "before", value: JSONCoding.formatDate(before))) }
@@ -299,6 +326,11 @@ extension LoftAPI {
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
+    func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
+    func taskComments(id: String) async throws -> [TaskComment] { [] }
+    func addTaskComment(id: String, text: String, clientId: String) async throws { throw APIError.unsupported("Comments") }
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
+    func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
     func taskPlan(id: String) async throws -> TaskPlan { throw APIError.unsupported("Plans") }
     func needsYou() async throws -> NeedsYouList { throw APIError.unsupported("Needs you") }

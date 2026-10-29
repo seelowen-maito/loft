@@ -9,6 +9,7 @@ struct TaskDetailView: View {
     @State private var busy = false
     @State private var confirmCancel = false
     @State private var confirmDelete = false
+    @State private var confirmPublish = false
     @State private var pickAgent = false
     @State private var notice: String?
     /// Opened from a link or a push before the app has this task (a cold start, or a new task): look it up first.
@@ -51,6 +52,9 @@ struct TaskDetailView: View {
                             StatusBadge(text: "Personal", symbol: "person", color: .secondary)
                         }
                     }
+                    if let labels = t.labels, !labels.isEmpty {
+                        IssueLabels(labels: labels)
+                    }
                 }
                 .padding(.vertical, 4)
                 if !t.description.isEmpty {
@@ -59,6 +63,42 @@ struct TaskDetailView: View {
                 if let notice {
                     Label(notice, systemImage: "checkmark.circle").font(.footnote).foregroundStyle(Theme.working)
                 }
+            }
+
+            // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
+            Section("Where") {
+                if let g = t.github {
+                    // Only a web link: a malformed stored value can't open another app's scheme.
+                    if let url = URL(string: g.url), url.scheme == "https" {
+                        Link(destination: url) {
+                            LabeledContent("On GitHub") { IssueOriginMark(link: g) }
+                        }
+                        .accessibilityIdentifier("issueGitHubLink")
+                    }
+                    LabeledContent("On GitHub it's", value: g.state == "closed" ? "Closed" : "Open")
+                    if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
+                } else {
+                    LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
+                    // Its project's repo gets it as a GitHub issue; the server says why when it can't.
+                    if !t.project.isEmpty, !t.state.isClosed {
+                        Button { confirmPublish = true } label: { Label("Publish to GitHub", systemImage: "arrow.up.forward.square") }
+                        .disabled(!store.canWrite || busy)
+                        .accessibilityIdentifier("publishTask")
+                        // As on the web: say where it goes before a possibly public issue is created.
+                        .confirmationDialog("Publish to GitHub?", isPresented: $confirmPublish, titleVisibility: .visible) {
+                            Button("Publish") {
+                                act {
+                                    let p = try await store.publishTask(t.id)
+                                    notice = p.github.map { "Published as \($0.shortName)." }
+                                }
+                            }
+                            .accessibilityIdentifier("confirmPublish")
+                        } message: {
+                            Text("It becomes an issue in the \(t.project) project's GitHub repo, which may be public.")
+                        }
+                    }
+                }
+                if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
             }
 
             if t.state.isActive && !t.note.isEmpty {
@@ -128,6 +168,8 @@ struct TaskDetailView: View {
                     }
                 }
             }
+
+            TaskThreadSection(task: t)
 
             let history = store.activity.filter { $0.taskId == t.id }
             if !history.isEmpty {

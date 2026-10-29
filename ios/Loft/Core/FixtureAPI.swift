@@ -113,6 +113,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             task("t6", "Renew the domain", "inbox", agent: nil, minutes: 300),
             task("t7", "Fix broken docs links", "failed", agent: "docs", error: "Link checker crashed", minutes: 60),
         ]
+        // t1 mirrors a GitHub issue (spec #65): labels, an owner and its sub-issues; t2 a closed one.
+        taskList[0].labels = ["spec", "ios"]
+        taskList[0].owner = "octo-dev"
+        taskList[0].github = .init(repo: "octo/loft", number: 42, url: "https://github.com/octo/loft/issues/42", state: "open", subTotal: 4, subDone: 1)
+        taskList[1].labels = ["ready-for-agent"]
+        taskList[1].github = .init(repo: "octo/loft", number: 43, url: "https://github.com/octo/loft/issues/43", state: "closed")
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
         }
@@ -611,6 +617,67 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             if let s = f["status"]?.stringValue { taskList[i].status = s }
             if let t = f["title"]?.stringValue { taskList[i].title = t }
             taskList[i].updatedAt = Date()
+            return taskList[i]
+        }
+    }
+
+    /// t1's thread: a GitHub comment, a status change, an agent's note, a comment waiting for GitHub (the Needs you
+    /// item's 77) and one of yours already posted.
+    private var comments: [TaskComment] = {
+        let now = Date()
+        func c(_ id: Int64, _ author: String, _ kind: String, _ text: String, _ minutes: Double, _ meta: JSONValue? = nil) -> TaskComment {
+            TaskComment(id: id, taskId: "t1", author: author, kind: kind, text: text, meta: meta, createdAt: now.addingTimeInterval(-minutes * 60))
+        }
+        return [
+            c(70, "github", "comment", "Can the sync time show in the user's time zone?", 50, ["author_name": "octo-dev", "github": ["state": "from_github"]]),
+            c(71, "user", "status", "Started by Orchestrator", 40),
+            c(72, "be", "note", "3 of 4 endpoints done", 20, ["author_name": "Backend Agent"]),
+            c(77, "be", "comment", "Backend is done: 4 endpoints with tests. iOS screen next.", 2, ["author_name": "Backend Agent", "github": ["state": "pending"]]),
+            c(78, "user", "comment", "Yes, local time with the zone name.", 1, ["github": ["state": "posted"]]),
+        ]
+    }()
+
+    func taskComments(id: String) async throws -> [TaskComment] {
+        try check()
+        return locked { comments.filter { $0.taskId == id } }
+    }
+
+    func addTaskComment(id: String, text: String, clientId: String) async throws {
+        try check()
+        locked {
+            let mirrored = taskList.first { $0.id == id }?.github != nil
+            comments.append(TaskComment(id: (comments.map(\.id).max() ?? 0) + 1, taskId: id, author: "user", kind: "comment", text: text,
+                                        meta: mirrored ? ["github": ["state": "pending"]] : nil, createdAt: Date()))
+        }
+    }
+
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            if let text { comments[i].text = text }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "posted"]]
+        }
+    }
+
+    func keepComment(taskId: String, commentId: Int64) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "kept"]]
+        }
+    }
+
+    /// As the server: a Loft-only issue in a project gets the next number on octo/<project>.
+    func publishTask(id: String) async throws -> HBTask {
+        try check()
+        return try locked {
+            guard let i = taskList.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            guard !taskList[i].project.isEmpty else {
+                throw APIError.server(status: 400, message: "This Loft issue has no project, so there's no GitHub repo to publish it to.")
+            }
+            let repo = "octo/\(taskList[i].project)"
+            taskList[i].github = .init(repo: repo, number: 50, url: "https://github.com/\(repo)/issues/50", state: "open")
             return taskList[i]
         }
     }
