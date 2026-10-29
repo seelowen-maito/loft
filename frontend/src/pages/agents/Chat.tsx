@@ -26,7 +26,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { commandSpan } from "../../lib/commandHighlight";
+import { highlightParts } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -138,7 +138,6 @@ export function Chat({
   const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
-  const command = commandSpan(text, COMMANDS.map((c) => c.name));
   const overlay = useRef<HTMLDivElement>(null);
   // The overlay follows the textarea's scroll, also when it appears on text that's already scrolled.
   useLayoutEffect(() => {
@@ -148,7 +147,10 @@ export function Chat({
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
   // Only agents in the same project: the backend doesn't deliver to others.
-  const mention = useMention(agent.id, text, setText, agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim()));
+  const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
+  const mention = useMention(agent.id, text, setText, mentionable);
+  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name));
+  const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
     const m = new Map<string, PullRequest[]>();
@@ -542,17 +544,16 @@ export function Chat({
                   e.target.value = "";
                 }}
               />
-              {/* A known command is drawn in the accent colour by an overlay behind the textarea, whose own text turns
-                  transparent: the caret, selection, paste and auto-grow stay the textarea's own. */}
+              {/* A known command and @mentions of agents are drawn in the accent colour by an overlay behind the
+                  textarea, whose own text turns transparent: the caret, selection, paste and auto-grow stay the textarea's own. */}
               <div className="relative min-w-0 flex-1">
-                {command > 0 && (
+                {highlighted && (
                   <div
                     ref={overlay}
                     aria-hidden
                     className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words py-1.5 text-[14px] text-fg"
                   >
-                    <span className="text-accent">{text.slice(0, command)}</span>
-                    {text.slice(command)}
+                    {highlight.map((p, i) => (p.accent ? <span key={i} className="text-accent">{p.text}</span> : p.text))}
                   </div>
                 )}
                 <textarea
@@ -599,7 +600,7 @@ export function Chat({
                     : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
                     : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                   }
-                  className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", command > 0 && "text-transparent caret-fg")}
+                  className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
               </div>
               <button
