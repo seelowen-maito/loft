@@ -8,6 +8,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
+import { compareOpen, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -28,8 +29,6 @@ const STATUS_TONE: Record<string, string> = {
   done: "text-good",
   cancelled: "text-fg-3",
 };
-
-const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
 type Source = "all" | "loft" | "github";
 const SOURCES: { key: Source; label: string }[] = [
@@ -135,7 +134,7 @@ export default function TasksPage() {
           .sort((a, b) =>
             g.key === "closed"
               ? (b.completed_at ?? b.updated_at).localeCompare(a.completed_at ?? a.updated_at)
-              : PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || b.updated_at.localeCompare(a.updated_at),
+              : compareOpen(a, b),
           ),
       })),
     [filtered],
@@ -214,7 +213,7 @@ export default function TasksPage() {
                 </button>
                 {!folded &&
                   g.tasks.slice(0, g.key === "closed" ? 50 : undefined).map((t) => (
-                    <TaskRow key={t.id} task={t} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate(`/tasks/${t.id}`)} />
+                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate(`/tasks/${t.id}`)} />
                   ))}
               </section>
             );
@@ -240,7 +239,7 @@ export default function TasksPage() {
   );
 }
 
-function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent; active: boolean; onOpen: () => void }) {
+function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; agent?: Agent; active: boolean; onOpen: () => void; progress: { done: number; total: number } | null }) {
   return (
     <button onClick={onOpen} className={cx("flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors", active ? "bg-white/[0.06]" : "hover:bg-white/[0.03]")}>
       <StateIcon task={t} className="mt-0.5 size-3.5 shrink-0" />
@@ -255,6 +254,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
           {t.github && <span className="text-fg-2">· #{t.github.number}</span>}
+          {progress && <span className="text-fg-2" title="Tickets done of this spec's tickets">· {progress.done}/{progress.total} done</span>}
           {agent && <>· {agent.name}</>}
           {t.project && <>· {t.project}</>}
           {(t.priority === "high" || t.priority === "urgent") && <span className="text-warn">· {t.priority}</span>}

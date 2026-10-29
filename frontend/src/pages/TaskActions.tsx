@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
+import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
@@ -197,6 +198,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const active = ACTIVE.includes(t.status);
+  const spec = isSpec(t);
   const finished = FINISHED.includes(t.status);
   const agent = agents.find((a) => a.id === t.agent_id);
 
@@ -226,12 +228,14 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
-        {!active && !finished && agent && (
+        {/* A spec is split into tickets; each ticket goes to an agent, never the spec as one task. */}
+        {spec && <span className="font-mono text-[11px] text-fg-3">A spec: its tickets go to agents.</span>}
+        {!spec && !active && !finished && agent && (
           <button className="btn-primary" disabled={busy} onClick={() => act(() => api.runTask(t.id))}>
             <Play className="size-3 fill-current" /> Run with {agent.name}
           </button>
         )}
-        {!active && (
+        {!spec && !active && (
           <button className="btn" disabled={busy} onClick={() => setDialog("run")}>
             <UserRoundPlus className="size-3.5" /> {agent ? (finished ? "Run again with…" : "Run with another agent…") : "Run with an agent…"}
           </button>
