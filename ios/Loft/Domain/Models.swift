@@ -71,6 +71,8 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// Set when another agent sent this message rather than the user.
     var fromAgentName: String? { meta?["from_agent"]?["name"]?.stringValue }
     var fromAgentId: String? { meta?["from_agent"]?["id"]?.stringValue }
+    /// An FYI from another agent: shown at once, read on the agent's next Run, without waking it (#112).
+    var isFYI: Bool { role == "user" && fromAgentName != nil && meta?["fyi"] == .bool(true) }
     /// Another agent's reply to an @-mention, copied into this chat (#92).
     var isMentionReply: Bool { meta?["mention_reply"] == .bool(true) }
     /// The agents your message @-mentioned, and whether it went only to them (the chat's agent wasn't woken).

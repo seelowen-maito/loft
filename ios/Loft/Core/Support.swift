@@ -76,6 +76,9 @@ enum TestMode {
     static let noSpeech = flag("-no-speech")
     /// `-no-ai`: the on-device model counts as off, so no UI test waits on it (`-fixture-ai-status` still wins).
     static let noAI = flag("-no-ai")
+    /// `-hold-reading`: reading aloud plays no audio and holds its state (the Skip/Stop bar) until Skip or Stop,
+    /// so a UI test sees it however soon the Simulator's voice would end, or fail to start.
+    static let holdReading = flag("-hold-reading")
 
     private static func flag(_ name: String) -> Bool {
         #if DEBUG

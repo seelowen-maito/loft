@@ -356,6 +356,7 @@ export type Settings = {
   github_token: string;
   auto_update: boolean;
   show_simulator: boolean;
+  messaging_rules: boolean;
   /** Projects whose new Loft issues are published to GitHub as they're made. */
   auto_publish: string[];
   /** Per project: ask (every comment waits for approval), own (yours go straight) or all. */

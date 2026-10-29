@@ -21,6 +21,7 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { FyiMark } from "./FyiMark";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -831,7 +832,10 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     return (
       <div className="flex justify-end gap-3 pt-2">
         <div className="flex max-w-[80%] flex-col items-end">
-          <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{from?.name ?? m.meta.from_agent.name} → {agent.name}</div>
+          <div className="relative mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
+            <FyiMark m={m} agentName={agent.name} />
+            {from?.name ?? m.meta.from_agent.name} → {agent.name}
+          </div>
           <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
           <div className="mt-1.5">
             <MessageTasks m={m} />

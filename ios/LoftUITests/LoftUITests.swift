@@ -165,6 +165,21 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
     }
 
+    /// Agent messages in the fixture chat: the FYI one carries the mark (and says so to VoiceOver), the needs-action one doesn't.
+    func testFYIMarkOnlyOnFYIAgentMessages() {
+        let app = launch()
+        openOrchestratorChat(app)
+        let fyi = app.staticTexts["Backend Agent, FYI: Merged #40 on main; the endpoints are live."]
+        XCTAssertTrue(fyi.appears(timeout: 5), "VoiceOver reads the FYI message with FYI in its label")
+        let marks = app.staticTexts.matching(identifier: "fyiMark")
+        XCTAssertTrue(marks.matching(NSPredicate(format: "label == 'FYI'")).firstMatch.exists, "the mark shows in the chat")
+        XCTAssertEqual(fyi.identifier, "fyiMark", "the mark sits on the FYI message")
+        let needsAction = app.staticTexts["Backend Agent: Please review PR #41 before I merge it."]
+        XCTAssertTrue(needsAction.exists)
+        XCTAssertNotEqual(needsAction.identifier, "fyiMark", "no mark on a needs-action message")
+        XCTAssertFalse(marks.matching(NSPredicate(format: "label CONTAINS 'PR #41'")).firstMatch.exists)
+    }
+
     /// The Talk button: a tap talks to the Orchestrator; the long-press menu talks to another agent or dictates.
     func testTalkButton() {
         let app = launch()
@@ -448,8 +463,9 @@ final class LoftUITests: XCTestCase {
     /// Picking up the reply without an event is StoreTests.testAReplyWithoutAnEventIsStillPickedUp; this checks
     /// the screen reads it even when the dictation was sent with a tap.
     func testAReplyToADictatedMessageIsReadAloudEvenWhenSentWithATap() {
-        // QA Agent is idle, so the reply ends the wait; the fixture sends no live event for it.
-        let app = launch(["-fixture-dictation", "Run the smoke tests", "-fixture-replies", "-voiceHandsFree", "NO"])
+        // QA Agent is idle, so the reply ends the wait; the fixture sends no live event for it. The reading is held
+        // until Stop: the Simulator's voice can end (or fail to start) before the bar is ever seen.
+        let app = launch(["-fixture-dictation", "Run the smoke tests", "-fixture-replies", "-voiceHandsFree", "NO", "-hold-reading"])
         openQAChat(app)
         let no = app.buttons["submitPromptNo"]
         XCTAssertTrue(no.appears(timeout: 5))
@@ -457,7 +473,13 @@ final class LoftUITests: XCTestCase {
         app.buttons["sendButton"].tap()
         // The reply comes half a second after the send and is found by the store's first refetch, a second in.
         XCTAssertTrue(app.staticTexts["Done. I ran it and everything passed."].appears(timeout: 5))
-        XCTAssertTrue(any("readAloudBar", app).appears(timeout: 5), "reading starts soon after the reply shows")
+        // With no run seen, the reply is read once nothing new has come for 2 s (LoftStore.waitForReply), checked
+        // every half second: about 3 s after it shows, more on a busy Simulator.
+        let bar = any("readAloudBar", app)
+        XCTAssertTrue(bar.appears(timeout: 10), "reading starts once the reply has settled")
+        // The bar's identifier covers its buttons, so Stop is found by its label.
+        app.buttons.matching(identifier: "readAloudBar")["Stop"].tap()
+        XCTAssertTrue(bar.disappears(timeout: 5))
     }
 
     func testRunWatchRestart() {

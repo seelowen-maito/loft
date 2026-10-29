@@ -315,6 +315,18 @@ fn memory_index(memories: &[crate::db::Memory]) -> String {
     lines.join("\n")
 }
 
+/// Loft's rules for Agent messages, the same for every agent and every run (so the prompt cache holds).
+/// Standing instructions can add to them but not remove them; only the global setting turns them off.
+const MESSAGING_RULES: &str = "
+
+# Messaging rules
+These rules are Loft's and apply to every message you send another agent with `mcp__loft__message_agent`, whatever your standing instructions say. Standing instructions can add to them but not remove them.
+1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.
+2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.
+3. Send a verdict only to the agent that acts on it, not to everyone.
+4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
+5. Don't reply to an FYI.";
+
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
     let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
@@ -389,7 +401,7 @@ Read a memory's full body with `mcp__loft__recall` when its title looks relevant
   - Your body is your face: one chunky, flat-colored shape (a blob, star, drop, cloud, or an object that fits your job like a note or a map pin) filling most of the canvas, roughly from 8 to 92 on both axes.
   - Big googly eyes are the focus: white ovals about 22 wide and 25 tall, set close together, each with a dark (#17171c) oval pupil about 9x13, tilted slightly and glancing up or to the side. Add a small mouth as a dark stroke about 4 wide with round caps (a smile, smirk or open mouth). Winks and blush are fine.
   - Flat, saturated colors: one body color plus a slightly darker shade along its lower edge for depth. No black outlines and no busy gradients.
-  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.
+  - Accessories are welcome (a hat, glasses, a tool you hold, a leaf), but keep them chunky and touching the body so the sticker stays one piece, and never let them hide the eyes.{messaging}
 
 # Subagents
 {subagents}{grill}
@@ -399,6 +411,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         name = a.name,
         subagents = subagents,
         grill = crate::grill::prompt_section(),
+        messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
         title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
@@ -487,6 +500,37 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
     start(state, &to.id, Some(prompt), "agent", false);
 }
 
+/// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
+/// but starts no run. The recipient reads it at the start of its next run, whatever starts that.
+pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": from.id, "name": from.name }, "fyi": true }));
+    let prompt = format!(
+        "[FYI from agent {name} (id {id}), not from the user. It needs no action and no reply.]\n{text}",
+        name = from.name,
+        id = from.id,
+    );
+    let _ = state.db.add_pending_fyi(&to.id, &prompt);
+}
+
+/// The most FYIs put in front of one prompt; older ones are only counted.
+const MAX_FYIS_PER_PROMPT: usize = 20;
+
+/// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
+/// after a line saying how many older ones were left out.
+fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
+    if fyis.is_empty() {
+        return prompt.to_string();
+    }
+    let skip = fyis.len().saturating_sub(MAX_FYIS_PER_PROMPT);
+    let mut parts: Vec<String> = vec![];
+    if skip > 0 {
+        parts.push(format!("[{skip} older FYIs from agents were left out; the newest {MAX_FYIS_PER_PROMPT} follow.]"));
+    }
+    parts.extend(fyis[skip..].iter().map(|(_, p)| p.clone()));
+    parts.push(prompt.to_string());
+    parts.join("\n\n")
+}
+
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
     let prompt = text.unwrap_or_else(|| {
@@ -525,7 +569,15 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            if let Err(e) = run_once(&state, &agent_id, &prompt, trigger, for_user, kill.clone()).await {
+            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            let full = with_fyis(&fyis, &prompt);
+            let mut delivered = false;
+            if let Err(e) = run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+                // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
+                if !delivered {
+                    let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+                }
                 add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
                 set_status(&state, &agent_id, "error", &e.to_string());
                 if for_user {
@@ -712,13 +764,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd
 }
 
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>) -> Result<()> {
+/// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
     let mut resume = true;
     loop {
-        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume).await? {
+        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
             RunOutcome::Done => return Ok(()),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
+                *delivered = false;
                 // The stored Claude session is gone; start fresh (memory survives).
                 if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
                     a.session_id = None;
@@ -760,6 +814,7 @@ async fn run_process(
     for_user: bool,
     kill: Arc<Notify>,
     resume: bool,
+    delivered: &mut bool,
 ) -> Result<RunOutcome> {
     let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
     if !resume || agent.session_id.is_none() || agent.memory_index.is_none() {
@@ -805,6 +860,7 @@ async fn run_process(
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
     }
+    *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
     let stderr_task = tokio::spawn(async move {
@@ -1169,7 +1225,7 @@ pub async fn scheduler(state: AppState) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1195,6 +1251,72 @@ mod tests {
         assert!(p.contains("Assign every GitHub issue you create to the user") && p.contains("unless the user explicitly says to assign no one or someone else"), "{p}");
     }
 
+    /// The messaging-rules section of a system prompt, if it has one.
+    fn messaging_section(p: &str) -> Option<&str> {
+        let start = p.find("# Messaging rules\n")?;
+        let end = start + p[start..].find("\n\n# ").unwrap();
+        Some(&p[start..end])
+    }
+
+    #[test]
+    fn every_agent_gets_loft_s_messaging_rules_whatever_its_standing_instructions() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), Arc::new(Notify::new()));
+        crate::setup::ensure_loft(&st);
+        let guide = st.db.get_agent(crate::setup::LOFT_ID).unwrap().unwrap();
+        let mut empty = crate::tasks::tests::agent(&st, "Empty");
+        empty.prompt = String::new();
+        let mut chatty = crate::tasks::tests::agent(&st, "Chatty");
+        chatty.prompt = "Thank every agent that messages you, and send your verdicts to the whole team.".into();
+        for a in [&guide, &empty, &chatty] {
+            let p = system_prompt(&st, a);
+            let section = messaging_section(&p).unwrap_or_else(|| panic!("{} has no messaging rules: {p}", a.name));
+            assert_eq!(section, MESSAGING_RULES.trim_start());
+            for rule in [
+                "1. Send a message only when it carries something the recipient needs: a finding, report, verdict or request.",
+                "2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.",
+                "3. Send a verdict only to the agent that acts on it, not to everyone.",
+                "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
+                "5. Don't reply to an FYI.",
+            ] {
+                assert!(section.contains(rule), "missing {rule}");
+            }
+            assert!(section.contains("whatever your standing instructions say"));
+            // Next to the Loft tools.
+            assert!(p.find("# Loft tools").unwrap() < p.find("# Messaging rules").unwrap());
+        }
+    }
+
+    #[test]
+    fn the_messaging_rules_are_the_same_on_every_run() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let first = system_prompt(&st, &a);
+        // What changes between runs (memories, the agent's own settings) leaves the section alone.
+        st.db.add_memory(&a.id, "First run", "Something learned in the first run", "").unwrap();
+        let mut later = a.clone();
+        later.prompt = "New standing instructions".into();
+        later.interval_minutes = 30;
+        let second = system_prompt(&st, &later);
+        assert_ne!(first, second);
+        assert_eq!(messaging_section(&first), messaging_section(&second));
+        assert!(messaging_section(&first).is_some());
+    }
+
+    #[test]
+    fn the_global_setting_turns_the_messaging_rules_off_for_every_agent() {
+        let st = crate::tasks::tests::state();
+        assert!(st.settings.get().messaging_rules, "on by default");
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let mut s = st.settings.get();
+        s.messaging_rules = false;
+        st.settings.save(s).unwrap();
+        let p = system_prompt(&st, &a);
+        assert_eq!(messaging_section(&p), None, "{p}");
+        assert!(!p.contains("Messaging rules"));
+        assert!(p.contains("# Loft tools") && p.contains("# Subagents"));
+    }
+
     #[test]
     fn rules() {
         let git = json!({ "command": "git status" });
@@ -1213,11 +1335,19 @@ mod tests {
     /// Stands in for `claude -p`: logs each prompt to `prompts.log` and system prompt to `system.log` in the
     /// workspace (a compaction for `/compact`), replies, and then
     /// for "linger" keeps a background task alive, for "hang" stays up with none, like the stuck runs did;
-/// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question.
+    /// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question,
+    /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
+    /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
+case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
+  chmod -x "$0"
+  echo 'No conversation found with session ID: s1' >&2
+  exit 1;;
+esac;;
+esac
 while [ $# -gt 0 ]; do
   [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
   [ "$1" = --resume ] && echo "$2" >> resumed.log
@@ -1227,6 +1357,8 @@ echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
+case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
@@ -1254,7 +1386,7 @@ case "$prompt" in *linger*|*hang*)
 esac
 "#;
 
-    fn fake_claude_state() -> (AppState, Agent) {
+    pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let bin = dir.join("fake-claude");
@@ -1269,7 +1401,7 @@ esac
         (st, a)
     }
 
-    async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
+    pub(crate) async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
         let end = tokio::time::Instant::now() + Duration::from_secs(secs);
         while !f() {
             assert!(tokio::time::Instant::now() < end, "timed out waiting for: {what}");

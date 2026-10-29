@@ -203,6 +203,15 @@ export default function SettingsPage() {
           />
         </Section>
 
+        <Section title="Agents">
+          <Toggle
+            on={draft.messaging_rules}
+            onChange={(v) => set("messaging_rules", v)}
+            label="Messaging rules"
+            hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
+          />
+        </Section>
+
         <Section title="GitHub issues">
           <Field label="Comments going to GitHub" hint="For projects without their own choice below. Every comment on a GitHub issue waits for your approval unless this says otherwise.">
             <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />

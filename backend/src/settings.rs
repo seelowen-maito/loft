@@ -22,6 +22,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Show the Simulator tab in the web navbar. Off by default: only useful for iOS work on this Mac.
     pub show_simulator: bool,
+    /// Give every agent Loft's messaging rules (see `agents::MESSAGING_RULES`). On by default.
+    pub messaging_rules: bool,
     /// Projects whose new Loft issues are published to GitHub as they're made. Off (empty) by default.
     pub auto_publish: Vec<String>,
     /// When comments on mirrored issues go to GitHub, per project: `ask` (every one waits for approval),
@@ -69,6 +71,7 @@ impl Default for Settings {
             github_token: String::new(),
             auto_update: false,
             show_simulator: false,
+            messaging_rules: true,
             auto_publish: vec![],
             comment_approval: Default::default(),
             comment_approval_default: "ask".into(),
