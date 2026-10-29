@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FileText, Folder, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -25,6 +25,7 @@ import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
+import { useMention } from "../../components/MentionMenu";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -140,33 +141,7 @@ export function Chat({
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
   // Only agents in the same project: the backend doesn't deliver to others.
-  const atToken = /(?:^|\s)@([^\s@]*)$/.exec(text)?.[1];
-  const mentionQuery = atToken?.toLowerCase();
-  const agentMatches =
-    mentionQuery === undefined ? [] : agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim() && a.name.toLowerCase().startsWith(mentionQuery)).slice(0, 6);
-  const fileDir = atToken === undefined ? undefined : atToken.slice(0, atToken.lastIndexOf("/") + 1);
-  const filePrefix = atToken?.slice(fileDir?.length ?? 0).toLowerCase() ?? "";
-  const [listing, setListing] = useState<{ typed: string; dir: string; entries: { name: string; dir: boolean }[] }>();
-  useEffect(() => {
-    if (fileDir === undefined) return;
-    let live = true;
-    api.ls(agent.id, fileDir).then(
-      (r) => live && setListing({ typed: fileDir, ...r }),
-      () => live && setListing({ typed: fileDir, dir: "", entries: [] }),
-    );
-    return () => {
-      live = false;
-    };
-  }, [agent.id, fileDir]);
-  const fileMatches =
-    listing && listing.typed === fileDir
-      ? listing.entries.filter((e) => e.name.toLowerCase().startsWith(filePrefix) && (filePrefix.startsWith(".") || !e.name.startsWith("."))).slice(0, 50)
-      : [];
-  type Pick = { agent: Agent } | { file: { name: string; dir: boolean } };
-  const mentionMatches: Pick[] = [...agentMatches.map((a) => ({ agent: a })), ...fileMatches.map((f) => ({ file: f }))];
-  // A folder keeps the menu open on its contents, like tab completion in a shell.
-  const mention = (p: Pick) =>
-    setText((t) => t.replace(/@[^\s@]*$/, "agent" in p ? `@${p.agent.name} ` : `@${fileDir}${p.file.name}${p.file.dir ? "/" : " "}`));
+  const mention = useMention(agent.id, text, setText, agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim()));
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
     const m = new Map<string, PullRequest[]>();
@@ -503,51 +478,7 @@ export function Chat({
               onClose={() => setPickingTask(false)}
             />
           )}
-          {mentionMatches.length > 0 && (
-            <div className="mb-2 max-h-80 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Mention an agent or a file">
-              {mentionMatches.map((p, i) => (
-                <Fragment key={"agent" in p ? p.agent.id : p.file.name}>
-                  {"file" in p && i === agentMatches.length && (
-                    <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{listing?.dir ? `${listing.dir}/` : "./"}</div>
-                  )}
-                  <button
-                    role="option"
-                    aria-selected={i === menuIndex}
-                    ref={(el) => {
-                      if (i === menuIndex) el?.scrollIntoView({ block: "nearest" });
-                    }}
-                    onMouseEnter={() => setMenuIndex(i)}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      mention(p);
-                    }}
-                    className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === menuIndex && "bg-white/[0.06]")}
-                  >
-                    {"agent" in p ? (
-                      <>
-                        <Sticker avatar={p.agent.avatar} lead={p.agent.lead} size={20} />
-                        <span className="text-[13px]">{p.agent.name}</span>
-                        <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
-                      </>
-                    ) : (
-                      <>
-                        {p.file.dir ? <Folder className="size-4 shrink-0 text-fg-3" /> : <FileText className="size-4 shrink-0 text-fg-3" />}
-                        <span className="truncate font-mono text-[12.5px]">
-                          {p.file.name}
-                          {p.file.dir && "/"}
-                        </span>
-                      </>
-                    )}
-                  </button>
-                  {"agent" in p && i === agentMatches.length - 1 && (
-                    <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">
-                      The message also goes to them, and their reply shows here. Start with @… to send it only to them.
-                    </div>
-                  )}
-                </Fragment>
-              ))}
-            </div>
-          )}
+          {mention.menu && <div className="mb-2">{mention.menu}</div>}
           {matches.length > 0 && (
             <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
               {matches.map((c, i) => (
@@ -613,18 +544,7 @@ export function Chat({
                   if (files.length > 0) addImages(files);
                 }}
                 onKeyDown={(e) => {
-                  if (mentionMatches.length > 0) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : mentionMatches.length - 1)) % mentionMatches.length);
-                      return;
-                    }
-                    if ((e.key === "Tab" || e.key === "Enter") && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      mention(mentionMatches[Math.min(menuIndex, mentionMatches.length - 1)]);
-                      return;
-                    }
-                  }
+                  if (mention.onKeyDown(e)) return;
                   if (matches.length > 0) {
                     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();

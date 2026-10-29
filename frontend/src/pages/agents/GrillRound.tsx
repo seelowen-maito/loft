@@ -9,6 +9,7 @@ import { draftImages, type Attachment } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { useMention } from "../../components/MentionMenu";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -147,6 +148,8 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
   // Grows with the answer up to 5 lines, then scrolls.
   const field = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(field, draft, 1, 5);
+  // "@" picks a file from the agent's workspace, as in the chat; no agents, an answer goes only to this one.
+  const mention = useMention(agentId, draft, setDraft);
   const wait = failed ? "Remove the image that failed to upload" : uploading ? "Waiting for images to upload" : undefined;
   return (
     <div
@@ -188,6 +191,7 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
           {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} onMissing={() => removeImage(a.key)} />)}
         </div>
       )}
+      {mention.menu && <div className="mt-2">{mention.menu}</div>}
       <form
         className="mt-2 flex items-end gap-2"
         onSubmit={(e) => {
@@ -204,6 +208,8 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
           onChange={(e) => setDraft(e.target.value)}
           // Enter saves, like the chat; Shift+Enter adds a line, and Enter that confirms an IME composition doesn't save.
           onKeyDown={(e) => {
+            // While the @ menu is open, Enter picks instead of saving.
+            if (mention.onKeyDown(e)) return;
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               answer(draft);
