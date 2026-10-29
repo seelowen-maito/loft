@@ -122,7 +122,14 @@ pub struct GithubItem {
     pub updated_at: String,
 }
 
+/// Git processes running at once. The Repos scan asks 9 things of every repo in parallel; with a few
+/// dozen repos that's hundreds of processes and pipes, past launchd's 256 open files, so spawns failed
+/// ("spawning git") and repos showed no GitHub remote.
+const GIT_AT_ONCE: usize = 16;
+static GIT_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GIT_AT_ONCE);
+
 pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let _slot = GIT_SLOTS.acquire().await?;
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -697,6 +704,25 @@ mod tests {
         git_in(&real, &["remote", "add", "origin", "git@github.com:octo/real.git"]);
         assert_eq!(super::github_repo(&st, "real").await.unwrap(), "octo/real");
         assert!(fake.seen("/").is_empty());
+    }
+
+    #[tokio::test]
+    async fn many_repos_scanned_at_once_never_fail_to_spawn_git() {
+        // Run under `ulimit -n 256` (launchd's default) to see the old failure.
+        let root = std::env::temp_dir().join(format!("loft-spawn-{}", uuid::Uuid::new_v4()));
+        for n in 0..40 {
+            let d = root.join(format!("r{n}"));
+            std::fs::create_dir_all(&d).unwrap();
+            let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&d).args(args).output().unwrap().status.success());
+            git(&["init", "-q"]);
+            git(&["remote", "add", "origin", &format!("git@github.com:octo/r{n}.git")]);
+        }
+        // Like `list`: every repo summarised at once, 9 git calls each.
+        let all = futures::future::join_all(super::discover(&root).into_iter().map(|(n, d)| super::summarize(n, d))).await;
+        assert_eq!(all.len(), 40);
+        let failed: Vec<_> = all.iter().filter(|r| r.error.as_deref() == Some("spawning git") || r.github.is_none()).map(|r| r.name.clone()).collect();
+        assert!(failed.is_empty(), "{failed:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
 }
