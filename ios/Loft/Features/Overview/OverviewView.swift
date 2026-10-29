@@ -173,8 +173,8 @@ private struct TalkButton: View {
 
     var body: some View {
         Button {
-            // Voice style C starts with whoever you talked to last.
-            if VoiceVariant.selected == .c, let id = UserDefaults.standard.string(forKey: "voiceLastAgent"), store.agent(id) != nil {
+            // Voice style E starts with whoever you talked to last.
+            if VoiceVariant.selected == .e, let id = UserDefaults.standard.string(forKey: "voiceLastAgent"), store.agent(id) != nil {
                 startVoice(id)
             } else if let o = store.orchestrator { startVoice(o.id) } else { picking = true }
         } label: {

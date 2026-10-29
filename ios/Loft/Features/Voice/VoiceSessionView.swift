@@ -13,6 +13,13 @@ struct VoiceSessionView: View {
 
     private var variant: VoiceVariant { VoiceVariant(rawValue: variantRaw.lowercased()) ?? .current }
 
+    /// Style E after Send: the full-screen status, when there is one. A mic failure keeps the usual failure screen.
+    private var status: VoiceStatus? {
+        guard variant == .e else { return nil }
+        let s = VoiceStatus.of(voice.phase, undoPending: voice.autoSendAt != nil, posting: !store.pending(for: agentId).isEmpty)
+        return s == .failed && voice.failedSend == nil ? nil : s
+    }
+
     @State private var showOriginal = false
     @State private var draft = ""
     @State private var confirmDiscard = false
@@ -26,15 +33,19 @@ struct VoiceSessionView: View {
             header
             questionCard
             Group {
+                if let status {
+                    VoiceStatusView(status: status, dismiss: dismiss)
+                } else if variant == .e, [.idle, .preparing, .listening, .paused, .cleaning].contains(voice.phase) {
+                    dictate
+                } else {
                 switch voice.phase {
-                case .failed(let message): failed(message)
-                case _ where variant == .d: conversation
-                case _ where variant == .e && [.idle, .preparing, .listening, .paused, .cleaning].contains(voice.phase): dictate
                 case .idle, .preparing, .listening, .paused: listening
                 case .cleaning: cleaning
                 case .review: review
                 case .sending: working
-                case .speaking: speaking
+                case .speaking, .replied: speaking
+                case .failed(let message): failed(message)
+                }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -42,16 +53,12 @@ struct VoiceSessionView: View {
         .background(Theme.background.ignoresSafeArea())
         .onChange(of: voice.phase, initial: true) { _, p in
             if p == .review { loadDraft() }
-            // Voice style E: the tidied text goes to the chat's message box, to read and send there.
-            if p == .review, variant == .e, let id = voice.agentId {
+            // Style E: the tidied text goes to the chat's message box, to read there; sending it brings the status back.
+            if p == .review, variant == .e, voice.autoSendAt == nil, let id = voice.agentId {
                 let text = voice.cleaned ?? voice.raw
                 voice.discard()
+                VoicePresentation.shared.statusAgentId = id
                 router.openChat(id, draft: text)
-                dismiss()
-            }
-            // Voice style B: once it's sent, the chat takes over (your message, then "thinking…" and the reply).
-            if p == .sending, variant == .b, let id = voice.agentId {
-                router.openChat(id)
                 dismiss()
             }
         }
@@ -115,9 +122,7 @@ struct VoiceSessionView: View {
             .accessibilityIdentifier("voiceClose")
             Spacer()
             VStack(spacing: 2) {
-                if variant == .c { recipientChip } else {
-                    Text(agentName).font(.headline).lineLimit(1).minimumScaleFactor(0.6)
-                }
+                Text(agentName).font(.headline).lineLimit(1).minimumScaleFactor(0.6)
                 Text(subtitle).font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
             }
             .accessibilityElement(children: .combine)
@@ -137,30 +142,6 @@ struct VoiceSessionView: View {
         .padding(.horizontal, 8)
     }
 
-    /// Voice style C: who this goes to, changeable before it's sent.
-    private var recipientChip: some View {
-        Menu {
-            ForEach(store.agents) { a in
-                Button { voice.switchAgent(a.id) } label: {
-                    if a.id == agentId { Label(a.name, systemImage: "checkmark") } else { Text(a.name) }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text("To").foregroundStyle(.secondary)
-                Text(agentName).fontWeight(.semibold)
-                Image(systemName: "chevron.down").font(.caption2.weight(.bold))
-            }
-            .font(.subheadline)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Theme.accent.opacity(0.15), in: Capsule())
-        }
-        .disabled(voice.phase == .sending || voice.phase == .speaking)
-        .accessibilityLabel("To \(agentName)")
-        .accessibilityHint("Choose who this message goes to.")
-        .accessibilityIdentifier("voiceRecipient")
-    }
-
     private var subtitle: String {
         switch voice.phase {
         case .idle, .preparing: "Getting ready…"
@@ -170,6 +151,7 @@ struct VoiceSessionView: View {
         case .review: voice.autoSendAt != nil ? "Sending…" : "Review before sending"
         case .sending: "Sent"
         case .speaking: "Replying"
+        case .replied: "Replied"
         case .failed: "Something went wrong"
         }
     }
@@ -188,36 +170,24 @@ struct VoiceSessionView: View {
         return VStack(spacing: ax ? 8 : 16) {
             if !ax {
                 Spacer(minLength: 0)
-                Group {
-                    let tint = voice.phase == .listening ? Theme.accent : Color.secondary
-                    switch variant {
-                    case .current, .d, .e: VoiceOrb(level: voice.level, active: voice.phase == .listening, tint: tint).frame(maxWidth: 220)
-                    case .a: VoiceBars(level: voice.level, active: voice.phase == .listening, tint: tint)
-                    case .b: VoicePulse(level: voice.level, active: voice.phase == .listening, tint: tint)
-                    case .c: VoiceLine(level: voice.level, active: voice.phase == .listening, tint: tint).padding(.horizontal, Theme.gutter)
-                    }
-                }
-                .opacity(preparing ? 0.45 : 1)
+                VoiceOrb(level: voice.level, active: voice.phase == .listening,
+                         tint: voice.phase == .listening ? Theme.accent : .secondary)
+                    .frame(maxWidth: 220)
+                    .opacity(preparing ? 0.45 : 1)
             }
             Spacer(minLength: 0)
             if preparing {
                 ProgressView("Getting ready…").accessibilityIdentifier("voicePreparing")
                 Spacer(minLength: 0)
             } else {
-                switch variant {
-                case .current, .d, .e:
-                    transcript
-                        .frame(maxHeight: 280)
-                        .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
-                case .a: CaptionTranscript(committed: voice.committed, live: voice.live)
-                case .b: BubbleTranscript(text: voice.raw, agentName: agentName)
-                case .c: LiveCaptions(committed: voice.committed, live: voice.live)
-                }
+                transcript
+                    .frame(maxHeight: 280)
+                    .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
                 if voice.phase == .paused {
                     Label("Paused. Tap resume to keep talking.", systemImage: "pause.circle")
                         .font(.footnote).foregroundStyle(.secondary)
                 } else {
-                    Text(hint)
+                    Text("Take your time. Say “send” when you're done; after a quiet moment I'll ask.")
                         .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .lineLimit(ax ? 2 : nil)
                         .accessibilityIdentifier("voiceFinishHint")
@@ -251,14 +221,6 @@ struct VoiceSessionView: View {
         }
     }
 
-    private var hint: String {
-        switch variant {
-        case .current, .c, .d, .e: "Take your time. Say “send” when you're done; after a quiet moment I'll ask."
-        case .a: "Say “send” or tap Done. It's tidied up and goes after 3 seconds, with Undo."
-        case .b: "Say “send” or tap Done. It goes to the chat as you said it."
-        }
-    }
-
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -283,51 +245,6 @@ struct VoiceSessionView: View {
         }
         .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.12),
                                      .init(color: .black, location: 1)], startPoint: .top, endPoint: .bottom))
-    }
-
-    // MARK: Style D: conversation
-
-    private var conversation: some View {
-        let state = VoiceLoop.state(for: voice.phase)
-        return VStack(spacing: 20) {
-            Spacer(minLength: 0)
-            VoiceStateRing(state: state, level: voice.level,
-                           progress: VoiceLoop.endProgress(quiet: voice.quietFor, endsOpen: VoiceSend.endsOpen(voice.raw)))
-            Group {
-                switch state {
-                case .listening: LiveCaptions(committed: voice.committed, live: voice.live)
-                case .thinking:
-                    Text(voice.phase == .sending ? "\(agentName) is on it…" : "Sending…")
-                        .font(.title3).foregroundStyle(.secondary)
-                case .speaking:
-                    ScrollView {
-                        Text(voice.reply ?? "").font(.title3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, Theme.gutter)
-                            .accessibilityIdentifier("voiceReply")
-                    }
-                    .defaultScrollAnchor(.bottom)
-                    .frame(maxHeight: 220)
-                case .ended: EmptyView()
-                }
-            }
-            .frame(maxHeight: 240)
-            Text(state == .speaking ? "Talk any time to cut in." : state == .listening ? "Pause and it sends. Keep talking to add more." : " ")
-                .font(.footnote).foregroundStyle(.secondary)
-                .accessibilityIdentifier("voiceHint")
-            Spacer(minLength: 0)
-            Button(role: .destructive) {
-                voice.speaker.stop()
-                voice.discard()
-                dismiss()
-            } label: {
-                Label("End", systemImage: "xmark").frame(maxWidth: .infinity, minHeight: 30)
-            }
-            .buttonStyle(.borderedProminent).tint(.red).controlSize(.large)
-            .padding(.horizontal, Theme.gutter).padding(.bottom, 12)
-            .accessibilityIdentifier("voiceEnd")
-        }
-        .sensoryFeedback(.impact(weight: .medium), trigger: state)
     }
 
     // MARK: Style E: dictate
@@ -448,11 +365,7 @@ struct VoiceSessionView: View {
 
     // MARK: Agent replying
 
-    @ViewBuilder private var working: some View {
-        if variant == .a || variant == .c { VoiceProgress(agentId: agentId) } else { workingOrb }
-    }
-
-    private var workingOrb: some View {
+    private var working: some View {
         VStack(spacing: 20) {
             VoiceOrb(level: 0.35, active: true, tint: Theme.working).frame(maxWidth: 160)
             Text("\(agentName) is working…").font(.title3.weight(.semibold))
@@ -546,6 +459,8 @@ struct VoiceSessionView: View {
 @MainActor @Observable final class VoicePresentation {
     static let shared = VoicePresentation()
     var shown = false
+    /// Style E: the chat whose message box holds a dictation; sending it there opens the status screen.
+    var statusAgentId: String?
 }
 
 struct VoicePresenter: ViewModifier {
