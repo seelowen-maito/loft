@@ -73,9 +73,12 @@ struct TaskDetailView: View {
                         Link(destination: url) {
                             LabeledContent("On GitHub") { IssueOriginMark(link: g) }
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Open \(g.shortName) on GitHub")
+                        .accessibilityAddTraits(.isLink)
                         .accessibilityIdentifier("issueGitHubLink")
                     }
-                    LabeledContent("On GitHub it's", value: g.state == "closed" ? "Closed" : "Open")
+                    LabeledContent("State on GitHub", value: g.state == "closed" ? "Closed" : "Open")
                     if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
                 } else {
                     LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)

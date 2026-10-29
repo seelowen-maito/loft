@@ -642,10 +642,30 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked { comments.filter { $0.taskId == id } }
     }
 
-    func addTaskComment(id: String, text: String, clientId: String) async throws {
+    /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
+    private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
+                                       "auto_update": true, "messaging_rules": true]
+    /// Settings PUT so far, for tests to check what went to the server.
+    private(set) var settingsPut: [JSONValue] = []
+
+    func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+
+    func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
+        try check()
+        return locked {
+            settingsPut.append(s)
+            guard case .object(var o) = s else { return settings }
+            // As the server: no `github_token` keeps the saved one.
+            if o["github_token"] == nil { o["github_token"] = settings["github_token"] }
+            settings = .object(o)
+            return settings
+        }
+    }
+
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws {
         try check()
         locked {
-            let mirrored = taskList.first { $0.id == id }?.github != nil
+            let mirrored = taskList.first { $0.id == id }?.github != nil && github != false
             comments.append(TaskComment(id: (comments.map(\.id).max() ?? 0) + 1, taskId: id, author: "user", kind: "comment", text: text,
                                         meta: mirrored ? ["github": ["state": "pending"]] : nil, createdAt: Date()))
         }

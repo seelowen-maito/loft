@@ -8,6 +8,8 @@ struct TaskThreadSection: View {
     let task: HBTask
     @State private var comments: [TaskComment] = []
     @State private var draft = ""
+    /// On a mirrored issue: whether a new comment may go to GitHub (after approval, as the setting says).
+    @State private var toGitHub = true
     @State private var busy = false
     @State private var error: APIError?
 
@@ -24,6 +26,12 @@ struct TaskThreadSection: View {
                     entry(c)
                 }
             }
+            if task.github != nil {
+                Toggle("Post on GitHub", isOn: $toGitHub)
+                    .font(.subheadline)
+                    .accessibilityHint("Off keeps the comment in Loft.")
+                    .accessibilityIdentifier("threadPostOnGitHub")
+            }
             HStack(alignment: .bottom) {
                 // No promise about GitHub here: the server's approval setting decides whether a comment waits or goes.
                 TextField("Comment…", text: $draft, axis: .vertical)
@@ -32,7 +40,7 @@ struct TaskThreadSection: View {
                 Button {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     act {
-                        try await store.addTaskComment(task.id, text: text)
+                        try await store.addTaskComment(task.id, text: text, github: task.github == nil ? nil : toGitHub)
                         draft = ""
                     }
                 } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }

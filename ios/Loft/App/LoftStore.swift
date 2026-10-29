@@ -827,8 +827,19 @@ final class LoftStore {
 
     func taskComments(_ id: String) async throws -> [TaskComment] { try await requireTasks().taskComments(id: id) }
 
-    func addTaskComment(_ id: String, text: String) async throws {
-        try await requireTasks().addTaskComment(id: id, text: text, clientId: UUID().uuidString)
+    func addTaskComment(_ id: String, text: String, github: Bool? = nil) async throws {
+        try await requireTasks().addTaskComment(id: id, text: text, clientId: UUID().uuidString, github: github)
+    }
+
+    /// Settings › GitHub issues, or nil when this server has none.
+    func issueSettings() async throws -> IssueSettings? {
+        IssueSettings(try await requireWrite().serverSettings())
+    }
+
+    /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
+    func saveIssueSettings(_ s: IssueSettings) async throws {
+        let api = try requireWrite()
+        _ = try await api.putServerSettings(s.applied(to: try await api.serverSettings()))
     }
 
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {

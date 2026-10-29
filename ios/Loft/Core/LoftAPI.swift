@@ -50,8 +50,12 @@ protocol LoftAPI: Sendable {
     func publishTask(id: String) async throws -> HBTask
     /// A Loft issue's thread, oldest first.
     func taskComments(id: String) async throws -> [TaskComment]
-    /// Comment on a Loft issue; it goes to the issue's agent.
-    func addTaskComment(id: String, text: String, clientId: String) async throws
+    /// Comment on a Loft issue; it goes to the issue's agent. `github`: on a mirrored issue, whether it may go to
+    /// GitHub (after approval, as the setting says); nil leaves it to the server.
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws
+    /// The server's settings object (`GET /api/settings`'s `settings`), and replacing it.
+    func serverSettings() async throws -> JSONValue
+    func putServerSettings(_ settings: JSONValue) async throws -> JSONValue
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -249,8 +253,20 @@ struct LiveLoftAPI: LoftAPI {
 
     func taskComments(id: String) async throws -> [TaskComment] { try await get("/tasks/\(id)/comments") }
 
-    func addTaskComment(id: String, text: String, clientId: String) async throws {
-        _ = try await send("POST", "/tasks/\(id)/comments", body: ["text": .string(text), "client_id": .string(clientId)])
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws {
+        var body: [String: JSONValue] = ["text": .string(text), "client_id": .string(clientId)]
+        if let github { body["github"] = .bool(github) }
+        _ = try await send("POST", "/tasks/\(id)/comments", body: .object(body))
+    }
+
+    func serverSettings() async throws -> JSONValue {
+        let v: JSONValue = try await get("/settings")
+        return v["settings"] ?? .null
+    }
+
+    func putServerSettings(_ settings: JSONValue) async throws -> JSONValue {
+        let v = try decode(JSONValue.self, try await send("PUT", "/settings", body: settings))
+        return v["settings"] ?? .null
     }
 
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
@@ -328,7 +344,9 @@ extension LoftAPI {
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
     func taskComments(id: String) async throws -> [TaskComment] { [] }
-    func addTaskComment(id: String, text: String, clientId: String) async throws { throw APIError.unsupported("Comments") }
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }
+    func serverSettings() async throws -> JSONValue { throw APIError.unsupported("Server settings") }
+    func putServerSettings(_ settings: JSONValue) async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
