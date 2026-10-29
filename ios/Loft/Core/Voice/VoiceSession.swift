@@ -35,6 +35,8 @@ final class VoiceSession {
     /// Microphone level, 0…1, about 20 times a second.
     private(set) var level: Float = 0
     private(set) var elapsed: TimeInterval = 0
+    /// Voice style D: how long it's been quiet since the last word, for the ring that fills before the turn ends.
+    private(set) var quietFor: TimeInterval = 0
     /// The cleaned-up text, set in `.review`. Nil when cleanup failed or isn't available: show `raw`.
     private(set) var cleaned: String?
     private(set) var cleanupNote: String?
@@ -54,12 +56,13 @@ final class VoiceSession {
     var isFailed: Bool { if case .failed = phase { return true } else { return false } }
     var endPhrases: [String] { VoiceText.endPhrases }
 
+    /// Voice style D is a conversation: always hands-free and read aloud.
     var handsFree: Bool {
-        get { UserDefaults.standard.bool(forKey: Prefs.voiceHandsFree) }
+        get { VoiceVariant.selected == .d || UserDefaults.standard.bool(forKey: Prefs.voiceHandsFree) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceHandsFree) }
     }
     var readReplies: Bool {
-        get { UserDefaults.standard.bool(forKey: Prefs.voiceReadReplies) }
+        get { VoiceVariant.selected == .d || UserDefaults.standard.bool(forKey: Prefs.voiceReadReplies) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceReadReplies) }
     }
 
@@ -190,7 +193,8 @@ final class VoiceSession {
         }
         // Voice style B sends what was heard, without the tidy-up on the Mac.
         let variant = VoiceVariant.selected
-        if variant != .b { await clean() }
+        // B and D send what was heard, without the tidy-up on the Mac (D is a conversation: speed first).
+        if variant != .b && variant != .d { await clean() }
         phase = .review
         switch reason {
         case .review where variant == .a && store.canWrite:
@@ -352,6 +356,15 @@ final class VoiceSession {
             }
         }
         if quiet >= VoiceSend.utteranceGap { pauseBase = raw }
+        // Voice style D: a short silence after some words ends your turn and sends it, no question asked.
+        if VoiceVariant.selected == .d {
+            quietFor = raw.isEmpty ? 0 : quiet
+            let open = VoiceSend.endsOpen(raw)
+            if VoiceLoop.reduce(.listening, .quiet(quiet, hasText: !raw.isEmpty, endsOpen: open)) == .thinking {
+                VoiceLog.shared.add("talk: quiet \(String(format: "%.1f", quiet)) s: end of turn, sending (style D)")
+                return await finish(.send)
+            }
+        }
         if raw.isEmpty, quiet >= VoiceSend.noSpeechTimeout {
             VoiceLog.shared.add("talk: nothing heard for \(Int(VoiceSend.noSpeechTimeout)) s: paused")
             return pause()
@@ -720,6 +733,7 @@ final class VoiceSession {
         live = "and add a button to copy the diagnostics"
         level = 0.55
         elapsed = 83
+        quietFor = 0.9
         switch name {
         case "paused": phase = .paused
         case "preparing": phase = .preparing

@@ -5,8 +5,12 @@ import SwiftUI
 /// - A "Bars": rising bars, a caption-style transcript, and Done sends the tidied text after a 3 s Undo (no review screen).
 /// - B "Chat": a pulsing ring, the transcript as the message bubble, and Done sends what was heard straight into the chat.
 /// - C "Direct": a voice line, the transcript as live captions, and a To: chip to talk to any agent instead of the Lead.
+/// - D "Conversation" (round 2, like Grok or ChatGPT voice): a short silence ends your turn and sends it, the reply is
+///   read with captions, talking over it is your turn, and it listens again. One big state ring, one End button.
+/// - E "Dictate" (round 2, like Wispr Flow): talk (or hold the mic) and let go; the tidied text lands in the chat's
+///   message box, to read and send with one tap. A To: row with recent agents.
 enum VoiceVariant: String, CaseIterable {
-    case current, a, b, c
+    case current, a, b, c, d, e
 
     static let key = "voiceVariant"
     static var selected: VoiceVariant { VoiceVariant(rawValue: UserDefaults.standard.string(forKey: key)?.lowercased() ?? "") ?? .current }
@@ -17,6 +21,8 @@ enum VoiceVariant: String, CaseIterable {
         case .a: "A · Bars, send with Undo"
         case .b: "B · Bubble, send into the chat"
         case .c: "C · Captions, talk to any agent"
+        case .d: "D · Conversation, hands-free"
+        case .e: "E · Dictate into the chat"
         }
     }
 }
@@ -233,5 +239,115 @@ struct VoiceProgress: View {
             .frame(width: 26, height: 26)
             Text(title).font(.caption2).foregroundStyle(active || done ? .primary : .secondary)
         }
+    }
+}
+
+// MARK: - D: conversation
+
+/// The one thing D shows: a big ring that says whose turn it is. Listening: it fills as you pause, and the turn ends
+/// when it's full. Thinking: it turns while the agent works. Speaking: it pulses with the reply.
+struct VoiceStateRing: View {
+    var state: VoiceLoop.State
+    var level: Float
+    /// 0…1 of the silence that ends your turn.
+    var progress: Double
+
+    private var tint: Color {
+        switch state {
+        case .listening: Theme.accent
+        case .thinking: Theme.attention
+        case .speaking: Theme.working
+        case .ended: .secondary
+        }
+    }
+    private var title: String {
+        switch state {
+        case .listening: "Listening"
+        case .thinking: "Thinking"
+        case .speaking: "Speaking"
+        case .ended: "Ended"
+        }
+    }
+
+    var body: some View {
+        let l = CGFloat(min(max(level, 0), 1))
+        ZStack {
+            Circle().stroke(tint.opacity(0.18), lineWidth: 10)
+            if state == .listening {
+                Circle().trim(from: 0, to: progress)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.25), value: progress)
+            } else if state == .thinking {
+                TimelineView(.animation(paused: TestMode.noAnimations)) { t in
+                    Circle().trim(from: 0, to: 0.25)
+                        .stroke(tint, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                        .rotationEffect(.degrees(t.date.timeIntervalSinceReferenceDate * 240))
+                }
+            }
+            Circle().fill(tint.gradient)
+                .scaleEffect(0.62 + (state == .listening || state == .speaking ? l * 0.18 : 0))
+                .animation(.spring(duration: 0.2), value: level)
+            Text(title).font(.title2.weight(.bold)).foregroundStyle(.white)
+        }
+        .frame(width: 220, height: 220)
+        .accessibilityElement()
+        .accessibilityLabel(title)
+        .accessibilityIdentifier("voiceStateRing")
+    }
+}
+
+// MARK: - E: dictate
+
+/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches.
+struct RecentAgentsRow: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(VoiceSession.self) private var voice
+
+    var body: some View {
+        let current = voice.agentId
+        let recent = store.agents.sorted { ($0.lastRunAt ?? .distantPast) > ($1.lastRunAt ?? .distantPast) }
+        let shown = (recent.filter { $0.id == current } + recent.filter { $0.id != current }).prefix(5)
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                Text("To").font(.subheadline).foregroundStyle(.secondary)
+                ForEach(Array(shown)) { a in
+                    Button { voice.switchAgent(a.id) } label: {
+                        Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(a.id == current ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, Theme.gutter)
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityIdentifier("voiceRecentAgents")
+    }
+}
+
+/// E's mic: you're already talking when it opens. Let go of it after holding, or tap it, and you're done.
+struct HoldToTalkButton: View {
+    var listening: Bool
+    var done: () -> Void
+    @GestureState private var pressed = false
+
+    var body: some View {
+        Image(systemName: listening ? "waveform" : "mic.fill")
+            .font(.system(size: 34, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 96, height: 96)
+            .background(Theme.accent.gradient, in: Circle())
+            .scaleEffect(pressed ? 1.12 : 1)
+            .animation(.spring(duration: 0.2), value: pressed)
+            .gesture(DragGesture(minimumDistance: 0).updating($pressed) { _, s, _ in s = true }.onEnded { _ in done() })
+            .accessibilityElement()
+            .accessibilityLabel("Done talking")
+            .accessibilityHint("Your words are tidied up and put in the chat's message box.")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { done() }
+            .accessibilityIdentifier("voiceHoldToTalk")
     }
 }

@@ -11,6 +11,8 @@ final class InterruptibleReader {
     /// The command heard, once; reading is stopped by whoever handles it.
     var onCommand: ((ReadAloudCommand) -> Void)?
     var phrases: GrillPhrases?
+    /// Voice style D: any words said over the reading (not only a command) end it, as `.skip`: it's your turn.
+    var bargeIn = false
 
     private let synth = AVSpeechSynthesizer()
     private var engine: AVAudioEngine?
@@ -180,7 +182,13 @@ final class InterruptibleReader {
     }
 
     private func check(_ words: [ReadAloudCommand.Word]) {
-        guard !heard, finished != nil, let c = ReadAloudCommand.latest(in: words, phrases: phrases) else { return }
+        guard !heard, finished != nil else { return }
+        if bargeIn, ReadAloudCommand.latest(in: words, phrases: phrases) == nil,
+           VoiceLoop.reduce(.speaking, .userSpoke(words: words.count)) == .listening {
+            heard = true
+            return onCommand?(.skip) ?? ()
+        }
+        guard let c = ReadAloudCommand.latest(in: words, phrases: phrases) else { return }
         heard = true
         onCommand?(c)
     }
