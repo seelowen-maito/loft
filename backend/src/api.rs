@@ -329,6 +329,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         last_run_at: None,
         next_run_at: None,
         total_cost_usd: 0.0,
+        session_cost_usd: 0.0,
         created_at: now(),
         replied_at: None,
         read_at: None,

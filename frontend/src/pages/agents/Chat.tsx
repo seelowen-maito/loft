@@ -710,7 +710,7 @@ export function Chat({
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
             <span className="max-md:hidden">↵ send · ⇧↵ newline · / commands</span>
-            <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · ${agent.total_cost_usd.toFixed(2)} spent</span>
+            <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
           </div>
         </div>
       </div>
@@ -805,7 +805,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex justify-end gap-2 font-mono text-[10.5px] text-fg-3">
         {secs && <span>{secs}s</span>}
         {m.meta?.num_turns != null && <span>· {m.meta.num_turns} turns</span>}
-        {m.meta?.cost_usd != null && <span>· ${Number(m.meta.cost_usd).toFixed(3)}</span>}
+        {m.meta?.cost_usd != null && <span title="Estimated at API list prices">· est. ${Number(m.meta.cost_usd).toFixed(3)}</span>}
       </div>
     );
   }

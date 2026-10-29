@@ -1078,11 +1078,16 @@ async fn run_process(
                         preempt.notify_one();
                     }
                 }
-                let cost = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                // On --resume Claude Code reports the session's running total; the run cost what it added.
+                let total = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                let mut cost = total;
                 if let Some(sid) = ev["session_id"].as_str() {
                     let sid = sid.to_string();
                     state.db.update_agent(agent_id, |a| {
+                        let prev = if a.session_id.as_deref() == Some(sid.as_str()) { a.session_cost_usd } else { 0.0 };
+                        cost = crate::db::run_cost(total, prev);
                         a.session_id = Some(sid);
+                        a.session_cost_usd = total;
                         a.total_cost_usd += cost;
                     })?;
                 }
@@ -1093,6 +1098,7 @@ async fn run_process(
                 }
                 let end = json!({
                     "cost_usd": cost,
+                    "session_cost_usd": total,
                     "duration_ms": ev["duration_ms"],
                     "num_turns": ev["num_turns"],
                     "is_error": ev["is_error"],
@@ -1353,6 +1359,9 @@ while [ $# -gt 0 ]; do
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
+cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
+sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9]*\).*/\1/p')
+: "${cost:=0}" "${sid:=s1}"
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
@@ -1378,7 +1387,7 @@ esac
 reply=started
 case "$prompt" in *ask*) reply='Which one?';; esac
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$reply"'"}]}}'
-echo '{"type":"result","subtype":"success","result":"'"$reply"'","num_turns":1,"session_id":"s1","total_cost_usd":0}'
+echo '{"type":"result","subtype":"success","result":"'"$reply"'","num_turns":1,"session_id":"'"$sid"'","total_cost_usd":'"$cost"'}'
 case "$prompt" in *linger*|*hang*)
   trap 'kill $!; echo yes > terminated; exit 143' TERM
   sleep 600 &
@@ -1451,6 +1460,21 @@ esac
         assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
         run(&st, &a.id, "after compact", 5).await;
         assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_run_costs_what_it_added_to_the_session() {
+        let (st, a) = fake_claude_state();
+        // Claude Code reports the resumed session's running total; a new session starts again from 0.
+        for (i, p) in ["cost=0.005", "cost=0.006", "cost=0.007", "sid=s2 cost=0.003", "sid=s2 cost=0.002"].iter().enumerate() {
+            run(&st, &a.id, p, i + 1).await;
+        }
+        let mut msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        msgs.sort_by_key(|m| m.id);
+        let costs: Vec<f64> = msgs.iter().filter(|m| m.kind == "run_end").map(|m| (m.meta["cost_usd"].as_f64().unwrap() * 1e6).round() / 1e6).collect();
+        assert_eq!(costs, vec![0.005, 0.001, 0.001, 0.003, 0.002], "a total that went down counts whole, never negative");
+        let a = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!((a.total_cost_usd - 0.012).abs() < 1e-9, "{}", a.total_cost_usd);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -71,9 +71,9 @@ function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; 
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
+function Stat({ label, value, tone, title }: { label: string; value: React.ReactNode; tone?: string; title?: string }) {
   return (
-    <div>
+    <div title={title}>
       <div className={cx("font-serif text-[24px] leading-none tabular-nums", tone)}>{value}</div>
       <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-fg-3">{label}</div>
     </div>
@@ -112,7 +112,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
         <Stat label="Runs" value={runs} />
         <Stat label="Tool calls" value={s.tool_calls} />
         <Stat label="PRs" value={s.prs.total} />
-        <Stat label="Spent" value={`$${s.cost_usd < 10 ? s.cost_usd.toFixed(2) : Math.round(s.cost_usd)}`} />
+        <Stat label="Est. spent" title="API list-price equivalent" value={`$${s.cost_usd < 10 ? s.cost_usd.toFixed(2) : Math.round(s.cost_usd)}`} />
       </div>
 
       <div className="mt-5">
@@ -222,7 +222,10 @@ export function AgentActivity() {
               <>
                 <span className={totals.working ? "text-accent" : "text-fg-2"}>{totals.working} working</span>
                 {totals.waiting > 0 && <span className="text-warn"> · {totals.waiting} waiting on you</span>}
-                <span className="text-fg-2"> · {totals.runs} runs · ${totals.cost.toFixed(2)} spent</span>
+                <span className="text-fg-2">
+                  {" "}
+                  · {totals.runs} runs · <span title="API list-price equivalent">est. ${totals.cost.toFixed(2)} spent</span>
+                </span>
               </>
             )}
           </div>

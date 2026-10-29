@@ -65,6 +65,9 @@ pub struct Agent {
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
     pub total_cost_usd: f64,
+    /// The running total Claude Code last reported for `session_id`, so a run's cost is what it added.
+    #[serde(default)]
+    pub session_cost_usd: f64,
     pub created_at: String,
     /// Loft's own agent: always present, and the user can't delete it.
     #[serde(default)]
@@ -421,6 +424,67 @@ CREATE TABLE IF NOT EXISTS pending_fyis (
 CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
 "#;
 
+/// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
+/// Each one becomes its difference from the previous run end of the same session, keeping the reported
+/// total as `session_cost_usd`, which also marks it done; the agent's lifetime total is then recomputed.
+fn per_run_costs(conn: &Connection) -> Result<()> {
+    let agents: Vec<String> = {
+        let mut st = conn.prepare(
+            "SELECT DISTINCT agent_id FROM messages WHERE kind = 'run_end'
+               AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL",
+        )?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for agent_id in agents {
+        let tx = conn.unchecked_transaction()?;
+        let rows: Vec<(i64, String, Value)> = {
+            let mut st = tx.prepare(
+                "SELECT id, kind, meta FROM messages WHERE agent_id = ?1 AND kind IN ('run_start', 'run_end', 'clear', 'resume') ORDER BY id",
+            )?;
+            let rows = st
+                .query_map([&agent_id], |r| Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null))))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut prev = 0.0;
+        for (id, kind, mut meta) in rows {
+            match kind.as_str() {
+                "clear" | "resume" => prev = 0.0,
+                "run_start" if meta["resumed"] == Value::Bool(false) => prev = 0.0,
+                "run_end" => {
+                    // A stopped run reported nothing.
+                    let Some(total) = meta["cost_usd"].as_f64() else { continue };
+                    if let Some(total) = meta["session_cost_usd"].as_f64() {
+                        prev = total;
+                        continue;
+                    }
+                    meta["cost_usd"] = run_cost(total, prev).into();
+                    meta["session_cost_usd"] = total.into();
+                    tx.execute("UPDATE messages SET meta = ?1 WHERE id = ?2", params![meta.to_string(), id])?;
+                    prev = total;
+                }
+                _ => {}
+            }
+        }
+        tx.execute(
+            "UPDATE agents SET data = json_set(data, '$.total_cost_usd',
+                 (SELECT COALESCE(sum(json_extract(meta, '$.cost_usd')), 0.0) FROM messages WHERE agent_id = ?1 AND kind = 'run_end'),
+                 '$.session_cost_usd', ?2)
+             WHERE id = ?1",
+            params![agent_id, prev],
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// What a run added to its session, given the running total it reported and the one before it.
+/// A total that went down is a fresh session, so all of it is this run's.
+pub fn run_cost(total: f64, prev: f64) -> f64 {
+    if total >= prev { total - prev } else { total }
+}
+
 fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
     let meta: String = r.get(6)?;
     Ok(Message {
@@ -490,6 +554,7 @@ impl Db {
              UPDATE agents SET data = json_remove(data, '$.pending_fyis') WHERE json_type(data, '$.pending_fyis') IS NOT NULL;
              COMMIT;",
         )?;
+        per_run_costs(&conn)?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before roles existed get one from their name and title, once; the user can change it.
         let unroled: Vec<String> = {
@@ -1259,6 +1324,42 @@ mod tests {
             "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn stored_running_totals_become_per_run_costs_once() {
+        let path = std::env::temp_dir().join(format!("loft-costs-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            let mut a = agent("a");
+            a.total_cost_usd = 0.005 + 0.006 + 0.007 + 0.002;
+            db.save_agent(&a).unwrap();
+            // As runs before #164 stored them: each run end holds the session's running total.
+            let run = |resumed: bool, cost: Option<f64>| {
+                db.add_message("a", None, "system", "run_start", "user", serde_json::json!({ "resumed": resumed })).unwrap();
+                let end = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c }));
+                db.add_message("a", None, "system", "run_end", "", end).unwrap();
+            };
+            run(false, Some(0.005));
+            run(true, Some(0.006));
+            run(true, None);
+            run(true, Some(0.007));
+            run(false, Some(0.002));
+        }
+        let costs = |db: &Db| -> Vec<f64> {
+            let mut m = db.list_messages("a", 50, None).unwrap();
+            m.sort_by_key(|m| m.id);
+            m.iter().filter_map(|m| (m.kind == "run_end").then(|| m.meta["cost_usd"].as_f64()).flatten()).map(|c| (c * 1e6).round() / 1e6).collect()
+        };
+        let db = Db::open(&path).unwrap();
+        assert_eq!(costs(&db), vec![0.005, 0.001, 0.001, 0.002], "a new session counts from 0");
+        let a = db.get_agent("a").unwrap().unwrap();
+        assert!((a.total_cost_usd - 0.009).abs() < 1e-9, "{}", a.total_cost_usd);
+        assert_eq!(a.session_cost_usd, 0.002, "the next run of the session counts from its last total");
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(costs(&db), vec![0.005, 0.001, 0.001, 0.002], "running it again changes nothing");
+        assert!((db.get_agent("a").unwrap().unwrap().total_cost_usd - 0.009).abs() < 1e-9);
     }
 
     #[test]
