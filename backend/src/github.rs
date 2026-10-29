@@ -4,9 +4,69 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::state::AppState;
+
+tokio::task_local! {
+    /// What a request is for: `prs`, `mirror`, `repos`, `inbox`, `user` or `agent`, for the per-source counts.
+    static SOURCE: &'static str;
+}
+
+/// Runs `fut` with its GitHub requests counted as `source`.
+pub async fn as_source<F: std::future::Future>(source: &'static str, fut: F) -> F::Output {
+    SOURCE.scope(source, fut).await
+}
+
+fn source() -> &'static str {
+    SOURCE.try_with(|s| *s).unwrap_or("other")
+}
+
+/// What GitHub's rate limit headers last said, per resource (`core`, `graphql`), and the requests Loft
+/// made by source in the current core window. One token is shared with the agents' `gh`, so `used` can
+/// be well above Loft's own count.
+#[derive(Default)]
+pub struct Budget(Mutex<BudgetState>);
+
+#[derive(Default)]
+struct BudgetState {
+    resources: std::collections::BTreeMap<String, Value>,
+    /// The core window the counts belong to: its reset time.
+    window: i64,
+    /// source -> (requests that counted, 304s that didn't)
+    by_source: std::collections::BTreeMap<&'static str, (u64, u64)>,
+}
+
+impl Budget {
+    fn record(&self, headers: &reqwest::header::HeaderMap, not_modified: bool) {
+        let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<i64>().ok());
+        let mut b = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let resource = headers.get("x-ratelimit-resource").and_then(|v| v.to_str().ok()).unwrap_or("core").to_string();
+        if let (Some(limit), Some(remaining), Some(reset)) = (h("x-ratelimit-limit"), h("x-ratelimit-remaining"), h("x-ratelimit-reset")) {
+            if resource == "core" && reset > b.window {
+                // A new hour: the counts start again with it.
+                b.window = reset;
+                b.by_source.clear();
+            }
+            let used = h("x-ratelimit-used").unwrap_or(limit - remaining);
+            b.resources.insert(resource, json!({ "limit": limit, "remaining": remaining, "used": used, "reset": reset }));
+        }
+        let c = b.by_source.entry(source()).or_default();
+        if not_modified { c.1 += 1 } else { c.0 += 1 }
+    }
+
+    /// For the API: the resources and the counts by source.
+    pub fn snapshot(&self) -> Value {
+        let b = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let by_source: serde_json::Map<String, Value> = b.by_source.iter().map(|(s, (n, free))| (s.to_string(), json!({ "requests": n, "not_modified": free }))).collect();
+        json!({ "resources": b.resources, "by_source": by_source, "window_reset": (b.window > 0).then_some(b.window) })
+    }
+}
+
+/// `GET /api/github/budget`: how much of GitHub's rate limit is left and where Loft's requests went.
+pub async fn budget(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<Value> {
+    axum::Json(state.gh_budget.snapshot())
+}
 
 /// Token from settings, else `gh auth token`, re-checked periodically so
 /// logging in to `gh` after startup still works.
@@ -133,6 +193,7 @@ async fn exchange(state: &AppState, method: reqwest::Method, path: &str, body: O
         }
         let resp = req.send().await?;
         let status = resp.status();
+        state.gh_budget.record(resp.headers(), status == reqwest::StatusCode::NOT_MODIFIED);
         if status == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(None);
         }
@@ -411,4 +472,41 @@ pub(crate) mod tests {
         );
         assert!(extract_pr_links(r#"{"html_url":"https://github.com/o/r/pull/7"}"#) == vec![("o/r".to_string(), 7)]);
     }
+
+    #[tokio::test]
+    async fn the_budget_shows_what_github_says_is_left_and_who_used_it() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let core = |remaining: &'static str, reset: &'static str| vec![("x-ratelimit-limit", "5000"), ("x-ratelimit-remaining", remaining), ("x-ratelimit-used", "4800"), ("x-ratelimit-reset", reset), ("x-ratelimit-resource", "core")];
+        fake.route("GET", "/repos/octo/budget/pulls/1", 200, json!({ "number": 1 }));
+        fake.with_headers("GET", "/repos/octo/budget/pulls/1", &core("200", "1900000000"));
+        fake.route("GET", "/repos/octo/budget/issues", 304, Value::Null);
+        fake.with_headers("GET", "/repos/octo/budget/issues", &core("200", "1900000000"));
+        fake.route("POST", "/graphql", 200, json!({ "data": {} }));
+        fake.with_headers("POST", "/graphql", &[("x-ratelimit-limit", "5000"), ("x-ratelimit-remaining", "4990"), ("x-ratelimit-reset", "1900000100"), ("x-ratelimit-resource", "graphql")]);
+
+        as_source("prs", async { get(&st, "/repos/octo/budget/pulls/1").await.unwrap() }).await;
+        as_source("prs", async { get(&st, "/repos/octo/budget/pulls/1").await.unwrap() }).await;
+        as_source("mirror", async { assert!(get_if_changed(&st, "/repos/octo/budget/issues", Some("\"e\"")).await.unwrap().is_none()) }).await;
+        as_source("inbox", async { request(&st, reqwest::Method::POST, "/graphql", Some(json!({}))).await.unwrap() }).await;
+        get(&st, "/repos/octo/budget/pulls/1").await.unwrap();
+
+        let axum::Json(v) = budget(axum::extract::State(st.clone())).await;
+        assert_eq!(v["resources"]["core"], json!({ "limit": 5000, "remaining": 200, "used": 4800, "reset": 1900000000i64 }));
+        assert_eq!(v["resources"]["graphql"], json!({ "limit": 5000, "remaining": 4990, "used": 10, "reset": 1900000100i64 }));
+        assert_eq!(v["by_source"], json!({
+            "prs": { "requests": 2, "not_modified": 0 },
+            "mirror": { "requests": 0, "not_modified": 1 },
+            "inbox": { "requests": 1, "not_modified": 0 },
+            "other": { "requests": 1, "not_modified": 0 },
+        }));
+
+        // The next hour starts the counts again.
+        fake.with_headers("GET", "/repos/octo/budget/pulls/1", &core("4999", "1900003600"));
+        as_source("user", async { get(&st, "/repos/octo/budget/pulls/1").await.unwrap() }).await;
+        let axum::Json(v) = budget(axum::extract::State(st)).await;
+        assert_eq!(v["by_source"], json!({ "user": { "requests": 1, "not_modified": 0 } }));
+        assert_eq!((&v["resources"]["core"]["remaining"], &v["window_reset"]), (&json!(4999), &json!(1900003600i64)));
+    }
+
 }

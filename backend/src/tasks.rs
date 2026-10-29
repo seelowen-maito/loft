@@ -1093,6 +1093,7 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             gh_token: Arc::new(Default::default()),
             gh_pace: Arc::new(Default::default()),
+            gh_budget: Arc::new(Default::default()),
             update: Arc::new(Mutex::new(Default::default())),
             settings: Arc::new(crate::settings::Store::load(&dir).unwrap()),
             usage: Arc::new(Default::default()),

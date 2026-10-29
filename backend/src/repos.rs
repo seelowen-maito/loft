@@ -484,7 +484,7 @@ pub async fn github(state: &AppState, force: bool) -> HashMap<String, GithubInfo
     let fetched = futures::future::join_all(todo.into_iter().map(|(name, slug)| {
         let state = state.clone();
         async move {
-            let info = fetch_github(&state, &slug).await;
+            let info = crate::github::as_source("repos", fetch_github(&state, &slug)).await;
             (name, slug, info)
         }
     }))
