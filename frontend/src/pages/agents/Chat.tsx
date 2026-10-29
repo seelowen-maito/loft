@@ -21,7 +21,8 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
-import { EMPTY_DRAFT, loadDraft, saveDraft, type Draft } from "../../lib/draft";
+import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
+import { useDraft, type Attachment } from "../../lib/useDraft";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -106,37 +107,13 @@ export function Chat({
   /** Extra buttons at the end of the header, e.g. the inspector toggle. */
   headerActions?: React.ReactNode;
 }) {
-  const [initial] = useState(() => loadDraft(agent.id));
-  const [text, setText] = useState(initial.text);
+  const { text, setText, attachments, setAttachments, images, taskId, setTaskId, putDraft, removeImage } = useDraft(agent.id);
   const [sending, setSending] = useState(false);
   const [cmdError, setCmdError] = useState<string | null>(null);
   const [cmdNote, setCmdNote] = useState<string | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showEarlier, setShowEarlier] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>(() => draftImages(agent.id, initial.images));
-  const [taskId, setTaskId] = useState<string | null>(initial.task);
-  const showDraft = (id: string, d: Draft) => {
-    setText(d.text);
-    setTaskId(d.task);
-    setAttachments((a) => (a.forEach((x) => URL.revokeObjectURL(x.preview)), draftImages(id, d.images)));
-  };
-  // The composer shows the selected agent's Draft: on a switch it's swapped in before anything renders or saves,
-  // so one agent's text never lands in another's. Uploads still running for the old agent are dropped.
-  const [draftFor, setDraftFor] = useState(agent.id);
-  if (draftFor !== agent.id) {
-    setDraftFor(agent.id);
-    showDraft(agent.id, loadDraft(agent.id));
-  }
-  const shown = useRef(agent.id);
-  useLayoutEffect(() => {
-    shown.current = agent.id;
-  }, [agent.id]);
-  // Commands finish after an await, maybe with another agent on screen: they change the Draft of the agent they ran for.
-  const putDraft = (id: string, d: Draft) => {
-    saveDraft(id, d);
-    if (shown.current === id) showDraft(id, d);
-  };
   const picker = useRef<HTMLInputElement>(null);
   // dragenter/dragleave fire for every child crossed; count them to know when the drag really left.
   const [dragDepth, setDragDepth] = useState(0);
@@ -321,18 +298,8 @@ export function Chat({
     }
   };
 
-  const removeImage = (key: string) =>
-    setAttachments((a) => a.filter((x) => (x.key === key ? (URL.revokeObjectURL(x.preview), false) : true)));
-
   const uploading = attachments.some((a) => !a.file && !a.error);
   const failed = attachments.some((a) => a.error);
-  const images = attachments.flatMap((a) => (a.file ? [a.file] : []));
-
-  // Every change is saved as this agent's Draft; an emptied composer deletes it.
-  const imageList = images.join("\n");
-  useEffect(() => {
-    saveDraft(agent.id, { text, images: imageList ? imageList.split("\n") : [], task: taskId });
-  }, [agent.id, text, imageList, taskId]);
 
   const [pickingTask, setPickingTask] = useState(false);
   useEffect(() => {
@@ -631,7 +598,7 @@ export function Chat({
             )}
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-2 px-2 pb-2 pt-1">
-                {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} />)}
+                {attachments.map((a) => <AttachmentTile key={a.key} a={a} onRemove={() => removeImage(a.key)} onMissing={() => removeImage(a.key)} />)}
               </div>
             )}
             <div className="flex items-end gap-2">
@@ -991,13 +958,8 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
   );
 }
 
-/** A pasted image: shown at once from `preview`, sendable once uploaded (`file`). */
-type Attachment = { key: string; preview: string; file?: string; error?: string };
-
-/** A Draft's images, already uploaded: they preview from the server. */
-const draftImages = (agent: string, files: string[]): Attachment[] => files.map((file) => ({ key: file, preview: api.uploadUrl(agent, file), file }));
-
-function AttachmentTile({ a, onRemove }: { a: Attachment; onRemove: () => void }) {
+/** `onMissing` fires when an uploaded image's file can't be loaded, e.g. a Draft's after the chat history was cleared. */
+export function AttachmentTile({ a, onRemove, onMissing }: { a: Attachment; onRemove: () => void; onMissing: () => void }) {
   const [loaded, setLoaded] = useState(false);
   const busy = !a.file && !a.error;
   return (
@@ -1009,6 +971,7 @@ function AttachmentTile({ a, onRemove }: { a: Attachment; onRemove: () => void }
         src={a.preview}
         alt="Pasted image"
         onLoad={() => setLoaded(true)}
+        onError={() => a.file && onMissing()}
         className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
       />
       {busy && (
