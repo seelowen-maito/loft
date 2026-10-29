@@ -26,6 +26,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
+import { commandSpan } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -137,6 +138,12 @@ export function Chat({
   const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
   const slash = text.startsWith("/") && !/\s/.test(text.trim());
+  const command = commandSpan(text, COMMANDS.map((c) => c.name));
+  const overlay = useRef<HTMLDivElement>(null);
+  // The overlay follows the textarea's scroll, also when it appears on text that's already scrolled.
+  useLayoutEffect(() => {
+    if (overlay.current && composer.current) overlay.current.scrollTop = composer.current.scrollTop;
+  });
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
@@ -535,51 +542,66 @@ export function Chat({
                   e.target.value = "";
                 }}
               />
-              <textarea
-                ref={composer}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onPaste={(e) => {
-                  const files = pastedImages(e);
-                  if (files.length > 0) addImages(files);
-                }}
-                onKeyDown={(e) => {
-                  if (mention.onKeyDown(e)) return;
-                  if (matches.length > 0) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
-                      return;
+              {/* A known command is drawn in the accent colour by an overlay behind the textarea, whose own text turns
+                  transparent: the caret, selection, paste and auto-grow stay the textarea's own. */}
+              <div className="relative min-w-0 flex-1">
+                {command > 0 && (
+                  <div
+                    ref={overlay}
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words py-1.5 text-[14px] text-fg"
+                  >
+                    <span className="text-accent">{text.slice(0, command)}</span>
+                    {text.slice(command)}
+                  </div>
+                )}
+                <textarea
+                  ref={composer}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onScroll={(e) => overlay.current && (overlay.current.scrollTop = e.currentTarget.scrollTop)}
+                  onPaste={(e) => {
+                    const files = pastedImages(e);
+                    if (files.length > 0) addImages(files);
+                  }}
+                  onKeyDown={(e) => {
+                    if (mention.onKeyDown(e)) return;
+                    if (matches.length > 0) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
+                        return;
+                      }
+                      if (e.key === "Tab") {
+                        e.preventDefault();
+                        setText(matches[menuIndex].name);
+                        return;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        runCommand(matches[menuIndex].name);
+                        return;
+                      }
                     }
-                    if (e.key === "Tab") {
-                      e.preventDefault();
-                      setText(matches[menuIndex].name);
+                    if (e.key === "Escape" && slash) {
+                      setText("");
                       return;
                     }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault();
-                      runCommand(matches[menuIndex].name);
-                      return;
+                      send();
                     }
+                  }}
+                  rows={1}
+                  placeholder={
+                    watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
+                    : running ? `${agent.name} is working. Your message will be delivered next.`
+                    : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
+                    : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
                   }
-                  if (e.key === "Escape" && slash) {
-                    setText("");
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-                rows={1}
-                placeholder={
-                  watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
-                  : running ? `${agent.name} is working. Your message will be delivered next.`
-                  : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
-                  : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
-                }
-                className="flex-1 resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3"
-              />
+                  className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", command > 0 && "text-transparent caret-fg")}
+                />
+              </div>
               <button
                 className="btn-primary size-8 justify-center p-0"
                 disabled={(!text.trim() && images.length === 0) || uploading || failed || sending}
