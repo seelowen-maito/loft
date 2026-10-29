@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, CornerDownLeft, MessageCircle, Send, Sparkles, Wand2 } from "lucide-react";
 import { api, grillError, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
 import { cx } from "../../lib/format";
+import { clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/draft";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -18,6 +19,12 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
   const live = open ? (session?.questions ?? []) : [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A round that was sent, ended or followed by another keeps no answer Drafts. Unknown while the session loads.
+  const closed = !!session && !open;
+  const postedIds = posted.map((q) => q.id).join("\n");
+  useEffect(() => {
+    if (closed && g.session_id && g.round != null) clearAnswerDrafts(g.session_id, g.round, postedIds.split("\n"));
+  }, [closed, g.session_id, g.round, postedIds]);
 
   const sendRound = async () => {
     if (!session) return;
@@ -42,7 +49,7 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
         </div>
         <div className="space-y-3">
           {open
-            ? live.map((q, i) => <QuestionCard key={q.id} n={i + 1} q={q} agentId={agentId} sessionId={session!.session_id} />)
+            ? live.map((q, i) => <QuestionCard key={q.id} n={i + 1} q={q} agentId={agentId} sessionId={session!.session_id} round={g.round} />)
             : posted.map((q, i) => (
                 <div key={q.id} className="text-[13.5px]">
                   <div className="prose-chat text-fg-2">
@@ -70,13 +77,17 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
 
 /** One question of the open round: the recommendation with Accept or Decide for me, and a field for any
  * other answer, saved as a decision or as a comment to discuss. */
-function QuestionCard({ n, q, agentId, sessionId }: { n: number; q: GrillQuestion; agentId: string; sessionId: string }) {
+function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
   const written = (q.state === "answered" && !q.accepted) || q.state === "discuss";
-  const [draft, setDraft] = useState(written ? (q.answer ?? "") : "");
+  // A half-typed answer is this question's Draft, so it survives switching agents or tabs.
+  const [draft, setDraft] = useState(() => loadAnswerDraft(sessionId, round, q.id) || (written ? (q.answer ?? "") : ""));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Answers given elsewhere (the app) show here too.
+  // Answers given elsewhere (the app) show here too; on mount the Draft wins.
+  const seen = useRef({ written, answer: q.answer });
   useEffect(() => {
+    if (seen.current.written === written && seen.current.answer === q.answer) return;
+    seen.current = { written, answer: q.answer };
     if (written) setDraft(q.answer ?? "");
   }, [written, q.answer]);
 
@@ -92,10 +103,17 @@ function QuestionCard({ n, q, agentId, sessionId }: { n: number; q: GrillQuestio
     }
   };
   const answer = (text: string, discuss = false) => {
-    if (text.trim()) run(() => api.grillAnswer(agentId, sessionId, q.id, text.trim(), discuss));
+    if (!text.trim()) return;
+    run(async () => {
+      await api.grillAnswer(agentId, sessionId, q.id, text.trim(), discuss);
+      if (text === draft) clearAnswerDrafts(sessionId, round, [q.id]);
+    });
   };
 
   const same = written && q.answer === draft.trim();
+  useEffect(() => {
+    saveAnswerDraft(sessionId, round, q.id, same ? "" : draft);
+  }, [sessionId, round, q.id, same, draft]);
   return (
     <div className="rounded-xl border border-line bg-ink-900/70 p-3">
       {q.from_round != null && <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Still open from round {q.from_round}</div>}
