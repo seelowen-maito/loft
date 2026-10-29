@@ -55,12 +55,46 @@ impl Budget {
         if not_modified { c.1 += 1 } else { c.0 += 1 }
     }
 
+    /// Whether a request for `resource` from `source` may go out. At 0 left nothing goes until the reset;
+    /// below a tenth only what a person (or an agent's tool) asked for. What's known after the reset
+    /// time is stale, so then everything goes again.
+    fn allow(&self, resource: &str, source: &str) -> Result<(), String> {
+        let b = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(r) = b.resources.get(resource) else { return Ok(()) };
+        let (limit, remaining, reset) = (r["limit"].as_i64().unwrap_or(0), r["remaining"].as_i64().unwrap_or(0), r["reset"].as_i64().unwrap_or(0));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        if reset <= now || limit <= 0 {
+            return Ok(());
+        }
+        let wait = reset - now;
+        if remaining <= 0 {
+            return Err(format!("{PAUSED}: none left, back in {wait} s"));
+        }
+        if remaining * 10 < limit && !matches!(source, "user" | "agent" | "repos") {
+            return Err(format!("{PAUSED}: {remaining} of {limit} left, kept for your own clicks until the reset in {wait} s"));
+        }
+        Ok(())
+    }
+
     /// For the API: the resources and the counts by source.
     pub fn snapshot(&self) -> Value {
         let b = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let by_source: serde_json::Map<String, Value> = b.by_source.iter().map(|(s, (n, free))| (s.to_string(), json!({ "requests": n, "not_modified": free }))).collect();
         json!({ "resources": b.resources, "by_source": by_source, "window_reset": (b.window > 0).then_some(b.window) })
     }
+}
+
+/// What a request turned away by the budget says, so callers can tell it from a GitHub error.
+const PAUSED: &str = "GitHub paused";
+
+/// The request didn't go out: the budget is (nearly) used up. Pollers skip their tick on it.
+pub fn is_paused(e: &anyhow::Error) -> bool {
+    e.to_string().starts_with(PAUSED)
+}
+
+/// Background work: it waits for the next tick instead of retrying when GitHub is busy.
+fn in_background() -> bool {
+    !matches!(source(), "user" | "agent" | "repos")
 }
 
 /// `GET /api/github/budget`: how much of GitHub's rate limit is left and where Loft's requests went.
@@ -171,7 +205,12 @@ pub fn is_gone(e: &anyhow::Error) -> bool {
 }
 
 async fn exchange(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, etag: Option<&str>) -> Result<Option<(Value, Option<String>)>> {
-    let mut retried = false;
+    let resource = if path == "/graphql" { "graphql" } else { "core" };
+    if let Err(why) = state.gh_budget.allow(resource, source()) {
+        bail!(why);
+    }
+    // A poller doesn't sleep on a rate limit: it tries again on its next tick.
+    let mut retried = in_background();
     loop {
         if method != reqwest::Method::GET && path != "/graphql" {
             state.gh_pace.wait().await;
@@ -406,6 +445,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn waits_out_a_rate_limit_once_then_gives_up() {
+        // Something a person asked for: it waits and retries once (background work doesn't, see below).
+        as_source("user", waits_out_a_rate_limit_once()).await;
+    }
+
+    async fn waits_out_a_rate_limit_once() {
         let st = state_with_token();
         let fake = own_fake(&st);
         // Secondary limit: GitHub says when to come back, and the retry goes through.
@@ -477,11 +521,11 @@ pub(crate) mod tests {
     async fn the_budget_shows_what_github_says_is_left_and_who_used_it() {
         let st = state_with_token();
         let fake = own_fake(&st);
-        let core = |remaining: &'static str, reset: &'static str| vec![("x-ratelimit-limit", "5000"), ("x-ratelimit-remaining", remaining), ("x-ratelimit-used", "4800"), ("x-ratelimit-reset", reset), ("x-ratelimit-resource", "core")];
+        let core = |remaining: &'static str, reset: &'static str| vec![("x-ratelimit-limit", "5000"), ("x-ratelimit-remaining", remaining), ("x-ratelimit-used", "800"), ("x-ratelimit-reset", reset), ("x-ratelimit-resource", "core")];
         fake.route("GET", "/repos/octo/budget/pulls/1", 200, json!({ "number": 1 }));
-        fake.with_headers("GET", "/repos/octo/budget/pulls/1", &core("200", "1900000000"));
+        fake.with_headers("GET", "/repos/octo/budget/pulls/1", &core("4200", "1900000000"));
         fake.route("GET", "/repos/octo/budget/issues", 304, Value::Null);
-        fake.with_headers("GET", "/repos/octo/budget/issues", &core("200", "1900000000"));
+        fake.with_headers("GET", "/repos/octo/budget/issues", &core("4200", "1900000000"));
         fake.route("POST", "/graphql", 200, json!({ "data": {} }));
         fake.with_headers("POST", "/graphql", &[("x-ratelimit-limit", "5000"), ("x-ratelimit-remaining", "4990"), ("x-ratelimit-reset", "1900000100"), ("x-ratelimit-resource", "graphql")]);
 
@@ -492,7 +536,7 @@ pub(crate) mod tests {
         get(&st, "/repos/octo/budget/pulls/1").await.unwrap();
 
         let axum::Json(v) = budget(axum::extract::State(st.clone())).await;
-        assert_eq!(v["resources"]["core"], json!({ "limit": 5000, "remaining": 200, "used": 4800, "reset": 1900000000i64 }));
+        assert_eq!(v["resources"]["core"], json!({ "limit": 5000, "remaining": 4200, "used": 800, "reset": 1900000000i64 }));
         assert_eq!(v["resources"]["graphql"], json!({ "limit": 5000, "remaining": 4990, "used": 10, "reset": 1900000100i64 }));
         assert_eq!(v["by_source"], json!({
             "prs": { "requests": 2, "not_modified": 0 },
@@ -507,6 +551,61 @@ pub(crate) mod tests {
         let axum::Json(v) = budget(axum::extract::State(st)).await;
         assert_eq!(v["by_source"], json!({ "user": { "requests": 1, "not_modified": 0 } }));
         assert_eq!((&v["resources"]["core"]["remaining"], &v["window_reset"]), (&json!(4999), &json!(1900003600i64)));
+    }
+
+
+    /// The budget as if GitHub's last answer said: this many of 5000 left, resetting in `secs`.
+    fn left(st: &AppState, remaining: i64, secs: i64) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let mut h = reqwest::header::HeaderMap::new();
+        for (k, v) in [("x-ratelimit-limit", 5000), ("x-ratelimit-remaining", remaining), ("x-ratelimit-reset", now + secs)] {
+            h.insert(k, v.to_string().parse().unwrap());
+        }
+        st.gh_budget.record(&h, false);
+    }
+
+    #[tokio::test]
+    async fn below_a_tenth_only_people_reach_github_and_at_zero_nobody_until_the_reset() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        fake.route("GET", "/repos/octo/pause/pulls/1", 200, json!({ "number": 1 }));
+        let calls = || fake.seen("/repos/octo/pause/pulls/1").len();
+
+        // 400 of 5000 left: the pollers wait, a person's click and an agent's tool still go out.
+        left(&st, 400, 1800);
+        for poller in ["prs", "mirror", "inbox", "other"] {
+            let e = as_source(poller, async { get(&st, "/repos/octo/pause/pulls/1").await.unwrap_err() }).await;
+            assert!(is_paused(&e) && e.to_string().contains("400 of 5000 left"), "{poller}: {e}");
+        }
+        assert_eq!(calls(), 0, "nothing went out");
+        for person in ["user", "agent", "repos"] {
+            as_source(person, async { get(&st, "/repos/octo/pause/pulls/1").await.unwrap() }).await;
+        }
+        assert_eq!(calls(), 3);
+
+        // None left: nobody, until the reset.
+        left(&st, 0, 1800);
+        let e = as_source("user", async { get(&st, "/repos/octo/pause/pulls/1").await.unwrap_err() }).await;
+        assert!(is_paused(&e) && e.to_string().contains("none left"), "{e}");
+        assert_eq!(calls(), 3);
+
+        // Once the reset time has passed, what Loft knew is stale and everything goes again.
+        left(&st, 0, -1);
+        as_source("prs", async { get(&st, "/repos/octo/pause/pulls/1").await.unwrap() }).await;
+        assert_eq!(calls(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_poller_skips_its_tick_on_a_rate_limit_instead_of_waiting() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        fake.in_turn("GET", "/repos/octo/skip/pulls/1", vec![(429, json!({ "message": "Too Many Requests" })), (200, json!({ "number": 1 }))]);
+        fake.with_headers("GET", "/repos/octo/skip/pulls/1", &[("retry-after", "30")]);
+        let started = std::time::Instant::now();
+        let e = as_source("prs", async { get(&st, "/repos/octo/skip/pulls/1").await.unwrap_err() }).await;
+        assert!(e.to_string().contains("rate limited"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(5), "no 30 s sleep");
+        assert_eq!(fake.seen("/repos/octo/skip/pulls/1").len(), 1, "no retry: the next tick tries again");
     }
 
 }

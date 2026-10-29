@@ -78,6 +78,8 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
                 pr.checks = checks(state, &pr.slug, &pr.head_sha).await.unwrap_or(pr.checks);
             }
         }
+        // Paused for the rate limit: nothing went out, so the card keeps what it had.
+        Err(e) if github::is_paused(&e) => return Ok(pr),
         Err(e) => pr.error = Some(e.to_string()),
     }
     pr.checked_at = Some(now());
