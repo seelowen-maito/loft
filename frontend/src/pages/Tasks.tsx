@@ -336,7 +336,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} repo={repos[t.project]} />
+          <TaskActions task={t} agents={agents} repo={repos[t.project]} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
         </div>
       </header>
 

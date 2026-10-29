@@ -316,7 +316,7 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
         return Ok(t);
     }
     if t.project.trim().is_empty() {
-        return Err("This Loft issue has no project, so there's no GitHub repo to publish it to.".into());
+        return Err("Pick a project first: this Loft issue has no project, so there's no GitHub repo to publish it to.".into());
     }
     let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| format!("{e}, so there's no GitHub repo to publish it to."))?;
     if crate::github::token(state).is_none() {
@@ -1228,6 +1228,42 @@ mod tests {
         s.comment_approval_default = "own".into();
         st.settings.save(s).unwrap();
         assert_eq!(st.settings.get().approval_mode("ap-new"), "own");
+    }
+
+
+    #[tokio::test]
+    async fn an_issue_takes_its_agents_project_and_one_without_a_project_says_so() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/pub-proj";
+        project(&st, "pub-proj", Some("https://github.com/octo/pub-proj"));
+        let mut dev = crate::tasks::tests::agent(&st, "Dev");
+        dev.project = "pub-proj".into();
+        st.db.save_agent(&dev).unwrap();
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+
+        // Through the API and the Lead's create_issue: no project given, the assignee's.
+        let (code, Json(v)) = crate::tasks::create_task(State(st.clone()), Json(json!({ "title": "Via API", "agent_id": dev.id }))).await.unwrap();
+        assert_eq!((code.as_u16(), &v["project"]), (201, &json!("pub-proj")));
+        crate::tasks::mcp_call(&st, &lead, "create_issue", &json!({ "title": "Via Lead", "agent": "Dev" }), |k: &str| if k == "Dev" { Ok(dev.clone()) } else { Err(k.to_string()) }).unwrap().unwrap();
+        let by_lead = st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Via Lead").unwrap();
+        assert_eq!(by_lead.project, "pub-proj");
+        // An explicit project wins.
+        let (_, Json(v)) = crate::tasks::create_task(State(st.clone()), Json(json!({ "title": "Mine", "agent_id": dev.id, "project": "other" }))).await.unwrap();
+        assert_eq!(v["project"], "other");
+
+        // No project: Publish is refused with the reason, and GitHub isn't asked.
+        let (bare, _) = crate::tasks::create(&st, &json!({ "title": "Bare" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(bare.id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("Pick a project first"), "{}", err.1);
+        assert!(fake.seen("/").is_empty());
+
+        // Set the project through PATCH (both names): then it publishes.
+        let Json(v) = crate::tasks::update(State(st.clone()), axum::extract::Path(bare.id.clone()), Json(json!({ "project": "pub-proj" }))).await.unwrap();
+        assert_eq!(v["project"], "pub-proj");
+        fake.route("POST", "/repos/octo/pub-proj/issues", 201, gh(repo, 5, "Bare", "open", "2026-10-29T00:00:00Z"));
+        let Json(v) = publish_route(State(st.clone()), axum::extract::Path(bare.id)).await.unwrap();
+        assert_eq!(v["github"]["number"], 5);
     }
 
 }
