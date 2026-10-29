@@ -10,6 +10,11 @@ use crate::github;
 use crate::state::{AppState, Event};
 
 const POLL_EVERY: Duration = Duration::from_secs(30);
+/// Drafts, and every PR while no app is open, are polled this often instead.
+const SLOW_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// PRs with a mergeability retry already waiting, so refreshes don't stack more.
+static RETRYING: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
 
 /// Does this tool call open a pull request?
 pub fn creates_pr(tool: &str, input: &Value) -> bool {
@@ -52,8 +57,15 @@ pub async fn register(state: &AppState, agent_id: &str, slug: &str, number: i64,
 /// Pull fresh state, mergeability and checks from GitHub.
 pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
     let pr = refresh_once(state, id).await?;
-    // GitHub computes mergeability lazily; ask again shortly when it's unknown.
-    if pr.state == "open" && pr.mergeable.is_none() && pr.error.is_none() {
+    // GitHub computes mergeability lazily; ask again shortly when it's unknown, with one retry
+    // waiting per PR at most.
+    let first = RETRYING.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(pr.id.clone());
+    if !first {
+        return Ok(pr);
+    }
+    if pr.state != "open" || pr.mergeable.is_some() || pr.error.is_some() {
+        RETRYING.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|s| s.remove(&pr.id));
+    } else {
         let (state, id) = (state.clone(), pr.id.clone());
         tokio::spawn(github::as_source("prs", async move {
             for delay in [3, 8, 20] {
@@ -63,6 +75,7 @@ pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
                     _ => break,
                 }
             }
+            RETRYING.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|s| s.remove(&id));
         }));
     }
     Ok(pr)
@@ -70,16 +83,32 @@ pub async fn refresh(state: &AppState, id: &str) -> Result<PullRequest> {
 
 async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
     let Some(mut pr) = state.db.get_pull_request(id)? else { bail!("no such pull request") };
-    match github::get(state, &format!("/repos/{}/pulls/{}", pr.slug, pr.number)).await {
-        Ok(v) => {
-            apply(&mut pr, &v);
+    // With the ETag, an unchanged PR answers 304, which doesn't count against the rate limit.
+    match github::get_if_changed(state, &format!("/repos/{}/pulls/{}", pr.slug, pr.number), pr.etag.as_deref()).await {
+        Ok(changed) => {
+            if let Some((v, etag)) = changed {
+                apply(&mut pr, &v);
+                pr.etag = etag;
+            }
             pr.error = None;
-            if pr.state == "open" && !pr.head_sha.is_empty() {
-                pr.checks = checks(state, &pr.slug, &pr.head_sha).await.unwrap_or(pr.checks);
+            pr.gone = false;
+            // Checks change without the PR changing, so they're read until they settle on its head.
+            let settled = pr.checks_sha == pr.head_sha && pr.checks["pending"].as_i64() == Some(0);
+            if pr.state == "open"
+                && !pr.head_sha.is_empty()
+                && !settled
+                && let Ok(c) = checks(state, &pr.slug, &pr.head_sha).await
+            {
+                pr.checks = c;
+                pr.checks_sha = pr.head_sha.clone();
             }
         }
         // Paused for the rate limit: nothing went out, so the card keeps what it had.
         Err(e) if github::is_paused(&e) => return Ok(pr),
+        Err(e) if github::is_gone(&e) => {
+            pr.gone = true;
+            pr.error = Some("This pull request is gone from GitHub (deleted, or its repo is), so Loft stopped checking it.".into());
+        }
         Err(e) => pr.error = Some(e.to_string()),
     }
     pr.checked_at = Some(now());
@@ -174,12 +203,27 @@ pub async fn poller(state: AppState) {
         loop {
             tick.tick().await;
             let Ok(prs) = state.db.list_pull_requests(None) else { continue };
-            for pr in prs.into_iter().filter(|p| p.state == "open" || p.state.is_empty()) {
+            // An open app (the web or a phone) is someone looking.
+            let watched = state.events.receiver_count() > 0;
+            for pr in prs.into_iter().filter(|p| due(p, watched)) {
                 let _ = refresh(&state, &pr.id).await;
             }
         }
     })
     .await
+}
+
+/// Does `pr` get polled this tick: open and not gone, every tick while someone looks at a non-draft,
+/// else every `SLOW_EVERY`.
+fn due(pr: &PullRequest, watched: bool) -> bool {
+    if pr.gone || !(pr.state == "open" || pr.state.is_empty()) {
+        return false;
+    }
+    if watched && !pr.draft {
+        return true;
+    }
+    let since = pr.checked_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+    since.is_none_or(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).to_std().unwrap_or_default() >= SLOW_EVERY)
 }
 
 /// Find PRs agents opened before this feature existed, anchored to their tool calls.
@@ -194,5 +238,104 @@ pub async fn backfill(state: AppState) {
         for (slug, n) in github::extract_pr_links(&result.content) {
             let _ = register(&state, &use_msg.agent_id, &slug, n, tool_use_id.clone()).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::tests::{own_fake, state_with_token};
+
+    fn pull(slug: &str, n: i64, sha: &str) -> Value {
+        json!({ "number": n, "title": "Retry cap", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean",
+                "head": { "ref": "cap", "sha": sha }, "base": { "ref": "main", "repo": {} }, "user": { "login": "octo" },
+                "html_url": format!("https://github.com/{slug}/pull/{n}") })
+    }
+
+    fn settled_checks(fake: &crate::github::tests::Fake, slug: &str, sha: &str) {
+        fake.route("GET", &format!("/repos/{slug}/commits/{sha}/check-runs"), 200, json!({ "check_runs": [{ "status": "completed", "conclusion": "success" }] }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{sha}/status"), 200, json!({ "statuses": [] }));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pr_costs_one_304_and_no_checks_call() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-etag";
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        fake.in_turn("GET", "/repos/octo/pr-etag/pulls/7", vec![(200, pull(slug, 7, "abc")), (304, Value::Null)]);
+        fake.with_headers("GET", "/repos/octo/pr-etag/pulls/7", &[("etag", "\"v1\"")]);
+        settled_checks(&fake, slug, "abc");
+
+        let pr = register(&st, &a.id, slug, 7, None).await.unwrap();
+        assert_eq!((pr.checks["passed"].as_i64(), pr.etag.as_deref(), pr.checks_sha.as_str()), (Some(1), Some("\"v1\""), "abc"));
+        let before_checks = fake.seen("/repos/octo/pr-etag/commits/").len();
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_eq!((pr.title.as_str(), pr.checks["passed"].as_i64(), pr.error.as_deref()), ("Retry cap", Some(1), None), "the card keeps what it had");
+        let pulls = fake.seen("/repos/octo/pr-etag/pulls/7");
+        assert_eq!(pulls.len(), 2);
+        assert_eq!(pulls[1].headers["if-none-match"], "\"v1\"");
+        assert_eq!(fake.seen("/repos/octo/pr-etag/commits/").len(), before_checks, "settled checks on the same head aren't read again");
+    }
+
+    #[tokio::test]
+    async fn pending_checks_and_a_new_head_are_read_again() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-pending";
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        fake.in_turn("GET", "/repos/octo/pr-pending/pulls/8", vec![(200, pull(slug, 8, "abc")), (304, Value::Null), (200, pull(slug, 8, "def"))]);
+        fake.in_turn("GET", "/repos/octo/pr-pending/commits/abc/check-runs", vec![(200, json!({ "check_runs": [{ "status": "in_progress" }] })), (200, json!({ "check_runs": [{ "status": "completed", "conclusion": "success" }] }))]);
+        fake.route("GET", "/repos/octo/pr-pending/commits/abc/status", 200, json!({ "statuses": [] }));
+        settled_checks(&fake, slug, "def");
+        let pr = register(&st, &a.id, slug, 8, None).await.unwrap();
+        assert_eq!(pr.checks["pending"], 1);
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_eq!((pr.checks["pending"].as_i64(), pr.checks["passed"].as_i64()), (Some(0), Some(1)), "pending checks are read on a 304 too");
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_eq!((pr.head_sha.as_str(), pr.checks_sha.as_str()), ("def", "def"));
+        assert_eq!(fake.seen("/repos/octo/pr-pending/commits/def/check-runs").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pr_github_no_longer_has_stops_being_polled() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        fake.in_turn("GET", "/repos/octo/pr-gone/pulls/9", vec![(200, pull("octo/pr-gone", 9, "abc")), (404, json!({ "message": "Not Found" }))]);
+        settled_checks(&fake, "octo/pr-gone", "abc");
+        let pr = register(&st, &a.id, "octo/pr-gone", 9, None).await.unwrap();
+        assert!(due(&pr, true));
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert!(pr.gone && pr.error.as_deref().is_some_and(|e| e.contains("gone from GitHub")), "{:?}", pr.error);
+        assert!(!due(&pr, true) && !due(&pr, false), "never polled again");
+    }
+
+    #[test]
+    fn drafts_and_unwatched_prs_poll_slowly() {
+        let recent = PullRequest { state: "open".into(), checked_at: Some(now()), ..Default::default() };
+        assert!(due(&recent, true), "watched: every tick");
+        assert!(!due(&recent, false), "nobody looking: every 5 min");
+        assert!(!due(&PullRequest { draft: true, ..recent.clone() }, true), "a draft: every 5 min");
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+        assert!(due(&PullRequest { draft: true, checked_at: Some(old.clone()), ..recent.clone() }, false));
+        assert!(!due(&PullRequest { state: "merged".into(), checked_at: Some(old), ..recent }, true));
+    }
+
+    #[tokio::test]
+    async fn only_one_mergeability_retry_waits_per_pr() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let mut unknown = pull("octo/pr-retry", 3, "abc");
+        unknown["mergeable"] = Value::Null;
+        fake.route("GET", "/repos/octo/pr-retry/pulls/3", 200, unknown);
+        settled_checks(&fake, "octo/pr-retry", "abc");
+        let pr = register(&st, &a.id, "octo/pr-retry", 3, None).await.unwrap();
+        for _ in 0..4 {
+            refresh(&st, &pr.id).await.unwrap();
+        }
+        let waiting = RETRYING.lock().unwrap().as_ref().map_or(0, |s| s.iter().filter(|i| **i == pr.id).count());
+        assert_eq!(waiting, 1);
     }
 }

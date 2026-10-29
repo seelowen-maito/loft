@@ -170,6 +170,12 @@ pub struct PullRequest {
     pub error: Option<String>,
     pub checked_at: Option<String>,
     pub created_at: String,
+    /// GitHub's ETag for the PR, so an unchanged one costs a free 304.
+    pub etag: Option<String>,
+    /// The head commit `checks` were read for; settled checks there aren't read again.
+    pub checks_sha: String,
+    /// GitHub answered 404/410: the PR (or its repo) is gone, so it's no longer polled.
+    pub gone: bool,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
