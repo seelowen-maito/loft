@@ -145,6 +145,13 @@ struct RootView: View {
     @Environment(Router.self) private var router
 
     var body: some View {
+        VStack(spacing: 0) {
+            if store.isDemo { DemoBanner() }
+            main
+        }
+    }
+
+    @ViewBuilder private var main: some View {
         @Bindable var router = router
         Group {
             if store.connection == .notConfigured {
@@ -272,5 +279,30 @@ struct RecipientPicker: View {
                 EmptyState(symbol: "person.3", title: "No agents", message: "Create agents in Loft on your Mac first.")
             }
         }
+    }
+}
+
+/// On every screen of the demo: it's sample data, and one tap leaves it.
+struct DemoBanner: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(Router.self) private var router
+
+    var body: some View {
+        HStack {
+            Label("Demo · sample data", systemImage: "play.circle.fill").font(.footnote.weight(.semibold))
+            Spacer()
+            Button("Exit") {
+                router.tab = .overview
+                store.exitDemo()
+            }
+            .font(.footnote.weight(.semibold))
+            .accessibilityHint("Leaves the demo. Nothing from it is kept.")
+            .accessibilityIdentifier("exitDemo")
+        }
+        .foregroundStyle(.black)
+        .padding(.horizontal, Theme.gutter).padding(.vertical, 6)
+        .background(Theme.attention)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("demoBanner")
     }
 }
