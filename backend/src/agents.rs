@@ -1748,18 +1748,41 @@ esac
         fields(st, id)["subagents"].as_array().cloned().unwrap_or_default()
     }
 
+    /// The `subagents` of every agent-updated event pushed for the agent, from now on.
+    fn pushed_subagents(st: &AppState, id: &str) -> Arc<std::sync::Mutex<Vec<Value>>> {
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let (mut events, id, out) = (st.events.subscribe(), id.to_string(), seen.clone());
+        tokio::spawn(async move {
+            while let Ok(ev) = events.recv().await {
+                let ev = serde_json::to_value(ev).unwrap();
+                if ev["type"] == "agent_updated" && ev["agent"]["id"] == json!(id) {
+                    out.lock().unwrap().push(json!({ "running": ev["agent"]["running"], "ids": ev["agent"]["subagents"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect::<Vec<_>>() }));
+                }
+            }
+        });
+        seen
+    }
+
+    fn last_push(seen: &std::sync::Mutex<Vec<Value>>) -> Value {
+        seen.lock().unwrap().last().cloned().unwrap_or_default()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_json_shows_its_running_subagents() {
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
+        let pushed = pushed_subagents(&st, &a.id);
         enqueue(&st, &a.id, Some("delegate".into()), "user");
         until("the nested call", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
         let subs = subagents(&st, &a.id);
         assert_eq!(subs.len(), 1, "the subagent's own Agent call isn't counted: {subs:?}");
         assert!(subs[0]["id"] == "a1" && subs[0]["description"] == "Find the parser" && subs[0]["type"] == "Explore" && subs[0]["started_at"].is_string(), "{subs:?}");
+        until("the start pushed", 10, || last_push(&pushed)["ids"] == json!(["a1"])).await;
         std::fs::write(ws.join("go"), "").unwrap();
         until("the subagent's result", 10, || subagents(&st, &a.id).is_empty()).await;
         assert!(is_running(&st, &a.id), "the result ends the subagent, not the run");
+        // Nothing else changes before `go2`: only the result's own push can tell clients.
+        until("the result pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
         std::fs::write(ws.join("go2"), "").unwrap();
         until("the run to end", 10, || !is_running(&st, &a.id)).await;
     }
@@ -1767,9 +1790,14 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn the_run_ending_clears_its_subagents() {
         let (st, a) = fake_claude_state();
+        let pushed = pushed_subagents(&st, &a.id);
         enqueue(&st, &a.id, Some("orphan".into()), "user");
         until("the run to end", 10, || !is_running(&st, &a.id) && st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "run_end")).await;
         assert!(subagents(&st, &a.id).is_empty());
+        let seen = pushed.lock().unwrap().clone();
+        let started = seen.iter().position(|p| p["ids"] == json!(["a1"])).expect("the subagent was pushed while the run went on");
+        let cleared = seen[started..].iter().position(|p| p["ids"] == json!([])).expect("the run's end was pushed") + started;
+        assert_eq!(seen[cleared]["running"], json!(true), "the end of the run itself clears them, before the agent goes idle: {seen:?}");
 
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("delegate".into()), "user");
