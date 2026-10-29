@@ -46,6 +46,8 @@ protocol LoftAPI: Sendable {
     func deleteTask(id: String) async throws
     func executeTask(id: String, agentId: String?, note: String) async throws -> ExecuteResponse
     func cancelTask(id: String, stopRun: Bool) async throws -> CancelResponse
+    /// Publish a Loft-only issue to its project's GitHub repo (spec #65); it comes back mirrored.
+    func publishTask(id: String) async throws -> HBTask
     func activity(limit: Int, before: Date?) async throws -> [ActivityItem]
     func usage() async throws -> PlanUsage
     func system() async throws -> SystemReading
@@ -234,6 +236,10 @@ struct LiveLoftAPI: LoftAPI {
         try decode(CancelResponse.self, try await send("POST", "/tasks/\(id)/cancel", body: ["stop_run": .bool(stopRun)]))
     }
 
+    func publishTask(id: String) async throws -> HBTask {
+        try decode(HBTask.self, try await send("POST", "/tasks/\(id)/publish", body: [:]))
+    }
+
     func activity(limit: Int, before: Date?) async throws -> [ActivityItem] {
         var q = [URLQueryItem(name: "limit", value: String(limit))]
         if let before { q.append(URLQueryItem(name: "before", value: JSONCoding.formatDate(before))) }
@@ -299,6 +305,7 @@ extension LoftAPI {
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
+    func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
     func taskPlan(id: String) async throws -> TaskPlan { throw APIError.unsupported("Plans") }
     func needsYou() async throws -> NeedsYouList { throw APIError.unsupported("Needs you") }

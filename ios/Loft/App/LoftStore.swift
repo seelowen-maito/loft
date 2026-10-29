@@ -825,6 +825,14 @@ final class LoftStore {
         return t
     }
 
+    /// Publish a Loft-only issue to GitHub; it comes back with its GitHub link.
+    @discardableResult
+    func publishTask(_ id: String) async throws -> HBTask {
+        let t = try await requireTasks().publishTask(id: id)
+        upsert(&tasks, t)
+        return t
+    }
+
     func deleteTask(_ id: String) async throws {
         try await requireTasks().deleteTask(id: id)
         tasks.removeAll { $0.id == id }
