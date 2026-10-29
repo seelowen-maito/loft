@@ -113,6 +113,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             task("t6", "Renew the domain", "inbox", agent: nil, minutes: 300),
             task("t7", "Fix broken docs links", "failed", agent: "docs", error: "Link checker crashed", minutes: 60),
         ]
+        // t1 mirrors a GitHub issue (spec #65): labels, an owner and its sub-issues; t2 a closed one.
+        taskList[0].labels = ["spec", "ios"]
+        taskList[0].owner = "octo-dev"
+        taskList[0].github = .init(repo: "octo/loft", number: 42, url: "https://github.com/octo/loft/issues/42", state: "open", subTotal: 4, subDone: 1)
+        taskList[1].labels = ["ready-for-agent"]
+        taskList[1].github = .init(repo: "octo/loft", number: 43, url: "https://github.com/octo/loft/issues/43", state: "closed")
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
         }
