@@ -27,12 +27,14 @@ struct VoiceSessionView: View {
             questionCard
             Group {
                 switch voice.phase {
+                case .failed(let message): failed(message)
+                case _ where variant == .d: conversation
+                case _ where variant == .e && [.idle, .preparing, .listening, .paused, .cleaning].contains(voice.phase): dictate
                 case .idle, .preparing, .listening, .paused: listening
                 case .cleaning: cleaning
                 case .review: review
                 case .sending: working
                 case .speaking: speaking
-                case .failed(let message): failed(message)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -40,6 +42,13 @@ struct VoiceSessionView: View {
         .background(Theme.background.ignoresSafeArea())
         .onChange(of: voice.phase, initial: true) { _, p in
             if p == .review { loadDraft() }
+            // Voice style E: the tidied text goes to the chat's message box, to read and send there.
+            if p == .review, variant == .e, let id = voice.agentId {
+                let text = voice.cleaned ?? voice.raw
+                voice.discard()
+                router.openChat(id, draft: text)
+                dismiss()
+            }
             // Voice style B: once it's sent, the chat takes over (your message, then "thinking…" and the reply).
             if p == .sending, variant == .b, let id = voice.agentId {
                 router.openChat(id)
@@ -182,7 +191,7 @@ struct VoiceSessionView: View {
                 Group {
                     let tint = voice.phase == .listening ? Theme.accent : Color.secondary
                     switch variant {
-                    case .current: VoiceOrb(level: voice.level, active: voice.phase == .listening, tint: tint).frame(maxWidth: 220)
+                    case .current, .d, .e: VoiceOrb(level: voice.level, active: voice.phase == .listening, tint: tint).frame(maxWidth: 220)
                     case .a: VoiceBars(level: voice.level, active: voice.phase == .listening, tint: tint)
                     case .b: VoicePulse(level: voice.level, active: voice.phase == .listening, tint: tint)
                     case .c: VoiceLine(level: voice.level, active: voice.phase == .listening, tint: tint).padding(.horizontal, Theme.gutter)
@@ -196,7 +205,7 @@ struct VoiceSessionView: View {
                 Spacer(minLength: 0)
             } else {
                 switch variant {
-                case .current:
+                case .current, .d, .e:
                     transcript
                         .frame(maxHeight: 280)
                         .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
@@ -244,7 +253,7 @@ struct VoiceSessionView: View {
 
     private var hint: String {
         switch variant {
-        case .current, .c: "Take your time. Say “send” when you're done; after a quiet moment I'll ask."
+        case .current, .c, .d, .e: "Take your time. Say “send” when you're done; after a quiet moment I'll ask."
         case .a: "Say “send” or tap Done. It's tidied up and goes after 3 seconds, with Undo."
         case .b: "Say “send” or tap Done. It goes to the chat as you said it."
         }
@@ -274,6 +283,73 @@ struct VoiceSessionView: View {
         }
         .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.12),
                                      .init(color: .black, location: 1)], startPoint: .top, endPoint: .bottom))
+    }
+
+    // MARK: Style D: conversation
+
+    private var conversation: some View {
+        let state = VoiceLoop.state(for: voice.phase)
+        return VStack(spacing: 20) {
+            Spacer(minLength: 0)
+            VoiceStateRing(state: state, level: voice.level,
+                           progress: VoiceLoop.endProgress(quiet: voice.quietFor, endsOpen: VoiceSend.endsOpen(voice.raw)))
+            Group {
+                switch state {
+                case .listening: LiveCaptions(committed: voice.committed, live: voice.live)
+                case .thinking:
+                    Text(voice.phase == .sending ? "\(agentName) is on it…" : "Sending…")
+                        .font(.title3).foregroundStyle(.secondary)
+                case .speaking:
+                    ScrollView {
+                        Text(voice.reply ?? "").font(.title3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, Theme.gutter)
+                            .accessibilityIdentifier("voiceReply")
+                    }
+                    .defaultScrollAnchor(.bottom)
+                    .frame(maxHeight: 220)
+                case .ended: EmptyView()
+                }
+            }
+            .frame(maxHeight: 240)
+            Text(state == .speaking ? "Talk any time to cut in." : state == .listening ? "Pause and it sends. Keep talking to add more." : " ")
+                .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("voiceHint")
+            Spacer(minLength: 0)
+            Button(role: .destructive) {
+                voice.speaker.stop()
+                voice.discard()
+                dismiss()
+            } label: {
+                Label("End", systemImage: "xmark").frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .buttonStyle(.borderedProminent).tint(.red).controlSize(.large)
+            .padding(.horizontal, Theme.gutter).padding(.bottom, 12)
+            .accessibilityIdentifier("voiceEnd")
+        }
+        .sensoryFeedback(.impact(weight: .medium), trigger: state)
+    }
+
+    // MARK: Style E: dictate
+
+    private var dictate: some View {
+        VStack(spacing: 20) {
+            RecentAgentsRow()
+            Spacer(minLength: 0)
+            if voice.phase == .cleaning {
+                ProgressView("Tidying up…")
+                Text(voice.raw).font(.body).foregroundStyle(.secondary).lineLimit(6).padding(.horizontal, Theme.gutter)
+            } else {
+                CaptionTranscript(committed: voice.committed, live: voice.live)
+            }
+            Spacer(minLength: 0)
+            VoiceBars(level: voice.level, active: voice.phase == .listening).frame(height: 60).scaleEffect(0.6)
+            HoldToTalkButton(listening: voice.phase == .listening) { Task { await voice.finish() } }
+                .disabled(voice.raw.isEmpty || voice.phase == .cleaning)
+            Text("Tap or let go when you're done: it lands in the message box to send.")
+                .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .padding(.horizontal, Theme.gutter).padding(.bottom, 12)
+        }
     }
 
     // MARK: Cleaning
