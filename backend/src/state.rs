@@ -65,6 +65,14 @@ pub struct Subagent {
     #[serde(rename = "type")]
     pub kind: String,
     pub started_at: String,
+    /// Claude Code's task id for it, from its task_started.
+    #[serde(skip)]
+    pub task_id: Option<String>,
+    /// Runs in the background: its tool result only says it launched.
+    #[serde(skip)]
+    pub background: bool,
+    #[serde(skip)]
+    pub launched: bool,
 }
 
 #[derive(Default)]

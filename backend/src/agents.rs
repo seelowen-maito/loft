@@ -975,11 +975,38 @@ async fn run_process(
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
                 }
+                // Ties a subagent's Agent call to its task, and says whether it runs in the background.
+                Some("task_started") | Some("task_updated") => {
+                    let use_id = ev["tool_use_id"].as_str();
+                    let task_id = ev["task_id"].as_str();
+                    let background = ev["is_backgrounded"].as_bool().or(ev["patch"]["is_backgrounded"].as_bool()) == Some(true);
+                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                        for s in i.subagents.iter_mut().filter(|s| use_id == Some(s.id.as_str()) || (task_id.is_some() && s.task_id.as_deref() == task_id)) {
+                            s.task_id = task_id.map(String::from).or(s.task_id.take());
+                            s.background |= background;
+                        }
+                    }
+                }
                 Some("background_tasks_changed") => {
-                    bg = ev["tasks"]
-                        .as_array()
-                        .map(|ts| ts.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), t["description"].as_str().unwrap_or("background task").to_string())).collect())
-                        .unwrap_or_default();
+                    let tasks = ev["tasks"].as_array().cloned().unwrap_or_default();
+                    bg = tasks.iter().map(|t| (t["task_id"].as_str().unwrap_or("").to_string(), t["description"].as_str().unwrap_or("background task").to_string())).collect();
+                    // A launched background subagent runs until the list drops it. Without its task id, until
+                    // no subagent the agent started itself is left.
+                    let any_own = tasks.iter().any(|t| t["task_type"] == "local_agent" && t["parent_task_id"].is_null());
+                    let ended = state.rt.lock().unwrap().runs.get_mut(agent_id).is_some_and(|i| {
+                        let n = i.subagents.len();
+                        i.subagents.retain(|s| {
+                            !s.launched
+                                || match &s.task_id {
+                                    Some(t) => bg.iter().any(|(id, _)| id == t),
+                                    None => any_own,
+                                }
+                        });
+                        i.subagents.len() < n
+                    });
+                    if ended {
+                        emit_run(state, agent_id);
+                    }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
                         exit_by = Some(tokio::time::Instant::now() + FOLLOW_UP_GRACE);
@@ -1038,7 +1065,8 @@ async fn run_process(
                                 if sub.is_none() && matches!(name, "Agent" | "Task") {
                                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
                                         let s = |k: &str| b["input"][k].as_str().unwrap_or("").to_string();
-                                        i.subagents.push(crate::state::Subagent { id: id.to_string(), description: s("description"), kind: s("subagent_type"), started_at: now() });
+                                        let background = b["input"]["run_in_background"].as_bool() == Some(true);
+                                        i.subagents.push(crate::state::Subagent { id: id.to_string(), description: s("description"), kind: s("subagent_type"), started_at: now(), task_id: None, background, launched: false });
                                     }
                                     emit_run(state, agent_id);
                                 }
@@ -1068,9 +1096,15 @@ async fn run_process(
                         let full = result_text(&b["content"]);
                         let use_id = b["tool_use_id"].as_str().unwrap_or("").to_string();
                         let ok = !b["is_error"].as_bool().unwrap_or(false);
+                        // A background subagent's result only says it launched; it ends when the task list drops it.
                         let ended = state.rt.lock().unwrap().runs.get_mut(agent_id).is_some_and(|i| {
                             let n = i.subagents.len();
-                            i.subagents.retain(|s| s.id != use_id);
+                            i.subagents.retain_mut(|s| {
+                                if s.id == use_id && s.background {
+                                    s.launched = true;
+                                }
+                                s.id != use_id || s.background
+                            });
                             i.subagents.len() < n
                         });
                         if ended {
@@ -1383,6 +1417,8 @@ pub(crate) mod tests {
     /// "busy" never replies, "slow" replays an empty result first, "fail" ends in an error, "ask" replies with a question,
     /// "delegate" starts an Explore subagent, which starts one of its own, and waits for a `go` file before the
 /// subagent returns and for `go2` before the reply; "orphan" replies with a subagent that never returned.
+/// "bg-agent" launches two background subagents next to a shell; the task list drops one at `go` and the other at
+/// `go2`, and the reply waits for `go3` (with "linger" they stay listed instead, "no-task-id" leaves out their task_started).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
@@ -1432,7 +1468,26 @@ case "$prompt" in *delegate*)
   echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a1","content":"found it"}]}}'
   while [ ! -f go2 ]; do sleep 0.05; done;;
 esac
-case "$prompt" in *linger*)
+case "$prompt" in *bg-agent*)
+  for i in 1 2; do
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b'$i'","name":"Agent","input":{"description":"Audit '$i'","subagent_type":"Explore","prompt":"x","run_in_background":true}}]}}'
+  done
+  echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"t1","task_type":"local_agent","subagent_type":"Explore","description":"Audit 1"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+  for i in 1 2; do
+    case "$prompt" in *no-task-id*) ;; *)
+      echo '{"type":"system","subtype":"task_started","task_id":"t'$i'","tool_use_id":"b'$i'","description":"Audit '$i'","task_type":"local_agent","is_backgrounded":true}';;
+    esac
+    echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b'$i'","content":"Async agent launched successfully."}]}}'
+  done
+  case "$prompt" in *linger*) ;; *)
+    while [ ! -f go ]; do sleep 0.05; done
+    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"},{"task_id":"t2","task_type":"local_agent","subagent_type":"Explore","description":"Audit 2"}]}'
+    while [ ! -f go2 ]; do sleep 0.05; done
+    echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"}]}'
+    while [ ! -f go3 ]; do sleep 0.05; done;;
+  esac;;
+esac
+case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
 reply=started
@@ -1735,6 +1790,7 @@ esac
         enqueue(&st, &a.id, Some("linger".into()), "user");
         until("the reply", 10, || fields(&st, &a.id)["waiting_on"] == json!(["Run the QA suite"])).await;
         let v = fields(&st, &a.id);
+        assert_eq!(v["subagents"], json!([]), "a background shell isn't a subagent");
         assert!(v["running"] == json!(true) && v["waiting_since"].is_string() && v["last_output_at"].is_string(), "{v}");
         let r = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert!(r.is_ok());
@@ -1804,6 +1860,45 @@ esac
         until("the subagent", 10, || subagents(&st, &a.id).len() == 1).await;
         assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
         until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
+        assert!(subagents(&st, &a.id).is_empty());
+    }
+
+    fn subagent_ids(st: &AppState, id: &str) -> Vec<Value> {
+        subagents(st, id).iter().map(|s| s["id"].clone()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_subagent_counts_until_the_task_list_drops_it() {
+        for prompt in ["bg-agent", "bg-agent no-task-id"] {
+            let (st, a) = fake_claude_state();
+            let ws = workspace(&st, &a.id);
+            let pushed = pushed_subagents(&st, &a.id);
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the launch results", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.content.contains("launched successfully")).count() == 2).await;
+            assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")], "{prompt}: the launch doesn't end them, and the shell isn't a subagent");
+            std::fs::write(ws.join("go"), "").unwrap();
+            if prompt == "bg-agent" {
+                until("the task list to drop b1 only", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+                until("the drop pushed", 10, || last_push(&pushed)["ids"] == json!(["b2"])).await;
+            }
+            // Without task ids, they end together once no subagent of the agent's own is listed.
+            std::fs::write(ws.join("go2"), "").unwrap();
+            until("the task list to drop them", 10, || subagents(&st, &a.id).is_empty()).await;
+            until("the drop pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
+            std::fs::write(ws.join("go3"), "").unwrap();
+            until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_message_stopping_the_run_clears_its_background_subagents() {
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("bg-agent linger".into()), "user");
+        until("the reply", 10, || !fields(&st, &a.id)["waiting_on"].as_array().unwrap().is_empty()).await;
+        assert_eq!(subagents(&st, &a.id).len(), 2, "still running after the reply");
+        enqueue(&st, &a.id, Some("next".into()), "user");
+        until("the new message to run", 10, || !is_running(&st, &a.id)).await;
+        assert!(workspace(&st, &a.id).join("terminated").exists());
         assert!(subagents(&st, &a.id).is_empty());
     }
 
