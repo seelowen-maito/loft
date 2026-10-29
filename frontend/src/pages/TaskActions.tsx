@@ -335,6 +335,41 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
   );
 }
 
+/** Closed on GitHub while an agent works on it: the work wasn't stopped; the user decides. */
+export function ClosedOnGithubCard({ task: t }: { task: Task }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const act = async (f: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = t.github?.number;
+  return (
+    <section className="rounded-2xl border border-warn/30 bg-warn/[0.06] p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] text-fg">#{n} was closed on GitHub</div>
+          <div className="mt-0.5 text-[12.5px] text-fg-2">It's still being worked on here. Cancel it, or keep working and reopen #{n} on GitHub.</div>
+        </div>
+        <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>
+          <X className="size-3.5" /> Cancel issue
+        </button>
+        <button className="btn-primary" disabled={busy} onClick={() => act(() => api.keepWorking(t.id))}>
+          <RotateCcw className="size-3.5" /> Keep working
+        </button>
+      </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
 /** The comment box under a task's thread. */
 export function CommentBox({ task: t, agent }: { task: Task; agent?: Agent }) {
   const [text, setText] = useState("");

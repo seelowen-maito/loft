@@ -245,11 +245,16 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             }
             // Open/closed follows GitHub only when GitHub moved: a Loft close still being written isn't undone.
             let moved = t.github.as_ref().is_some_and(|g| g.state != l.state) && t.state() != l.state;
+            // Closed on GitHub while an agent works on it: the work isn't stopped behind the user's back.
+            // The issue stays open, the mismatch is shown (`github.state` closed, issue open) and asked about.
+            let working = crate::tasks::is_active(&t);
             let status = match (moved, l.state.as_str()) {
+                (true, "closed") if working => None,
                 (true, "closed") => Some(if i["state_reason"] == "not_planned" { "cancelled" } else { "done" }),
                 (true, _) => Some("inbox"),
                 _ => None,
             };
+            let closed_under_work = moved && working && l.state == "closed";
             t.title = if title.is_empty() { t.title } else { title };
             t.description = description;
             t.labels = labels;
@@ -265,6 +270,10 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
                 if let Some(s) = status {
                     let text = match s { "done" => "Closed on GitHub", "cancelled" => "Closed on GitHub as not planned", _ => "Reopened on GitHub" };
                     crate::tasks::log_status(state, &t, FROM_GITHUB, text);
+                }
+                if closed_under_work {
+                    let n = t.github.as_ref().map_or(0, |g| g.number);
+                    crate::tasks::log_status(state, &t, FROM_GITHUB, &format!("#{n} was closed on GitHub while it's being worked on: cancel it, or keep working (reopens #{n})"));
                 }
                 report.updated += 1;
             }
@@ -353,6 +362,31 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
     crate::tasks::log_status(state, &t, by, &format!("Published to GitHub as #{n}"));
     state.emit(crate::state::Event::Issues { project: t.project.clone() });
     Ok(t)
+}
+
+/// `POST /api/issues/{id}/keep-working`: the answer to "closed on GitHub while being worked on": the
+/// work goes on and the GitHub issue is reopened, so both sides agree again.
+pub async fn keep_working(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiError> {
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    let Some(repo) = t.github.as_ref().map(|g| g.repo.clone()) else {
+        return Err(crate::api::bad("It isn't on GitHub, so there's nothing to reopen."));
+    };
+    // Held like a sync or an edit, so a poll can't apply GitHub's close in between; then checked again.
+    let cursor = state.mirror.cursor(&repo);
+    let _held = cursor.lock().await;
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    if !crate::tasks::is_active(&t) {
+        return Err(crate::api::bad("Nobody is working on it now, so there's nothing to keep working on."));
+    }
+    let Some(g) = t.github.clone().filter(|g| g.state == "closed" && t.state() == "open") else {
+        return Err(crate::api::bad("It isn't closed on GitHub, so there's nothing to reopen."));
+    };
+    let path = format!("/repos/{}/issues/{}", g.repo, g.number);
+    let v = crate::github::request(&state, reqwest::Method::PATCH, &path, Some(json!({ "state": "open" }))).await.map_err(|e| crate::api::bad(format!("Couldn't reopen #{} on GitHub: {e}", g.number)))?;
+    keep_link(&state, &g.repo, &v);
+    let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
+    crate::tasks::log_status(&state, &t, "user", &format!("Kept working; #{} reopened on GitHub", g.number));
+    Ok(Json(json!(t)))
 }
 
 /// `POST /api/issues/{id}/publish`
@@ -525,7 +559,13 @@ fn patch(before: &Task, after: &Task) -> Value {
 /// it, GitHub wins: its version is brought in instead. A failure is noted in the thread, never fatal.
 pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
     let Some(g) = after.github.clone() else { return };
-    let body = patch(before, after);
+    let mut body = patch(before, after);
+    // Already closed on GitHub (cancelling after "closed while being worked on"): leave GitHub's reason as it is.
+    if g.state == "closed" && body["state"] == "closed" {
+        let o = body.as_object_mut().unwrap();
+        o.remove("state");
+        o.remove("state_reason");
+    }
     let fields = body.as_object().is_some_and(|o| !o.is_empty());
     if !fields && !links_changed(before, after) {
         return;
@@ -612,9 +652,16 @@ async fn links_to_github(state: &AppState, g: &GithubLink, now_there: &Value, be
 
 /// Reads issue #n again and keeps GitHub's `updated_at` (and state) on the Loft issue that mirrors it.
 async fn refresh_link(state: &AppState, repo: &str, n: i64) {
-    let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await else { return };
+    if let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await {
+        keep_link(state, repo, &v);
+    }
+}
+
+/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it.
+fn keep_link(state: &AppState, repo: &str, v: &Value) {
+    let Some(n) = v["number"].as_i64() else { return };
     if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
-        t.github = Some(link(repo, &v));
+        t.github = Some(link(repo, v));
         if state.db.save_task(&t).is_ok() {
             crate::tasks::emit(state, &t);
         }
@@ -1264,6 +1311,64 @@ mod tests {
         fake.route("POST", "/repos/octo/pub-proj/issues", 201, gh(repo, 5, "Bare", "open", "2026-10-29T00:00:00Z"));
         let Json(v) = publish_route(State(st.clone()), axum::extract::Path(bare.id)).await.unwrap();
         assert_eq!(v["github"]["number"], 5);
+    }
+
+    #[tokio::test]
+    async fn closed_on_github_while_being_worked_on_asks_the_user_instead() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cw";
+        let id = one_mirrored(&st, &fake, "cw", repo, "2026-10-02T00:00:00Z").await;
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+
+        // Someone closes it on GitHub mid-work.
+        fake.route("GET", "/repos/octo/cw/issues", 200, json!([gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z")]));
+        fake.route("GET", "/repos/octo/cw/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
+        sync_project(&st, "cw", true).await.unwrap();
+        let t = st.db.get_task(&id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.state(), t.github.as_ref().unwrap().state.as_str()), ("in_progress", "open", "closed"), "the work isn't stopped");
+        assert!(st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("#1 was closed on GitHub while it's being worked on")));
+        let items = crate::needs_you::collect(&st).unwrap();
+        let ask: Vec<_> = items.iter().filter(|i| i.kind == "closed_on_github").collect();
+        assert_eq!(ask.len(), 1);
+
+        // Keep working: GitHub reopens it, and the question goes away.
+        fake.route("PATCH", "/repos/octo/cw/issues/1", 200, gh(repo, 1, "Retry cap", "open", "2026-10-06T00:00:00Z"));
+        let Json(v) = keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        assert_eq!((&v["status"], &v["github"]["state"]), (&json!("in_progress"), &json!("open")));
+        let patched: Vec<Value> = fake.seen("/repos/octo/cw/issues/1").into_iter().filter(|r| r.method == "PATCH").map(|r| r.body).collect();
+        assert_eq!(patched, [json!({ "state": "open" })]);
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.kind != "closed_on_github"));
+        assert!(keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.is_err(), "nothing to reopen now");
+
+        // Not being worked on (here: cancelled): Keep working is refused and GitHub isn't asked.
+        let before = fake.seen("/repos/octo/cw/issues/1").len();
+        let mut t = st.db.get_task(&id).unwrap().unwrap();
+        t.status = "ready".into();
+        t.github.as_mut().unwrap().state = "closed".into();
+        st.db.save_task(&t).unwrap();
+        let err = keep_working(State(st.clone()), axum::extract::Path(id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("Nobody is working on it now"), "{}", err.1);
+        assert_eq!(fake.seen("/repos/octo/cw/issues/1").len(), before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_a_github_close_leaves_githubs_reason_alone() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/cw2";
+        let id = one_mirrored(&st, &fake, "cw2", repo, "2026-10-02T00:00:00Z").await;
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        crate::tasks::tests::busy(&st, &a);
+        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        fake.route("GET", "/repos/octo/cw2/issues", 200, json!([]));
+        fake.route("GET", "/repos/octo/cw2/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
+        sync_project(&st, "cw2", true).await.unwrap();
+        let _ = crate::tasks::cancel(State(st.clone()), axum::extract::Path(id.clone()), None).await.unwrap();
+        assert_eq!(st.db.get_task(&id).unwrap().unwrap().status, "cancelled");
+        assert!(fake.seen("/repos/octo/cw2/issues/1").iter().all(|r| r.method == "GET"), "no PATCH: it was already closed");
     }
 
 }
