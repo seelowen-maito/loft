@@ -692,7 +692,8 @@ impl Db {
         Ok(())
     }
 
-    pub fn count_pending_fyis(&self, agent_id: &str) -> Result<usize> {
+    #[cfg(test)]
+    pub(crate) fn count_pending_fyis(&self, agent_id: &str) -> Result<usize> {
         let c = self.0.lock().unwrap();
         Ok(c.query_row("SELECT COUNT(*) FROM pending_fyis WHERE agent_id = ?1", [agent_id], |r| r.get::<_, i64>(0))? as usize)
     }
