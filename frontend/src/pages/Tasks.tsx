@@ -7,7 +7,7 @@ import { api, type Agent, type Task, type TaskComment, type TaskStatus } from ".
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
-import { CommentBox, NewTaskDialog, TaskActions } from "./TaskActions";
+import { CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -269,6 +269,7 @@ function TaskRow({ task: t, agent, active, onOpen }: { task: Task; agent?: Agent
 
 function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
+  const [editAsked, setEditAsked] = useState(0);
   useEffect(() => {
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
@@ -336,9 +337,12 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} repo={repos[t.project]} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
+          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
         </div>
       </header>
+
+      {t.state === "open" && !t.agent_id && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
+      {t.state === "open" && !t.github && <PublishCard task={t} repo={repos[t.project]} onEdit={() => setEditAsked((n) => n + 1)} />}
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
