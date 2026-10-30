@@ -582,6 +582,15 @@ final class LoftUITests: XCTestCase {
         app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
         XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
         XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
+        // #146: the Lead answers, from a script.
+        app.tabBars.buttons["Chat"].tap()
+        app.buttons["orchestratorConversation"].firstMatch.tap()
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.appears(timeout: 5))
+        field.tap()
+        field.typeText("What is the status")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "3 of 4 endpoints", app).appears(timeout: 5), "a scripted answer, shown at once")
         app.buttons["exitDemo"].tap()
         XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
     }
