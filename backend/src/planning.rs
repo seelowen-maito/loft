@@ -28,11 +28,11 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
-            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
+            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
@@ -387,20 +387,21 @@ fn is_branch_name(b: &str) -> bool {
 /// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
 /// GitHub API. The branch starts at the head of the grill's docs branch when there is one, so the
 /// docs commits ship in the spec PR; otherwise at an empty commit on the default branch. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
-/// what's missing. The PR is recorded under the spec's number, for its tickets to find. Ok is the
+/// what's missing; a spec branch already there gets the docs branch merged in instead. The PR is recorded under the spec's number, for its tickets to find. Ok is the
 /// reply's line naming both; Err says what failed.
 async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, docs: Option<&str>) -> Result<String, String> {
     let branch = spec_branch(n, title);
     let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
     if let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", &n.to_string()) {
-        return Ok(line(pr));
+        return Ok(format!("{}{}", line(pr), docs_onto(state, slug, &branch, docs).await));
     }
     let gh = |path: String| async move { crate::github::get(state, &format!("/repos/{slug}{path}")).await };
     let post = |path: &'static str, body: Value| async move { crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}{path}"), Some(body)).await };
     let repo = gh(String::new()).await.map_err(|e| format!("couldn't read {slug} for its default branch: {e}"))?;
     let base = repo["default_branch"].as_str().filter(|b| !b.is_empty()).ok_or_else(|| format!("GitHub didn't give the default branch of {slug}"))?.to_string();
+    let mut docs_note = String::new();
     match gh(format!("/git/ref/heads/{branch}")).await {
-        Ok(_) => {}
+        Ok(_) => docs_note = docs_onto(state, slug, &branch, docs).await,
         Err(e) if crate::github::is_gone(&e) => {
             let failed = |e: anyhow::Error| format!("the spec branch `{branch}` couldn't be created: {e}");
             let start = match docs {
@@ -436,7 +437,23 @@ async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, docs: Option
         }
     };
     let _ = state.db.record_published_issue(slug, "spec_pr", &n.to_string(), pr);
-    Ok(line(pr))
+    Ok(format!("{}{docs_note}", line(pr)))
+}
+
+/// Merges the grill's docs branch into a spec branch made before it (a retry, say), so its glossary
+/// and ADR commits still ship in the spec PR. Empty when there's no docs branch or the spec branch
+/// already has them; otherwise a line for the reply saying what happened.
+async fn docs_onto(state: &AppState, slug: &str, branch: &str, docs: Option<&str>) -> String {
+    let Some(d) = docs else { return String::new() };
+    let body = json!({ "base": branch, "head": d, "commit_message": format!("Merge the grill's docs from {d}") });
+    match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/merges"), Some(body)).await {
+        // 204: nothing to merge.
+        Ok(Value::Null) => String::new(),
+        Ok(v) => format!("\nThe spec branch was already there: merged the docs branch `{d}` into it ({}).", v["sha"].as_str().map(|s| &s[..s.len().min(7)]).unwrap_or("merge commit")),
+        Err(e) if crate::github::is_gone(&e) => format!("\nThe docs branch `{d}` isn't on GitHub, so its commits aren't on `{branch}`: push it, then call publish_spec again with the same title and `docs_branch`."),
+        Err(e) if e.to_string().starts_with("GitHub 409") => format!("\nThe docs branch `{d}` conflicts with `{branch}`, so its commits aren't on it: merge `{d}` into `{branch}` by hand."),
+        Err(e) => format!("\nThe docs branch `{d}` couldn't be merged into `{branch}`: {e}. Call publish_spec again with the same title and `docs_branch` to retry."),
+    }
 }
 
 /// The "## Branch" section of a ticket under spec #spec, when the spec has a spec PR: where to commit
@@ -965,6 +982,52 @@ pub(crate) mod tests {
         assert!(fake.seen(&format!("/repos/{slug}/git/commits")).is_empty(), "no empty commit");
         assert_eq!(posts(&fake, slug, "pulls")[0]["base"], "main");
         assert_eq!(posts(&fake, slug, "issues").len(), 1, "never a second spec");
+    }
+
+    /// Spec #12's branch `spec/12-rounds` already on the fake (a retry after a failed PR), and the docs branch pushed.
+    fn spec_branch_there(fake: &Fake, slug: &str) {
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/spec/12-rounds"), 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/docs/rounds"), 200, json!({ "object": { "sha": "docs-sha" } }));
+    }
+
+    #[tokio::test]
+    async fn a_docs_branch_is_merged_into_a_spec_branch_already_there() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs-merge";
+        let a = planner_on(&st, "spec-docs-merge", Some("git@github.com:octo/spec-docs-merge.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+        spec_branch_there(&fake, slug);
+        fake.route("POST", &format!("/repos/{slug}/merges"), 201, json!({ "sha": "merge1234abcd" }));
+
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("Spec PR (draft, to the default branch): https://github.com/octo/spec-docs-merge/pull/500\nThe spec branch was already there: merged the docs branch `docs/rounds` into it (merge12)."), "{out}");
+        assert_eq!(posts(&fake, slug, "merges"), [json!({ "base": "spec/12-rounds", "head": "docs/rounds", "commit_message": "Merge the grill's docs from docs/rounds" })]);
+        assert!(posts(&fake, slug, "git/refs").is_empty(), "the branch isn't made again");
+
+        // A retry once the PR is recorded: GitHub has nothing left to merge (204) and the reply adds nothing.
+        fake.route("POST", &format!("/repos/{slug}/merges"), 204, Value::Null);
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("https://github.com/octo/spec-docs-merge/pull/500"), "{out}");
+        assert_eq!(posts(&fake, slug, "merges").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docs_that_cant_be_merged_are_named_and_the_spec_stays_published() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs-conflict";
+        let a = planner_on(&st, "spec-docs-conflict", Some("git@github.com:octo/spec-docs-conflict.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+        spec_branch_there(&fake, slug);
+        fake.route("POST", &format!("/repos/{slug}/merges"), 409, json!({ "message": "Merge conflict" }));
+
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.starts_with("Published the spec as #12"), "{out}");
+        assert!(out.ends_with("/pull/500\nThe docs branch `docs/rounds` conflicts with `spec/12-rounds`, so its commits aren't on it: merge `docs/rounds` into `spec/12-rounds` by hand."), "{out}");
+        assert_eq!(posts(&fake, slug, "pulls").len(), 1, "the spec PR is still opened");
+
+        fake.route("POST", &format!("/repos/{slug}/merges"), 404, json!({ "message": "Head does not exist" }));
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("\nThe docs branch `docs/rounds` isn't on GitHub, so its commits aren't on `spec/12-rounds`: push it, then call publish_spec again with the same title and `docs_branch`."), "{out}");
     }
 
     #[tokio::test]
