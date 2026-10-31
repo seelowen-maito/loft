@@ -806,6 +806,27 @@ impl Db {
         Ok(())
     }
 
+    /// The key and issue of every record of this kind on `slug`.
+    pub fn published_issues(&self, slug: &str, kind: &str) -> Result<Vec<(String, i64)>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT key, number FROM published_issues WHERE slug = ?1 AND kind = ?2 ORDER BY number")?;
+        let rows = q.query_map(params![slug, kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// When Loft recorded this kind and key on `slug`, if it did.
+    pub fn published_issue_at(&self, slug: &str, kind: &str, key: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT created_at FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key], |r| r.get(0)).optional()?)
+    }
+
+    /// Drops every record of this kind on `slug` that points at issue `number`, whatever its key.
+    pub fn forget_published_issues_of(&self, slug: &str, kind: &str, number: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM published_issues WHERE slug = ?1 AND kind = ?2 AND number = ?3", params![slug, kind, number])?;
+        Ok(())
+    }
+
     pub fn get_task(&self, id: &str) -> Result<Option<Task>> {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c.query_row("SELECT data FROM tasks WHERE id = ?1", [id], |r| r.get(0)).optional()?;
