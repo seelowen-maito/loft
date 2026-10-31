@@ -806,6 +806,14 @@ impl Db {
         Ok(())
     }
 
+    /// The key and issue of every record of this kind on `slug`.
+    pub fn published_issues(&self, slug: &str, kind: &str) -> Result<Vec<(String, i64)>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT key, number FROM published_issues WHERE slug = ?1 AND kind = ?2 ORDER BY number")?;
+        let rows = q.query_map(params![slug, kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// When Loft recorded this kind and key on `slug`, if it did.
     pub fn published_issue_at(&self, slug: &str, kind: &str, key: &str) -> Result<Option<String>> {
         let c = self.0.lock().unwrap();

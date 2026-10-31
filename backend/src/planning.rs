@@ -540,8 +540,42 @@ async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
 /// review. Some(PR) when it did; None when there's nothing to do.
 pub(crate) async fn ready_when_last(state: &AppState, slug: &str, ticket_body: &str) -> Result<Option<i64>, String> {
     let Some(pr) = spec_pr_in(ticket_body, slug) else { return Ok(None) };
+    ready_if_done(state, slug, pr).await
+}
+
+/// The mirror's catch-up for ready calls that were missed: on every poll the spec PRs whose call
+/// failed, and on a full read every spec PR Loft opened that isn't settled yet (Loft may have been
+/// down when the last ticket closed).
+pub(crate) async fn retry_ready(state: &AppState, slug: &str, full: bool) {
+    let settled: Vec<i64> = state.db.published_issues(slug, "spec_pr_settled").unwrap_or_default().into_iter().map(|(_, pr)| pr).collect();
+    let kind = if full { "spec_pr" } else { "spec_pr_retry" };
+    let prs: Vec<i64> = state.db.published_issues(slug, kind).unwrap_or_default().into_iter().map(|(_, pr)| pr).filter(|pr| !settled.contains(pr)).collect();
+    for pr in prs {
+        match ready_if_done(state, slug, pr).await {
+            Ok(Some(_)) => tracing::info!("mirror {slug}: marked spec PR #{pr} ready for review, a missed call caught up"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("mirror {slug}: {e}"),
+        }
+    }
+}
+
+/// [`ready_when_last`] for spec PR #pr. A call that fails is retried on the next poll; a PR found
+/// ready, merged or closed is settled and never asked about again.
+async fn ready_if_done(state: &AppState, slug: &str, pr: i64) -> Result<Option<i64>, String> {
+    let out = mark_ready(state, slug, pr).await;
+    // Done, settled, or a ticket still open whose close asks again: nothing left to retry.
+    let _ = match &out {
+        Err(_) => state.db.record_published_issue(slug, "spec_pr_retry", &pr.to_string(), pr),
+        Ok(_) => state.db.forget_published_issues_of(slug, "spec_pr_retry", pr),
+    };
+    out
+}
+
+/// Marks spec PR #pr ready for review when it's an open draft and every ticket of its spec is closed.
+async fn mark_ready(state: &AppState, slug: &str, pr: i64) -> Result<Option<i64>, String> {
     let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("couldn't read spec PR #{pr}: {e}"))?;
     if p["state"] != "open" || p["draft"] != true {
+        let _ = state.db.record_published_issue(slug, "spec_pr_settled", &pr.to_string(), pr);
         return Ok(None);
     }
     let body = p["body"].as_str().unwrap_or("").to_lowercase();
@@ -560,6 +594,7 @@ pub(crate) async fn ready_when_last(state: &AppState, slug: &str, ticket_body: &
     if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
         return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
     }
+    let _ = state.db.record_published_issue(slug, "spec_pr_settled", &pr.to_string(), pr);
     Ok(Some(pr))
 }
 
@@ -1221,6 +1256,91 @@ pub(crate) mod tests {
         // Seeing it closed again isn't a new close.
         crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
         assert_eq!(fake.seen("/graphql").len(), 1);
+    }
+
+    /// Spec #40's draft spec PR #500 recorded as Loft's, on a repo whose issue list is empty.
+    fn recorded_spec_pr(st: &AppState, fake: &Fake, slug: &str) {
+        st.db.record_published_issue(slug, "spec_pr", "40", 500).unwrap();
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_failed_ready_call_is_retried_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-retry";
+        let a = planner_on(&st, "ready-retry", Some("git@github.com:octo/ready-retry.git"));
+        spec_with_tickets(&fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        subs(&fake, slug, &["closed", "open"]);
+        crate::mirror::sync_project(&st, "ready-retry", true).await.unwrap();
+
+        subs(&fake, slug, &["closed", "closed"]);
+        fake.in_turn("POST", "/graphql", vec![
+            (502, json!({ "message": "Server Error" })),
+            (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } })),
+        ]);
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.contains("couldn't mark spec PR #500 ready for review"), "{out}");
+
+        // A change poll, not a full read: the failed call alone brings it back.
+        crate::mirror::sync_project(&st, "ready-retry", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 2, "retried and done");
+        crate::mirror::sync_project(&st, "ready-retry", false).await.unwrap();
+        crate::mirror::sync_project(&st, "ready-retry", true).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 2, "a ready PR isn't asked again");
+    }
+
+    #[tokio::test]
+    async fn a_full_read_readies_a_spec_pr_whose_last_close_loft_missed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-missed";
+        planner_on(&st, "ready-missed", Some("git@github.com:octo/ready-missed.git"));
+        spec_with_tickets(&fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        // Every ticket closed while Loft was down.
+        subs(&fake, slug, &["closed", "closed"]);
+
+        crate::mirror::sync_project(&st, "ready-missed", true).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(fake.seen("/graphql")[0].body["variables"], json!({ "id": "PR_500" }));
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_leaves_ready_merged_and_closed_spec_prs_alone() {
+        for (i, pr) in [json!({ "state": "open", "draft": false }), json!({ "state": "closed", "merged": true, "draft": false }), json!({ "state": "closed", "draft": true })].into_iter().enumerate() {
+            let st = state();
+            let fake = own_fake(&st);
+            let (name, slug) = (format!("ready-settled-{i}"), format!("octo/ready-settled-{i}"));
+            planner_on(&st, &name, Some(&format!("git@github.com:{slug}.git")));
+            spec_with_tickets(&fake, &slug);
+            recorded_spec_pr(&st, &fake, &slug);
+            subs(&fake, &slug, &["closed", "closed"]);
+            fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "body": "Closes #40", "state": pr["state"], "draft": pr["draft"] }));
+
+            crate::mirror::sync_project(&st, &name, true).await.unwrap();
+            crate::mirror::sync_project(&st, &name, true).await.unwrap();
+            assert!(fake.seen("/graphql").is_empty(), "{pr}");
+            assert_eq!(fake.seen(&format!("/repos/{slug}/pulls/500")).len(), 1, "settled after one look: {pr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_skips_a_spec_with_an_open_ticket() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-open";
+        planner_on(&st, "ready-open", Some("git@github.com:octo/ready-open.git"));
+        spec_with_tickets(&fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        subs(&fake, slug, &["closed", "open"]);
+
+        crate::mirror::sync_project(&st, "ready-open", true).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty());
+        // Nothing failed, so change polls don't look at it until the next full read.
+        crate::mirror::sync_project(&st, "ready-open", false).await.unwrap();
+        assert_eq!(fake.seen("/repos/octo/ready-open/pulls/500").len(), 1);
     }
 
     #[tokio::test]
