@@ -1183,7 +1183,7 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
 /// The grill instructions in full.
 pub fn brief() -> String {

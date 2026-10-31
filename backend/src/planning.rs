@@ -35,7 +35,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
-        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
+        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Under a spec with a spec PR, Loft adds a \"## Branch\" section to each ticket naming the spec branch and the spec PR. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
         "inputSchema": { "type": "object", "properties": {
             "spec": { "type": ["integer", "string"], "description": "The spec from publish_spec: its GitHub issue number, or its Loft issue id when the plan is kept in Loft. Leave it out only for a single standalone ticket." },
             "tickets": { "type": "array", "description": "The tickets, in any order.", "items": { "type": "object", "properties": {
@@ -308,7 +308,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let k = key(&title);
     let (msg, n) = spec_issue(state, me, &slug, &title, &k, body).await?;
-    let pr = match spec_pr(state, &slug, n, &title, &k).await {
+    let pr = match spec_pr(state, &slug, n, &title).await {
         Ok(line) => line,
         Err(e) => format!("The spec is published, but {e}. Call publish_spec again with the same title to retry only the spec branch and PR."),
     };
@@ -363,11 +363,12 @@ fn spec_branch(n: i64, title: &str) -> String {
 
 /// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
 /// GitHub API. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
-/// what's missing. Ok is the reply's line naming both; Err says what failed.
-async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, k: &str) -> Result<String, String> {
+/// what's missing. The PR is recorded under the spec's number, for its tickets to find. Ok is the
+/// reply's line naming both; Err says what failed.
+async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str) -> Result<String, String> {
     let branch = spec_branch(n, title);
     let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
-    if let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", k) {
+    if let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", &n.to_string()) {
         return Ok(line(pr));
     }
     let gh = |path: String| async move { crate::github::get(state, &format!("/repos/{slug}{path}")).await };
@@ -399,8 +400,34 @@ async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, k: &str) -> 
             made["number"].as_i64().ok_or("GitHub opened the spec PR but didn't return its number")?
         }
     };
-    let _ = state.db.record_published_issue(slug, "spec_pr", k, pr);
+    let _ = state.db.record_published_issue(slug, "spec_pr", &n.to_string(), pr);
     Ok(line(pr))
+}
+
+/// The "## Branch" section of a ticket under spec #spec, when the spec has a spec PR: where to commit
+/// and where it ships. None for a spec without one (published before spec PRs, or its PR failed).
+async fn branch_section(state: &AppState, slug: &str, spec: i64) -> Result<Option<String>, String> {
+    let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", &spec.to_string()) else {
+        return Ok(None);
+    };
+    let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("Couldn't read spec PR #{pr} on {slug} for its branch: {e}"))?;
+    let branch = p["head"]["ref"].as_str().ok_or_else(|| format!("GitHub didn't give the branch of spec PR #{pr} on {slug}"))?;
+    Ok(Some(format!("## Branch\n\nCommit on the spec branch `{branch}`. It ships in the spec PR https://github.com/{slug}/pull/{pr}.")))
+}
+
+/// The ticket's body with this "## Branch" section at the end, in place of one the body already had.
+fn with_branch(body: &str, section: &str) -> String {
+    let mut kept = vec![];
+    let mut skipping = false;
+    for line in body.lines() {
+        if line.starts_with("## ") {
+            skipping = line.trim_end() == "## Branch";
+        }
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    format!("{}\n\n{section}", kept.join("\n").trim_end())
 }
 
 struct Ticket {
@@ -512,6 +539,10 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             .map_err(|e| format!("Couldn't check {slug} for an existing ticket: {e}"))?,
     };
     let listed: Vec<(i64, i64, String)> = listed.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).filter_map(issue_ref).collect();
+    let branch = match spec {
+        Some(s) => branch_section(state, &slug, s).await?,
+        None => None,
+    };
     let scope = spec.map_or("standalone".to_string(), |s| format!("#{s}"));
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
@@ -535,7 +566,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
                 state,
                 reqwest::Method::POST,
                 &format!("/repos/{slug}/issues"),
-                Some(json!({ "title": t.title, "body": t.body, "labels": ["ready-for-agent"], "assignees": [login] })),
+                Some(json!({ "title": t.title, "body": branch.as_deref().map_or(t.body.clone(), |b| with_branch(&t.body, b)), "labels": ["ready-for-agent"], "assignees": [login] })),
             )
             .await
             .map_err(|e| format!("GitHub rejected the ticket \"{}\" on {slug}: {e}. {retry}", t.title))?;
@@ -675,7 +706,7 @@ pub(crate) mod tests {
     }
 
     /// What making the spec branch and spec PR on the fake needs: no spec branch or PR yet, and the PR
-    /// opened as #500.
+    /// opened as #500, from `spec/the-branch` when its tickets read it.
     fn spec_pr_on(fake: &Fake, slug: &str) {
         fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main" }));
         fake.route("GET", &format!("/repos/{slug}/git/ref/heads/main"), 200, json!({ "object": { "sha": "main-sha" } }));
@@ -684,6 +715,7 @@ pub(crate) mod tests {
         fake.route("POST", &format!("/repos/{slug}/git/refs"), 201, json!({}));
         fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([]));
         fake.route("POST", &format!("/repos/{slug}/pulls"), 201, json!({ "number": 500 }));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "head": { "ref": "spec/the-branch" } }));
     }
 
     async fn publish(st: &AppState, a: &Agent, title: &str) -> Result<String, String> {
@@ -1082,6 +1114,48 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn tickets_under_a_spec_with_a_spec_pr_say_which_branch_they_go_on() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-branch";
+        let a = planner_on(&st, "tickets-branch", Some("git@github.com:octo/tickets-branch.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 40);
+        publish(&st, &a, "Rounds").await.unwrap();
+        tickets_repo(&fake, slug, 40, &[41, 42]);
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "head": { "ref": "spec/40-rounds" } }));
+
+        // A body that already has a Branch section gets Loft's in its place, at the end.
+        let stale = json!({ "title": "API", "body": "## What to build\n\nAPI.\n\n## Branch\n\nmain\n\n## Acceptance criteria\n\n- [ ] Works", "blocked_by": ["Store"] });
+        publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[]), stale.clone()]).await.unwrap();
+        let section = "## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/octo/tickets-branch/pull/500.";
+        let bodies: Vec<Value> = posts(&fake, slug, "issues").into_iter().skip(1).map(|i| i["body"].clone()).collect();
+        assert_eq!(bodies, [
+            json!(format!("## What to build\n\nStore.\n\n{section}")),
+            json!(format!("## What to build\n\nAPI.\n\n## Acceptance criteria\n\n- [ ] Works\n\n{section}")),
+        ]);
+
+        // The retry leaves the published tickets as they are.
+        let again = publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[]), stale]).await.unwrap();
+        assert!(again.contains("Nothing new was created"), "{again}");
+        assert_eq!(posts(&fake, slug, "issues").len(), 3, "the spec and two tickets");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/4")).iter().all(|s| s.method != "PATCH"), "no ticket is edited");
+    }
+
+    #[tokio::test]
+    async fn tickets_wait_for_the_spec_pr_branch_github_wont_give() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-no-pr";
+        let a = planner_on(&st, "tickets-no-pr", Some("git@github.com:octo/tickets-no-pr.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 40);
+        publish(&st, &a, "Rounds").await.unwrap();
+        tickets_repo(&fake, slug, 40, &[41]);
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 502, json!({ "message": "Server Error" }));
+
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[])]).await.unwrap_err();
+        assert_eq!(err, "Couldn't read spec PR #500 on octo/tickets-no-pr for its branch: GitHub 502: Server Error");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1, "no ticket goes up without its branch");
+    }
+
+    #[tokio::test]
     async fn a_retry_after_a_partial_failure_creates_nothing_twice() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/tickets-partial";
@@ -1167,6 +1241,7 @@ pub(crate) mod tests {
         assert_eq!(out, "Published a standalone ticket, labelled `ready-for-agent` and assigned to octo-me:\n- #5 Blue button: https://github.com/octo/tickets-alone/issues/5");
         assert_eq!(posts(&fake, slug, "labels").len(), 2, "missing labels are created");
         assert_eq!(posts(&fake, slug, "issues")[0]["labels"], json!(["ready-for-agent"]));
+        assert_eq!(posts(&fake, slug, "issues")[0]["body"], "## What to build\n\nBlue button.", "no Branch section");
         assert!(fake.seen(&format!("/repos/{slug}/issues/")).is_empty(), "no parent, no links");
         assert!(fake.seen(&format!("/repos/{slug}/issues?labels=ready-for-agent&state=open")).len() == 1);
 
