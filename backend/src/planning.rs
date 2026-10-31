@@ -1090,6 +1090,25 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_ready_for_review_call_leaves_the_ticket_closed_and_says_so() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-refused";
+        let a = planner_on(&st, "ready-refused", Some("git@github.com:octo/ready-refused.git"));
+        spec_with_tickets(&fake, slug);
+        subs(&fake, slug, &["closed", "closed"]);
+        // GraphQL turns a mutation down with a 200 and `errors`.
+        fake.route("POST", "/graphql", 200, json!({ "errors": [{ "message": "Resource not accessible by integration" }] }));
+
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.ends_with("\nThe ticket is closed, but couldn't mark spec PR #500 ready for review: Resource not accessible by integration."), "{out}");
+        assert!(!out.contains("now ready for review"), "{out}");
+        let patched: Vec<Value> = fake.seen(&format!("/repos/{slug}/issues/42")).into_iter().filter(|s| s.method == "PATCH").map(|s| s.body).collect();
+        assert_eq!(patched, [json!({ "state": "closed", "state_reason": "completed" })]);
+        assert_eq!(fake.seen("/graphql").len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_spec_pr_already_ready_or_merged_is_left_alone() {
         let st = state();
         let fake = own_fake(&st);
