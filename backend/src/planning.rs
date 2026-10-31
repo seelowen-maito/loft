@@ -45,6 +45,13 @@ pub fn mcp_tools() -> Vec<Value> {
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
     }), json!({
+        "name": "close_ticket",
+        "description": "Close a ticket on your project's GitHub repo once its work has passed: Loft comments \"Done in `<sha…>`, part of #<spec PR>\" on it, closes it as completed so the tickets it blocks can start, and marks its Loft issue done. Only for open tickets labelled `ready-for-agent`.",
+        "inputSchema": { "type": "object", "properties": {
+            "number": { "type": "integer", "description": "The ticket's GitHub issue number." },
+            "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of the ticket's commits, oldest first." }
+        }, "required": ["number", "commits"] }
+    }), json!({
         "name": "publish_issue",
         "description": "Publish to GitHub: create the GitHub issue for a Loft issue you're on or created, in a project with a GitHub repo, and link them. Only when the user asked for it. Calling it again returns the issue already published.",
         "inputSchema": { "type": "object", "properties": {
@@ -72,6 +79,9 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
             let g = t.github.unwrap_or_default();
             format!("Published to GitHub as #{}: {}", g.number, g.url)
         }));
+    }
+    if name == "close_ticket" {
+        return Some(close_ticket(state, me, args).await);
     }
     if name != "publish_spec" && name != "publish_tickets" {
         return None;
@@ -428,6 +438,63 @@ fn with_branch(body: &str, section: &str) -> String {
         }
     }
     format!("{}\n\n{section}", kept.join("\n").trim_end())
+}
+
+/// The spec PR a ticket's "## Branch" section links to, if it has one.
+fn spec_pr_in(body: &str, slug: &str) -> Option<i64> {
+    let at = format!("https://github.com/{slug}/pull/");
+    let section = body.lines().skip_while(|l| l.trim_end() != "## Branch").skip(1).take_while(|l| !l.starts_with("## "));
+    section.filter_map(|l| l.split_once(&at)).find_map(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
+}
+
+/// `close_ticket`: the passed ticket's closing comment, its close as completed, and its Loft issue done.
+async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    let n = args["number"].as_i64().filter(|n| *n > 0).ok_or("number is required: the ticket's GitHub issue number")?;
+    let commits: Vec<String> = args["commits"].as_array().into_iter().flatten().filter_map(|c| c.as_str()).map(|c| c.trim().to_lowercase()).collect();
+    if commits.is_empty() {
+        return Err("commits is required: the SHAs of the ticket's commits".into());
+    }
+    if let Some(bad) = commits.iter().find(|c| !(7..=40).contains(&c.len()) || !c.chars().all(|ch| ch.is_ascii_hexdigit())) {
+        return Err(format!("\"{bad}\" isn't a commit SHA: give 7 to 40 hex characters"));
+    }
+    let slug = github_home(state, me).await.map_err(|why| format!("close_ticket closes tickets on GitHub, and {why}: mark the ticket's Loft issue done instead."))?;
+    let _held = state.publish_locks.of(&slug).lock_owned().await;
+    let i = crate::github::get(state, &format!("/repos/{slug}/issues/{n}")).await.map_err(|e| format!("Couldn't read #{n} on {slug}: {e}"))?;
+    let is_ticket = i.get("pull_request").is_none() && i["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent");
+    if !is_ticket {
+        return Err(format!("#{n} on {slug} isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed."));
+    }
+    if i["state"] != "open" {
+        return Err(format!("#{n} on {slug} is already closed: nothing was done."));
+    }
+    let pr = spec_pr_in(i["body"].as_str().unwrap_or(""), &slug);
+    let shas: Vec<String> = commits.iter().map(|c| format!("`{}`", &c[..7])).collect();
+    let part = pr.map(|p| format!(", part of #{p}")).unwrap_or_default();
+    let comment = format!("Done in {}{part}.", shas.join(", "));
+    // Commented before but the close failed: the retry doesn't comment twice.
+    if !matches!(state.db.published_issue(&slug, "close_comment", &n.to_string()), Ok(Some(_))) {
+        crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues/{n}/comments"), Some(json!({ "body": comment })))
+            .await
+            .map_err(|e| format!("Couldn't comment on #{n}, so it wasn't closed: {e}"))?;
+        let _ = state.db.record_published_issue(&slug, "close_comment", &n.to_string(), n);
+    }
+    let closed = crate::github::request(state, reqwest::Method::PATCH, &format!("/repos/{slug}/issues/{n}"), Some(json!({ "state": "closed", "state_reason": "completed" })))
+        .await
+        .map_err(|e| format!("Commented on #{n} but couldn't close it: {e}. Call close_ticket again to retry the close."))?;
+    // The mirror leaves an issue someone is working on open when GitHub closes it; this close is the work's end.
+    if let Some((mut t, _)) = crate::mirror::bring_in(state, me.project.trim(), &slug, &closed)
+        && t.status != "done"
+    {
+        t.status = "done".into();
+        t.completed_at = Some(crate::db::now());
+        t.updated_at = crate::db::now();
+        if state.db.save_task(&t).is_ok() {
+            crate::tasks::emit(state, &t);
+            crate::tasks::log_status(state, &t, &me.id, &format!("Closed by {} with close_ticket", me.name));
+        }
+    }
+    state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
+    Ok(format!("Closed #{n} as completed with the comment \"{comment}\": https://github.com/{slug}/issues/{n}"))
 }
 
 struct Ticket {
@@ -911,6 +978,88 @@ pub(crate) mod tests {
         let err = publish(&st, &a, "Bad token").await.unwrap_err();
         assert_eq!(err, "Couldn't read the labels of octo/spec-bad-token: GitHub 401: Bad credentials");
         assert!(posts(&fake, "octo/spec-bad-token", "issues").is_empty());
+    }
+
+    /// Ticket #n on `slug` as GitHub gives it.
+    fn gh_ticket(slug: &str, n: i64, state: &str, body: &str) -> Value {
+        json!({
+            "number": n, "id": n * 100, "title": format!("Ticket {n}"), "body": body, "state": state, "state_reason": if state == "closed" { json!("completed") } else { Value::Null },
+            "labels": [{ "name": "ready-for-agent" }], "html_url": format!("https://github.com/{slug}/issues/{n}"), "updated_at": format!("2026-10-31T00:00:0{}Z", if state == "closed" { 1 } else { 0 }),
+        })
+    }
+
+    async fn close(st: &AppState, a: &Agent, n: i64, commits: &[&str]) -> Result<String, String> {
+        mcp_call(st, a, "close_ticket", &json!({ "number": n, "commits": commits })).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn close_ticket_comments_the_commits_and_spec_pr_then_closes_it_completed() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-one";
+        let a = planner_on(&st, "close-one", Some("git@github.com:octo/close-one.git"));
+        let body = "## What to build\n\nStore.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/octo/close-one/pull/500.";
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", body));
+        // Its Loft issue is being worked on, which a close from GitHub alone would leave open.
+        let (mut t, _) = crate::mirror::bring_in(&st, "close-one", slug, &gh_ticket(slug, 41, "open", body)).unwrap();
+        t.status = "in_progress".into();
+        st.db.save_task(&t).unwrap();
+
+        let out = close(&st, &a, 41, &["ABC1234def5678abc1234def5678abc1234def56", "def5678"]).await.unwrap();
+        assert_eq!(out, "Closed #41 as completed with the comment \"Done in `abc1234`, `def5678`, part of #500.\": https://github.com/octo/close-one/issues/41");
+        assert_eq!(posts(&fake, slug, "issues/41/comments"), [json!({ "body": "Done in `abc1234`, `def5678`, part of #500." })]);
+        let patched: Vec<Value> = fake.seen(&format!("/repos/{slug}/issues/41")).into_iter().filter(|s| s.method == "PATCH").map(|s| s.body).collect();
+        assert_eq!(patched, [json!({ "state": "closed", "state_reason": "completed" })]);
+        let t = st.db.get_task(&t.id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.github.unwrap().state.as_str()), ("done", "closed"));
+    }
+
+    #[tokio::test]
+    async fn close_ticket_turns_down_what_isnt_an_open_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-no";
+        let a = planner_on(&st, "close-no", Some("git@github.com:octo/close-no.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/1"), 200, gh_ticket(slug, 1, "closed", ""));
+        let mut pr = gh_ticket(slug, 2, "open", "");
+        pr["pull_request"] = json!({});
+        fake.route("GET", &format!("/repos/{slug}/issues/2"), 200, pr);
+        let mut spec = gh_ticket(slug, 3, "open", "");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        fake.route("GET", &format!("/repos/{slug}/issues/3"), 200, spec);
+
+        assert_eq!(close(&st, &a, 1, &["abc1234"]).await.unwrap_err(), "#1 on octo/close-no is already closed: nothing was done.");
+        assert_eq!(close(&st, &a, 2, &["abc1234"]).await.unwrap_err(), "#2 on octo/close-no isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed.");
+        assert_eq!(close(&st, &a, 3, &["abc1234"]).await.unwrap_err(), "#3 on octo/close-no isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed.");
+        assert!(close(&st, &a, 9, &["abc1234"]).await.unwrap_err().starts_with("Couldn't read #9 on octo/close-no: GitHub 404"));
+        assert_eq!(close(&st, &a, 1, &[]).await.unwrap_err(), "commits is required: the SHAs of the ticket's commits");
+        assert_eq!(close(&st, &a, 1, &["main"]).await.unwrap_err(), "\"main\" isn't a commit SHA: give 7 to 40 hex characters");
+        assert!(fake.seen(&format!("/repos/{slug}")).iter().all(|s| s.method == "GET"), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_close_ticket_retry_after_a_failed_close_comments_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-retry";
+        let a = planner_on(&st, "close-retry", Some("git@github.com:octo/close-retry.git"));
+        // A standalone ticket: no Branch section, so no spec PR in the comment.
+        fake.route("GET", &format!("/repos/{slug}/issues/5"), 200, gh_ticket(slug, 5, "open", "## What to build\n\nBlue."));
+        fake.route("POST", &format!("/repos/{slug}/issues/5/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/5"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 5, "closed", ""))]);
+
+        let err = close(&st, &a, 5, &["abc1234"]).await.unwrap_err();
+        assert_eq!(err, "Commented on #5 but couldn't close it: GitHub 502: Server Error. Call close_ticket again to retry the close.");
+        assert!(close(&st, &a, 5, &["abc1234"]).await.unwrap().starts_with("Closed #5 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/5/comments").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_ticket_without_a_github_repo_points_at_the_loft_issue() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "close-loft", None);
+        let err = close(&st, &a, 1, &["abc1234"]).await.unwrap_err();
+        assert!(err.starts_with("close_ticket closes tickets on GitHub, and ") && err.ends_with(": mark the ticket's Loft issue done instead."), "{err}");
+        assert!(fake.seen("/repos/").iter().all(|s| !s.path.contains("close-loft")));
     }
 
     #[test]
