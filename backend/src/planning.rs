@@ -494,7 +494,40 @@ async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         }
     }
     state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
-    Ok(format!("Closed #{n} as completed with the comment \"{comment}\": https://github.com/{slug}/issues/{n}"))
+    let ready = match ready_when_last(state, &slug, i["body"].as_str().unwrap_or("")).await {
+        Ok(Some(pr)) => format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}"),
+        Ok(None) => String::new(),
+        Err(e) => format!("\nThe ticket is closed, but {e}."),
+    };
+    Ok(format!("Closed #{n} as completed with the comment \"{comment}\": https://github.com/{slug}/issues/{n}{ready}"))
+}
+
+/// After a ticket closed: when its spec PR (from the ticket's "## Branch" section) is still an open
+/// draft and every ticket of its spec (the `Closes #N` in the PR) is closed, marks the PR ready for
+/// review. Some(PR) when it did; None when there's nothing to do.
+pub(crate) async fn ready_when_last(state: &AppState, slug: &str, ticket_body: &str) -> Result<Option<i64>, String> {
+    let Some(pr) = spec_pr_in(ticket_body, slug) else { return Ok(None) };
+    let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("couldn't read spec PR #{pr}: {e}"))?;
+    if p["state"] != "open" || p["draft"] != true {
+        return Ok(None);
+    }
+    let body = p["body"].as_str().unwrap_or("").to_lowercase();
+    let Some(spec) = body.split("closes #").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()?.parse::<i64>().ok()) else {
+        return Ok(None);
+    };
+    let subs = crate::github::get(state, &format!("/repos/{slug}/issues/{spec}/sub_issues?per_page=100")).await.map_err(|e| format!("couldn't read the tickets of spec #{spec}: {e}"))?;
+    let subs = subs.as_array().cloned().unwrap_or_default();
+    if subs.is_empty() || subs.iter().any(|s| s["state"] != "closed") {
+        return Ok(None);
+    }
+    let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
+    let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
+        .await
+        .map_err(|e| format!("couldn't mark spec PR #{pr} ready for review: {e}"))?;
+    if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
+        return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
+    }
+    Ok(Some(pr))
 }
 
 struct Ticket {
@@ -1001,6 +1034,7 @@ pub(crate) mod tests {
         fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", body));
         fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
         fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", body));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "state": "open", "draft": false }));
         // Its Loft issue is being worked on, which a close from GitHub alone would leave open.
         let (mut t, _) = crate::mirror::bring_in(&st, "close-one", slug, &gh_ticket(slug, 41, "open", body)).unwrap();
         t.status = "in_progress".into();
@@ -1013,6 +1047,89 @@ pub(crate) mod tests {
         assert_eq!(patched, [json!({ "state": "closed", "state_reason": "completed" })]);
         let t = st.db.get_task(&t.id).unwrap().unwrap();
         assert_eq!((t.status.as_str(), t.github.unwrap().state.as_str()), ("done", "closed"));
+    }
+
+    /// Spec #40 on the fake: its draft spec PR #500 and tickets #41 and #42, both open, ready to close.
+    fn spec_with_tickets(fake: &Fake, slug: &str) -> String {
+        let body = format!("## What to build\n\nX.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/{slug}/pull/500.");
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "body": "Closes #40" }));
+        for n in [41, 42] {
+            fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "open", &body));
+            fake.route("POST", &format!("/repos/{slug}/issues/{n}/comments"), 201, json!({}));
+            fake.route("PATCH", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "closed", &body));
+        }
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        body
+    }
+
+    fn subs(fake: &Fake, slug: &str, states: &[&str]) {
+        let list: Vec<Value> = states.iter().enumerate().map(|(i, s)| json!({ "number": 41 + i as i64, "state": s })).collect();
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!(list));
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_ticket_marks_the_spec_pr_ready_and_not_before() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-last";
+        let a = planner_on(&st, "ready-last", Some("git@github.com:octo/ready-last.git"));
+        spec_with_tickets(&fake, slug);
+
+        subs(&fake, slug, &["closed", "open"]);
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(!out.contains("ready for review"), "{out}");
+        assert!(fake.seen("/graphql").is_empty(), "#42 is still open");
+
+        subs(&fake, slug, &["closed", "closed"]);
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.ends_with("\nIt was the spec's last open ticket: spec PR #500 is now ready for review: https://github.com/octo/ready-last/pull/500"), "{out}");
+        let calls = fake.seen("/graphql");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].body["query"].as_str().unwrap().contains("markPullRequestReadyForReview(input: { pullRequestId: $id })"));
+        assert_eq!(calls[0].body["variables"], json!({ "id": "PR_500" }));
+    }
+
+    #[tokio::test]
+    async fn a_spec_pr_already_ready_or_merged_is_left_alone() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-done";
+        let a = planner_on(&st, "ready-done", Some("git@github.com:octo/ready-done.git"));
+        spec_with_tickets(&fake, slug);
+        subs(&fake, slug, &["closed", "closed"]);
+
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "body": "Closes #40" }));
+        assert!(!close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("ready for review"));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "closed", "merged": true, "draft": false, "body": "Closes #40" }));
+        assert!(!close(&st, &a, 42, &["def5678"]).await.unwrap().contains("ready for review"));
+        assert!(fake.seen("/graphql").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_last_ticket_closed_on_github_by_hand_readies_the_spec_pr_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-hand";
+        planner_on(&st, "ready-hand", Some("git@github.com:octo/ready-hand.git"));
+        let body = spec_with_tickets(&fake, slug);
+        subs(&fake, slug, &["closed", "closed"]);
+        let mut spec = gh_ticket(slug, 40, "open", "Spec.");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([spec.clone(), gh_ticket(slug, 42, "open", &body)])),
+            // #42, the last open ticket, closed by hand on GitHub.
+            (200, json!([gh_ticket(slug, 42, "closed", &body)])),
+            (200, json!([gh_ticket(slug, 42, "closed", &body)])),
+        ]);
+
+        crate::mirror::sync_project(&st, "ready-hand", true).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty(), "nothing closed yet");
+        crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1, "the last ticket closed: the PR is ready");
+        assert_eq!(fake.seen("/graphql")[0].body["variables"], json!({ "id": "PR_500" }));
+        // Seeing it closed again isn't a new close.
+        crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1);
     }
 
     #[tokio::test]
