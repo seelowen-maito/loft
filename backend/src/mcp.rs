@@ -135,7 +135,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, project, and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, project, role (dev or reviewer, when set), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -350,12 +350,13 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
+                        let role = if a.role.is_empty() { String::new() } else { format!(" · role {}", a.role) };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{project} · {}", a.name, title, a.id, doing)
+                        format!("- {}{} · id {}{project}{role} · {}", a.name, title, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -525,6 +526,22 @@ mod tests {
         assert!(!said(&r).1);
         let m = &st.db.list_memories(&a.id).unwrap()[0];
         assert_eq!((m.title.as_str(), m.content.as_str()), ("Deploys go through staging", "Every deploy goes to staging first."));
+    }
+
+    #[tokio::test]
+    async fn list_agents_shows_each_agents_role_when_it_has_one() {
+        let st = crate::tasks::tests::state();
+        let me = crate::tasks::tests::agent(&st, "Worker");
+        let mut rev = crate::tasks::tests::agent(&st, "Checker");
+        rev.role = "reviewer".into();
+        st.db.save_agent(&rev).unwrap();
+        crate::tasks::tests::agent(&st, "Plain");
+        let r = call_tool(&st, &me.id, "list_agents", json!({})).await;
+        let (t, err) = said(&r);
+        assert!(!err, "{t}");
+        let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
+        assert!(line("Checker").contains(" · role reviewer · "), "{t}");
+        assert!(!line("Plain").contains("role"), "{t}");
     }
 
     #[tokio::test]

@@ -1660,6 +1660,31 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn every_agent_learns_how_a_ticket_is_built_and_closed() {
+        let st = state();
+        // Whatever its template or standing instructions say: Loft's section rides on every system prompt.
+        let mut a = crate::tasks::tests::agent(&st, "Own template");
+        a.prompt = "Open one PR per issue and close it with `gh issue close`.".into();
+        let p = crate::agents::system_prompt(&st, &a);
+        for want in [
+            "and on how a ticket is implemented: which branch it goes on, its commit messages, its PR, and how it's closed",
+            "# Planning: implementation",
+            "project with a GitHub repo",
+            "spec branch named in its \"## Branch\" section",
+            "each message ending with `Refs #<ticket>`",
+            "an agent with the reviewer role",
+            "\"Ticket #N passed at `<sha>`\"",
+            "Without a reviewer, the ticket passes once its commits are pushed and the tests pass",
+            "`mcp__loft__close_ticket`",
+            "new commits on the spec branch. Closed tickets aren't reopened",
+            "`ticket/<N>-<slug>`, with a PR whose body has `Closes #N`",
+        ] {
+            assert!(p.contains(want), "missing {want:?}");
+        }
+        assert!(!p.contains("Your standing instructions still set your role, your team and how work is implemented"), "the old override is gone");
+    }
+
     #[tokio::test]
     async fn the_planning_guide_gives_the_spec_and_ticket_templates() {
         let st = state();
