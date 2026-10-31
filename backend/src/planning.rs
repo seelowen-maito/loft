@@ -28,7 +28,7 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. Calling it again with the same title returns the spec already published instead of creating another, so a retry is safe.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>` with an empty \"Start spec #N\" commit and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." }
@@ -291,7 +291,8 @@ async fn login(state: &AppState) -> Result<String, String> {
     Ok(l)
 }
 
-/// The reply, the repo and the spec published (or already there).
+/// The reply, the repo and the spec published (or already there). On GitHub the reply also gives the
+/// spec branch and spec PR, or says why they couldn't be made: the spec stays published either way.
 async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> Result<(String, String, IssueLink), String> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() || body.trim().is_empty() {
@@ -306,22 +307,29 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     };
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let k = key(&title);
-    let already = |n: i64| {
-        let msg = format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed.");
-        (msg, slug.clone(), IssueLink { number: n, title: title.clone(), id: String::new() })
+    let (msg, n) = spec_issue(state, me, &slug, &title, &k, body).await?;
+    let pr = match spec_pr(state, &slug, n, &title, &k).await {
+        Ok(line) => line,
+        Err(e) => format!("The spec is published, but {e}. Call publish_spec again with the same title to retry only the spec branch and PR."),
     };
-    if let Ok(Some(n)) = state.db.published_issue(&slug, "spec", &k) {
+    Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new() }))
+}
+
+/// The spec's issue on `slug`: the reply and its number, published now or found already there.
+async fn spec_issue(state: &AppState, me: &Agent, slug: &str, title: &str, k: &str, body: &str) -> Result<(String, i64), String> {
+    let already = |n: i64| (format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed."), n);
+    if let Ok(Some(n)) = state.db.published_issue(slug, "spec", k) {
         return Ok(already(n));
     }
     let login = login(state).await?;
-    ensure_labels(state, &slug).await?;
+    ensure_labels(state, slug).await?;
     // Created before but never recorded (the reply was lost): adopt it rather than publish it twice.
     let existing = crate::github::get(state, &format!("/repos/{slug}/issues?labels=spec&state=all&per_page=100"))
         .await
         .map_err(|e| format!("Couldn't check {slug} for an existing spec: {e}"))?;
     let found = existing.as_array().into_iter().flatten().find(|i| i.get("pull_request").is_none() && i["title"].as_str().is_some_and(|t| key(t) == k));
     if let Some(n) = found.and_then(|i| i["number"].as_i64()) {
-        let _ = state.db.record_published_issue(&slug, "spec", &k, n);
+        let _ = state.db.record_published_issue(slug, "spec", k, n);
         return Ok(already(n));
     }
     let made = crate::github::request(
@@ -333,10 +341,66 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     .await
     .map_err(|e| format!("GitHub rejected the spec on {slug}: {e}"))?;
     let n = made["number"].as_i64().ok_or("GitHub created the spec but didn't return its number.")?;
-    state.db.record_published_issue(&slug, "spec", &k, n).map_err(|e| e.to_string())?;
-    crate::mirror::bring_in(state, me.project.trim(), &slug, &made);
-    let msg = format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}");
-    Ok((msg, slug, IssueLink { number: n, title, id: String::new() }))
+    state.db.record_published_issue(slug, "spec", k, n).map_err(|e| e.to_string())?;
+    crate::mirror::bring_in(state, me.project.trim(), slug, &made);
+    Ok((format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}"), n))
+}
+
+/// The spec branch of spec #n: `spec/<N>-<slug>`, the slug from the first words of its title.
+fn spec_branch(n: i64, title: &str) -> String {
+    let mut slug = String::new();
+    for w in title.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
+        if !slug.is_empty() && slug.len() + w.len() >= 40 {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&w.to_lowercase());
+    }
+    if slug.is_empty() { format!("spec/{n}") } else { format!("spec/{n}-{slug}") }
+}
+
+/// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
+/// GitHub API. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
+/// what's missing. Ok is the reply's line naming both; Err says what failed.
+async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, k: &str) -> Result<String, String> {
+    let branch = spec_branch(n, title);
+    let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
+    if let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", k) {
+        return Ok(line(pr));
+    }
+    let gh = |path: String| async move { crate::github::get(state, &format!("/repos/{slug}{path}")).await };
+    let post = |path: &'static str, body: Value| async move { crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}{path}"), Some(body)).await };
+    let repo = gh(String::new()).await.map_err(|e| format!("couldn't read {slug} for its default branch: {e}"))?;
+    let base = repo["default_branch"].as_str().filter(|b| !b.is_empty()).ok_or_else(|| format!("GitHub didn't give the default branch of {slug}"))?.to_string();
+    match gh(format!("/git/ref/heads/{branch}")).await {
+        Ok(_) => {}
+        Err(e) if crate::github::is_gone(&e) => {
+            let failed = |e: anyhow::Error| format!("the spec branch `{branch}` couldn't be created: {e}");
+            let head = gh(format!("/git/ref/heads/{base}")).await.map_err(failed)?;
+            let sha = head["object"]["sha"].as_str().unwrap_or_default().to_string();
+            let commit = gh(format!("/git/commits/{sha}")).await.map_err(failed)?;
+            // An empty commit: the tree of the default branch, so the branch has something to open a PR for.
+            let start = post("/git/commits", json!({ "message": format!("Start spec #{n}"), "tree": commit["tree"]["sha"], "parents": [sha] })).await.map_err(failed)?;
+            post("/git/refs", json!({ "ref": format!("refs/heads/{branch}"), "sha": start["sha"] })).await.map_err(failed)?;
+        }
+        Err(e) => return Err(format!("couldn't check {slug} for the spec branch `{branch}`: {e}")),
+    }
+    // Opened before but never recorded: adopt it rather than open a second one.
+    let owner = slug.split('/').next().unwrap_or_default();
+    let open = gh(format!("/pulls?head={owner}:{branch}&state=all")).await.map_err(|e| format!("couldn't check {slug} for the spec PR: {e}"))?;
+    let pr = match open.as_array().and_then(|ps| ps.first()).and_then(|p| p["number"].as_i64()) {
+        Some(pr) => pr,
+        None => {
+            let made = post("/pulls", json!({ "title": title, "head": branch, "base": base, "body": format!("Closes #{n}"), "draft": true }))
+                .await
+                .map_err(|e| format!("the draft spec PR from `{branch}` couldn't be opened: {e}"))?;
+            made["number"].as_i64().ok_or("GitHub opened the spec PR but didn't return its number")?
+        }
+    };
+    let _ = state.db.record_published_issue(slug, "spec_pr", k, pr);
+    Ok(line(pr))
 }
 
 struct Ticket {
@@ -607,6 +671,19 @@ pub(crate) mod tests {
         fake.route("POST", &format!("/repos/{slug}/labels"), 201, json!({}));
         fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
         fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": number }));
+        spec_pr_on(fake, slug);
+    }
+
+    /// What making the spec branch and spec PR on the fake needs: no spec branch or PR yet, and the PR
+    /// opened as #500.
+    fn spec_pr_on(fake: &Fake, slug: &str) {
+        fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main" }));
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/main"), 200, json!({ "object": { "sha": "main-sha" } }));
+        fake.route("GET", &format!("/repos/{slug}/git/commits/main-sha"), 200, json!({ "sha": "main-sha", "tree": { "sha": "main-tree" } }));
+        fake.route("POST", &format!("/repos/{slug}/git/commits"), 201, json!({ "sha": "start-sha" }));
+        fake.route("POST", &format!("/repos/{slug}/git/refs"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/pulls"), 201, json!({ "number": 500 }));
     }
 
     async fn publish(st: &AppState, a: &Agent, title: &str) -> Result<String, String> {
@@ -627,7 +704,7 @@ pub(crate) mod tests {
         let mut events = st.events.subscribe();
 
         let out = publish(&st, &a, "  Planning   in rounds ").await.unwrap();
-        assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40");
+        assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40\nSpec branch: `spec/40-planning-in-rounds`. Spec PR (draft, to the default branch): https://github.com/octo/spec-new/pull/500");
         // The Issues tab hears about it and refetches.
         let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
         assert_eq!(ev, json!({ "type": "issues", "project": "spec-new" }));
@@ -638,6 +715,74 @@ pub(crate) mod tests {
         assert_eq!(posts(&fake, "octo/spec-new", "issues"), [json!({
             "title": "Planning in rounds", "body": "## Problem Statement\n\nIt hurts.", "labels": ["spec"], "assignees": ["octo-me"],
         })]);
+    }
+
+    #[tokio::test]
+    async fn publishing_starts_the_spec_branch_and_opens_a_draft_spec_pr() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-branch", Some("git@github.com:octo/spec-branch.git"));
+        repo(&fake, "octo/spec-branch", &["spec", "ready-for-agent"], 186);
+
+        let out = publish(&st, &a, "One PR per spec: branch & ticket closing, ready on the last close").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/186-one-pr-per-spec-branch-ticket-closing`. Spec PR (draft, to the default branch): https://github.com/octo/spec-branch/pull/500"), "{out}");
+        // An empty commit on top of the default branch, then the branch pointing at it.
+        assert_eq!(posts(&fake, "octo/spec-branch", "git/commits"), [json!({ "message": "Start spec #186", "tree": "main-tree", "parents": ["main-sha"] })]);
+        assert_eq!(posts(&fake, "octo/spec-branch", "git/refs"), [json!({ "ref": "refs/heads/spec/186-one-pr-per-spec-branch-ticket-closing", "sha": "start-sha" })]);
+        assert_eq!(posts(&fake, "octo/spec-branch", "pulls"), [json!({
+            "title": "One PR per spec: branch & ticket closing, ready on the last close", "head": "spec/186-one-pr-per-spec-branch-ticket-closing",
+            "base": "main", "body": "Closes #186", "draft": true,
+        })]);
+
+        // The retry finds both recorded and asks GitHub nothing about them.
+        let before = fake.seen("/repos/octo/spec-branch").len();
+        let again = publish(&st, &a, "one pr per spec: branch & ticket closing, ready on the last close").await.unwrap();
+        assert!(again.contains("already published as #186") && again.ends_with("/pull/500"), "{again}");
+        assert_eq!(fake.seen("/repos/octo/spec-branch").len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_failed_spec_branch_or_pr_leaves_the_spec_published_and_a_retry_makes_only_whats_missing() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-pr-fail", Some("git@github.com:octo/spec-pr-fail.git"));
+        repo(&fake, "octo/spec-pr-fail", &["spec", "ready-for-agent"], 8);
+        let retry = "Call publish_spec again with the same title to retry only the spec branch and PR.";
+
+        // No push rights: the branch is turned down.
+        fake.route("POST", "/repos/octo/spec-pr-fail/git/refs", 403, json!({ "message": "Resource not accessible by integration" }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert_eq!(out, format!("Published the spec as #8, assigned to octo-me: https://github.com/octo/spec-pr-fail/issues/8\nThe spec is published, but the spec branch `spec/8-ship-it` couldn't be created: GitHub 403: Resource not accessible by integration. {retry}"));
+        assert!(posts(&fake, "octo/spec-pr-fail", "pulls").is_empty());
+
+        // The branch goes up now, then the draft PR is turned down.
+        fake.route("POST", "/repos/octo/spec-pr-fail/git/refs", 201, json!({}));
+        fake.route("POST", "/repos/octo/spec-pr-fail/pulls", 422, json!({ "message": "Validation Failed", "errors": [{ "message": "Draft pull requests are not supported in this repository." }] }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert!(out.starts_with("The spec \"Ship it\" is already published as #8"), "{out}");
+        assert!(out.ends_with(&format!("but the draft spec PR from `spec/8-ship-it` couldn't be opened: GitHub 422: Validation Failed (Draft pull requests are not supported in this repository.). {retry}")), "{out}");
+
+        // The branch exists now: only the PR is made.
+        fake.route("GET", "/repos/octo/spec-pr-fail/git/ref/heads/spec/8-ship-it", 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("POST", "/repos/octo/spec-pr-fail/pulls", 201, json!({ "number": 9 }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/8-ship-it`. Spec PR (draft, to the default branch): https://github.com/octo/spec-pr-fail/pull/9"), "{out}");
+
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "issues").len(), 1, "never a second spec");
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "git/refs").len(), 2, "one refused, one created");
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "pulls").len(), 2, "one refused, one opened");
+    }
+
+    #[tokio::test]
+    async fn a_spec_pr_opened_but_never_recorded_is_adopted() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-pr-lost", Some("git@github.com:octo/spec-pr-lost.git"));
+        repo(&fake, "octo/spec-pr-lost", &["spec", "ready-for-agent"], 4);
+        fake.route("GET", "/repos/octo/spec-pr-lost/git/ref/heads/spec/4-lost", 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("GET", "/repos/octo/spec-pr-lost/pulls", 200, json!([{ "number": 77 }]));
+
+        let out = publish(&st, &a, "Lost").await.unwrap();
+        assert!(out.ends_with("https://github.com/octo/spec-pr-lost/pull/77"), "{out}");
+        assert_eq!(fake.seen("/repos/octo/spec-pr-lost/pulls?").iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), ["/repos/octo/spec-pr-lost/pulls?head=octo:spec/4-lost&state=all"]);
+        assert!(posts(&fake, "octo/spec-pr-lost", "pulls").is_empty() && posts(&fake, "octo/spec-pr-lost", "git/refs").is_empty());
     }
 
     #[tokio::test]

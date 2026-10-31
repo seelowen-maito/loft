@@ -74,6 +74,14 @@ _Avoid_: PRD, plan, design doc
 An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
 
+**Spec branch**:
+The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates from the default branch when it publishes the spec on GitHub. Every ticket of the spec is one or more commits on it.
+_Avoid_: Feature branch, shared branch
+
+**Spec PR**:
+The one pull request from a spec branch to the default branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
+_Avoid_: Feature PR, epic PR
+
 **Owner**:
 The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer

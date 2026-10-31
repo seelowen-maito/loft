@@ -1158,7 +1158,7 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
   - <Anything else: the glossary terms and ADRs it relies on.>
   ```
 
-- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. Without a GitHub repo it saves it as a Loft issue labelled `spec` and gives you its id. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
+- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. Without a GitHub repo it saves it as a Loft issue labelled `spec` and gives you its id. On GitHub it also creates the spec branch and a draft spec PR and gives you both: share the PR link with the user. If they fail, the spec stays published and the result says why. A retry with the same title returns the spec already published and only makes a missing branch or PR, so after a failure call it again rather than changing the title. Never create issues with `gh`.
 - When it fails (GitHub refused it, for example), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
 - Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#;
 pub const TICKETS: &str = r#"# Planning: tickets
