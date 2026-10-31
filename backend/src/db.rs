@@ -806,6 +806,12 @@ impl Db {
         Ok(())
     }
 
+    pub fn forget_published_issue(&self, slug: &str, kind: &str, key: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key])?;
+        Ok(())
+    }
+
     pub fn get_task(&self, id: &str) -> Result<Option<Task>> {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c.query_row("SELECT data FROM tasks WHERE id = ?1", [id], |r| r.get(0)).optional()?;

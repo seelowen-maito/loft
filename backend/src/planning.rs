@@ -496,16 +496,20 @@ async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     let shas: Vec<String> = commits.iter().map(|c| format!("`{}`", &c[..7])).collect();
     let part = pr.map(|p| format!(", part of #{p}")).unwrap_or_default();
     let comment = format!("Done in {}{part}.", shas.join(", "));
-    // Commented before but the close failed: the retry doesn't comment twice.
-    if !matches!(state.db.published_issue(&slug, "close_comment", &n.to_string()), Ok(Some(_))) {
+    // Posted this same comment but the close failed: the retry doesn't comment twice. Keyed by the
+    // comment so the reply always names a comment that is on the ticket.
+    let key = format!("{n} {comment}");
+    if !matches!(state.db.published_issue(&slug, "close_comment", &key), Ok(Some(_))) {
         crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues/{n}/comments"), Some(json!({ "body": comment })))
             .await
             .map_err(|e| format!("Couldn't comment on #{n}, so it wasn't closed: {e}"))?;
-        let _ = state.db.record_published_issue(&slug, "close_comment", &n.to_string(), n);
+        let _ = state.db.record_published_issue(&slug, "close_comment", &key, n);
     }
     let closed = crate::github::request(state, reqwest::Method::PATCH, &format!("/repos/{slug}/issues/{n}"), Some(json!({ "state": "closed", "state_reason": "completed" })))
         .await
         .map_err(|e| format!("Commented on #{n} but couldn't close it: {e}. Call close_ticket again to retry the close."))?;
+    // Closed: a close after a reopen comments again.
+    let _ = state.db.forget_published_issue(&slug, "close_comment", &key);
     // The mirror leaves an issue someone is working on open when GitHub closes it; this close is the work's end.
     if let Some((mut t, _)) = crate::mirror::bring_in(state, me.project.trim(), &slug, &closed)
         && t.status != "done"
@@ -1251,6 +1255,38 @@ pub(crate) mod tests {
         assert_eq!(err, "Commented on #5 but couldn't close it: GitHub 502: Server Error. Call close_ticket again to retry the close.");
         assert!(close(&st, &a, 5, &["abc1234"]).await.unwrap().starts_with("Closed #5 as completed with the comment \"Done in `abc1234`.\""));
         assert_eq!(posts(&fake, slug, "issues/5/comments").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closed_reopened_and_closed_again_gets_a_second_comment() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-reopen";
+        let a = planner_on(&st, "close-reopen", Some("git@github.com:octo/close-reopen.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/6"), 200, gh_ticket(slug, 6, "open", "## What to build\n\nGreen."));
+        fake.route("POST", &format!("/repos/{slug}/issues/6/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/6"), 200, gh_ticket(slug, 6, "closed", ""));
+
+        assert!(close(&st, &a, 6, &["abc1234"]).await.unwrap().starts_with("Closed #6 as completed with the comment \"Done in `abc1234`.\""));
+        // Reopened on GitHub (the fake still serves it open), fixed, and closed again, even with the same commits.
+        let out = close(&st, &a, 6, &["def5678"]).await.unwrap();
+        assert!(out.starts_with("Closed #6 as completed with the comment \"Done in `def5678`.\""), "{out}");
+        assert!(close(&st, &a, 6, &["def5678"]).await.unwrap().starts_with("Closed #6 as completed with the comment \"Done in `def5678`.\""));
+        assert_eq!(posts(&fake, slug, "issues/6/comments"), [json!({ "body": "Done in `abc1234`." }), json!({ "body": "Done in `def5678`." }), json!({ "body": "Done in `def5678`." })]);
+    }
+
+    #[tokio::test]
+    async fn a_retry_with_other_commits_after_a_failed_close_comments_what_it_says() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-other";
+        let a = planner_on(&st, "close-other", Some("git@github.com:octo/close-other.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/7"), 200, gh_ticket(slug, 7, "open", "## What to build\n\nRed."));
+        fake.route("POST", &format!("/repos/{slug}/issues/7/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/7"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 7, "closed", ""))]);
+
+        close(&st, &a, 7, &["abc1234"]).await.unwrap_err();
+        let out = close(&st, &a, 7, &["abc1234", "def5678"]).await.unwrap();
+        assert!(out.starts_with("Closed #7 as completed with the comment \"Done in `abc1234`, `def5678`.\""), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/7/comments"), [json!({ "body": "Done in `abc1234`." }), json!({ "body": "Done in `abc1234`, `def5678`." })]);
     }
 
     #[tokio::test]
