@@ -75,7 +75,7 @@ An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of th
 _Avoid_: Task, story, sub-task
 
 **Spec branch**:
-The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates from the default branch when it publishes the spec on GitHub. Every ticket of the spec is one or more commits on it.
+The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the default branch. Every ticket of the spec is one or more commits on it.
 _Avoid_: Feature branch, shared branch
 
 **Spec PR**:

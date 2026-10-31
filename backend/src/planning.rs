@@ -28,10 +28,11 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>` with an empty \"Start spec #N\" commit and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
-            "body": { "type": "string", "description": "The spec in Markdown, following the spec template." }
+            "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
+            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
@@ -89,7 +90,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     let out = if name == "publish_tickets" {
         publish_tickets(state, me, args).await
     } else {
-        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await.map(|(msg, slug, spec)| {
+        let docs = args["docs_branch"].as_str().map(str::trim).filter(|d| !d.is_empty());
+        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await.map(|(msg, slug, spec)| {
             crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
             msg
         })
@@ -303,10 +305,13 @@ async fn login(state: &AppState) -> Result<String, String> {
 
 /// The reply, the repo and the spec published (or already there). On GitHub the reply also gives the
 /// spec branch and spec PR, or says why they couldn't be made: the spec stays published either way.
-async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> Result<(String, String, IssueLink), String> {
+async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str, docs: Option<&str>) -> Result<(String, String, IssueLink), String> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() || body.trim().is_empty() {
         return Err("title and body are required".into());
+    }
+    if let Some(d) = docs.filter(|d| !is_branch_name(d)) {
+        return Err(format!("\"{d}\" isn't a branch name: pass the docs branch as you pushed it, like `docs/<topic>`"));
     }
     if title.chars().count() > MAX_TITLE {
         return Err(format!("the title is at most {MAX_TITLE} characters"));
@@ -318,9 +323,12 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let k = key(&title);
     let (msg, n) = spec_issue(state, me, &slug, &title, &k, body).await?;
-    let pr = match spec_pr(state, &slug, n, &title).await {
+    let pr = match spec_pr(state, &slug, n, &title, docs).await {
         Ok(line) => line,
-        Err(e) => format!("The spec is published, but {e}. Call publish_spec again with the same title to retry only the spec branch and PR."),
+        Err(e) => {
+            let same = if docs.is_some() { " and `docs_branch`" } else { "" };
+            format!("The spec is published, but {e}. Call publish_spec again with the same title{same} to retry only the spec branch and PR.")
+        }
     };
     Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new() }))
 }
@@ -371,11 +379,17 @@ fn spec_branch(n: i64, title: &str) -> String {
     if slug.is_empty() { format!("spec/{n}") } else { format!("spec/{n}-{slug}") }
 }
 
+/// A branch name as git takes it: letters, digits and `-_./`, no `..`, not starting or ending with `/`.
+fn is_branch_name(b: &str) -> bool {
+    !b.is_empty() && b.len() <= 200 && b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)) && !b.contains("..") && !b.starts_with('/') && !b.ends_with('/') && !b.ends_with(".lock")
+}
+
 /// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
-/// GitHub API. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
+/// GitHub API. The branch starts at the head of the grill's docs branch when there is one, so the
+/// docs commits ship in the spec PR; otherwise at an empty commit on the default branch. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
 /// what's missing. The PR is recorded under the spec's number, for its tickets to find. Ok is the
 /// reply's line naming both; Err says what failed.
-async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str) -> Result<String, String> {
+async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, docs: Option<&str>) -> Result<String, String> {
     let branch = spec_branch(n, title);
     let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
     if let Ok(Some(pr)) = state.db.published_issue(slug, "spec_pr", &n.to_string()) {
@@ -389,12 +403,23 @@ async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str) -> Result<St
         Ok(_) => {}
         Err(e) if crate::github::is_gone(&e) => {
             let failed = |e: anyhow::Error| format!("the spec branch `{branch}` couldn't be created: {e}");
-            let head = gh(format!("/git/ref/heads/{base}")).await.map_err(failed)?;
-            let sha = head["object"]["sha"].as_str().unwrap_or_default().to_string();
-            let commit = gh(format!("/git/commits/{sha}")).await.map_err(failed)?;
-            // An empty commit: the tree of the default branch, so the branch has something to open a PR for.
-            let start = post("/git/commits", json!({ "message": format!("Start spec #{n}"), "tree": commit["tree"]["sha"], "parents": [sha] })).await.map_err(failed)?;
-            post("/git/refs", json!({ "ref": format!("refs/heads/{branch}"), "sha": start["sha"] })).await.map_err(failed)?;
+            let start = match docs {
+                Some(d) => {
+                    let head = gh(format!("/git/ref/heads/{d}")).await.map_err(|e| {
+                        if crate::github::is_gone(&e) { format!("the docs branch `{d}` isn't on GitHub, so the spec branch `{branch}` wasn't created: push it first") } else { failed(e) }
+                    })?;
+                    head["object"]["sha"].clone()
+                }
+                None => {
+                    let head = gh(format!("/git/ref/heads/{base}")).await.map_err(failed)?;
+                    let sha = head["object"]["sha"].as_str().unwrap_or_default().to_string();
+                    let commit = gh(format!("/git/commits/{sha}")).await.map_err(failed)?;
+                    // An empty commit: the tree of the default branch, so the branch has something to open a PR for.
+                    let made = post("/git/commits", json!({ "message": format!("Start spec #{n}"), "tree": commit["tree"]["sha"], "parents": [sha] })).await.map_err(failed)?;
+                    made["sha"].clone()
+                }
+            };
+            post("/git/refs", json!({ "ref": format!("refs/heads/{branch}"), "sha": start })).await.map_err(failed)?;
         }
         Err(e) => return Err(format!("couldn't check {slug} for the spec branch `{branch}`: {e}")),
     }
@@ -870,6 +895,45 @@ pub(crate) mod tests {
         let again = publish(&st, &a, "one pr per spec: branch & ticket closing, ready on the last close").await.unwrap();
         assert!(again.contains("already published as #186") && again.ends_with("/pull/500"), "{again}");
         assert_eq!(fake.seen("/repos/octo/spec-branch").len(), before);
+    }
+
+    async fn publish_with_docs(st: &AppState, a: &Agent, title: &str, docs: &str) -> Result<String, String> {
+        mcp_call(st, a, "publish_spec", &json!({ "title": title, "body": "## Problem Statement\n\nIt hurts.", "docs_branch": docs })).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_grills_docs_branch_starts_the_spec_branch() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs";
+        let a = planner_on(&st, "spec-docs", Some("git@github.com:octo/spec-docs.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+
+        // Not pushed yet: the spec is published, the branch waits for a retry.
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.starts_with("Published the spec as #12"), "{out}");
+        assert!(out.ends_with("The spec is published, but the docs branch `docs/rounds` isn't on GitHub, so the spec branch `spec/12-rounds` wasn't created: push it first. Call publish_spec again with the same title and `docs_branch` to retry only the spec branch and PR."), "{out}");
+        assert!(posts(&fake, slug, "git/refs").is_empty() && posts(&fake, slug, "pulls").is_empty());
+
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/docs/rounds"), 200, json!({ "object": { "sha": "docs-sha" } }));
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/12-rounds`. Spec PR (draft, to the default branch): https://github.com/octo/spec-docs/pull/500"), "{out}");
+        // The spec branch points at the docs head, so its history holds the docs commits: no empty commit.
+        assert_eq!(posts(&fake, slug, "git/refs"), [json!({ "ref": "refs/heads/spec/12-rounds", "sha": "docs-sha" })]);
+        assert!(fake.seen(&format!("/repos/{slug}/git/commits")).is_empty(), "no empty commit");
+        assert_eq!(posts(&fake, slug, "pulls")[0]["base"], "main");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1, "never a second spec");
+    }
+
+    #[tokio::test]
+    async fn a_docs_branch_that_isnt_a_branch_name_is_turned_down() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-docs-bad", Some("git@github.com:octo/spec-docs-bad.git"));
+        repo(&fake, "octo/spec-docs-bad", &["spec", "ready-for-agent"], 1);
+        for bad in ["docs/../main", "docs rounds", "/docs", "docs/"] {
+            let err = publish_with_docs(&st, &a, "Rounds", bad).await.unwrap_err();
+            assert_eq!(err, format!("\"{bad}\" isn't a branch name: pass the docs branch as you pushed it, like `docs/<topic>`"));
+        }
+        assert!(fake.seen("/repos/octo/spec-docs-bad").is_empty(), "nothing asked of GitHub");
     }
 
     #[tokio::test]
