@@ -497,9 +497,13 @@ async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     let part = pr.map(|p| format!(", part of #{p}")).unwrap_or_default();
     let comment = format!("Done in {}{part}.", shas.join(", "));
     // Posted this same comment but the close failed: the retry doesn't comment twice. Keyed by the
-    // comment so the reply always names a comment that is on the ticket.
+    // comment so the reply always names a comment that is on the ticket. A record older than the
+    // ticket's last close (by hand on GitHub, then reopened) belongs to an earlier round.
     let key = format!("{n} {comment}");
-    if !matches!(state.db.published_issue(&slug, "close_comment", &key), Ok(Some(_))) {
+    let rfc = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+    let last_closed = i["closed_at"].as_str().and_then(rfc);
+    let posted = state.db.published_issue_at(&slug, "close_comment", &key).ok().flatten().and_then(|t| rfc(&t));
+    if !posted.is_some_and(|p| last_closed.is_none_or(|c| p > c)) {
         crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues/{n}/comments"), Some(json!({ "body": comment })))
             .await
             .map_err(|e| format!("Couldn't comment on #{n}, so it wasn't closed: {e}"))?;
@@ -508,8 +512,8 @@ async fn close_ticket(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     let closed = crate::github::request(state, reqwest::Method::PATCH, &format!("/repos/{slug}/issues/{n}"), Some(json!({ "state": "closed", "state_reason": "completed" })))
         .await
         .map_err(|e| format!("Commented on #{n} but couldn't close it: {e}. Call close_ticket again to retry the close."))?;
-    // Closed: a close after a reopen comments again.
-    let _ = state.db.forget_published_issue(&slug, "close_comment", &key);
+    // Closed: a close after a reopen comments again, whichever comments the failed tries left.
+    let _ = state.db.forget_published_issues_of(&slug, "close_comment", n);
     // The mirror leaves an issue someone is working on open when GitHub closes it; this close is the work's end.
     if let Some((mut t, _)) = crate::mirror::bring_in(state, me.project.trim(), &slug, &closed)
         && t.status != "done"
@@ -1287,6 +1291,40 @@ pub(crate) mod tests {
         let out = close(&st, &a, 7, &["abc1234", "def5678"]).await.unwrap();
         assert!(out.starts_with("Closed #7 as completed with the comment \"Done in `abc1234`, `def5678`.\""), "{out}");
         assert_eq!(posts(&fake, slug, "issues/7/comments"), [json!({ "body": "Done in `abc1234`." }), json!({ "body": "Done in `abc1234`, `def5678`." })]);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_a_reopen_comments_whatever_earlier_tries_left() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-stale";
+        let a = planner_on(&st, "close-stale", Some("git@github.com:octo/close-stale.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/8"), 200, gh_ticket(slug, 8, "open", "## What to build\n\nPink."));
+        fake.route("POST", &format!("/repos/{slug}/issues/8/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/8"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 8, "closed", ""))]);
+
+        // Fails with abc, succeeds with abc and def, then reopened and closed with abc alone.
+        close(&st, &a, 8, &["abc1234"]).await.unwrap_err();
+        close(&st, &a, 8, &["abc1234", "def5678"]).await.unwrap();
+        assert!(close(&st, &a, 8, &["abc1234"]).await.unwrap().starts_with("Closed #8 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/8/comments").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_a_failed_close_and_a_close_by_hand_comments_again() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-hand";
+        let a = planner_on(&st, "close-hand", Some("git@github.com:octo/close-hand.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/9"), 200, gh_ticket(slug, 9, "open", "## What to build\n\nGrey."));
+        fake.route("POST", &format!("/repos/{slug}/issues/9/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/9"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 9, "closed", ""))]);
+
+        close(&st, &a, 9, &["abc1234"]).await.unwrap_err();
+        // Closed by hand on GitHub after that, then reopened: GitHub keeps the last close's time.
+        let mut reopened = gh_ticket(slug, 9, "open", "## What to build\n\nGrey.");
+        reopened["closed_at"] = json!(crate::db::now());
+        fake.route("GET", &format!("/repos/{slug}/issues/9"), 200, reopened);
+        assert!(close(&st, &a, 9, &["abc1234"]).await.unwrap().starts_with("Closed #9 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/9/comments").len(), 2);
     }
 
     #[tokio::test]

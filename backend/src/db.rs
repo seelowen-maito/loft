@@ -806,9 +806,16 @@ impl Db {
         Ok(())
     }
 
-    pub fn forget_published_issue(&self, slug: &str, kind: &str, key: &str) -> Result<()> {
+    /// When Loft recorded this kind and key on `slug`, if it did.
+    pub fn published_issue_at(&self, slug: &str, kind: &str, key: &str) -> Result<Option<String>> {
         let c = self.0.lock().unwrap();
-        c.execute("DELETE FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key])?;
+        Ok(c.query_row("SELECT created_at FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key], |r| r.get(0)).optional()?)
+    }
+
+    /// Drops every record of this kind on `slug` that points at issue `number`, whatever its key.
+    pub fn forget_published_issues_of(&self, slug: &str, kind: &str, number: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM published_issues WHERE slug = ?1 AND kind = ?2 AND number = ?3", params![slug, kind, number])?;
         Ok(())
     }
 
