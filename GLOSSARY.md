@@ -17,8 +17,12 @@ A folder under the user's projects directory. Its git `origin`, once it has one,
 _Avoid_: Workspace (that is the agent's private folder)
 
 **Lead**:
-The one agent per team marked as lead: it plans with the user and hands ready tickets to the rest of the team. A team has at most one.
+The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
 _Avoid_: Orchestrator, manager, planner
+
+**Role**:
+What an agent does in its team: Lead, Dev, Code reviewer, QA or Security. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake. An agent has at most one role.
+_Avoid_: Job, type, flag
 
 **Run**:
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
