@@ -24,6 +24,14 @@ _Avoid_: Orchestrator, manager, planner
 What an agent does in its team: Lead, Dev, Code reviewer, QA or Security. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake. An agent has at most one role.
 _Avoid_: Job, type, flag
 
+**Delivery**:
+Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers, closes it when they pass, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
+_Avoid_: Build, run, pipeline
+
+**Role brief**:
+The fixed instructions Loft writes for a role and sends with that role's wake in a Delivery. An agent's standing instructions add to it but can't change how the Delivery works.
+_Avoid_: Role prompt, template
+
 **Run**:
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
