@@ -181,6 +181,25 @@ final class LoftStore {
 
     // MARK: - Configuration & lifecycle
 
+    /// Demo mode (spec #144): the app on bundled sample data, with no server. Nothing is cached, and the saved
+    /// connection is left as it was; a relaunch starts from it again.
+    private(set) var isDemo = false
+
+    func enterDemo() {
+        deactivate()
+        isDemo = true
+        configure(FixtureAPI())
+        activate()
+    }
+
+    /// Back to the connect screen, or to the saved server if there is one.
+    func exitDemo() {
+        deactivate()
+        isDemo = false
+        configure(UserDefaults.standard.string(forKey: Prefs.serverURL).flatMap(LiveLoftAPI.normalize).map(LiveLoftAPI.init(baseURL:)))
+        if api != nil { activate() }
+    }
+
     func configure(_ api: LoftAPI?) {
         connectionTask?.cancel()
         connectionTask = nil
@@ -884,7 +903,8 @@ final class LoftStore {
     }
 
     func saveNow() {
-        guard let api, let lastSync else { return }
+        // The demo's sample data never replaces the cache of the real server.
+        guard !isDemo, let api, let lastSync else { return }
         cache.save(Snapshot(
             server: api.baseURL.absoluteString,
             savedAt: lastSync,

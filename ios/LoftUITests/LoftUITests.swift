@@ -567,6 +567,25 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["testConnection"].isEnabled)
     }
 
+    /// Spec #144: "Try the demo" opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
+    func testTheDemoShowsIssuesAndLeaves() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai"]
+        app.launch()
+        let demo = app.buttons["tryDemo"]
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5))
+        if !demo.isHittable { app.swipeUp() }
+        demo.tap()
+        XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
+        app.tabBars.buttons["Tasks"].tap()
+        XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
+        app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
+        XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
+        app.buttons["exitDemo"].tap()
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
+    }
+
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
         let app = launch(["-fixture-risky-permission", "-fixture-explain", "Sends your commits to the main branch on GitHub."])
         app.tabBars.buttons["Agents"].tap()

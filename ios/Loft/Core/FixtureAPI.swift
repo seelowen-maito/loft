@@ -1,8 +1,7 @@
-#if DEBUG
 import Foundation
 
-/// Deterministic in-memory server for UI tests (`-ui-testing`). Debug builds only;
-/// the shipping app always talks to a real Loft.
+/// Deterministic in-memory server: UI tests (`-ui-testing`, debug builds) and demo mode (spec #144: "Try the demo"
+/// on the connect screen, in every build). It never touches the network.
 final class FixtureAPI: LoftAPI, @unchecked Sendable {
     enum Mode { case normal, empty, offline, failSends }
 
@@ -728,7 +727,6 @@ private struct GrillMetaWire: Encodable {
         try c.encode(try JSONDecoder().decode(JSONValue.self, from: try e.encode(g)))
     }
 }
-#endif
 
 /// Hand-drawn stickers in the backend's avatar format, exercising paths (curves, arcs), gradients,
 /// clip paths, transforms and strokes.
