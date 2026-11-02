@@ -1,5 +1,8 @@
 import type { Task } from "./api";
 
+/** The action that attaches an issue (Loft or GitHub) to a chat message: label, button and picker title. */
+export const ATTACH = "Attach an issue";
+
 export type Source = "all" | "loft" | "github";
 export const SOURCES: { key: Source; label: string }[] = [
   { key: "all", label: "All" },

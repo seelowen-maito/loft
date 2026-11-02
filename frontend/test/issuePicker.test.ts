@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterIssues } from "../src/lib/issueFilter.ts";
-import { ATTACH } from "../src/lib/attach.ts";
+import { ATTACH, filterIssues } from "../src/lib/issueFilter.ts";
 
 const issue = (title: string, number?: number, labels: string[] = []) =>
   ({ id: title, title, description: "", labels, owner: "", github: number ? { number } : null }) as never;
