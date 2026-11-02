@@ -54,6 +54,9 @@ struct SettingsView: View {
     @AppStorage(Prefs.aiChatReplies) private var aiChatReplies = true
     @AppStorage(Prefs.aiExplain) private var aiExplain = true
     @AppStorage(Prefs.speechVoice) private var speechVoice = ""
+    /// Settings › GitHub issues, from the server; nil until loaded, or on a server without them.
+    @State private var issueSettings: IssueSettings?
+    @State private var issueSettingsError: APIError?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     @State private var copied = false
@@ -74,6 +77,19 @@ struct SettingsView: View {
     private var interruptNote: String {
         (interruptByVoice ? " While it reads, say “stop”, “skip” or “repeat” to cut it short." : "")
             + (shortRead ? " Long replies start with their opening; say “more” for the rest." : "")
+    }
+
+    /// Shows the change at once, saves it on the server, and goes back to what the server has if that fails.
+    private func save<T>(_ key: WritableKeyPath<IssueSettings, T>, _ value: T) {
+        guard var s = issueSettings else { return }
+        s[keyPath: key] = value
+        issueSettings = s
+        Task {
+            do { try await store.saveIssueSettings(s) } catch {
+                issueSettingsError = APIError.from(error)
+                issueSettings = try? await store.issueSettings()
+            }
+        }
     }
 
     var body: some View {
@@ -243,6 +259,24 @@ struct SettingsView: View {
                 Text("Runs on this iPhone, works offline and sends nothing anywhere. When it's not available, Loft works as before.")
             }
 
+            if let issues = issueSettings {
+                Section {
+                    Picker("Comments to GitHub", selection: Binding(get: { issues.commentApproval }, set: { save(\.commentApproval, $0) })) {
+                        Text("Ask for every comment").tag("ask")
+                        Text("Mine go straight").tag("own")
+                        Text("Everything goes straight").tag("all")
+                    }
+                    .accessibilityIdentifier("commentApprovalPicker")
+                    Toggle("Publish new issues to GitHub", isOn: Binding(get: { issues.autoPublish }, set: { save(\.autoPublish, $0) }))
+                        .accessibilityIdentifier("autoPublishToggle")
+                } header: {
+                    Text("GitHub issues")
+                } footer: {
+                    Text("For every project with a GitHub repo. A comment that waits shows in Needs you to approve, edit or keep in Loft.")
+                }
+                .disabled(!store.canWrite)
+            }
+
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     Text("Dark").tag("dark")
@@ -272,6 +306,8 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .task { issueSettings = try? await store.issueSettings() }
+        .errorAlert($issueSettingsError)
         .task { notificationStatus = await store.notifier.authorizationStatus() }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }

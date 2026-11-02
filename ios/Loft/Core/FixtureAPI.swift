@@ -643,6 +643,87 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
+    /// t1's thread: a GitHub comment, a status change, an agent's note, a comment waiting for GitHub (the Needs you
+    /// item's 77) and one of yours already posted.
+    private var comments: [TaskComment] = {
+        let now = Date()
+        func c(_ id: Int64, _ author: String, _ kind: String, _ text: String, _ minutes: Double, _ meta: JSONValue? = nil) -> TaskComment {
+            TaskComment(id: id, taskId: "t1", author: author, kind: kind, text: text, meta: meta, createdAt: now.addingTimeInterval(-minutes * 60))
+        }
+        return [
+            c(70, "github", "comment", "Can the sync time show in the user's time zone?", 50, ["author_name": "octo-dev", "github": ["state": "from_github"]]),
+            c(71, "user", "status", "Started by Orchestrator", 40),
+            c(72, "be", "note", "3 of 4 endpoints done", 20, ["author_name": "Backend Agent"]),
+            c(77, "be", "comment", "Backend is done: 4 endpoints with tests. iOS screen next.", 2, ["author_name": "Backend Agent", "github": ["state": "pending"]]),
+            c(78, "user", "comment", "Yes, local time with the zone name.", 1, ["github": ["state": "posted"]]),
+        ]
+    }()
+
+    func taskComments(id: String) async throws -> [TaskComment] {
+        try check()
+        return locked { comments.filter { $0.taskId == id } }
+    }
+
+    /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
+    private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
+                                       "auto_update": true, "messaging_rules": true]
+    /// Settings PUT so far, for tests to check what went to the server.
+    private(set) var settingsPut: [JSONValue] = []
+
+    func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+
+    func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
+        try check()
+        return locked {
+            settingsPut.append(s)
+            guard case .object(var o) = s else { return settings }
+            // As the server: no `github_token` keeps the saved one.
+            if o["github_token"] == nil { o["github_token"] = settings["github_token"] }
+            settings = .object(o)
+            return settings
+        }
+    }
+
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws {
+        try check()
+        locked {
+            let mirrored = taskList.first { $0.id == id }?.github != nil && github != false
+            comments.append(TaskComment(id: (comments.map(\.id).max() ?? 0) + 1, taskId: id, author: "user", kind: "comment", text: text,
+                                        meta: mirrored ? ["github": ["state": "pending"]] : nil, createdAt: Date()))
+        }
+    }
+
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            if let text { comments[i].text = text }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "posted"]]
+        }
+    }
+
+    func keepComment(taskId: String, commentId: Int64) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "kept"]]
+        }
+    }
+
+    /// As the server: a Loft-only issue in a project gets the next number on octo/<project>.
+    func publishTask(id: String) async throws -> HBTask {
+        try check()
+        return try locked {
+            guard let i = taskList.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            guard !taskList[i].project.isEmpty else {
+                throw APIError.server(status: 400, message: "This Loft issue has no project, so there's no GitHub repo to publish it to.")
+            }
+            let repo = "octo/\(taskList[i].project)"
+            taskList[i].github = .init(repo: repo, number: 50, url: "https://github.com/\(repo)/issues/50", state: "open")
+            return taskList[i]
+        }
+    }
+
     func deleteTask(id: String) async throws { try check(); locked { taskList.removeAll { $0.id == id } } }
 
     func executeTask(id: String, agentId: String?, note: String) async throws -> ExecuteResponse {
