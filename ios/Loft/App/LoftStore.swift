@@ -188,7 +188,8 @@ final class LoftStore {
     func enterDemo() {
         deactivate()
         isDemo = true
-        configure(FixtureAPI())
+        // The Lead answers, from a script.
+        configure(FixtureAPI(scripted: true))
         activate()
     }
 
