@@ -16,9 +16,19 @@ export function MacAccess() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const card = useRef<HTMLElement>(null);
-  // Needs you links here when macOS is asking on the Mac.
+  // Needs you links here when macOS is asking on the Mac. The sections above load after this one
+  // mounts and push it down, so it's scrolled to again while the page grows (for a few seconds).
   useEffect(() => {
-    if (window.location.hash === "#mac-access") card.current?.scrollIntoView({ block: "start" });
+    if (window.location.hash !== "#mac-access") return;
+    const go = () => card.current?.scrollIntoView({ block: "start" });
+    go();
+    const grows = new ResizeObserver(go);
+    grows.observe(card.current?.parentElement ?? document.body);
+    const stop = setTimeout(() => grows.disconnect(), 3000);
+    return () => {
+      clearTimeout(stop);
+      grows.disconnect();
+    };
   }, []);
 
   const run = async () => {
