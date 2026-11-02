@@ -219,6 +219,8 @@ pub struct PullRequest {
     pub gone: bool,
     /// The PR's label names, from the payload the poller already reads (the verdicts show from them).
     pub labels: Vec<String>,
+    /// The head commit the pass labels (tests:green, qa:passed, security:passed) were set for, so a new head clears them.
+    pub passes_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a

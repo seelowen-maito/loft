@@ -16,6 +16,16 @@ const SLOW_EVERY: Duration = Duration::from_secs(5 * 60);
 /// PRs with a mergeability retry already waiting, so refreshes don't stack more.
 static RETRYING: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
 
+/// The verdicts a checker can set: (kind, label for a pass, label for a failure).
+pub const VERDICTS: [(&str, &str, &str); 3] = [("tests", "tests:green", "tests:failing"), ("qa", "qa:passed", "qa:failed"), ("security", "security:passed", "security:findings")];
+
+fn is_pass(label: &str) -> bool {
+    VERDICTS.iter().any(|(_, pass, _)| *pass == label)
+}
+
+/// owner/repo + label pairs Loft has made sure exist, so a repo gets each created once.
+static ENSURED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
 /// Does this tool call open a pull request?
 pub fn creates_pr(tool: &str, input: &Value) -> bool {
     if tool.contains("create_pull_request") || tool == "mcp__loft__share_pull_request" {
@@ -89,6 +99,7 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
             if let Some((v, etag)) = changed {
                 apply(&mut pr, &v);
                 pr.etag = etag;
+                clear_stale_passes(state, &mut pr).await;
             }
             pr.error = None;
             pr.gone = false;
@@ -178,6 +189,79 @@ async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
     Ok(json!({ "total": passed + failed + pending, "passed": passed, "failed": failed, "pending": pending }))
 }
 
+/// A checker's verdict on a PR: sets the label for `kind` (tests, qa or security) and removes its opposite in one
+/// call, after creating the label if the repo doesn't have it. `sha` is the head commit the checker tested.
+/// Only an agent with the reviewer role in the project of the agent that opened the PR may.
+pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str) -> Result<String, String> {
+    let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
+    let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
+    let known = state.db.list_pull_requests(None).map_err(|e| e.to_string())?.into_iter().find(|p| p.slug == slug && p.number == number);
+    let pr = known.ok_or("Loft doesn't track that pull request: its opener shares it with share_pull_request first.")?;
+    let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
+    if me.role != "reviewer" || opener.is_none_or(|o| o.project.trim() != me.project.trim()) {
+        return Err("Only a reviewer agent of the project that opened this pull request can set its verdict.".into());
+    }
+    // Read it fresh (a 304 when unchanged): a verdict is about the head commit it was tested on.
+    let pr = refresh(state, &pr.id).await.map_err(|e| e.to_string())?;
+    if sha.len() < 7 || !pr.head_sha.starts_with(sha) {
+        return Err(format!("Its head is now {}, not {sha}. Test the new head and set the verdict again.", pr.head_sha.chars().take(7).collect::<String>()));
+    }
+    let (want, opposite) = if pass { (good, bad) } else { (bad, good) };
+    let ensure = format!("{slug}|{want}");
+    if !ENSURED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).contains(&ensure) {
+        let color = if want.ends_with("green") || want.ends_with("passed") { "2da44e" } else { "cf222e" };
+        let made = github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/labels"), Some(json!({ "name": want, "color": color, "description": "Set by Loft's checkers" }))).await;
+        // 422 is "already exists", which is what we wanted.
+        if let Err(e) = made
+            && !e.to_string().starts_with("GitHub 422")
+        {
+            return Err(format!("Couldn't create the label {want}: {e}"));
+        }
+        ENSURED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ensure);
+    }
+    let mut labels: Vec<String> = pr.labels.iter().filter(|l| *l != opposite && *l != want).cloned().collect();
+    labels.push(want.into());
+    set_labels(state, pr, labels, pass).await.map(|_| format!("{want} is on {slug}#{number}."))
+}
+
+/// Replaces the PR's labels in one call and keeps what GitHub answers. `passed_at`: a pass was just set, for the current head.
+async fn set_labels(state: &AppState, mut pr: PullRequest, labels: Vec<String>, passed_at: bool) -> Result<PullRequest, String> {
+    let v = github::request(state, reqwest::Method::PUT, &format!("/repos/{}/issues/{}/labels", pr.slug, pr.number), Some(json!({ "labels": labels })))
+        .await
+        .map_err(|e| format!("Couldn't set the labels: {e}"))?;
+    pr.labels = v.as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
+    if passed_at {
+        pr.passes_sha = pr.head_sha.clone();
+    }
+    if !pr.labels.iter().any(|l| is_pass(l)) {
+        pr.passes_sha.clear();
+    }
+    state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
+    emit(state, &pr);
+    Ok(pr)
+}
+
+/// When the head moved on from the commit the pass labels were set for, removes them (at most three) in one
+/// call; failure labels stay until the next verdict. A pass first seen here (set by hand) is taken as for this head.
+async fn clear_stale_passes(state: &AppState, pr: &mut PullRequest) {
+    if !pr.labels.iter().any(|l| is_pass(l)) {
+        pr.passes_sha.clear();
+        return;
+    }
+    if pr.passes_sha.is_empty() || pr.head_sha.is_empty() {
+        pr.passes_sha = pr.head_sha.clone();
+        return;
+    }
+    if pr.passes_sha == pr.head_sha {
+        return;
+    }
+    let keep: Vec<String> = pr.labels.iter().filter(|l| !is_pass(l)).cloned().collect();
+    match set_labels(state, pr.clone(), keep, false).await {
+        Ok(p) => *pr = p,
+        Err(e) => tracing::warn!("clearing the passed labels of {}#{}: {e}", pr.slug, pr.number),
+    }
+}
+
 pub async fn merge(state: &AppState, id: &str, method: &str) -> Result<PullRequest> {
     let pr = refresh(state, id).await?;
     if pr.state != "open" {
@@ -260,6 +344,7 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
         } else {
             apply_graphql(&mut pr, node);
             pr.error = None;
+            clear_stale_passes(state, &mut pr).await;
         }
         pr.checked_at = Some(now());
         state.db.save_pull_request(&pr)?;
@@ -511,6 +596,106 @@ mod tests {
         assert_eq!(get(2).state, "merged");
         let gone = get(3);
         assert!(gone.gone && !due(&gone, true), "not found: gone, and not polled again");
+    }
+
+
+    /// A dev that opened the PR, and a reviewer of the same project.
+    fn team(st: &AppState, project: &str) -> (crate::db::Agent, crate::db::Agent) {
+        let mut dev = crate::tasks::tests::agent(st, &format!("Dev {project}"));
+        dev.project = project.into();
+        st.db.save_agent(&dev).unwrap();
+        let mut qa = crate::tasks::tests::agent(st, &format!("Tester {project}"));
+        qa.project = project.into();
+        qa.role = "reviewer".into();
+        st.db.save_agent(&qa).unwrap();
+        (dev, qa)
+    }
+
+    fn label_objects(names: &[&str]) -> Value {
+        json!(names.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>())
+    }
+
+    #[tokio::test]
+    async fn a_verdict_sets_one_label_and_removes_its_opposite_in_one_call_creating_the_label_first() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-verdict";
+        let (dev, qa) = team(&st, "pr-verdict");
+        let mut p = pull(slug, 5, "abc1234def");
+        p["labels"] = label_objects(&["bug", "tests:failing"]);
+        fake.route("GET", "/repos/octo/pr-verdict/pulls/5", 200, p);
+        settled_checks(&fake, slug, "abc1234def");
+        fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
+        fake.route("PUT", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green"]));
+        register(&st, &dev.id, slug, 5, None).await.unwrap();
+        let url = "https://github.com/octo/pr-verdict/pull/5";
+
+        let said = set_verdict(&st, &qa, url, "tests", true, "abc1234").await.unwrap();
+        assert!(said.contains("tests:green"), "{said}");
+        let writes: Vec<_> = fake.seen("/repos/octo/pr-verdict/").into_iter().filter(|r| r.method != "GET").collect();
+        assert_eq!(writes.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "PUT"], "the label is created, then set");
+        assert_eq!(writes[0].body["name"], "tests:green");
+        assert_eq!(writes[1].body, json!({ "labels": ["bug", "tests:green"] }), "tests:failing is gone in the same call");
+        let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
+        assert_eq!(pr.labels, ["bug", "tests:green"]);
+        assert_eq!(pr.passes_sha, "abc1234def");
+
+        // The label now exists: a second verdict of the same kind doesn't create it again.
+        fake.route("PUT", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green", "qa:failed"]));
+        fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
+        set_verdict(&st, &qa, url, "qa", false, "abc1234").await.unwrap();
+        let posts = fake.seen("/repos/octo/pr-verdict/labels").into_iter().filter(|r| r.method == "POST").count();
+        assert_eq!(posts, 2, "one per new label, not per verdict");
+    }
+
+    #[tokio::test]
+    async fn a_new_head_removes_the_passed_labels_and_keeps_the_failures() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-newhead";
+        let (dev, _) = team(&st, "pr-newhead");
+        let mut old = pull(slug, 6, "aaa1111");
+        old["labels"] = label_objects(&["tests:green", "qa:failed", "security:passed"]);
+        let mut new = pull(slug, 6, "bbb2222");
+        new["labels"] = label_objects(&["tests:green", "qa:failed", "security:passed"]);
+        fake.in_turn("GET", "/repos/octo/pr-newhead/pulls/6", vec![(200, old), (200, new)]);
+        settled_checks(&fake, slug, "aaa1111");
+        settled_checks(&fake, slug, "bbb2222");
+        fake.route("PUT", "/repos/octo/pr-newhead/issues/6/labels", 200, label_objects(&["qa:failed"]));
+        let pr = register(&st, &dev.id, slug, 6, None).await.unwrap();
+        assert_eq!(pr.passes_sha, "aaa1111", "passes first seen are taken as for that head");
+        assert!(fake.seen("/repos/octo/pr-newhead/issues").is_empty(), "same head: nothing is removed");
+
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        let puts: Vec<_> = fake.seen("/repos/octo/pr-newhead/issues/6/labels");
+        assert_eq!(puts.len(), 1, "one call, not one per label");
+        assert_eq!(puts[0].body, json!({ "labels": ["qa:failed"] }));
+        assert_eq!((pr.labels.clone(), pr.passes_sha.as_str()), (vec!["qa:failed".to_string()], ""));
+    }
+
+    #[tokio::test]
+    async fn only_a_reviewer_of_the_prs_project_can_set_a_verdict_and_only_for_its_head() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-auth";
+        let (dev, qa) = team(&st, "pr-auth");
+        let (_, other_qa) = team(&st, "elsewhere");
+        fake.route("GET", "/repos/octo/pr-auth/pulls/7", 200, pull(slug, 7, "ccc3333444"));
+        settled_checks(&fake, slug, "ccc3333444");
+        register(&st, &dev.id, slug, 7, None).await.unwrap();
+        let url = "https://github.com/octo/pr-auth/pull/7";
+        let before = fake.seen("/").len();
+
+        for who in [&dev, &other_qa] {
+            let err = set_verdict(&st, who, url, "tests", true, "ccc3333").await.unwrap_err();
+            assert!(err.starts_with("Only a reviewer agent of the project"), "{err}");
+        }
+        let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999").await.unwrap_err();
+        assert!(err.contains("Its head is now ccc3333"), "{err}");
+        assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333").await.unwrap_err().contains("kind must be"));
+        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track"));
+        let writes = fake.seen("/").into_iter().skip(before).filter(|r| r.method != "GET").count();
+        assert_eq!(writes, 0, "a refused verdict writes nothing to GitHub");
     }
 
 }
