@@ -235,6 +235,18 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
     }
 
+    /// Talk's message box step: after a pause it asks "Send it?" (it never sends by itself); its Send sends as the
+    /// box's own button does, with the status and Undo.
+    func testTalkAsksToSendAfterAPause() {
+        let app = launch(["-fixture-voice", "confirm", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(any("talkConfirm", app).appears(timeout: 5))
+        XCTAssertTrue(any("talkListening", app).exists, "the mic is open, and it says so")
+        XCTAssertTrue(app.staticTexts["talkAsk"].appears(timeout: 8), "asks after the pause")
+        XCTAssertFalse(app.staticTexts["voiceStatusTitle"].exists, "nothing sent by itself")
+        app.buttons["talkSend"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+    }
+
     private func openGrillChat(_ extra: [String] = []) -> XCUIApplication {
         // No reading aloud or hands-free listening in tests.
         let app = launch(["-fixture-grill", "-grillReadAloud", "NO", "-voiceHandsFree", "NO"] + extra)

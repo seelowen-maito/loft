@@ -44,6 +44,8 @@ struct VoiceSessionView: View {
                 let text = voice.cleaned ?? voice.raw
                 voice.discard()
                 VoicePresentation.shared.statusAgentId = id
+                // Also for a chat that's already open, which keeps its own box.
+                VoicePresentation.shared.returnedText = text
                 router.openChat(id, draft: text)
                 dismiss()
             }

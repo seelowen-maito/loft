@@ -48,11 +48,25 @@ struct ChatView: View {
     private let dictate: Bool
     @Environment(VoiceSession.self) private var voice
 
+    /// `-fixture-voice ask`: the Send it? question shows at once, for screenshots.
+    private static var fixtureAsks: Bool {
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        if let i = a.firstIndex(of: "-fixture-voice"), i + 1 < a.count { return a[i + 1] == "ask" }
+        #endif
+        return false
+    }
+
     init(agentId: String, draft: String? = nil, dictate: Bool = false) {
         self.agentId = agentId
         self.dictate = dictate
         _draft = State(initialValue: draft ?? "")
+        // Talk's tidied text, landed in the box: it gets the Send it? bar until it's sent or touched.
+        _talkText = State(initialValue: VoicePresentation.shared.statusAgentId == agentId ? draft : nil)
     }
+
+    /// Talk's text waiting in the box, while its Send it? bar shows.
+    @State private var talkText: String?
 
     var body: some View {
         if let agent = store.agent(agentId) {
@@ -194,6 +208,19 @@ struct ChatView: View {
                     .accessibilityLabel("Attached task: \(t.title)")
                     .accessibilityIdentifier("attachedTask")
                 }
+                if let t = talkText, !t.isEmpty {
+                    TalkConfirmBar(text: t, current: draft, startAsking: Self.fixtureAsks, send: {
+                        talkText = nil
+                        draft = ""
+                        VoicePresentation.shared.statusAgentId = nil
+                        voice.sendWithStatus(t, to: agentId)
+                    }, cancel: {
+                        talkText = nil
+                        draft = ""
+                        VoicePresentation.shared.statusAgentId = nil
+                    }, done: { talkText = nil })
+                    .id(t)
+                }
                 ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
@@ -225,6 +252,7 @@ struct ChatView: View {
         .onChange(of: VoicePresentation.shared.returnedText, initial: true) { _, t in
             guard let t, VoicePresentation.shared.statusAgentId == agentId else { return }
             draft = t
+            talkText = t
             VoicePresentation.shared.returnedText = nil
         }
         .navigationBarTitleDisplayMode(.inline)

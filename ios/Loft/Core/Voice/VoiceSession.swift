@@ -763,7 +763,7 @@ final class VoiceSession {
         case "cleaning":
             live = ""
             phase = .cleaning
-        case "review":
+        case "review", "ask", "confirm":
             live = ""
             cleaned = "I want the settings screen to show the server version and the last sync time, and add a button to copy the diagnostics."
             phase = .review
