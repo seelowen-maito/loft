@@ -1,18 +1,20 @@
 import SwiftUI
 
-/// Full-screen, hands-free conversation with one agent: listen → review → send → hear the reply.
-/// It only reads `VoiceSession` and calls its actions; the engine owns the mic, the end phrases and
-/// the spoken confirmation. Nothing is sent without an explicit Send (a tap, or "send" in hands-free mode).
+/// Talk: dictate to one agent, then follow it. You talk (or hold the mic) and let go; the tidied text lands in that
+/// agent's chat message box to read and send. Sending it there brings this screen back as a full-screen status:
+/// Sent (with Undo) → Thinking → the reply read aloud. It only reads `VoiceSession` and calls its actions.
 struct VoiceSessionView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
     @Environment(\.dynamicTypeSize) private var typeSize
     let dismiss: () -> Void
 
-    @State private var showOriginal = false
-    @State private var draft = ""
-    @State private var confirmDiscard = false
-    @FocusState private var editing: Bool
+    /// After Send: the full-screen status, when there is one. A mic failure keeps the failure screen.
+    private var status: VoiceStatus? {
+        let s = VoiceStatus.of(voice.phase, undoPending: voice.autoSendAt != nil, posting: !store.pending(for: agentId).isEmpty)
+        return s == .failed && voice.failedSend == nil ? nil : s
+    }
 
     private var agentId: String { voice.agentId ?? "" }
     private var agentName: String { store.agent(agentId)?.name ?? "Agent" }
@@ -22,25 +24,31 @@ struct VoiceSessionView: View {
             header
             questionCard
             Group {
-                switch voice.phase {
-                case .idle, .preparing, .listening, .paused: listening
-                case .cleaning: cleaning
-                case .review: review
-                case .sending: working
-                case .speaking: speaking
-                case .failed(let message): failed(message)
+                if let status {
+                    VoiceStatusView(status: status, dismiss: dismiss)
+                } else if case .failed(let message) = voice.phase {
+                    failed(message)
+                } else if voice.phase == .review || voice.phase == .sending {
+                    // On its way to the chat's message box (or an interview answer going out).
+                    ProgressView()
+                } else {
+                    dictate
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.background.ignoresSafeArea())
         .onChange(of: voice.phase, initial: true) { _, p in
-            if p == .review { loadDraft() }
-        }
-        .confirmationDialog("Discard what you said?", isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button("Discard", role: .destructive) { voice.discard(); dismiss() }
-        } message: {
-            Text("The transcript is deleted and nothing is sent.")
+            // The tidied text goes to the chat's message box, to read there; sending it brings the status back.
+            if p == .review, voice.autoSendAt == nil, let id = voice.agentId {
+                let text = voice.cleaned ?? voice.raw
+                voice.discard()
+                VoicePresentation.shared.statusAgentId = id
+                // Also for a chat that's already open, which keeps its own box.
+                VoicePresentation.shared.returnedText = text
+                router.openChat(id, draft: text)
+                dismiss()
+            }
         }
         .sensoryFeedback(.selection, trigger: voice.phase)
         .task(id: agentId) {
@@ -126,6 +134,7 @@ struct VoiceSessionView: View {
         case .review: voice.autoSendAt != nil ? "Sending…" : "Review before sending"
         case .sending: "Sent"
         case .speaking: "Replying"
+        case .replied: "Replied"
         case .failed: "Something went wrong"
         }
     }
@@ -135,235 +144,25 @@ struct VoiceSessionView: View {
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 
-    // MARK: Listening
+    // MARK: Dictate
 
-    private var listening: some View {
-        let preparing = voice.phase == .preparing || voice.phase == .idle
-        // At accessibility sizes everything competes for the height: no orb, the transcript gives way, icon-only buttons.
-        let ax = typeSize.isAccessibilitySize
-        return VStack(spacing: ax ? 8 : 16) {
-            if !ax {
-                Spacer(minLength: 0)
-                VoiceOrb(level: voice.level, active: voice.phase == .listening,
-                         tint: voice.phase == .listening ? Theme.accent : .secondary)
-                    .frame(maxWidth: 220)
-                    .opacity(preparing ? 0.45 : 1)
+    private var dictate: some View {
+        VStack(spacing: 20) {
+            RecentAgentsRow()
+            Spacer(minLength: 0)
+            if voice.phase == .cleaning {
+                ProgressView("Tidying up…")
+                Text(voice.raw).font(.body).foregroundStyle(.secondary).lineLimit(6).padding(.horizontal, Theme.gutter)
+            } else {
+                CaptionTranscript(committed: voice.committed, live: voice.live)
             }
             Spacer(minLength: 0)
-            if preparing {
-                ProgressView("Getting ready…").accessibilityIdentifier("voicePreparing")
-                Spacer(minLength: 0)
-            } else {
-                transcript
-                    .frame(maxHeight: 280)
-                    .fixedSize(horizontal: false, vertical: !ax && voice.raw.count < 200)
-                if voice.phase == .paused {
-                    Label("Paused. Tap resume to keep talking.", systemImage: "pause.circle")
-                        .font(.footnote).foregroundStyle(.secondary)
-                } else {
-                    Text("Take your time. Say “send” when you're done; after a quiet moment I'll ask.")
-                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        .lineLimit(ax ? 2 : nil)
-                        .accessibilityIdentifier("voiceFinishHint")
-                        .accessibilityIdentifier("voiceHint")
-                }
-            }
-            HStack(spacing: 16) {
-                Button {
-                    voice.phase == .paused ? voice.resume() : voice.pause()
-                } label: {
-                    Label(voice.phase == .paused ? "Resume" : "Pause",
-                          systemImage: voice.phase == .paused ? "play.fill" : "pause.fill")
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(.bordered)
-                .disabled(preparing)
-                .accessibilityIdentifier("voicePause")
-                Button {
-                    Task { await voice.finish() }
-                } label: {
-                    Label("Done", systemImage: "checkmark").frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(preparing || voice.raw.isEmpty)
-                .accessibilityIdentifier("voiceDone")
-            }
-            .labelStyle(ax ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
-            .controlSize(.large)
-            .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, 12)
-        }
-    }
-
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                Group {
-                    if voice.raw.isEmpty {
-                        Text("Start talking…").foregroundStyle(.tertiary)
-                    } else {
-                        Text(voice.committed) + Text(voice.committed.isEmpty || voice.live.isEmpty ? "" : " ")
-                            + Text(voice.live).foregroundStyle(.secondary)
-                    }
-                }
-                .font(.title3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Theme.gutter)
-                .id("end")
-                .accessibilityIdentifier("voiceTranscript")
-            }
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: voice.raw) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) }
-            }
-        }
-        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.12),
-                                     .init(color: .black, location: 1)], startPoint: .top, endPoint: .bottom))
-    }
-
-    // MARK: Cleaning
-
-    private var cleaning: some View {
-        VStack(spacing: 20) {
-            VoiceOrb(level: 0.2, active: true).frame(maxWidth: 140)
-            ProgressView("Tidying up what you said…")
-            Text(voice.raw).font(.body).foregroundStyle(.secondary).lineLimit(6)
-                .padding(.horizontal, Theme.gutter)
-        }
-    }
-
-    // MARK: Review
-
-    private func loadDraft() {
-        draft = showOriginal ? voice.raw : (voice.cleaned ?? voice.raw)
-    }
-
-    @ViewBuilder private var review: some View {
-        // At accessibility sizes the bar, the draft and three big buttons don't fit: let it all scroll.
-        if typeSize.isAccessibilitySize {
-            ScrollView { reviewContent }.scrollBounceBehavior(.basedOnSize)
-        } else {
-            reviewContent
-        }
-    }
-
-    private var reviewContent: some View {
-        VStack(spacing: 12) {
-            if voice.autoSendAt != nil {
-                AutoSendBar(recipient: agentName, undo: { voice.cancelAutoSend() }, sendNow: {
-                    editing = false
-                    let text = draft
-                    Task { await voice.send(text) }
-                })
-            }
-            if voice.cleaned != nil {
-                Picker("Version", selection: $showOriginal) {
-                    Text("Cleaned").tag(false)
-                    Text("Original").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: showOriginal) { _, _ in loadDraft() }
-                .accessibilityIdentifier("voiceVersion")
-            }
-            if let note = voice.cleanupNote {
-                Label(note, systemImage: "info.circle")
-                    .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("voiceCleanupNote")
-            }
-            TextEditor(text: $draft)
-                .font(.title3)
-                .focused($editing)
-                .scrollContentBackground(.hidden)
-                .padding(10)
-                .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
-                .frame(minHeight: typeSize.isAccessibilitySize ? 160 : 100)
-                .accessibilityLabel("Message to \(agentName)")
-                .accessibilityIdentifier("voiceDraft")
-            if voice.awaitingVoiceConfirm {
-                Label("\(VoiceSend.question(for: draft)) Say yes or no, or keep talking.", systemImage: "waveform")
-                    .font(.footnote.weight(.medium)).foregroundStyle(Theme.accent)
-                    .accessibilityIdentifier("voiceConfirmHint")
-            }
-            VStack(spacing: 10) {
-                Button {
-                    editing = false
-                    let text = draft
-                    Task { await voice.send(text) }
-                } label: {
-                    Label(typeSize.isAccessibilitySize ? "Send" : "Send to \(agentName)", systemImage: "arrow.up.circle.fill")
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canWrite)
-                .accessibilityIdentifier("voiceSend")
-                AnyLayout(typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))) {
-                    Button { voice.resume() } label: {
-                        Label("Keep talking", systemImage: "mic").fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 30)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("voiceKeepTalking")
-                    Button(role: .destructive) { confirmDiscard = true } label: {
-                        Label("Discard", systemImage: "trash").frame(maxWidth: .infinity, minHeight: 30)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("voiceDiscard")
-                }
-            }
-            .controlSize(.large)
-        }
-        .padding(.horizontal, Theme.gutter)
-        .padding(.bottom, 12)
-    }
-
-    // MARK: Agent replying
-
-    private var working: some View {
-        VStack(spacing: 20) {
-            VoiceOrb(level: 0.35, active: true, tint: Theme.working).frame(maxWidth: 160)
-            Text("\(agentName) is working…").font(.title3.weight(.semibold))
-            Text(voice.readReplies ? "The reply will be read aloud when it arrives." : "The reply will appear here when it arrives.")
-                .font(.footnote).foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, Theme.gutter)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var speaking: some View {
-        VStack(spacing: 16) {
-            VoiceOrb(level: 0.5, active: true, tint: Theme.working).frame(maxWidth: typeSize.isAccessibilitySize ? 56 : 120)
-            ScrollView {
-                Text(voice.reply ?? "")
-                    .font(.title3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Theme.gutter)
-                    .accessibilityIdentifier("voiceReply")
-            }
-            .scrollIndicators(.visible)
-            .scrollBounceBehavior(.basedOnSize)
-            if voice.handsFree && !typeSize.isAccessibilitySize {
-                Label("Listening again after the reply", systemImage: "arrow.trianglehead.2.clockwise")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            (typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 12))) {
-                if voice.handsFree {
-                    // Your turn now, without waiting for the end of the reply.
-                    Button { voice.speaker.interrupt(.skip) } label: {
-                        Label("Skip", systemImage: "forward.fill").frame(maxWidth: .infinity, minHeight: 30)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityHint("Stops reading and listens for you")
-                    .accessibilityIdentifier("voiceSkipSpeaking")
-                }
-                Button { voice.speaker.interrupt(.stop) } label: {
-                    Label("Stop", systemImage: "stop.fill").frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityHint("Stops reading and ends the conversation")
-                .accessibilityIdentifier("voiceStopSpeaking")
-            }
-            .controlSize(.large)
-            .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, 12)
+            VoiceBars(level: voice.level, active: voice.phase == .listening).frame(height: 60).scaleEffect(0.6)
+            HoldToTalkButton(listening: voice.phase == .listening) { Task { await voice.finish() } }
+                .disabled(voice.raw.isEmpty || voice.phase == .cleaning)
+            Text("Tap or let go when you're done: it lands in the message box to send.")
+                .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .padding(.horizontal, Theme.gutter).padding(.bottom, 12)
         }
     }
 
@@ -411,6 +210,10 @@ struct VoiceSessionView: View {
 @MainActor @Observable final class VoicePresentation {
     static let shared = VoicePresentation()
     var shown = false
+    /// Talk: the chat whose message box holds a dictation; sending it there opens the status screen.
+    var statusAgentId: String?
+    /// Talk: text Undo sends back to that chat's message box.
+    var returnedText: String?
 }
 
 struct VoicePresenter: ViewModifier {
@@ -493,11 +296,4 @@ struct VoiceDraftBanner: View {
         .onChange(of: voice.phase) { _, _ in saved = VoiceSession.savedDraft() }
         .onChange(of: presentation.shown) { _, _ in saved = VoiceSession.savedDraft() }
     }
-}
-
-/// Picks a label style at run time (icon-only at accessibility sizes, where words don't fit side by side).
-struct AnyLabelStyle: LabelStyle {
-    private let make: (Configuration) -> AnyView
-    init(_ style: some LabelStyle) { make = { AnyView(style.makeBody(configuration: $0)) } }
-    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }

@@ -219,19 +219,32 @@ final class LoftUITests: XCTestCase {
 
     // MARK: - Other fixtures
 
-    func testClosingReviewKeepsDraftOnOverview() {
-        let app = launch(["-fixture-voice", "review"])
-        XCTAssertTrue(app.buttons["voiceSend"].appears(timeout: 5))
-        app.buttons["voiceClose"].tap()
-        let review = app.buttons["voiceDraftReview"]
-        XCTAssertTrue(review.appears(timeout: 5))
-        review.tap()
-        XCTAssertTrue(app.buttons["voiceSend"].appears(timeout: 5))
-        app.buttons["voiceClose"].tap()
-        let discard = app.buttons["voiceDraftDiscard"]
-        XCTAssertTrue(discard.appears(timeout: 5))
-        discard.tap()
-        XCTAssertTrue(discard.disappears(timeout: 5))
+    /// Talk: the tidied dictation lands in the chat's message box; sending it there shows the full-screen status,
+    /// whose Undo puts the text back in the box.
+    func testATalkDictationGoesToTheChatThenTheStatus() {
+        let app = launch(["-fixture-voice", "review", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "in the chat")
+        XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "the tidied text, in the box")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+        XCTAssertEqual(app.staticTexts["voiceStatusTitle"].label, "Sending to Orchestrator…")
+        app.buttons["Undo"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].disappears(timeout: 5))
+        let deadline = Date().addingTimeInterval(5)
+        while composerValue(app)?.contains("copy the diagnostics") != true, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
+    }
+
+    /// Talk's message box step: after a pause it asks "Send it?" (it never sends by itself); its Send sends as the
+    /// box's own button does, with the status and Undo.
+    func testTalkAsksToSendAfterAPause() {
+        let app = launch(["-fixture-voice", "confirm", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(any("talkConfirm", app).appears(timeout: 5))
+        XCTAssertTrue(any("talkListening", app).exists, "the mic is open, and it says so")
+        XCTAssertTrue(app.staticTexts["talkAsk"].appears(timeout: 8), "asks after the pause")
+        XCTAssertFalse(app.staticTexts["voiceStatusTitle"].exists, "nothing sent by itself")
+        app.buttons["talkSend"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
     }
 
     private func openGrillChat(_ extra: [String] = []) -> XCUIApplication {

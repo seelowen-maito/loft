@@ -129,6 +129,10 @@ enum Prefs {
     static let aiRoute = "aiRoute"
     /// "Make it a brief" under a long dictation (Claude on the Mac, `voice_brief`).
     static let voiceBrief = "voiceBrief"
+    /// Talk: "Send it?" after the tidied text has waited untouched in the message box for a few seconds.
+    static let talkAskToSend = "talkAskToSend"
+    /// Talk: while the text waits in the message box, "send it" said aloud sends it.
+    static let talkSayToSend = "talkSayToSend"
     /// Suggested one-tap replies under an agent's question in a chat.
     static let aiChatReplies = "aiChatReplies"
     /// "What does this do?" on a permission card.
@@ -152,6 +156,8 @@ enum Prefs {
             aiQuickAck: true,
             aiRoute: true,
             voiceBrief: true,
+            talkAskToSend: true,
+            talkSayToSend: true,
             aiChatReplies: true,
             aiExplain: true,
         ])

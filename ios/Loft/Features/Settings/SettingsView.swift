@@ -46,6 +46,8 @@ struct SettingsView: View {
     @AppStorage(Prefs.voiceInterrupt) private var interruptByVoice = true
     @AppStorage(Prefs.voiceShortRead) private var shortRead = true
     @AppStorage(Prefs.voiceBrief) private var offerBrief = true
+    @AppStorage(Prefs.talkAskToSend) private var talkAskToSend = true
+    @AppStorage(Prefs.talkSayToSend) private var talkSayToSend = true
     @AppStorage(Prefs.aiCommands) private var aiCommands = true
     @AppStorage(Prefs.aiShortSpoken) private var aiShortSpoken = true
     @AppStorage(Prefs.aiNeedsYou) private var aiNeedsYou = true
@@ -197,6 +199,10 @@ struct SettingsView: View {
                     .accessibilityIdentifier("readRepliesToggle")
                 Toggle("Hands-free", isOn: $handsFree)
                     .accessibilityIdentifier("handsFreeToggle")
+                Toggle("Ask to send after a pause", isOn: $talkAskToSend)
+                    .accessibilityIdentifier("talkAskToSendToggle")
+                Toggle("Say “send it” to send", isOn: $talkSayToSend)
+                    .accessibilityIdentifier("talkSayToSendToggle")
                 Toggle("Stop or skip by voice", isOn: $interruptByVoice)
                     .accessibilityIdentifier("interruptByVoiceToggle")
                 Toggle("Read long replies short", isOn: $shortRead)
