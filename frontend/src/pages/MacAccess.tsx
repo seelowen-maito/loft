@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { api, type MacAccess as Check } from "../lib/api";
 import { cx } from "../lib/format";
@@ -15,6 +15,11 @@ export function MacAccess() {
   const [check, setCheck] = useState<Check | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const card = useRef<HTMLElement>(null);
+  // Needs you links here when macOS is asking on the Mac.
+  useEffect(() => {
+    if (window.location.hash === "#mac-access") card.current?.scrollIntoView({ block: "start" });
+  }, []);
 
   const run = async () => {
     setBusy(true);
@@ -31,7 +36,7 @@ export function MacAccess() {
   const fullDisk = check?.items.find((i) => i.id === "full_disk")?.state === "allowed";
   const needsHelp = check && !fullDisk && check.items.some((i) => i.state === "blocked" || i.state === "waiting");
   return (
-    <section className="panel space-y-4 p-5">
+    <section id="mac-access" ref={card} className="panel scroll-mt-4 space-y-4 p-5">
       <div className="flex items-start gap-3">
         <div className="flex-1">
           <h2 className="text-[15px] font-medium tracking-tight">Mac access</h2>
