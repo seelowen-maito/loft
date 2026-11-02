@@ -1,22 +1,7 @@
 import SwiftUI
 
-/// Temporary: the Talk screen trial (Settings › Voice style, or `-voiceVariant e`). Round 3 kept one flow, E:
-/// talk (or hold the mic) and let go; the tidied text lands in the chat's message box, with a To: row of recent agents.
-/// Sending it from there opens a full-screen status (Sent → Thinking → the reply read aloud) with its buttons.
-/// The toggle goes once it's decided.
-enum VoiceVariant: String, CaseIterable {
-    case current, e
-
-    static let key = "voiceVariant"
-    static var selected: VoiceVariant { VoiceVariant(rawValue: UserDefaults.standard.string(forKey: key)?.lowercased() ?? "") ?? .current }
-
-    var title: String {
-        switch self {
-        case .current: "Current"
-        case .e: "E · Dictate, then a status screen"
-        }
-    }
-}
+/// The Talk screen's parts: the voice bars, the live captions, the To: row, the mic you hold, and the full-screen
+/// status after Send.
 
 // MARK: - Animations
 
@@ -72,7 +57,7 @@ struct CaptionTranscript: View {
 
 // MARK: - After sending
 
-/// Style E after Send: the whole screen says where the message is. Sent (with Undo) → Thinking, with the agent's own
+/// After Send: the whole screen says where the message is. Sent (with Undo) → Thinking, with the agent's own
 /// status line and a timer → the reply, read aloud, as a big bubble. The chat is one tap away at every step.
 struct VoiceStatusView: View {
     @Environment(LoftStore.self) private var store
@@ -239,6 +224,9 @@ struct VoiceStatusView: View {
         let text = voice.cleaned ?? voice.raw
         voice.cancelAutoSend()
         voice.discard()
+        // Sending it again from the box brings the status back.
+        VoicePresentation.shared.statusAgentId = agentId
+        VoicePresentation.shared.returnedText = text
         router.openChat(agentId, draft: text)
         dismiss()
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Voice style E, after you send: the full-screen status, one step at a time. Pure, so it's unit-tested.
+/// Talk, after you send: the full-screen status, one step at a time. Pure, so it's unit-tested.
 /// Sending (with Undo) → Thinking (the agent works) → Speaking (the reply read aloud) → Replied (the reply stays).
 enum VoiceStatus: Equatable {
     case sending, thinking, speaking, replied, failed

@@ -21,7 +21,7 @@ final class VoiceSession {
         /// Sent; waiting for the agent to answer.
         case sending
         case speaking
-        /// Voice style E: the reply has been read (or arrived, with reading off) and stays on screen.
+        /// Talk: the reply has been read (or arrived, with reading off) and stays on screen.
         case replied
         case failed(String)
     }
@@ -259,14 +259,14 @@ final class VoiceSession {
         discard()
     }
 
-    /// Voice style E: who the dictation goes to, picked on the To: row. Remembered for the next Talk.
+    /// Talk: who the dictation goes to, picked on the To: row. Remembered for the next Talk.
     func switchAgent(_ id: String) {
         guard phase != .sending, phase != .speaking else { return }
         agentId = id
         UserDefaults.standard.set(id, forKey: "voiceLastAgent")
     }
 
-    /// Voice style E: a dictated message sent from the chat's message box goes out after a short Undo, with the
+    /// Talk: a dictated message sent from the chat's message box goes out after a short Undo, with the
     /// full-screen status (Sent, Thinking, the reply read aloud) instead of only a bubble in the chat.
     func sendWithStatus(_ text: String, to agentId: String) {
         guard phase == .idle || phase == .replied || isFailed else { return }
@@ -277,13 +277,13 @@ final class VoiceSession {
         reply = nil
         failedSend = nil
         cleaned = text
-        // The countdown first, so the screen already sees it when the phase changes (no Undo: E's review means "to the chat").
+        // The countdown first, so the screen already sees it when the phase changes (a review without one means "to the chat").
         scheduleAutoSend()
         phase = .review
-        VoiceLog.shared.add("talk: sending from the chat with the status screen (style E)")
+        VoiceLog.shared.add("talk: sending from the chat with the status screen")
     }
 
-    /// Voice style E: read the reply again.
+    /// Talk: read the reply again.
     func replay() async {
         guard phase == .replied, let text = reply else { return }
         phase = .speaking
@@ -291,7 +291,7 @@ final class VoiceSession {
         if phase == .speaking { phase = .replied }
     }
 
-    /// Voice style E: stop reading; the reply stays on screen.
+    /// Talk: stop reading; the reply stays on screen.
     func stopReading() {
         guard phase == .speaking else { return }
         phase = .replied
@@ -571,8 +571,8 @@ final class VoiceSession {
             VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
             let ended = await speaker.readReply(spoken, messageId: id, isActive: { phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")
-            if VoiceVariant.selected == .e, next == nil {
-                // Style E: the reply stays on screen with Replay, Reply by voice, Open chat and Done.
+            if next == nil {
+                // The reply stays on screen with Replay, Reply by voice, Open chat and Done.
                 if phase == .speaking { phase = .replied }
                 return
             }
@@ -585,7 +585,7 @@ final class VoiceSession {
             VoiceLog.shared.add("talk: not read, “Read replies aloud” is off")
         }
         guard phase == .speaking || phase == .sending else { return } // stopped meanwhile
-        if VoiceVariant.selected == .e, next == nil {
+        if next == nil {
             phase = .replied
             return
         }
@@ -773,7 +773,7 @@ final class VoiceSession {
             phase = .review
             autoSendAt = Date().addingTimeInterval(3600)
         case "sent":
-            // Style E's status screen: the message on its way, with Undo.
+            // The status screen: the message on its way, with Undo.
             live = ""
             cleaned = "I want the settings screen to show the server version and the last sync time, and add a button to copy the diagnostics."
             phase = .review

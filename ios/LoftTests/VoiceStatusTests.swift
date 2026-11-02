@@ -1,7 +1,7 @@
 import XCTest
 @testable import Loft
 
-/// Voice style E's status screen after a dictated message is sent: Sending → Thinking → Speaking → Replied.
+/// Talk's status screen after a dictated message is sent: Sending → Thinking → Speaking → Replied.
 final class VoiceStatusTests: XCTestCase {
     func testAMessageGoesSentThinkingSpeakingReplied() {
         var s: VoiceStatus? = .sending

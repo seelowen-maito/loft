@@ -207,8 +207,8 @@ struct ChatView: View {
                     // on another one) and the voice moves on; typed text is always chat, as on the web.
                     if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
                         Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
-                    } else if VoiceVariant.selected == .e, VoicePresentation.shared.statusAgentId == agentId, attached == nil {
-                        // Voice style E: a dictation sent from here gets the full-screen status (Sent, Thinking, the reply).
+                    } else if VoicePresentation.shared.statusAgentId == agentId, attached == nil {
+                        // A Talk dictation sent from here gets the full-screen status (Sent, Thinking, the reply).
                         VoicePresentation.shared.statusAgentId = nil
                         voice.sendWithStatus(text, to: agentId)
                     } else {
@@ -221,6 +221,12 @@ struct ChatView: View {
             }
         }
         .navigationTitle(agent.name)
+        // Undo on Talk's status screen: the text comes back to this message box (the chat stays the same view).
+        .onChange(of: VoicePresentation.shared.returnedText, initial: true) { _, t in
+            guard let t, VoicePresentation.shared.statusAgentId == agentId else { return }
+            draft = t
+            VoicePresentation.shared.returnedText = nil
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
