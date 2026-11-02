@@ -221,10 +221,16 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
         }
         ENSURED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ensure);
     }
-<<<<<<< HEAD
-    let mut labels: Vec<String> = pr.labels.iter().filter(|l| *l != opposite && *l != want).cloned().collect();
-    labels.push(want.into());
-    let mut pr = set_labels(state, pr, labels, pass).await?;
+    // Add, then remove its opposite: never a full replace, so a label someone else added meanwhile survives.
+    let mut pr = pr;
+    add_label(state, &mut pr, want).await?;
+    remove_label(state, &mut pr, opposite).await?;
+    if pass {
+        pr.passes_sha = pr.head_sha.clone();
+    }
+    if !pr.labels.iter().any(|l| is_pass(l)) {
+        pr.passes_sha.clear();
+    }
     // The last verdict a PR needs makes it ready now, not at the next poll.
     mark_ready_if_due(state, &mut pr).await;
     state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
@@ -295,30 +301,6 @@ async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
         Ok(v) => tracing::warn!("marking {}#{} ready: {}", pr.slug, pr.number, v["errors"]),
         Err(e) => tracing::warn!("marking {}#{} ready: {e}", pr.slug, pr.number),
     }
-}
-
-/// Replaces the PR's labels in one call and keeps what GitHub answers. `passed_at`: a pass was just set, for the current head.
-async fn set_labels(state: &AppState, mut pr: PullRequest, labels: Vec<String>, passed_at: bool) -> Result<PullRequest, String> {
-    let v = github::request(state, reqwest::Method::PUT, &format!("/repos/{}/issues/{}/labels", pr.slug, pr.number), Some(json!({ "labels": labels })))
-        .await
-        .map_err(|e| format!("Couldn't set the labels: {e}"))?;
-    pr.labels = v.as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
-    if passed_at {
-=======
-    // Add, then remove its opposite: never a full replace, so a label someone else added meanwhile survives.
-    let mut pr = pr;
-    add_label(state, &mut pr, want).await?;
-    remove_label(state, &mut pr, opposite).await?;
-    if pass {
->>>>>>> pr-verdict-tool
-        pr.passes_sha = pr.head_sha.clone();
-    }
-    if !pr.labels.iter().any(|l| is_pass(l)) {
-        pr.passes_sha.clear();
-    }
-    state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
-    emit(state, &pr);
-    Ok(format!("{want} is on {slug}#{number}."))
 }
 
 fn names(v: &Value) -> Vec<String> {
