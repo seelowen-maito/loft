@@ -221,6 +221,7 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
         }
         ENSURED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ensure);
     }
+<<<<<<< HEAD
     let mut labels: Vec<String> = pr.labels.iter().filter(|l| *l != opposite && *l != want).cloned().collect();
     labels.push(want.into());
     let mut pr = set_labels(state, pr, labels, pass).await?;
@@ -303,6 +304,13 @@ async fn set_labels(state: &AppState, mut pr: PullRequest, labels: Vec<String>, 
         .map_err(|e| format!("Couldn't set the labels: {e}"))?;
     pr.labels = v.as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
     if passed_at {
+=======
+    // Add, then remove its opposite: never a full replace, so a label someone else added meanwhile survives.
+    let mut pr = pr;
+    add_label(state, &mut pr, want).await?;
+    remove_label(state, &mut pr, opposite).await?;
+    if pass {
+>>>>>>> pr-verdict-tool
         pr.passes_sha = pr.head_sha.clone();
     }
     if !pr.labels.iter().any(|l| is_pass(l)) {
@@ -310,11 +318,35 @@ async fn set_labels(state: &AppState, mut pr: PullRequest, labels: Vec<String>, 
     }
     state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
     emit(state, &pr);
-    Ok(pr)
+    Ok(format!("{want} is on {slug}#{number}."))
 }
 
-/// When the head moved on from the commit the pass labels were set for, removes them (at most three) in one
-/// call; failure labels stay until the next verdict. A pass first seen here (set by hand) is taken as for this head.
+fn names(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect()
+}
+
+/// Adds one label; GitHub answers with all the PR's labels, which the PR keeps.
+async fn add_label(state: &AppState, pr: &mut PullRequest, label: &str) -> Result<(), String> {
+    let v = github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{}/labels", pr.slug, pr.number), Some(json!({ "labels": [label] })))
+        .await
+        .map_err(|e| format!("Couldn't add {label}: {e}"))?;
+    pr.labels = names(&v);
+    Ok(())
+}
+
+/// Removes one label. A 404 means it wasn't on the PR, which is fine.
+async fn remove_label(state: &AppState, pr: &mut PullRequest, label: &str) -> Result<(), String> {
+    let path = format!("/repos/{}/issues/{}/labels/{}", pr.slug, pr.number, label.replace(':', "%3A"));
+    match github::request(state, reqwest::Method::DELETE, &path, None).await {
+        Ok(v) => pr.labels = names(&v),
+        Err(e) if github::is_gone(&e) => pr.labels.retain(|l| l != label),
+        Err(e) => return Err(format!("Couldn't remove {label}: {e}")),
+    }
+    Ok(())
+}
+
+/// When the head moved on from the commit the pass labels were set for, removes them (at most three, one call
+/// each); failure labels stay until the next verdict. A pass first seen here (set by hand) is taken as for this head.
 async fn clear_stale_passes(state: &AppState, pr: &mut PullRequest) {
     if !pr.labels.iter().any(|l| is_pass(l)) {
         pr.passes_sha.clear();
@@ -327,11 +359,12 @@ async fn clear_stale_passes(state: &AppState, pr: &mut PullRequest) {
     if pr.passes_sha == pr.head_sha {
         return;
     }
-    let keep: Vec<String> = pr.labels.iter().filter(|l| !is_pass(l)).cloned().collect();
-    match set_labels(state, pr.clone(), keep, false).await {
-        Ok(p) => *pr = p,
-        Err(e) => tracing::warn!("clearing the passed labels of {}#{}: {e}", pr.slug, pr.number),
+    for label in pr.labels.clone().into_iter().filter(|l| is_pass(l)) {
+        if let Err(e) = remove_label(state, pr, &label).await {
+            return tracing::warn!("clearing the passed labels of {}#{}: {e}", pr.slug, pr.number);
+        }
     }
+    pr.passes_sha.clear();
 }
 
 pub async fn merge(state: &AppState, id: &str, method: &str) -> Result<PullRequest> {
@@ -700,26 +733,40 @@ mod tests {
         fake.route("GET", "/repos/octo/pr-verdict/pulls/5", 200, p);
         settled_checks(&fake, slug, "abc1234def");
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
-        fake.route("PUT", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green"]));
+        fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:failing", "tests:green"]));
+        fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/tests%3Afailing", 200, label_objects(&["bug", "tests:green"]));
         register(&st, &dev.id, slug, 5, None).await.unwrap();
         let url = "https://github.com/octo/pr-verdict/pull/5";
 
         let said = set_verdict(&st, &qa, url, "tests", true, "abc1234").await.unwrap();
         assert!(said.contains("tests:green"), "{said}");
         let writes: Vec<_> = fake.seen("/repos/octo/pr-verdict/").into_iter().filter(|r| r.method != "GET").collect();
-        assert_eq!(writes.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "PUT"], "the label is created, then set");
+        assert_eq!(writes.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "POST", "DELETE"], "the label is created, added, and its opposite removed");
         assert_eq!(writes[0].body["name"], "tests:green");
-        assert_eq!(writes[1].body, json!({ "labels": ["bug", "tests:green"] }), "tests:failing is gone in the same call");
+        assert_eq!(writes[1].body, json!({ "labels": ["tests:green"] }), "only the one label is added: no full replace");
+        assert!(writes[2].path.ends_with("/labels/tests%3Afailing"), "{}", writes[2].path);
         let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
         assert_eq!(pr.labels, ["bug", "tests:green"]);
         assert_eq!(pr.passes_sha, "abc1234def");
 
         // The label now exists: a second verdict of the same kind doesn't create it again.
-        fake.route("PUT", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green", "qa:failed"]));
+        fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green", "qa:failed"]));
+        fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/qa%3Apassed", 404, json!({ "message": "Label does not exist" }));
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
         set_verdict(&st, &qa, url, "qa", false, "abc1234").await.unwrap();
-        let posts = fake.seen("/repos/octo/pr-verdict/labels").into_iter().filter(|r| r.method == "POST").count();
-        assert_eq!(posts, 2, "one per new label, not per verdict");
+        let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
+        assert_eq!(pr.labels, ["bug", "tests:green", "qa:failed"], "a 404 on the opposite is fine: it wasn't there");
+        let creates = fake.seen("/repos/octo/pr-verdict/labels").into_iter().filter(|r| r.method == "POST").count();
+        assert_eq!(creates, 2, "one per new label, not per verdict");
+        assert!(fake.seen("/repos/octo/pr-verdict/").iter().all(|r| r.method != "PUT"), "never a full replace");
+
+        // Someone else labelled the PR after Loft last read it: their label survives, as GitHub's answer is what is kept.
+        fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "needs-docs", "tests:green", "security:passed"]));
+        fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
+        fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
+        set_verdict(&st, &qa, url, "security", true, "abc1234").await.unwrap();
+        let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
+        assert!(pr.labels.contains(&"needs-docs".to_string()), "{:?}", pr.labels);
     }
 
     #[tokio::test]
@@ -735,15 +782,15 @@ mod tests {
         fake.in_turn("GET", "/repos/octo/pr-newhead/pulls/6", vec![(200, old), (200, new)]);
         settled_checks(&fake, slug, "aaa1111");
         settled_checks(&fake, slug, "bbb2222");
-        fake.route("PUT", "/repos/octo/pr-newhead/issues/6/labels", 200, label_objects(&["qa:failed"]));
+        fake.route("DELETE", "/repos/octo/pr-newhead/issues/6/labels/tests%3Agreen", 200, label_objects(&["qa:failed", "security:passed"]));
+        fake.route("DELETE", "/repos/octo/pr-newhead/issues/6/labels/security%3Apassed", 200, label_objects(&["qa:failed"]));
         let pr = register(&st, &dev.id, slug, 6, None).await.unwrap();
         assert_eq!(pr.passes_sha, "aaa1111", "passes first seen are taken as for that head");
         assert!(fake.seen("/repos/octo/pr-newhead/issues").is_empty(), "same head: nothing is removed");
 
         let pr = refresh(&st, &pr.id).await.unwrap();
-        let puts: Vec<_> = fake.seen("/repos/octo/pr-newhead/issues/6/labels");
-        assert_eq!(puts.len(), 1, "one call, not one per label");
-        assert_eq!(puts[0].body, json!({ "labels": ["qa:failed"] }));
+        let calls: Vec<_> = fake.seen("/repos/octo/pr-newhead/issues/6/labels");
+        assert_eq!(calls.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["DELETE", "DELETE"], "the two passes, one call each, no full replace");
         assert_eq!((pr.labels.clone(), pr.passes_sha.as_str()), (vec!["qa:failed".to_string()], ""));
     }
 
@@ -852,7 +899,8 @@ mod tests {
         assert!(pr.draft);
         let qa = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Tester rdy-last").unwrap();
         fake.route("POST", "/repos/octo/rdy-last/labels", 201, json!({}));
-        fake.route("PUT", "/repos/octo/rdy-last/issues/8/labels", 200, label_objects(&["tests:green", "security:passed"]));
+        fake.route("POST", "/repos/octo/rdy-last/issues/8/labels", 200, label_objects(&["tests:green", "security:passed"]));
+        fake.route("DELETE", "/repos/octo/rdy-last/issues/8/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
         set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1").await.unwrap();
         let pr = st.db.get_pull_request(&pr.id).unwrap().unwrap();
         assert!(!pr.draft && pr.ready_sha == "abcdef1234");
