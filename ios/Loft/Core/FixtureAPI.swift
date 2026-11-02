@@ -538,6 +538,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }
+        // A comment waiting for GitHub: Approve (edited or not) or Keep in Loft shows in its issue's thread, as on the server.
+        let parts = path.split(separator: "/").map(String.init)
+        // "/api/issues/t1/comments/77/approve" → api, issues, t1, comments, 77, approve
+        if parts.count == 6, parts[1] == "issues" || parts[1] == "tasks", parts[3] == "comments", let cid = Int64(parts[4]) {
+            switch parts[5] {
+            case "approve": try await approveComment(taskId: parts[2], commentId: cid, text: body?["text"]?.stringValue)
+            case "keep": try await keepComment(taskId: parts[2], commentId: cid)
+            default: break
+            }
+        }
     }
 
     func registerDevice(_ d: DeviceRegistration) async throws { try check() }
