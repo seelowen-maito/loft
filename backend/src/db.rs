@@ -217,6 +217,8 @@ pub struct PullRequest {
     pub checks_sha: String,
     /// GitHub answered 404/410: the PR (or its repo) is gone, so it's no longer polled.
     pub gone: bool,
+    /// The PR's label names, from the payload the poller already reads (the verdicts show from them).
+    pub labels: Vec<String>,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a

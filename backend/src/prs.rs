@@ -143,6 +143,7 @@ fn apply(pr: &mut PullRequest, v: &Value) {
     pr.closed_at = v["closed_at"].as_str().map(Into::into);
     let repo = &v["base"]["repo"];
     let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
+    pr.labels = v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
     pr.merge_methods = [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
         .iter()
         .filter(|(_, k)| allowed(k))
@@ -224,7 +225,7 @@ const BATCH: usize = 20;
 /// What the poller reads of each PR, the same fields `apply` and `checks` give the card.
 const PR_FIELDS: &str = "number title url state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName \
     author { login } additions deletions changedFiles commits { totalCount } comments { totalCount } reviewThreads { totalCount } \
-    mergedBy { login } mergedAt closedAt \
+    mergedBy { login } mergedAt closedAt labels(first: 30) { nodes { name } } \
     baseRepository { squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed } \
     last: commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { \
     __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } }";
@@ -294,6 +295,7 @@ fn apply_graphql(pr: &mut PullRequest, n: &Value) {
     pr.merged_by = n["mergedBy"]["login"].as_str().map(Into::into);
     pr.merged_at = n["mergedAt"].as_str().map(Into::into);
     pr.closed_at = n["closedAt"].as_str().map(Into::into);
+    pr.labels = n["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
     let repo = &n["baseRepository"];
     let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
     pr.merge_methods = [("squash", "squashMergeAllowed"), ("merge", "mergeCommitAllowed"), ("rebase", "rebaseMergeAllowed")]
@@ -354,6 +356,25 @@ mod tests {
         json!({ "number": n, "title": "Retry cap", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean",
                 "head": { "ref": "cap", "sha": sha }, "base": { "ref": "main", "repo": {} }, "user": { "login": "octo" },
                 "html_url": format!("https://github.com/{slug}/pull/{n}") })
+    }
+
+    #[tokio::test]
+    async fn the_labels_of_a_pr_are_in_the_api_without_another_request() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-labels";
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let mut p = pull(slug, 5, "abc");
+        p["labels"] = json!([{ "name": "tests:green" }, { "name": "qa:failed" }, { "name": "security:passed" }]);
+        fake.route("GET", "/repos/octo/pr-labels/pulls/5", 200, p);
+        settled_checks(&fake, slug, "abc");
+        let pr = register(&st, &a.id, slug, 5, None).await.unwrap();
+        let before = fake.seen("/").len();
+        let axum::Json(list) = crate::api::list_pull_requests(axum::extract::State(st.clone()), axum::extract::Query(crate::api::PrQuery { agent_id: None })).await.unwrap();
+        let ours = list.as_array().unwrap().iter().find(|v| v["id"] == pr.id).unwrap();
+        assert_eq!(ours["labels"], json!(["tests:green", "qa:failed", "security:passed"]));
+        assert_eq!(fake.seen("/").len(), before, "reading the PR list asks GitHub for nothing");
+        assert_eq!(fake.seen("/repos/octo/pr-labels/pulls/5").len(), 1, "the labels came with the one PR request");
     }
 
     fn settled_checks(fake: &crate::github::tests::Fake, slug: &str, sha: &str) {
@@ -449,7 +470,7 @@ mod tests {
             "isDraft": false, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefName": "b", "headRefOid": sha,
             "baseRefName": "main", "author": { "login": "octo" }, "additions": 3, "deletions": 1, "changedFiles": 2,
             "commits": { "totalCount": 1 }, "comments": { "totalCount": 2 }, "reviewThreads": { "totalCount": 1 },
-            "mergedBy": null, "mergedAt": null, "closedAt": null,
+            "mergedBy": null, "mergedAt": null, "closedAt": null, "labels": { "nodes": [{ "name": "tests:green" }, { "name": "security:passed" }] },
             "baseRepository": { "squashMergeAllowed": true, "mergeCommitAllowed": false, "rebaseMergeAllowed": true },
             "last": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": { "nodes": checks } } } }] },
         } })
@@ -486,6 +507,7 @@ mod tests {
         assert_eq!((one.title.as_str(), one.state.as_str(), one.mergeable, one.mergeable_state.as_str(), one.head_sha.as_str()), ("PR 1", "open", Some(true), "clean", "aaa"));
         assert_eq!(one.checks, json!({ "total": 3, "passed": 1, "failed": 1, "pending": 1 }));
         assert_eq!((one.comments, one.merge_methods.clone(), one.checks_sha.as_str()), (3, vec!["squash".to_string(), "rebase".to_string()], "aaa"));
+        assert_eq!(one.labels, ["tests:green", "security:passed"], "the labels come in the same query: no extra request");
         assert_eq!(get(2).state, "merged");
         let gone = get(3);
         assert!(gone.gone && !due(&gone, true), "not found: gone, and not polled again");

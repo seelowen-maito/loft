@@ -24,6 +24,15 @@ final class DecodingTests: XCTestCase {
         XCTAssertNil(a.nextRunAt)
     }
 
+    /// `/pull-requests`: the verdict labels come with the PR; an older server sends none.
+    func testPullRequestLabels() throws {
+        let base = #"{"id":"p","agent_id":"a","slug":"o/r","number":7,"url":"u","title":"T","state":"open","draft":true"#
+        let with = try JSONCoding.decoder.decode(PullRequest.self, from: Data((base + #","labels":["tests:green","security:passed"]}"#).utf8))
+        XCTAssertEqual(with.labels, ["tests:green", "security:passed"])
+        let without = try JSONCoding.decoder.decode(PullRequest.self, from: Data((base + "}").utf8))
+        XCTAssertNil(without.labels)
+    }
+
     /// `/agents/{id}/sessions`: the start time is Claude Code's transcript timestamp.
     func testPastSessions() throws {
         let json = """
