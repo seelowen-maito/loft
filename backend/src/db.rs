@@ -221,6 +221,13 @@ pub struct PullRequest {
     pub labels: Vec<String>,
     /// The head commit the pass labels (tests:green, qa:passed, security:passed) were set for, so a new head clears them.
     pub passes_sha: String,
+    /// GitHub's node id, which marking a draft ready (GraphQL) needs.
+    pub node_id: String,
+    /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
+    pub kind: String,
+    pub kind_sha: String,
+    /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
+    pub ready_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a

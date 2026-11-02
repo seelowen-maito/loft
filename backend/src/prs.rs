@@ -101,6 +101,7 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
                 pr.etag = etag;
                 clear_stale_passes(state, &mut pr).await;
             }
+            mark_ready_if_due(state, &mut pr).await;
             pr.error = None;
             pr.gone = false;
             // Checks change without the PR changing, so they're read until they settle on its head.
@@ -154,6 +155,7 @@ fn apply(pr: &mut PullRequest, v: &Value) {
     pr.closed_at = v["closed_at"].as_str().map(Into::into);
     let repo = &v["base"]["repo"];
     let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
+    pr.node_id = s("node_id");
     pr.labels = v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
     pr.merge_methods = [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
         .iter()
@@ -221,7 +223,77 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     }
     let mut labels: Vec<String> = pr.labels.iter().filter(|l| *l != opposite && *l != want).cloned().collect();
     labels.push(want.into());
-    set_labels(state, pr, labels, pass).await.map(|_| format!("{want} is on {slug}#{number}."))
+    let mut pr = set_labels(state, pr, labels, pass).await?;
+    // The last verdict a PR needs makes it ready now, not at the next poll.
+    mark_ready_if_due(state, &mut pr).await;
+    state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
+    emit(state, &pr);
+    Ok(format!("{want} is on {slug}#{number}."))
+}
+
+/// What a PR's changed files make it: `ios` (any file under ios/), else `ui` (anything under frontend/), else
+/// `docs` (only documentation), else `backend`.
+fn kind_of(files: &[String]) -> &'static str {
+    let doc = |f: &str| f.starts_with("docs/") || f.starts_with("notes/") || f.to_lowercase().ends_with(".md") || f == "LICENSE";
+    if files.iter().any(|f| f.starts_with("ios/")) {
+        "ios"
+    } else if files.iter().any(|f| f.starts_with("frontend/")) {
+        "ui"
+    } else if !files.is_empty() && files.iter().all(|f| doc(f)) {
+        "docs"
+    } else {
+        "backend"
+    }
+}
+
+/// The verdict kinds a PR of this kind needs passed: backend tests and security; UI and iOS add QA (and the iOS
+/// tests are its `tests` verdict); docs only needs none.
+fn required(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "docs" => &[],
+        "backend" => &["tests", "security"],
+        _ => &["tests", "qa", "security"],
+    }
+}
+
+/// Marks an open draft ready for review once the verdicts its kind of change needs are on its current head,
+/// and none is a failure. One files read per draft head (cached on the PR), one GraphQL call when it flips; done
+/// once per head. Loft never merges.
+async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
+    if pr.state != "open" || !pr.draft || pr.gone || pr.node_id.is_empty() || pr.head_sha.is_empty() || pr.ready_sha == pr.head_sha {
+        return;
+    }
+    if pr.labels.iter().any(|l| VERDICTS.iter().any(|(_, _, bad)| bad == l)) {
+        return;
+    }
+    if pr.kind_sha != pr.head_sha {
+        // More files than one page lists: take the strictest kind rather than guess.
+        let kind = if pr.changed_files > 100 {
+            Ok("ios")
+        } else {
+            match github::get(state, &format!("/repos/{}/pulls/{}/files?per_page=100", pr.slug, pr.number)).await {
+                Ok(v) => Ok(kind_of(&v.as_array().into_iter().flatten().filter_map(|f| f["filename"].as_str().map(String::from)).collect::<Vec<_>>())),
+                Err(e) => Err(e),
+            }
+        };
+        match kind {
+            Ok(k) => (pr.kind, pr.kind_sha) = (k.into(), pr.head_sha.clone()),
+            Err(e) => return tracing::warn!("files of {}#{}: {e}", pr.slug, pr.number),
+        }
+    }
+    let have = |kind: &str| VERDICTS.iter().any(|(k, good, _)| *k == kind && pr.labels.iter().any(|l| l == good));
+    if !required(&pr.kind).iter().all(|k| have(k)) || (!required(&pr.kind).is_empty() && pr.passes_sha != pr.head_sha) {
+        return;
+    }
+    let query = format!("mutation {{ markPullRequestReadyForReview(input: {{ pullRequestId: {} }}) {{ pullRequest {{ isDraft }} }} }}", json!(pr.node_id));
+    match github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query }))).await {
+        Ok(v) if v["errors"].as_array().is_none_or(|e| e.is_empty()) => {
+            pr.draft = false;
+            pr.ready_sha = pr.head_sha.clone();
+        }
+        Ok(v) => tracing::warn!("marking {}#{} ready: {}", pr.slug, pr.number, v["errors"]),
+        Err(e) => tracing::warn!("marking {}#{} ready: {e}", pr.slug, pr.number),
+    }
 }
 
 /// Replaces the PR's labels in one call and keeps what GitHub answers. `passed_at`: a pass was just set, for the current head.
@@ -307,7 +379,7 @@ pub async fn poller(state: AppState) {
 const BATCH: usize = 20;
 
 /// What the poller reads of each PR, the same fields `apply` and `checks` give the card.
-const PR_FIELDS: &str = "number title url state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName \
+const PR_FIELDS: &str = "id number title url state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName \
     author { login } additions deletions changedFiles commits { totalCount } comments { totalCount } reviewThreads { totalCount } \
     mergedBy { login } mergedAt closedAt labels(first: 30) { nodes { name } } \
     baseRepository { squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed } \
@@ -345,6 +417,7 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
             apply_graphql(&mut pr, node);
             pr.error = None;
             clear_stale_passes(state, &mut pr).await;
+            mark_ready_if_due(state, &mut pr).await;
         }
         pr.checked_at = Some(now());
         state.db.save_pull_request(&pr)?;
@@ -356,6 +429,7 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
 /// The GraphQL PR onto the card, as `apply` and `checks` do with the REST answers.
 fn apply_graphql(pr: &mut PullRequest, n: &Value) {
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    pr.node_id = s(&n["id"]);
     pr.title = s(&n["title"]);
     if let Some(u) = n["url"].as_str() {
         pr.url = u.into();
@@ -696,6 +770,96 @@ mod tests {
         assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track"));
         let writes = fake.seen("/").into_iter().skip(before).filter(|r| r.method != "GET").count();
         assert_eq!(writes, 0, "a refused verdict writes nothing to GitHub");
+    }
+
+
+    /// A draft PR with the given labels, and the files it changes, for the ready rule.
+    async fn draft_pr(st: &AppState, fake: &crate::github::tests::Fake, project: &str, n: i64, labels: &[&str], files: &[&str]) -> PullRequest {
+        let slug = format!("octo/{project}");
+        let (dev, _) = team(st, project);
+        let mut p = pull(&slug, n, "abcdef1234");
+        p["draft"] = json!(true);
+        p["node_id"] = json!(format!("PR_node_{project}"));
+        p["labels"] = label_objects(labels);
+        fake.route("GET", &format!("/repos/{slug}/pulls/{n}"), 200, p);
+        settled_checks(fake, &slug, "abcdef1234");
+        fake.route("GET", &format!("/repos/{slug}/pulls/{n}/files"), 200, json!(files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>()));
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        register(st, &dev.id, &slug, n, None).await.unwrap()
+    }
+
+    fn ready_calls(fake: &crate::github::tests::Fake) -> usize {
+        fake.seen("/graphql").iter().filter(|r| r.body["query"].as_str().is_some_and(|q| q.contains("markPullRequestReadyForReview"))).count()
+    }
+
+    #[tokio::test]
+    async fn a_backend_pr_with_tests_and_security_passed_becomes_ready_once() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let pr = draft_pr(&st, &fake, "rdy-backend", 1, &["tests:green", "security:passed"], &["backend/src/prs.rs", "docs/x.md"]).await;
+        assert_eq!((pr.kind.as_str(), pr.draft, pr.ready_sha.as_str()), ("backend", false, "abcdef1234"));
+        assert_eq!(ready_calls(&fake), 1);
+        assert!(fake.seen("/graphql")[0].body["query"].as_str().unwrap().contains("PR_node_rdy-backend"));
+        // GitHub still says draft on the next read (the user flipped it back): not flipped again for the same head.
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert!(pr.draft && pr.ready_sha == "abcdef1234");
+        assert_eq!(ready_calls(&fake), 1, "once per head");
+        assert_eq!(fake.seen("/repos/octo/rdy-backend/pulls/1/files").len(), 1, "the files are read once per head");
+    }
+
+    #[tokio::test]
+    async fn a_ui_or_ios_pr_needs_qa_too() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let ui = draft_pr(&st, &fake, "rdy-ui", 2, &["tests:green", "security:passed"], &["frontend/src/a.tsx", "backend/src/b.rs"]).await;
+        assert_eq!((ui.kind.as_str(), ui.draft), ("ui", true), "no qa:passed: still a draft");
+        assert_eq!(ready_calls(&fake), 0);
+        let ios = draft_pr(&st, &fake, "rdy-ios", 3, &["tests:green", "security:passed"], &["ios/Loft/A.swift"]).await;
+        assert_eq!((ios.kind.as_str(), ios.draft), ("ios", true));
+        let ui_ok = draft_pr(&st, &fake, "rdy-ui2", 4, &["tests:green", "security:passed", "qa:passed"], &["frontend/src/a.tsx"]).await;
+        assert!(!ui_ok.draft, "with qa:passed it is ready");
+    }
+
+    #[tokio::test]
+    async fn a_failure_label_keeps_the_pr_a_draft_and_a_docs_pr_needs_no_verdict() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let failing = draft_pr(&st, &fake, "rdy-fail", 5, &["tests:green", "security:passed", "qa:failed"], &["backend/src/a.rs"]).await;
+        assert!(failing.draft, "a failure keeps it a draft");
+        let docs = draft_pr(&st, &fake, "rdy-docs", 6, &[], &["docs/plans/a.md", "README.md"]).await;
+        assert_eq!((docs.kind.as_str(), docs.draft), ("docs", false), "docs only: ready without any verdict");
+        let docs_failing = draft_pr(&st, &fake, "rdy-docs2", 7, &["tests:failing"], &["docs/a.md"]).await;
+        assert!(docs_failing.draft);
+        assert_eq!(ready_calls(&fake), 1);
+    }
+
+    #[test]
+    fn the_kind_of_a_change_comes_from_its_files() {
+        let k = |f: &[&str]| kind_of(&f.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(k(&["backend/src/a.rs"]), "backend");
+        assert_eq!(k(&["backend/src/a.rs", "frontend/src/a.tsx"]), "ui");
+        assert_eq!(k(&["frontend/src/a.tsx", "ios/Loft/A.swift"]), "ios");
+        assert_eq!(k(&["docs/a.md", "notes/b.txt"]), "docs");
+        assert_eq!(k(&["docs/a.md", "setup.sh"]), "backend");
+        assert_eq!(k(&[]), "backend", "nothing known: not docs-only");
+    }
+
+    #[tokio::test]
+    async fn the_last_verdict_marks_it_ready_and_needs_you_says_so() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let pr = draft_pr(&st, &fake, "rdy-last", 8, &["tests:green"], &["backend/src/a.rs"]).await;
+        assert!(pr.draft);
+        let qa = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Tester rdy-last").unwrap();
+        fake.route("POST", "/repos/octo/rdy-last/labels", 201, json!({}));
+        fake.route("PUT", "/repos/octo/rdy-last/issues/8/labels", 200, label_objects(&["tests:green", "security:passed"]));
+        set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1").await.unwrap();
+        let pr = st.db.get_pull_request(&pr.id).unwrap().unwrap();
+        assert!(!pr.draft && pr.ready_sha == "abcdef1234");
+        assert_eq!(ready_calls(&fake), 1);
+        let items = crate::needs_you::snapshot(&st).unwrap();
+        let reasons: Vec<&str> = items["items"].as_array().unwrap().iter().filter(|i| i["type"] == "pr_ready").filter_map(|i| i["reason"].as_str()).collect();
+        assert!(reasons.iter().any(|r| r.starts_with("Loft marked it ready")), "{reasons:?}");
     }
 
 }
