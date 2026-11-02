@@ -42,9 +42,13 @@ enum TalkConfirm {
     /// How far the ring has gone (0…1).
     static func progress(since: Date, now: Date) -> Double { min(1, max(0, now.timeIntervalSince(since) / askAfter)) }
 
-    /// Listening for "send it" makes sense only while it waits, with the setting on and the mic usable.
-    static func listens(_ s: State, sayToSend: Bool) -> Bool {
-        guard sayToSend else { return false }
+    /// The mic stays open this long at most, then the buttons are the way.
+    static let listenFor: TimeInterval = 60
+
+    /// Listening for "send it" makes sense only while it waits, with the setting on, the app in front, and not
+    /// for longer than `listenFor`.
+    static func listens(_ s: State, sayToSend: Bool, active: Bool = true, listenedFor: TimeInterval = 0) -> Bool {
+        guard sayToSend, active, listenedFor < listenFor else { return false }
         switch s {
         case .counting, .asking: return true
         default: return false
@@ -54,14 +58,15 @@ enum TalkConfirm {
     private static let fillers: Set<String> = ["ok", "okay", "um", "uh", "please", "now", "so", "yeah"]
 
     /// The command in what was said, matched on whole words only ("sender" isn't "send"), on the device, with no
-    /// model. `agents`: names that may follow "send it to" ("send it to Loft Dev").
-    static func command(in heard: String, agents: [String]) -> Command? {
+    /// model. `agents`: names that may follow "send it to" ("send it to Loft Dev"). A bare "send", "yes" or "go ahead"
+    /// only answers the "Send it?" question (`asking`): before it, a bystander's "yes" mustn't send.
+    static func command(in heard: String, agents: [String], asking: Bool = true) -> Command? {
         let words = VoiceText.normalize(heard).split(separator: " ").map(String.init)
         let core = Array(words.drop { fillers.contains($0) }.reversed().drop { fillers.contains($0) }.reversed())
         guard !core.isEmpty else { return nil }
         let said = core.joined(separator: " ")
-        let sendPhrases = ["send", "send it", "yes", "yes send", "yes send it", "send it now", "send now", "go ahead"]
-        if sendPhrases.contains(said) { return .send }
+        if ["send it", "yes send it", "send it now"].contains(said) { return .send }
+        if asking, ["send", "yes", "yes send", "send now", "go ahead"].contains(said) { return .send }
         for name in agents.map(VoiceText.normalize) where !name.isEmpty {
             if said == "send it to \(name)" || said == "send to \(name)" || said == "send this to \(name)" { return .send }
         }

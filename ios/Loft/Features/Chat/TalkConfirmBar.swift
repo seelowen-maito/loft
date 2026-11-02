@@ -15,6 +15,14 @@ struct TalkConfirmBar: View {
     let done: () -> Void
     @State private var state: TalkConfirm.State
     @State private var speech = SpeechTranscriber()
+    @Environment(\.scenePhase) private var scenePhase
+    /// When the mic opened, for the cap on how long it listens.
+    @State private var since = Date()
+    @State private var now = Date()
+
+    private var listening: Bool {
+        TalkConfirm.listens(state, sayToSend: sayToSend, active: scenePhase == .active, listenedFor: now.timeIntervalSince(since))
+    }
 
     init(text: String, current: String, startAsking: Bool = false, send: @escaping () -> Void, cancel: @escaping () -> Void, done: @escaping () -> Void) {
         self.text = text
@@ -43,7 +51,7 @@ struct TalkConfirmBar: View {
                     .accessibilityIdentifier("talkSend")
             }
             .controlSize(.small)
-            if TalkConfirm.listens(state, sayToSend: sayToSend) { micLine }
+            if listening { micLine }
         }
         .padding(.horizontal, Theme.gutter).padding(.vertical, 8)
         .background(.bar)
@@ -51,18 +59,20 @@ struct TalkConfirmBar: View {
         .accessibilityIdentifier("talkConfirm")
         .sensoryFeedback(.impact(weight: .light), trigger: state == .asking)
         .task {
-            // Twice a second: the ring, and the ask once the pause is long enough.
-            while !Task.isCancelled, case .counting = state {
+            // Four times a second: the ring, the ask once the pause is long enough, and the mic's cap.
+            while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
-                apply(.tick(Date()))
+                now = Date()
+                if case .counting = state { apply(.tick(now)) }
             }
         }
-        .task(id: TalkConfirm.listens(state, sayToSend: sayToSend)) {
-            if TalkConfirm.listens(state, sayToSend: sayToSend) { await speech.start() } else { speech.stop() }
+        // In the background, or past the cap, the mic closes.
+        .task(id: listening) {
+            if listening { await speech.start() } else { speech.stop() }
         }
         .onChange(of: speech.transcript) { _, heard in
             let names = store.agents.map(\.name)
-            if let c = TalkConfirm.command(in: heard, agents: names) {
+            if let c = TalkConfirm.command(in: heard, agents: names, asking: state == .asking) {
                 apply(.heard(c))
             } else if heard.split(separator: " ").count > 8 {
                 // Talk that isn't a command: start over, so a "send it" said next is heard on its own.

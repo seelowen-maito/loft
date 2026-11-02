@@ -39,6 +39,10 @@ final class TalkConfirmTests: XCTestCase {
         for p in ["send it", "Send.", "yes", "OK, send it", "send it please", "send it to Loft Dev", "Send it to loft dev.", "send to Orchestrator"] {
             XCTAssertEqual(TalkConfirm.command(in: p, agents: agents), .send, p)
         }
+        // Before the question, a bare "yes" or "send" (a bystander's, say) doesn't send; "send it" does.
+        XCTAssertNil(TalkConfirm.command(in: "yes", agents: agents, asking: false))
+        XCTAssertNil(TalkConfirm.command(in: "send", agents: agents, asking: false))
+        XCTAssertEqual(TalkConfirm.command(in: "send it", agents: agents, asking: false), .send)
         XCTAssertEqual(TalkConfirm.command(in: "edit", agents: agents), .edit)
         XCTAssertEqual(TalkConfirm.command(in: "Cancel that", agents: agents), .cancel)
         for p in ["sender", "send it to the moon", "send it to Loft", "please send the invoice", "sending", ""] {
@@ -52,5 +56,7 @@ final class TalkConfirmTests: XCTestCase {
         XCTAssertFalse(TalkConfirm.listens(.asking, sayToSend: false))
         XCTAssertFalse(TalkConfirm.listens(.editing, sayToSend: true))
         XCTAssertFalse(TalkConfirm.listens(.sending, sayToSend: true))
+        XCTAssertFalse(TalkConfirm.listens(.asking, sayToSend: true, active: false), "in the background the mic closes")
+        XCTAssertFalse(TalkConfirm.listens(.asking, sayToSend: true, listenedFor: TalkConfirm.listenFor), "and after the cap")
     }
 }
