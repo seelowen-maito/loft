@@ -53,6 +53,8 @@ pub struct RunInfo {
     pub subagents: Vec<Subagent>,
     /// The run answers the user, so a Restart carries that over to the run it starts.
     pub for_user: bool,
+    /// Tool calls (ids) whose result hasn't come back yet.
+    pub tools_open: Vec<String>,
 }
 
 /// A running subagent, as clients show it above the composer.

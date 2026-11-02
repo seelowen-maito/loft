@@ -117,8 +117,8 @@ const RESTART_QUIET: Duration = Duration::from_secs(20 * 60);
 /// Automatic restarts in a row with no output between; then it's left to the user (Needs you says why).
 pub(crate) const MAX_AUTO_RESTARTS: u32 = 2;
 
-/// Restarts runs that went quiet with nothing to wait on: no background work or subagent, no
-/// permission or interview question waiting on the user. A dropped API connection looks like this.
+/// Restarts runs that went quiet with nothing to wait on: no tool call, background work or subagent still
+/// going, no permission or interview question waiting on the user. A dropped API connection looks like this.
 pub(crate) async fn restart_quiet(state: &AppState) {
     let due: Vec<(String, i64)> = {
         let rt = state.rt.lock().unwrap();
@@ -127,7 +127,7 @@ pub(crate) async fn restart_quiet(state: &AppState) {
             .filter_map(|id| {
                 let i = rt.runs.get(id)?;
                 let quiet = DateTime::parse_from_rfc3339(&i.last_output_at).ok().map(|t| (Utc::now() - t.with_timezone(&Utc)).num_seconds())?;
-                let idle = i.waiting_on.is_empty() && i.subagents.is_empty() && quiet >= RESTART_QUIET.as_secs() as i64;
+                let idle = i.waiting_on.is_empty() && i.subagents.is_empty() && i.tools_open.is_empty() && quiet >= RESTART_QUIET.as_secs() as i64;
                 (idle && rt.auto_restarts.get(id).copied().unwrap_or(0) < MAX_AUTO_RESTARTS).then(|| (id.clone(), quiet / 60))
             })
             .collect()
@@ -1007,9 +1007,18 @@ async fn run_process(
             let mut rt = state.rt.lock().unwrap();
             if let Some(i) = rt.runs.get_mut(agent_id) {
                 i.last_output_at = now();
+                // Tool calls still waiting on their result: a long build in the foreground is quiet, not stuck.
+                for b in ev["message"]["content"].as_array().into_iter().flatten() {
+                    match (ev["type"].as_str(), b["type"].as_str()) {
+                        (Some("assistant"), Some("tool_use")) => i.tools_open.extend(b["id"].as_str().map(String::from)),
+                        (Some("user"), Some("tool_result")) => i.tools_open.retain(|t| Some(t.as_str()) != b["tool_use_id"].as_str()),
+                        _ => {}
+                    }
+                }
             }
-            // Real output (not just a run starting): the agent isn't stuck, so automatic restarts start over.
-            if ev["type"] != "system" {
+            // A finished turn is real progress: automatic restarts start over. (Any output isn't: a restarted
+            // run always says something, and one that then hangs the same way must still reach the limit.)
+            if ev["type"] == "result" && ev["num_turns"].as_u64() != Some(0) {
                 rt.auto_restarts.remove(agent_id);
             }
         }
@@ -1516,6 +1525,9 @@ case "$prompt" in /compact*)
 esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
+case "$prompt" in *chatty*)
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"On it."}]}}';;
+esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
@@ -2249,10 +2261,14 @@ esac
         started(&st, &b.id, 1).await;
         st.rt.lock().unwrap().runs.get_mut(&b.id).unwrap().waiting_on = vec!["npm test".into()];
         go_quiet(&st, &b.id, 25);
-        // Not quiet long enough, or waiting on a permission: left alone.
+        // Not quiet long enough, in a tool call that hasn't returned (a long build), or waiting on a
+        // permission: left alone.
         go_quiet(&st, &a.id, 19);
         restart_quiet(&st).await;
         go_quiet(&st, &a.id, 25);
+        st.rt.lock().unwrap().runs.get_mut(&a.id).unwrap().tools_open = vec!["toolu_build".into()];
+        restart_quiet(&st).await;
+        st.rt.lock().unwrap().runs.get_mut(&a.id).unwrap().tools_open.clear();
         let mut ask = crate::db::PermissionRequest {
             id: "p-quiet".into(), agent_id: a.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({ "command": "ls" }),
             reason: String::new(), rule: "Bash(ls)".into(), status: "pending".into(), created_at: crate::db::now(),
@@ -2282,9 +2298,9 @@ esac
         let runs = |st: &AppState| prompts(st, &a.id).matches("busy").count();
         let _ = send(&st, &a.id, "busy 1").await.ok().unwrap();
         started(&st, &a.id, 1).await;
-        // Each restarted run hangs too (it runs what's queued, and only starts: no output).
+        // Each restarted run hangs too: it runs what's queued, says something, and never finishes its turn.
         for n in 2..=3 {
-            let _ = send(&st, &a.id, &format!("busy {n}")).await.ok().unwrap();
+            let _ = send(&st, &a.id, &format!("chatty busy {n}")).await.ok().unwrap();
             go_quiet(&st, &a.id, 21);
             restart_quiet(&st).await;
             started(&st, &a.id, n).await;
