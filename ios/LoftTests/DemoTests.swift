@@ -25,6 +25,22 @@ final class DemoTests: XCTestCase {
         store.deactivate()
     }
 
+    /// #148: a pull request card with its status and checks, and agents both busy and idle.
+    func testTheDemoShowsAPullRequestAndBusyAndIdleAgents() async throws {
+        let store = LoftStore(api: nil, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID()).json")))
+        store.enterDemo()
+        for _ in 0..<100 where store.connection != .connected || store.agents.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        let items = try await store.api!.needsYou().items
+        let pr = try XCTUnwrap(items.first { $0.type == "pr_ready" })
+        XCTAssertEqual(pr.title, "loft#214: Settings endpoints")
+        XCTAssertTrue(pr.reason.contains("checks passed"), "its checks")
+        XCTAssertEqual(pr.actions.first?.kind, "merge")
+        XCTAssertTrue(store.agents.contains { $0.running == true }, "some agents at work")
+        XCTAssertTrue(store.agents.contains { $0.status == "idle" }, "and some idle")
+        XCTAssertFalse(store.task("t1")?.description.isEmpty ?? true, "issues open with a description")
+        store.deactivate()
+    }
+
     func testTheDemoNeverTouchesTheRealCacheOrServer() async throws {
         let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID()).json")
         let store = LoftStore(api: nil, cache: SnapshotStore(url: cacheURL))
