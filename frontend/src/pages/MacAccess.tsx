@@ -52,7 +52,8 @@ export function MacAccess() {
           <h2 className="text-[15px] font-medium tracking-tight">Mac access</h2>
           <p className="mt-1 text-[12.5px] text-fg-3">
             macOS asks before any app reads Desktop, Documents, Downloads or iCloud Drive. On a Mac with no screen nobody sees it, and an agent waits
-            for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing.
+            for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing. Loft also
+            watches macOS's privacy log for prompts in its own name (only those) and tells you in Needs you.
           </p>
         </div>
         <button className="btn shrink-0" disabled={busy} onClick={run}>
