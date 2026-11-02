@@ -73,6 +73,28 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(closed.state, .done)
     }
 
+    /// A mirrored Loft issue (spec #65): labels, owner and its GitHub link with sub-issue counts.
+    func testTaskMirroringAGitHubIssue() throws {
+        let json = """
+        {"agent_id":null,"completed_at":null,"created_at":"2026-10-21T13:06:33Z","created_by":"user","depends_on":[],
+         "description":"d","due_at":null,"error":"","id":"6f1d","kind":"work","note":"","parent_id":null,
+         "labels":["spec"],"owner":"octo-dev","state":"open",
+         "github":{"repo":"octo/loft","number":42,"id":991,"url":"https://github.com/octo/loft/issues/42","state":"open","updated_at":"2026-10-21T13:00:00Z","sub_total":4,"sub_done":1},
+         "priority":"normal","project":"loft","started_at":null,"status":"ready","summary":"","title":"Ship",
+         "updated_at":"2026-10-21T13:06:33Z"}
+        """
+        let t = try JSONCoding.decoder.decode(HBTask.self, from: Data(json.utf8))
+        XCTAssertEqual(t.github?.shortName, "loft#42")
+        XCTAssertEqual(t.github?.subIssues, "1/4 sub-issues")
+        XCTAssertEqual(t.ownerLogin, "octo-dev")
+        XCTAssertEqual(t.labels, ["spec"])
+        // A Loft-only issue, and an older server without the fields.
+        let plain = try JSONCoding.decoder.decode(HBTask.self, from: Data(json.replacingOccurrences(of: #""github":{"repo":"octo/loft","number":42,"id":991,"url":"https://github.com/octo/loft/issues/42","state":"open","updated_at":"2026-10-21T13:00:00Z","sub_total":4,"sub_done":1},"#, with: #""github":null,"#).replacingOccurrences(of: #""owner":"octo-dev""#, with: #""owner":"""#).utf8))
+        XCTAssertNil(plain.github)
+        XCTAssertNil(plain.ownerLogin, "an empty owner is no owner")
+        XCTAssertNil(HBTask.GitHubLink(repo: "o/r", number: 1, url: "", state: "open", subTotal: 0).subIssues)
+    }
+
     func testMessageMeta() throws {
         let json = """
         {"id":42,"agent_id":"a","run_id":null,"role":"user","kind":"text","content":"[Task 123e4567-e89b-12d3-a456-426614174000] Do it\\n\\nDetails\\n\\n[Report progress on this task with x]",

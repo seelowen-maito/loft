@@ -51,6 +51,9 @@ struct TaskDetailView: View {
                             StatusBadge(text: "Personal", symbol: "person", color: .secondary)
                         }
                     }
+                    if let labels = t.labels, !labels.isEmpty {
+                        IssueLabels(labels: labels)
+                    }
                 }
                 .padding(.vertical, 4)
                 if !t.description.isEmpty {
@@ -59,6 +62,24 @@ struct TaskDetailView: View {
                 if let notice {
                     Label(notice, systemImage: "checkmark.circle").font(.footnote).foregroundStyle(Theme.working)
                 }
+            }
+
+            // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
+            Section("Where") {
+                if let g = t.github {
+                    // Only a web link: a malformed stored value can't open another app's scheme.
+                    if let url = URL(string: g.url), url.scheme == "https" {
+                        Link(destination: url) {
+                            LabeledContent("On GitHub") { IssueOriginMark(link: g) }
+                        }
+                        .accessibilityIdentifier("issueGitHubLink")
+                    }
+                    LabeledContent("On GitHub it's", value: g.state == "closed" ? "Closed" : "Open")
+                    if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
+                } else {
+                    LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
+                }
+                if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
             }
 
             if t.state.isActive && !t.note.isEmpty {

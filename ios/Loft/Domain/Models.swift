@@ -177,6 +177,34 @@ struct HBTask: Codable, Identifiable, Hashable {
     var updatedAt: Date
     var startedAt: Date?
     var completedAt: Date?
+    /// Label names, as on GitHub. Older servers send none.
+    var labels: [String]? = nil
+    /// The GitHub login of the person who owns it, or empty. Always a person, never an agent.
+    var owner: String? = nil
+    /// The GitHub issue it mirrors; nil for a Loft-only issue.
+    var github: GitHubLink? = nil
+
+    /// Where a mirrored Loft issue lives on GitHub (backend db.rs `GithubLink`).
+    struct GitHubLink: Codable, Hashable {
+        /// owner/name
+        var repo: String
+        var number: Int
+        var url: String
+        /// open | closed, as GitHub last said.
+        var state: String
+        /// Its sub-issues on GitHub, when it has any.
+        var subTotal: Int?
+        var subDone: Int?
+
+        /// "loft#42": the repo's name and the number, as a row shows it.
+        var shortName: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
+        var subIssues: String? {
+            guard let t = subTotal, t > 0 else { return nil }
+            return "\(subDone ?? 0)/\(t) sub-issues"
+        }
+    }
+
+    var ownerLogin: String? { owner.flatMap { $0.isEmpty ? nil : $0 } }
 
     var state: TaskState { TaskState(raw: status) }
     var priorityLevel: TaskPriority { TaskPriority(rawValue: priority) ?? .normal }

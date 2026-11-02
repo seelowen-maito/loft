@@ -205,16 +205,64 @@ struct TaskRow: View {
             store.agent(task.agentId)?.name,
             task.isPersonalTodo && task.agentId == nil ? "Personal" : nil,
             children.isEmpty ? nil : "\(children.filter { $0.state == .done }.count)/\(children.count) subtasks",
+            children.isEmpty ? task.github?.subIssues : nil,
+            task.ownerLogin.map { "@\($0)" },
             task.dueAt.map { "Due \($0.formatted(.dateTime.month(.abbreviated).day()))" },
-            task.project.isEmpty ? nil : task.project,
+            task.github == nil && !task.project.isEmpty ? task.project : nil,
         ].compactMap { $0 }
         return VStack(alignment: .leading, spacing: 2) {
-            if !parts.isEmpty {
-                Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+            if !parts.isEmpty || task.github != nil {
+                HStack(spacing: 4) {
+                    // Where it lives: on GitHub (its repo and number), or only in Loft (the project, as before).
+                    if let g = task.github {
+                        IssueOriginMark(link: g)
+                    }
+                    Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                }
+            }
+            if let labels = task.labels, !labels.isEmpty {
+                IssueLabels(labels: labels, limit: 3)
             }
             if task.state.isActive, !task.note.isEmpty {
                 Text(task.note).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
             }
         }
+    }
+}
+
+/// A mirrored Loft issue's GitHub mark: "loft#42", struck through once it's closed on GitHub.
+struct IssueOriginMark: View {
+    let link: HBTask.GitHubLink
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: link.state == "closed" ? "checkmark.circle" : "arrow.triangle.pull")
+            Text(link.shortName)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(link.state == "closed" ? Color.secondary : Theme.accent)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("On GitHub, \(link.shortName)\(link.state == "closed" ? ", closed" : "")")
+    }
+}
+
+/// GitHub-style labels as small chips; past `limit`, a "+2".
+struct IssueLabels: View {
+    let labels: [String]
+    var limit = Int.max
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(labels.prefix(limit), id: \.self) { l in
+                Text(l).font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.15), in: Capsule())
+            }
+            if labels.count > limit {
+                Text("+\(labels.count - limit)").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Labels: \(labels.joined(separator: ", "))")
     }
 }
