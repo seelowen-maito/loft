@@ -79,7 +79,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(activity.appears(timeout: 5))
 
         // Tasks.
-        app.tabBars.buttons["Tasks"].tap()
+        app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(app.buttons["taskRow-Implement settings functionality"].appears(timeout: 5))
         XCTAssertTrue(app.buttons["taskRow-Implement backend endpoints"].exists, "subtasks nest under their parent")
         app.buttons["taskFilter-failed"].tap()
@@ -89,7 +89,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["taskRow-Renew the domain"].appears(timeout: 3))
 
         app.buttons["createButton"].tap()
-        app.buttons["New task"].tap()
+        app.buttons["New issue"].tap()
         let title = app.textFields["taskTitleField"]
         XCTAssertTrue(title.appears(timeout: 3))
         title.tap()
@@ -125,7 +125,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(run.label.hasPrefix("Working: 12m "), run.label)
         XCTAssertTrue(run.label.hasSuffix("s · Planning the settings work"), run.label)
 
-        let brief = app.buttons["Task: Renew the domain"]
+        let brief = app.buttons["Issue: Renew the domain"]
         XCTAssertTrue(brief.appears(timeout: 5))
         // The raw brief (with its tag and instructions) isn't shown as a bubble.
         XCTAssertFalse(text(containing: "[Task", app).exists)
@@ -590,7 +590,7 @@ final class LoftUITests: XCTestCase {
         if !demo.isHittable { app.swipeUp() }
         demo.tap()
         XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
-        app.tabBars.buttons["Tasks"].tap()
+        app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
         app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
         XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
@@ -651,7 +651,7 @@ final class LoftUITests: XCTestCase {
         field.typeText("Can you check this one?")
         app.buttons["sendButton"].tap()
         XCTAssertTrue(any("attachedTask", app).disappears(timeout: 3), "sent with the message, then cleared")
-        XCTAssertTrue(app.buttons["Task: Implement backend endpoints, In progress"].appears(timeout: 5), "the chip on the sent message")
+        XCTAssertTrue(app.buttons["Issue: Implement backend endpoints, In progress"].appears(timeout: 5), "the chip on the sent message")
     }
 
     func testABriefFromTheMacKeepsWhatYouSaidOneTapAway() {
