@@ -376,7 +376,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             let reason = if !waiting.is_empty() && age_secs(&since) / 60 >= QUIET_MINUTES {
                 Some(format!("Waiting on a background task for {} min: {}", age_secs(&since) / 60, waiting.join(", ")))
             } else if waiting.is_empty() && !last.is_empty() && quiet >= QUIET_MINUTES {
-                Some(format!("No activity for {quiet} min."))
+                let restarts = state.rt.lock().unwrap().auto_restarts.get(&a.id).copied().unwrap_or(0);
+                Some(if restarts >= crate::agents::MAX_AUTO_RESTARTS {
+                    format!("No activity for {quiet} min, after {restarts} automatic restarts. Loft won't restart it again.")
+                } else {
+                    format!("No activity for {quiet} min.")
+                })
             } else {
                 None
             };

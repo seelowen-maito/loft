@@ -91,8 +91,10 @@ pub struct Runtime {
     pub waiting: HashMap<String, Arc<Notify>>,
     /// agent id -> what its current run is doing, for the "waiting" / "no activity" display
     pub runs: HashMap<String, RunInfo>,
-    /// agents whose run the user restarted; the stop notice says so
-    pub restarting: std::collections::HashSet<String>,
+    /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
+    pub restarting: HashMap<String, &'static str>,
+    /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
+    pub auto_restarts: HashMap<String, u32>,
     /// agent id -> chats it was @-mentioned in, waiting for the run that answers the mention
     pub mention_pending: HashMap<String, Vec<String>>,
     /// Ready PRs on GitHub that wait on the user (their own, or their review requested), from github_inbox

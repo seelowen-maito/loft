@@ -112,6 +112,46 @@ pub fn mark_read(state: &AppState, agent_id: &str) -> Result<Option<Agent>> {
     Ok(a)
 }
 
+/// A run quiet this long with nothing to wait on is restarted, as if the user pressed Restart.
+const RESTART_QUIET: Duration = Duration::from_secs(20 * 60);
+/// Automatic restarts in a row with no output between; then it's left to the user (Needs you says why).
+pub(crate) const MAX_AUTO_RESTARTS: u32 = 2;
+
+/// Restarts runs that went quiet with nothing to wait on: no background work or subagent, no
+/// permission or interview question waiting on the user. A dropped API connection looks like this.
+pub(crate) async fn restart_quiet(state: &AppState) {
+    let due: Vec<(String, i64)> = {
+        let rt = state.rt.lock().unwrap();
+        rt.running
+            .keys()
+            .filter_map(|id| {
+                let i = rt.runs.get(id)?;
+                let quiet = DateTime::parse_from_rfc3339(&i.last_output_at).ok().map(|t| (Utc::now() - t.with_timezone(&Utc)).num_seconds())?;
+                let idle = i.waiting_on.is_empty() && i.subagents.is_empty() && quiet >= RESTART_QUIET.as_secs() as i64;
+                (idle && rt.auto_restarts.get(id).copied().unwrap_or(0) < MAX_AUTO_RESTARTS).then(|| (id.clone(), quiet / 60))
+            })
+            .collect()
+    };
+    for (id, minutes) in due {
+        let asking = state.db.list_permissions(Some(&id)).map_or(true, |ps| ps.iter().any(|p| p.status == "pending"));
+        let interviewing = crate::grill::active(state, &id).is_some_and(|s| crate::grill::open_round(&s).is_some());
+        if asking || interviewing {
+            continue;
+        }
+        *state.rt.lock().unwrap().auto_restarts.entry(id.clone()).or_default() += 1;
+        tracing::info!("restarting {id}: no output for {minutes} min");
+        let _ = crate::api::restart_run(state.clone(), id, "Loft").await;
+    }
+}
+
+/// Checks for quiet runs once a minute.
+pub async fn quiet_watcher(state: AppState) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        restart_quiet(&state).await;
+    }
+}
+
 pub fn is_running(state: &AppState, agent_id: &str) -> bool {
     state.rt.lock().unwrap().running.contains_key(agent_id)
 }
@@ -963,8 +1003,15 @@ async fn run_process(
         let Some(line) = line else { break };
         let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
         got_any = true;
-        if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
-            i.last_output_at = now();
+        {
+            let mut rt = state.rt.lock().unwrap();
+            if let Some(i) = rt.runs.get_mut(agent_id) {
+                i.last_output_at = now();
+            }
+            // Real output (not just a run starting): the agent isn't stuck, so automatic restarts start over.
+            if ev["type"] != "system" {
+                rt.auto_restarts.remove(agent_id);
+            }
         }
         let sub = ev["parent_tool_use_id"].as_str().map(|s| s.to_string());
         match ev["type"].as_str() {
@@ -1244,7 +1291,11 @@ async fn run_process(
             let n = rt.queued.get(agent_id).map_or(0, |q| q.iter().filter(|p| !p.starts_with("[Loft:")).count());
             (n, rt.restarting.remove(agent_id))
         };
-        let what = if restarted { "Restarted by user." } else { "Stopped by user." };
+        let what = match restarted {
+            Some("user") => "Restarted by user.",
+            Some(_) => "Restarted by Loft: no output for a while.",
+            None => "Stopped by user.",
+        };
         let text = match n {
             0 => what.to_string(),
             1 => format!("{what} The queued message runs next."),
@@ -2168,6 +2219,88 @@ esac
         idle(&st, &b.id).await;
         assert!(st.db.list_messages(&b.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
         assert!(unread(&st, &b.id), "the restarted run's error");
+    }
+
+    /// Makes the agent's current run look quiet for `minutes`, as a dead API connection does.
+    fn go_quiet(st: &AppState, id: &str, minutes: i64) {
+        st.rt.lock().unwrap().runs.get_mut(id).unwrap().last_output_at = (Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+    }
+
+    fn prompts(st: &AppState, id: &str) -> String {
+        std::fs::read_to_string(workspace(st, id).join("prompts.log")).unwrap_or_default()
+    }
+
+    /// The agent's `n`th run has started and its first event (the session) has come in, so the quiet
+    /// clock it sets can be moved back.
+    async fn started(st: &AppState, id: &str, n: usize) {
+        until("the run to start", 10, || prompts(st, id).matches("\n---\n").count() == n && st.rt.lock().unwrap().runs.contains_key(id)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_run_with_nothing_to_wait_on_is_restarted_like_the_restart_button() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+
+        // Waiting on background work (another agent, so its run's own handling of that stays out of the way).
+        let b = crate::tasks::tests::agent(&st, "Builder");
+        let _ = send(&st, &b.id, "busy").await.ok().unwrap();
+        started(&st, &b.id, 1).await;
+        st.rt.lock().unwrap().runs.get_mut(&b.id).unwrap().waiting_on = vec!["npm test".into()];
+        go_quiet(&st, &b.id, 25);
+        // Not quiet long enough, or waiting on a permission: left alone.
+        go_quiet(&st, &a.id, 19);
+        restart_quiet(&st).await;
+        go_quiet(&st, &a.id, 25);
+        let mut ask = crate::db::PermissionRequest {
+            id: "p-quiet".into(), agent_id: a.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({ "command": "ls" }),
+            reason: String::new(), rule: "Bash(ls)".into(), status: "pending".into(), created_at: crate::db::now(),
+        };
+        st.db.save_permission(&ask).unwrap();
+        restart_quiet(&st).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(is_running(&st, &a.id) && !prompts(&st, &a.id).contains("restarted your last run"), "{}", prompts(&st, &a.id));
+        assert!(!prompts(&st, &b.id).contains("restarted your last run"), "waiting on background work");
+        let _ = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(b.id.clone())).await;
+        ask.status = "allow_once".into();
+        st.db.save_permission(&ask).unwrap();
+
+        // Quiet 20 minutes with nothing to wait on: restarted, told so, and its reply is Unread as before.
+        restart_quiet(&st).await;
+        until("the restarted run", 10, || prompts(&st, &a.id).contains("[Loft: Loft restarted your last run (no output for 25 min)")).await;
+        idle(&st, &a.id).await;
+        assert!(unread(&st, &a.id), "the restarted run's reply");
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.starts_with("Restarted by Loft")));
+        // It answered: the count starts over.
+        assert!(!st.rt.lock().unwrap().auto_restarts.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_stays_quiet_is_restarted_twice_then_left_to_the_user() {
+        let (st, a) = fake_claude_state();
+        let runs = |st: &AppState| prompts(st, &a.id).matches("busy").count();
+        let _ = send(&st, &a.id, "busy 1").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+        // Each restarted run hangs too (it runs what's queued, and only starts: no output).
+        for n in 2..=3 {
+            let _ = send(&st, &a.id, &format!("busy {n}")).await.ok().unwrap();
+            go_quiet(&st, &a.id, 21);
+            restart_quiet(&st).await;
+            started(&st, &a.id, n).await;
+        }
+        assert_eq!(st.rt.lock().unwrap().auto_restarts.get(&a.id), Some(&2));
+
+        // A third quiet spell: not restarted; Needs you says why.
+        go_quiet(&st, &a.id, 21);
+        restart_quiet(&st).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(runs(&st), 3);
+        assert!(is_running(&st, &a.id));
+        let snap = crate::needs_you::snapshot(&st).unwrap();
+        let stuck = snap["items"].as_array().unwrap().iter().find(|i| i["type"] == "stuck").unwrap();
+        assert!(stuck["reason"].as_str().unwrap().contains("after 2 automatic restarts"), "{stuck}");
+        let _ = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
