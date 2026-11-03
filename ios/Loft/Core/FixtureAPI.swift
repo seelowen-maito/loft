@@ -315,7 +315,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     /// Like the backend: starts the card's Delivery once, on the fixture's Dev; a repeat is a duplicate.
-    func startDelivery(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
         try check()
         return try locked {
             guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {

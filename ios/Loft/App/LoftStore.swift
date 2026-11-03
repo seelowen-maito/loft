@@ -812,11 +812,15 @@ final class LoftStore {
     }
 
     /// "Start delivery" on an end-of-planning card. The server starts the first ticket once and marks the card, so a
-    /// second tap, another device or the web having started it already starts nothing more.
-    func startDelivery(agentId: String, messageId: Int64) async throws {
-        let r = try await requireWrite().startDelivery(agentId: agentId, messageId: messageId)
+    /// second tap, another device or the web having started it already starts nothing more. Returns the project
+    /// folder when it has no git yet: nothing started, and the user is asked before `initGit` sets it up.
+    @discardableResult
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool = false) async throws -> String? {
+        let r = try await requireWrite().startDelivery(agentId: agentId, messageId: messageId, initGit: initGit)
+        if r.needsGit == true { return r.dir ?? "the project folder" }
         if let m = r.message { insert(m) }
         scheduleSave()
+        return nil
     }
 
     @discardableResult

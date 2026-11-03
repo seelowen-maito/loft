@@ -468,6 +468,9 @@ struct EndCardView: View {
     @State private var setupError: String?
     @State private var starting = false
     @State private var startError: String?
+    /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
+    @State private var askGitDir: String?
+    @State private var declinedGit = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -488,15 +491,7 @@ struct EndCardView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("endCardStarted")
                 } else {
-                    Button {
-                        starting = true
-                        startError = nil
-                        Task {
-                            do { try await store.startDelivery(agentId: message.agentId, messageId: message.id) }
-                            catch { startError = error.localizedDescription }
-                            starting = false
-                        }
-                    } label: { Label("Start delivery", systemImage: "play.fill") }
+                    Button { start(initGit: false) } label: { Label("Start delivery", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)
                     .font(.footnote)
                     .disabled(starting)
@@ -504,6 +499,9 @@ struct EndCardView: View {
                 }
                 if let startError {
                     Text("Not started: \(startError)").font(.caption2).foregroundStyle(.red)
+                }
+                if declinedGit && d.started == nil {
+                    Text("Nothing was set up: the plan stays as Loft issues.").font(.caption2).foregroundStyle(.secondary)
                 }
             }
             HStack(spacing: 8) {
@@ -545,6 +543,26 @@ struct EndCardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog(
+            "Set up git?",
+            isPresented: Binding(get: { askGitDir != nil }, set: { if !$0 { askGitDir = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Set up git and start") { start(initGit: true) }
+            Button("Not now", role: .cancel) { declinedGit = true }
+        } message: {
+            Text("\(askGitDir ?? "") has no git yet. Loft runs git init, adds a .gitignore for .DS_Store and .remember/, and commits the folder as it is. Then the Delivery starts.")
+        }
+    }
+
+    private func start(initGit: Bool) {
+        starting = true
+        startError = nil
+        Task {
+            do { askGitDir = try await store.startDelivery(agentId: message.agentId, messageId: message.id, initGit: initGit) }
+            catch { startError = error.localizedDescription }
+            starting = false
+        }
     }
 
     private func issue(_ i: EndCard.Issue, symbol: String) -> some View {

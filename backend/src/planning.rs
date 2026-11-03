@@ -2318,7 +2318,13 @@ pub(crate) mod tests {
     }
 
     async fn press(st: &AppState, a: &Agent, m: &crate::db::Message) -> Result<Value, crate::api::ApiError> {
-        crate::delivery::start_from_card(State(st.clone()), Path((a.id.clone(), m.id))).await.map(|j| j.0)
+        press_with(st, a, m, json!({})).await
+    }
+
+    /// Start delivery with these query parameters (`init_git`).
+    async fn press_with(st: &AppState, a: &Agent, m: &crate::db::Message, q: Value) -> Result<Value, crate::api::ApiError> {
+        let q = axum::extract::Query(serde_json::from_value(q).unwrap());
+        crate::delivery::start_from_card(State(st.clone()), Path((a.id.clone(), m.id)), q).await.map(|j| j.0)
     }
 
     #[tokio::test]
@@ -3230,6 +3236,75 @@ pub(crate) mod tests {
         crate::delivery::update(&st, &d.repo, d.spec, |d| (d.state, d.base) = ("ready".into(), "main".into()));
         let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
         assert!(err.starts_with("Nothing was merged: the project folder of sneaky isn't a git repo of its own"), "{err}");
+    }
+
+    /// `local_plan`, in a project folder with no git at all (it holds one file).
+    async fn plan_without_git(st: &AppState, name: &str) -> (Agent, crate::db::Message, Agent, std::path::PathBuf) {
+        let mut a = planner(st, name);
+        a.project = name.into();
+        st.db.save_agent(&a).unwrap();
+        let dir = st.settings.boot().projects_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "plans\n").unwrap();
+        crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish(st, &a, "Offline mode").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == name && t.labels == ["spec"]).unwrap();
+        mcp_call(st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": [ticket("Store", &[])] })).await.unwrap().unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let dev = busy(st, "Builder", name, "dev");
+        let m = summary(st, &a);
+        (a, m, dev, dir)
+    }
+
+    #[tokio::test]
+    async fn start_delivery_in_a_folder_with_no_git_asks_first_and_changes_nothing_until_yes() {
+        let st = state();
+        let (a, m, dev, dir) = plan_without_git(&st, "no-git").await;
+        let v = press(&st, &a, &m).await.unwrap();
+        assert_eq!((&v["ok"], &v["needs_git"], &v["dir"]), (&json!(false), &json!(true), &json!(dir.canonicalize().unwrap().display().to_string())));
+        // Asked, not done: no repo, no Delivery started, nobody woken.
+        assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists());
+        let d = crate::delivery::local_of(&st, "no-git", &loft_ticket(&st, "no-git", "Offline mode").id).unwrap();
+        assert_eq!((d.state.as_str(), d.base.as_str()), ("planned", ""));
+        assert!(woken(&st, &dev).is_empty());
+
+        // Yes: git is set up with a first commit, then the Delivery starts.
+        let v = press_with(&st, &a, &m, json!({ "init_git": true })).await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert!(dir.join(".git").is_dir());
+        assert!(std::fs::read_to_string(dir.join(".gitignore")).unwrap().contains(".DS_Store"));
+        assert_eq!(git_in(&dir, &["log", "--format=%s"]), "First commit");
+        assert_eq!(git_in(&dir, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\nnotes.md");
+        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "");
+        let d = st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap();
+        assert_eq!(d.state, "running");
+        assert!(git_in(&dir, &["branch", "--list", "spec/1-offline-mode"]).contains("spec/1-offline-mode"));
+        assert!(woken(&st, &dev)[0].contains("build ticket \"Store\""));
+        // Once it has git, Start delivery doesn't ask again.
+        assert_eq!(press(&st, &a, &m).await.unwrap()["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_git_isnt_a_folder_of_its_own_is_refused_and_not_offered_git() {
+        let st = state();
+        let (a, m, dev, dir) = plan_without_git(&st, "gitdir-file").await;
+        // Its .git is a `gitdir:` file pointing at a repo in an agent's workspace.
+        let agent_repo = st.cfg.storage_dir.join("some-agent").join("repo");
+        std::fs::create_dir_all(&agent_repo).unwrap();
+        git_in(&agent_repo, &["init", "-q", "-b", "main"]);
+        git_in(&agent_repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::write(dir.join(".git"), format!("gitdir: {}\n", agent_repo.join(".git").display())).unwrap();
+
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert_eq!(err.1, "The Delivery didn't start: the project folder of gitdir-file isn't a git repo of its own in the projects folder, so Loft won't run git there.");
+        let err = press_with(&st, &a, &m, json!({ "init_git": true })).await.unwrap_err();
+        assert!(err.1.contains("isn't a git repo of its own"), "{}", err.1);
+        assert!(git_in(&agent_repo, &["branch", "--list", "spec/*"]).is_empty(), "nothing ran in the agent's repo");
+        assert!(woken(&st, &dev).is_empty());
+        let d = crate::delivery::local_of(&st, "gitdir-file", &loft_ticket(&st, "gitdir-file", "Offline mode").id).unwrap();
+        crate::delivery::update(&st, &d.repo, d.spec, |d| (d.state, d.base) = ("ready".into(), "main".into()));
+        assert!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err().starts_with("Nothing was merged: the project folder of gitdir-file isn't a git repo of its own"));
     }
 
     #[test]

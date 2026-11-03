@@ -122,6 +122,25 @@ fn gitignore_update(dir: &Path) -> Option<String> {
     Some(format!("{have}{sep}{}\n", missing.join("\n")))
 }
 
+/// Sets up git in a project folder that has none, for a Delivery of a plan kept in Loft: the `.gitignore`
+/// the new-repo flow writes, `git init`, and a first commit of the folder as it is, as the user's git
+/// identity or, when git has none, as Loft.
+pub(crate) async fn init_folder(dir: &Path) -> Result<(), String> {
+    let git = |a: &[&str]| {
+        let a: Vec<String> = a.iter().map(|x| x.to_string()).collect();
+        async move { crate::repos::git(dir, &a.iter().map(String::as_str).collect::<Vec<_>>()).await.map_err(|e| format!("Couldn't set up git: {e}")) }
+    };
+    if let Some(ignore) = gitignore_update(dir) {
+        std::fs::write(dir.join(".gitignore"), ignore).map_err(|e| format!("Couldn't write the .gitignore: {e}"))?;
+    }
+    git(&["init", "-q"]).await?;
+    git(&["add", "-A"]).await?;
+    let anonymous = crate::repos::git(dir, &["config", "user.email"]).await.map(|e| e.trim().is_empty()).unwrap_or(true);
+    let who: &[&str] = if anonymous { &["-c", "user.name=Loft", "-c", "user.email=loft@localhost"] } else { &[] };
+    git(&[who, &["-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "First commit"]].concat()).await?;
+    Ok(())
+}
+
 fn gitignore_after(dir: &Path) -> String {
     gitignore_update(dir).unwrap_or_else(|| std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default())
 }

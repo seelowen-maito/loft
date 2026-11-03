@@ -318,6 +318,9 @@ struct SendMessageResponse: Codable {
     var queued: Bool?
     var duplicate: Bool?
     var message: ChatMessage?
+    /// Start delivery on a plan whose project folder has no git: nothing started; ask before setting it up.
+    var needsGit: Bool? = nil
+    var dir: String? = nil
 }
 
 struct ExecuteResponse: Codable {

@@ -781,15 +781,40 @@ pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String
     })))
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+pub struct StartQuery {
+    /// The user said yes to setting up git in a project folder that has none.
+    init_git: bool,
+}
+
+/// The project folder of a plan kept in Loft that hasn't started, when it has no git at all: a folder in
+/// the projects folder, never an agent's workspace, with no `.git` (not even a file or a link).
+fn without_git(state: &AppState, d: &Delivery) -> Option<std::path::PathBuf> {
+    if !d.local || !d.base.is_empty() {
+        return None;
+    }
+    let dir = crate::repos::project_dir(state, &d.project)?;
+    std::fs::symlink_metadata(dir.join(".git")).is_err().then_some(dir)
+}
+
 /// `POST /api/agents/{id}/messages/{mid}/start-delivery`: the end-of-planning card's "Start delivery".
 /// Starts the card's Delivery once and records on the card who got which ticket, so it shows as started
-/// after a reload; a second press gets the card back without starting another ticket.
-pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Path<(String, i64)>) -> ApiResult<Value> {
+/// after a reload; a second press gets the card back without starting another ticket. A plan kept in Loft
+/// whose folder has no git gets `needs_git` back instead, and `?init_git=true` sets git up first.
+pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Path<(String, i64)>, axum::extract::Query(q): axum::extract::Query<StartQuery>) -> ApiResult<Value> {
     let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
     let card = &m.meta["grill"]["end_card"]["delivery"];
     let (Some(repo), Some(spec)) = (card["repo"].as_str(), card["spec"].as_i64()) else {
         return Err(bad("This card has no Delivery."));
     };
+    // A plan kept in Loft in a folder with no git: ask first, and set it up only on the user's yes.
+    if let Some(dir) = state.db.get_delivery(repo, spec)?.and_then(|d| without_git(&state, &d)) {
+        if !q.init_git {
+            return Ok(Json(json!({ "ok": false, "needs_git": true, "dir": dir.display().to_string(), "message": m })));
+        }
+        crate::greenfield::init_folder(&dir).await.map_err(bad)?;
+    }
     let s = start(&state, repo, spec, &id).await.map_err(bad)?;
     if s.ticket > 0 {
         let title = state.db.get_delivery(repo, spec)?.and_then(|d| d.tickets.into_iter().find(|t| t.number == s.ticket)).map(|t| t.title).unwrap_or_default();

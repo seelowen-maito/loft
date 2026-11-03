@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CircleDot, Eraser, ExternalLink, FileText, GitMerge, Loader2, Play, Users } from "lucide-react";
+import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2, Play, Users } from "lucide-react";
 import { cx } from "../../lib/format";
 import { api, roleLabel, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
@@ -25,6 +25,16 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const [busy, setBusy] = useState<"clear" | "setup" | "start" | "merge" | null>(null);
   const [sent, setSent] = useState(false);
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
+  // A plan kept in a folder with no git: Start delivery asks before setting it up.
+  const [askGit, setAskGit] = useState<string | null>(null);
+  const [declined, setDeclined] = useState(false);
+  const start = (initGit: boolean) =>
+    run("start", async () => {
+      const r = await api.startDelivery(agentId, messageId, initGit);
+      if (r.needs_git) return setAskGit(r.dir ?? "the project folder");
+      setAskGit(null);
+      setStarted(r.message.meta?.grill?.end_card?.delivery?.started ?? null);
+    });
   const [error, setError] = useState<string | null>(null);
   const run = async (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => {
     setBusy(what);
@@ -60,21 +70,34 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         {card.spec && <Issue i={card.spec} inLoft={!card.repo} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
         {card.tickets.map((t) => <Issue key={t.url} i={t} inLoft={!card.repo} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
       </div>
+      {askGit && (
+        <div className="mt-3 space-y-2 rounded-xl border border-accent/25 bg-accent/[0.05] px-3 py-2 text-[12.5px] text-fg-2">
+          <div>
+            <span className="break-all font-mono text-[11.5px] text-fg">{askGit}</span> has no git yet. Set it up? Loft runs <span className="font-mono">git init</span>, adds a <span className="font-mono">.gitignore</span> for <span className="font-mono">.DS_Store</span> and <span className="font-mono">.remember/</span>, and commits the folder as it is. Then the Delivery starts.
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn btn-primary text-[12px]" disabled={busy !== null} onClick={() => start(true)}>
+              {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />} Set up git and start
+            </button>
+            <button className="btn text-[12px]" disabled={busy !== null} onClick={() => { setAskGit(null); setDeclined(true); }}>
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
+      {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
       {setup && (
         <div className="mt-3 rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
           The team has no {card.missing_roles.map(roleLabel).join(", ").replace(/, ([^,]*)$/, " or $1")} yet.
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {delivery && !startedOn && (
+        {delivery && !startedOn && !askGit && (
           <button
             className="btn btn-primary text-[12.5px]"
             disabled={busy !== null}
             title={delivery.standalone ? `Opens #${delivery.spec}'s branch and draft PR and starts it on the team's Dev.` : `Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
-            onClick={() => run("start", async () => {
-              const r = await api.startDelivery(agentId, messageId);
-              setStarted(r.message.meta?.grill?.end_card?.delivery?.started ?? null);
-            })}
+            onClick={() => start(false)}
           >
             {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} Start delivery
           </button>
