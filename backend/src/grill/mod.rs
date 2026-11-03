@@ -1071,9 +1071,8 @@ When the user asks for an issue or a plan without a grill ("create an issue for 
 When you work on a ticket of a project with a GitHub repo (a plan kept in Loft issues keeps its own flow: mark the ticket's Loft issue done):
 - A ticket of a spec goes on the spec branch named in its "## Branch" section. Pull it, commit there and push. Open no PR for the ticket: the spec PR, which Loft opened as a draft, is the spec's only one.
 - One or more commits per ticket, each message ending with `Refs #<ticket>`.
-- If your project has agents with the Code reviewer, QA or Security role (`mcp__loft__list_agents` shows roles), ask them to review the ticket's commits and wait for their comments on the spec PR "Ticket #N passed at `<sha>`". Without a reviewer, the ticket passes once its commits are pushed and the tests pass.
-- When it passes, close it with `mcp__loft__close_ticket` (its number and its commit SHAs). Loft comments on it, closes it so the tickets it blocks can start, and marks the spec PR ready for review after the spec's last ticket. Never close a ticket another way.
-- If you are a reviewer (Code reviewer, QA or Security): when a ticket's commits pass, comment "Ticket #N passed at `<sha>`" on the spec PR.
+- When its commits are pushed and the tests pass, hand it in with `mcp__loft__submit_ticket` (its number and commit SHAs). Loft wakes the team's QA and Security to review it, closes it when they pass so the tickets it blocks can start, and marks the spec PR ready for review after the spec's last ticket. Never close a ticket yourself.
+- If Loft wakes you as QA or Security on a ticket, give your verdict with `mcp__loft__review_ticket`; Loft posts it on the spec PR.
 - Fixes from the final review of the spec PR are new commits on the spec branch. Closed tickets aren't reopened.
 - A standalone ticket (no spec) goes on its own branch `ticket/<N>-<slug>`, with a PR whose body has `Closes #N`. It closes when that PR merges."###
 }

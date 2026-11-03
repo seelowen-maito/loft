@@ -196,6 +196,7 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
         }
     }
     crate::planning::retry_ready(state, &repo, full).await;
+    crate::delivery::retry(state, &repo).await;
     Some(report)
 }
 

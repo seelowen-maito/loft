@@ -44,6 +44,9 @@ pub struct Delivery {
     /// The ticket being built now: one at a time.
     #[serde(default)]
     pub current: Option<i64>,
+    /// The agent building the current ticket: the team's Dev, or the planner without one.
+    #[serde(default)]
+    pub dev: String,
     pub created_at: String,
 }
 
@@ -54,11 +57,18 @@ pub struct DeliveryTicket {
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
-    /// "open", "started" or "closed".
+    /// "open", "started" (being built), "review" (submitted), "closing" (passed, its close failed and is
+    /// retried), "needs_human" (too many changes rounds) or "closed".
     pub state: String,
     /// Changes-requested rounds so far.
     #[serde(default)]
     pub rounds: u32,
+    /// The commits last submitted, oldest first.
+    #[serde(default)]
+    pub commits: Vec<String>,
+    /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
+    #[serde(default)]
+    pub verdicts: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1165,6 +1175,8 @@ impl Db {
                     blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
                     state: "open".into(),
                     rounds: 0,
+                    commits: vec![],
+                    verdicts: Default::default(),
                 })
                 .collect();
             let d = Delivery {
@@ -1178,6 +1190,7 @@ impl Db {
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
+                dev: String::new(),
                 created_at: now(),
             };
             tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;

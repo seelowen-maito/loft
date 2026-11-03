@@ -49,7 +49,7 @@ fn only_acknowledges(text: &str, to: &str) -> bool {
     true
 }
 
-fn tools(state: &AppState) -> Value {
+pub(crate) fn tools(state: &AppState) -> Value {
     let mut all = base_tools();
     // With the messaging rules off, every message wakes its recipient, so the kind is optional.
     if !state.settings.get().messaging_rules {
@@ -61,6 +61,7 @@ fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::setup::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
     all
 }
@@ -198,7 +199,10 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
-                None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                None => match crate::delivery::mcp_call(state, &me, name, &args).await {
+                    None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                    r => r,
+                },
                 r => r,
             },
             r => r,
