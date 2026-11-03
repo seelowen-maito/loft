@@ -1734,6 +1734,8 @@ mod tests {
         with("dev2", "loft", "dev");
         let found = |project: &str, role: &str| db.agent_with_role(project, role).unwrap().map(|a| a.id);
         assert_eq!(found("loft", "dev").as_deref(), Some("dev1"), "padded project matches; list order picks the first");
+        db.reorder_agents(&["dev2", "other", "lead", "dev1"].map(String::from)).unwrap();
+        assert_eq!(found("loft", "dev").as_deref(), Some("dev2"), "list order, not the order they were saved in");
         assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
         assert_eq!(found("loft", "qa"), None);
         assert_eq!(found("", "dev"), None, "no project, no team");
