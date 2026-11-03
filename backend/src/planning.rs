@@ -2318,6 +2318,79 @@ pub(crate) mod tests {
         assert!(err.1.contains("has no ticket ready to start"), "{}", err.1);
     }
 
+    /// Where a Delivery stands on ticket #n: its state, the current ticket, and the next one to start.
+    fn standing(st: &AppState, slug: &str, n: i64) -> (String, Option<i64>, Option<i64>) {
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        let t = d.tickets.iter().find(|t| t.number == n).unwrap().state.clone();
+        (t, d.current, crate::delivery::next_ticket(&d).map(|t| t.number))
+    }
+
+    #[tokio::test]
+    async fn close_ticket_closes_the_ticket_on_its_delivery_and_frees_the_one_it_blocked() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-close";
+        let (a, m) = planned(&st, &fake, "dl-close", vec![ticket("Store", &[]), ticket("API", &["Store"])]).await;
+        busy(&st, "Builder", "dl-close", "dev");
+        press(&st, &a, &m).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("started".into(), Some(41), None), "#42 waits for #41");
+
+        // No "## Branch" section: the spec PR comes from the Delivery.
+        let body = "## What to build\n\nStore.";
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", body));
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(out.contains("\"Done in `abc1234`, part of #500.\""), "{out}");
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closed_by_hand_on_github_closes_on_its_delivery() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/dl-hand";
+        planner_on(&st, "dl-hand", Some("git@github.com:octo/dl-hand.git"));
+        delivery_40(&st, slug);
+        crate::delivery::update(&st, slug, 40, |d| {
+            (d.state, d.current) = ("running".into(), Some(41));
+            d.tickets[0].state = "started".into();
+            d.tickets[1].blocked_by = vec![41];
+        });
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        subs(&fake, slug, &["closed", "open"]);
+        let body = "## What to build\n\nStore.";
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([gh_ticket(slug, 41, "open", body), gh_ticket(slug, 42, "open", body)])),
+            (200, json!([gh_ticket(slug, 41, "closed", body)])),
+        ]);
+        crate::mirror::sync_project(&st, "dl-hand", true).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("started".into(), Some(41), None));
+        crate::mirror::sync_project(&st, "dl-hand", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+        assert!(fake.seen("/graphql").is_empty(), "#42 is still open: the spec PR stays a draft");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_its_delivery_doesnt_list_finds_it_by_its_branch_section() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-fallback";
+        let a = planner_on(&st, "dl-fallback", Some("git@github.com:octo/dl-fallback.git"));
+        // As migrated from before Deliveries with no sub-issue links: the record has no tickets.
+        crate::delivery::record_spec(&st, slug, 40, "", "", "");
+        crate::delivery::update(&st, slug, 40, |d| d.pr = Some(500));
+        let body = format!("## What to build\n\nStore.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/{slug}/pull/500.");
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", &body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", &body));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        subs(&fake, slug, &["closed"]);
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(out.contains("part of #500") && out.contains("spec PR #500 is now ready for review"), "{out}");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready", "found by its spec PR");
+    }
+
     #[test]
     fn spec_prs_recorded_before_deliveries_become_delivery_records() {
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));

@@ -77,7 +77,7 @@ pub fn ticket_closed(state: &AppState, repo: &str, number: i64) -> Option<Delive
 }
 
 /// The next ticket to build: the first open one whose blockers are all closed.
-fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
+pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     let closed = |n: &i64| d.tickets.iter().any(|t| t.number == *n && t.state == "closed");
     d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
 }
