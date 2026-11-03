@@ -476,15 +476,18 @@ pub const FRESH_CONTEXT: &[&str] = &["above_80k", "off", "always"];
 /// The context size the clients warn at (out of the smart zone): "above_80k" clears from here.
 pub const CONTEXT_WARN_AT: u64 = 80_000;
 
+/// What belongs to one Claude session: dropped together whenever the next run starts a fresh one.
+fn reset_session_fields(a: &mut Agent) {
+    a.session_id = None;
+    a.context_tokens = None;
+    a.grill_briefed = false;
+    a.memory_index = None;
+}
+
 /// Drop the Claude session so the next run starts with empty context, leaving `text` as the `clear` line in
 /// the chat. Long-term memory carries over, and the old session stays in `/resume`.
 pub fn clear_context(state: &AppState, agent_id: &str, text: &str, meta: Value) -> Option<Agent> {
-    let a = state.db.update_agent(agent_id, |a| {
-        a.session_id = None;
-        a.context_tokens = None;
-        a.grill_briefed = false;
-        a.memory_index = None;
-    }).ok()??;
+    let a = state.db.update_agent(agent_id, reset_session_fields).ok()??;
     if let Ok(m) = state.db.add_message(agent_id, None, "system", "clear", text, meta) {
         state.emit(crate::state::Event::Message { message: json!(m) });
     }
@@ -880,12 +883,7 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
             RunOutcome::StaleSession if resume => {
                 *delivered = false;
                 // The stored Claude session is gone; start fresh (memory survives).
-                if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
-                    a.session_id = None;
-                    a.context_tokens = None;
-                    a.grill_briefed = false;
-                    a.memory_index = None;
-                }) {
+                if let Ok(Some(a)) = state.db.update_agent(agent_id, reset_session_fields) {
                     emit_agent(state, &a);
                 }
                 resume = false;

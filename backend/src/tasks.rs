@@ -754,13 +754,9 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>, body:
     }
     let was_active = is_active(&t);
     let before = t.clone();
-    let ts = now();
-    t.status = "cancelled".into();
-    t.completed_at = Some(ts.clone());
-    t.updated_at = ts;
-    state.db.save_task(&t)?;
-    emit(&state, &t);
-    log_status(&state, &t, "user", "Cancelled by you");
+    if !set_status(&state, &mut t, "cancelled", "user", Some("Cancelled by you")) {
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the task".into()));
+    }
     crate::mirror::write_through(&state, &before, &t).await;
     let t = state.db.get_task(&id)?.unwrap_or(t);
     let mut stopped = false;
