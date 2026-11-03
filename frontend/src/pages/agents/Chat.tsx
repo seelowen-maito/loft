@@ -30,6 +30,7 @@ import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
 import { highlightParts } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
+import { projectsOf, teamOf } from "../../lib/team";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -148,8 +149,8 @@ export function Chat({
   const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
-  // Only agents in the same project: the backend doesn't deliver to others.
-  const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
+  // Any agent, its own group's first: the backend prefers them too when two share a name.
+  const mentionable = agents.filter((a) => a.id !== agent.id).sort((a, b) => Number(teamOf(a) !== teamOf(agent)) - Number(teamOf(b) !== teamOf(agent)));
   const mention = useMention(agent.id, text, setText, mentionable);
   const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name));
   const highlighted = highlight.some((p) => p.accent);
@@ -355,7 +356,11 @@ export function Chat({
           <div className="flex items-center gap-2">
             <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
             {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
-            {agent.project && <span className="shrink-0 rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3">{agent.project}</span>}
+            {teamOf(agent) && (
+              <span className="shrink-0 truncate rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3" title="Group · projects, main first">
+                {[agent.group?.trim(), projectsOf(agent).join(", ")].filter(Boolean).filter((x, i, xs) => xs.indexOf(x) === i).join(" · ")}
+              </span>
+            )}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
             <StatusPill agent={agent} />

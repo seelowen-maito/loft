@@ -18,9 +18,16 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// Free-form project or tag; agents sharing one are grouped in the UI.
+    /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
+    /// none), so clients that only know one project keep working.
     #[serde(default)]
     pub project: String,
+    /// Free-text label its team goes by (Dineout); never a path. Empty: its main project is its team.
+    #[serde(default)]
+    pub group: String,
+    /// The projects it works in, main first.
+    #[serde(default)]
+    pub projects: Vec<String>,
     pub personality: String,
     pub prompt: String,
     pub model: String,
@@ -49,7 +56,7 @@ pub struct Agent {
     /// run of that Session, so saving a memory doesn't break the prompt cache. Clear and Compact drop it.
     #[serde(default)]
     pub memory_index: Option<String>,
-    /// Leads its team (the agents sharing its project): at most one per project.
+    /// Leads its team (the agents sharing its group): at most one per group.
     #[serde(default)]
     pub lead: bool,
     /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
@@ -85,6 +92,19 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Its team's name: its group, else its main project. Empty: it has no team.
+    pub fn team(&self) -> &str {
+        match self.group.trim() {
+            "" => self.project.trim(),
+            g => g,
+        }
+    }
+
+    /// Whether `project` is one it works in.
+    pub fn has_project(&self, project: &str) -> bool {
+        self.projects.iter().any(|p| p == project.trim())
+    }
+
     /// An Unread reply: a run the user started ended after their read mark.
     pub fn unread_reply(&self) -> bool {
         let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
@@ -597,6 +617,14 @@ impl Db {
             let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter().filter(|d| serde_json::from_str::<Value>(d).is_ok_and(|v| v.get("role").is_none())).collect()
         };
+        // Agents saved before groups existed get their project as group and only project, once, so every
+        // team stays as it was until the user changes it.
+        conn.execute(
+            "UPDATE agents SET data = json_set(data, '$.group', COALESCE(json_extract(data, '$.project'), ''),
+                 '$.projects', CASE WHEN TRIM(COALESCE(json_extract(data, '$.project'), '')) = '' THEN json('[]') ELSE json_array(TRIM(json_extract(data, '$.project'))) END)
+             WHERE json_type(data, '$.projects') IS NULL",
+            [],
+        )?;
         // Anything left "running" from a previous backend process is stale.
         let db = Db(Arc::new(Mutex::new(conn)));
         for d in unroled {
@@ -1452,6 +1480,30 @@ mod tests {
         // Opening again moves nothing twice.
         drop(db);
         assert_eq!(Db::open(&path).unwrap().count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agents_saved_before_groups_get_their_project_as_group_and_only_project_once() {
+        let path = std::env::temp_dir().join(format!("loft-groups-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, project) in [("a", "api"), ("b", " api "), ("c", "")] {
+                db.save_agent(&agent(id)).unwrap();
+                // As agents were stored before groups: a project and nothing else.
+                let c = db.0.lock().unwrap();
+                c.execute("UPDATE agents SET data = json_remove(json_set(data, '$.project', ?1), '$.group', '$.projects') WHERE id = ?2", params![project, id]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let got = |id: &str| { let a = db.get_agent(id).unwrap().unwrap(); (a.group.trim().to_string(), a.projects.clone(), a.team().to_string()) };
+        assert_eq!(got("a"), ("api".into(), vec!["api".to_string()], "api".into()));
+        assert_eq!(got("b"), ("api".into(), vec!["api".to_string()], "api".into()), "same team as before");
+        assert_eq!(got("c"), ("".into(), vec![], "".into()));
+        // An edit after the migration stays.
+        db.update_agent("a", |a| a.group = "Dineout".into()).unwrap();
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Dineout", "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 

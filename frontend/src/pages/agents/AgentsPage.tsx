@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
-import { cx, groupByProject, timeAgo } from "../../lib/format";
+import { cx, timeAgo } from "../../lib/format";
+import { groupByTeam, projectsOf, teamOf } from "../../lib/team";
 import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
 import { Sticker } from "../../components/Sticker";
 import { RunTimer } from "../../components/RunTimer";
@@ -36,7 +37,7 @@ export default function AgentsPage() {
   const [prs, setPrs] = useState<PullRequest[]>([]);
   const [creating, setCreating] = useState(false);
   const [grill, setGrill] = useState<GrillSession | null>(null);
-  // Project groups folded away in the roster, remembered per browser.
+  // Groups folded away in the roster, remembered per browser.
   const folded = useCollapsed(COLLAPSED_KEY);
 
   // Inspector: a remembered column on wide screens, an overlay opened on demand on narrow ones.
@@ -166,15 +167,16 @@ export default function AgentsPage() {
     return m;
   }, [perms]);
 
-  // Roster order, set by dragging a row (or Alt+↑/↓) within its project group.
+  // Roster order, set by dragging a row (or Alt+↑/↓) within its group.
   // The ref is read by drag handlers, which can fire before React re-renders with the new state.
   const dragging = useRef<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const saveOrder = (as: Agent[] | null) => as && api.reorderAgents(as.map((a) => a.id)).catch(() => api.agents().then(setAgents));
 
   const working = agents?.filter((a) => a.running).length ?? 0;
-  const groups = useMemo(() => groupByProject(agents ?? []), [agents]);
-  const projects = useMemo(() => groups.map((g) => g.project).filter(Boolean), [groups]);
+  const groups = useMemo(() => groupByTeam(agents ?? []), [agents]);
+  const teams = useMemo(() => groups.map((g) => g.team).filter(Boolean), [groups]);
+  const projects = useMemo(() => [...new Set((agents ?? []).flatMap(projectsOf))].sort((a, b) => a.localeCompare(b)), [agents]);
 
   return (
     <div
@@ -198,14 +200,14 @@ export default function AgentsPage() {
         </div>
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-4">
           {groups.map((g) => {
-            const open = !projects.length || folded.isOpen(g.project);
+            const open = !teams.length || folded.isOpen(g.team);
             const groupWorking = g.agents.filter((a) => a.running).length;
             const groupPending = g.agents.reduce((n, a) => n + (pendingBy.get(a.id) ?? 0), 0);
             const groupUnreadCount = groupUnread(g.agents, selectedId);
             return (
-              <div key={g.project} className="space-y-1">
-                {projects.length > 0 && (
-                  <ProjectHeader name={g.project || "Other"} open={open} onToggle={() => folded.toggle(g.project)}>
+              <div key={g.team} className="space-y-1">
+                {teams.length > 0 && (
+                  <ProjectHeader name={g.team || "Other"} open={open} onToggle={() => folded.toggle(g.team)}>
                     {!open && groupWorking > 0 && <span className="text-accent">{groupWorking} working</span>}
                     {!open && groupUnreadCount > 0 && <span className="text-accent">{groupUnreadCount} unread</span>}
                     {!open && groupPending > 0 && <span className="rounded-full bg-warn px-1.5 text-[10px] text-ink-950">{groupPending}</span>}
@@ -227,7 +229,8 @@ export default function AgentsPage() {
                       }}
                       onDragOver={(e) => {
                         const id = dragging.current;
-                        if (!id || agents?.find((x) => x.id === id)?.project.trim() !== a.project.trim()) return;
+                        const from = agents?.find((x) => x.id === id);
+                        if (!id || !from || teamOf(from) !== teamOf(a)) return;
                         e.preventDefault();
                         setAgents((as) => as && moved(as, id, a.id));
                       }}
@@ -268,7 +271,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{a.status_text || s.label}</span>
                           ) : (
-                            <>{a.title || "agent"} · {a.last_run_at ? timeAgo(a.last_run_at) : "never run"}</>
+                            <>{[a.title || "agent", shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>
@@ -331,12 +334,13 @@ export default function AgentsPage() {
       >
         {/* Fixed width so the content is clipped, not reflowed, while the column animates. */}
         <div className="h-full w-[380px] max-xl:w-full">
-          {selected && <Inspector key={selected.id} agent={selected} projects={projects} perms={agentPerms} onCleared={() => setMessages([])} />}
+          {selected && <Inspector key={selected.id} agent={selected} groups={teams} projects={projects} perms={agentPerms} onCleared={() => setMessages([])} />}
         </div>
       </aside>
 
       {creating && (
         <NewAgentDialog
+          groups={teams}
           projects={projects}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
@@ -350,11 +354,17 @@ export default function AgentsPage() {
   );
 }
 
-/** `as` with agent `id` moved into `targetId`'s slot; unchanged across project groups. */
+/** Its projects for the roster row, unless it only has the one its group is named after. */
+function shownProjects(a: Agent): string {
+  const ps = projectsOf(a);
+  return ps.length === 1 && ps[0] === teamOf(a) ? "" : ps.join(", ");
+}
+
+/** `as` with agent `id` moved into `targetId`'s slot; unchanged across groups. */
 function moved(as: Agent[], id: string, targetId: string): Agent[] {
   const from = as.findIndex((a) => a.id === id);
   const to = as.findIndex((a) => a.id === targetId);
-  if (from < 0 || to < 0 || from === to || as[from].project.trim() !== as[to].project.trim()) return as;
+  if (from < 0 || to < 0 || from === to || teamOf(as[from]) !== teamOf(as[to])) return as;
   const next = [...as];
   next.splice(to, 0, ...next.splice(from, 1));
   return next;
