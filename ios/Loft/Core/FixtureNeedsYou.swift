@@ -293,7 +293,7 @@ enum FixtureNeedsYou {
      "kind": "open",
      "label": "Open on GitHub",
      "target": {
-      "url": "https://github.com/o/r/pull/7"
+      "url": "https://github.com/octo/loft/pull/214"
      }
     },
     {
@@ -314,13 +314,13 @@ enum FixtureNeedsYou {
    "links": [
     {
      "label": "Pull request",
-     "url": "https://github.com/o/r/pull/7"
+     "url": "https://github.com/octo/loft/pull/214"
     }
    ],
    "reason": "Ready to merge, 3 checks passed.",
    "task_id": null,
-   "text": "→  · +0 −0 in 0 files",
-   "title": "o/r#7: Fix it",
+   "text": "settings-endpoints → main · +412 −38 in 9 files",
+   "title": "loft#214: Settings endpoints",
    "type": "pr_ready",
    "urgency": 1
   },
