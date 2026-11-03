@@ -25,7 +25,7 @@ struct ComposerView: View {
     var onVoiceSent: (() -> Void)?
     /// "Stop" said on its own ends dictation without sending. Nil: "stop" is plain text (the grill reads it itself).
     var onVoiceStop: (() -> Void)?
-    /// Shows "Attach a task" next to @ (the chat keeps the attached task).
+    /// Shows "Attach an issue" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
     /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
     let send: (String, Bool) -> Void
@@ -125,8 +125,8 @@ struct ComposerView: View {
                         Image(systemName: "checklist").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 44)
                     }
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel("Attach a task")
-                    .accessibilityHint("The agent gets the task with your message")
+                    .accessibilityLabel("Attach an issue")
+                    .accessibilityHint("The agent gets the issue with your message")
                     .accessibilityIdentifier("attachTaskButton")
                 }
                 TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)

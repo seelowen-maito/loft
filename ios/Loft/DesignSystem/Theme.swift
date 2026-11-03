@@ -311,7 +311,7 @@ extension LoftStore {
 }
 
 /// What a list shows before anything has loaded: connecting, or why Loft can't be reached.
-/// Used instead of "No agents" / "No tasks", which would be wrong while nothing is known.
+/// Used instead of "No agents" / "No issues", which would be wrong while nothing is known.
 struct NotLoadedView: View {
     @Environment(LoftStore.self) private var store
 

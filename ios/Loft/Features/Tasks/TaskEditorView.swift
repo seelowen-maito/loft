@@ -84,7 +84,7 @@ struct TaskEditorView: View {
                 }
             } footer: {
                 if assignmentLocked {
-                    Text("An agent is working on this task. Cancel it to reassign. Editing the description doesn't change what the agent was already told.")
+                    Text("An agent is working on this issue. Cancel it to reassign. Editing the description doesn't change what the agent was already told.")
                 } else if editing == nil {
                     Text(agentId == nil
                          ? "Saved to your inbox. Nothing runs until you choose to run it."
@@ -92,7 +92,7 @@ struct TaskEditorView: View {
                 }
             }
         }
-        .navigationTitle(editing != nil ? "Edit task" : parentId != nil ? "New subtask" : "New task")
+        .navigationTitle(editing != nil ? "Edit issue" : parentId != nil ? "New sub-issue" : "New issue")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

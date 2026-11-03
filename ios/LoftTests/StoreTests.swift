@@ -186,7 +186,7 @@ final class StoreTests: XCTestCase {
         api.features = []
         let store = try await connectedStore(api)
         XCTAssertFalse(store.supportsTasks)
-        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Tasks")) }
+        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Issues")) }
         store.deactivate()
     }
 

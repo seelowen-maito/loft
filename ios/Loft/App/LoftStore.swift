@@ -460,11 +460,11 @@ final class LoftStore {
             upsert(&tasks, t)
             if let before, before.status != t.status {
                 switch t.state {
-                case .done: notifier.post(.taskOutcome, title: "Task done", body: t.title, whenActive: isActive,
+                case .done: notifier.post(.taskOutcome, title: "Issue done", body: t.title, whenActive: isActive,
                                           target: ["screen": "task", "task_id": t.id])
-                case .failed: notifier.post(.taskOutcome, title: "Task failed", body: t.title, whenActive: isActive,
+                case .failed: notifier.post(.taskOutcome, title: "Issue failed", body: t.title, whenActive: isActive,
                                             itemId: NeedsYouKey.task(t.id, "failed"), target: ["screen": "task", "task_id": t.id])
-                case .blocked: notifier.post(.taskOutcome, title: "Task blocked", body: t.title, whenActive: isActive,
+                case .blocked: notifier.post(.taskOutcome, title: "Issue blocked", body: t.title, whenActive: isActive,
                                              itemId: NeedsYouKey.task(t.id, "blocked"), target: ["screen": "task", "task_id": t.id])
                 default: break
                 }
@@ -813,7 +813,7 @@ final class LoftStore {
 
     private func requireTasks() throws -> LoftAPI {
         let api = try requireWrite()
-        guard supportsTasks else { throw APIError.unsupported("Tasks") }
+        guard supportsTasks else { throw APIError.unsupported("Issues") }
         return api
     }
 
