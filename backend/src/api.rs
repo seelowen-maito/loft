@@ -208,11 +208,8 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
             v => Some(v.as_u64().filter(|n| *n <= 20).ok_or_else(|| bad("max_subagents must be null or 0-20"))? as u32),
         };
     }
-    if let Some(v) = p.get("lead") {
-        a.lead = v.as_bool().ok_or_else(|| bad("lead must be true or false"))?;
-    }
     if let Some(v) = p.get("role") {
-        a.role = v.as_str().filter(|r| crate::planning::ROLES.contains(r) || r.is_empty()).ok_or_else(|| bad("role must be \"dev\", \"reviewer\" or \"\""))?.into();
+        a.role = v.as_str().filter(|r| crate::planning::is_role(r)).ok_or_else(|| bad("role must be one of lead, dev, code_reviewer, qa, security or custom"))?.into();
     }
     if let Some(v) = str_field("permission_mode") {
         const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan", "manual"];
@@ -259,7 +256,7 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
-    if a.lead {
+    if a.role == "lead" {
         if a.project.trim().is_empty() {
             return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
         }
@@ -267,16 +264,16 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Makes `a` its project's only Lead: clears the mark on any other agent in the project and returns
-/// the one it moved from.
+/// Makes `a` its project's only Lead: any other Lead in the project becomes Custom. Returns the agent
+/// the role moved from.
 fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
-    if !a.lead {
+    if a.role != "lead" {
         return Ok(None);
     }
     let mut moved = None;
     for mut o in state.db.list_agents()? {
-        if o.lead && o.id != a.id && o.project.trim() == a.project.trim() {
-            o.lead = false;
+        if o.role == "lead" && o.id != a.id && o.project.trim() == a.project.trim() {
+            o.role = "custom".into();
             state.db.save_agent(&o)?;
             emit_agent(state, &o);
             moved = Some(o);
@@ -285,7 +282,7 @@ fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     Ok(moved)
 }
 
-/// The agent as JSON, plus a notice naming both agents when the Lead mark moved to it.
+/// The agent as JSON, plus a notice naming both agents when the Lead role moved to it.
 fn with_lead_notice(mut v: Value, a: &Agent, moved: Option<Agent>) -> Value {
     if let Some(o) = moved {
         v["lead_moved_from"] = json!({ "id": o.id, "name": o.name });
@@ -300,7 +297,7 @@ pub async fn create_agent(State(state): State<AppState>, Json(p): Json<Value>) -
 }
 
 /// Create, save and announce an agent with `id`, defaults overridden by the patch `p`. `created_by` is the agent
-/// that asked for it, if one did. Also returns the agent the Lead mark moved from, if it took it.
+/// that asked for it, if one did. Also returns the agent the Lead role moved from, if it took it.
 pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<String>) -> Result<(Agent, Option<Agent>), ApiError> {
     let mut a = Agent {
         id: id.clone(),
@@ -323,8 +320,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         max_subagents: None,
         grill_briefed: false,
         memory_index: None,
-        lead: false,
-        role: String::new(),
+        role: "custom".into(),
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -941,9 +937,14 @@ pub(crate) mod tests {
     fn the_role_is_set_through_the_patch() {
         let st = crate::tasks::tests::state();
         let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Planner" }), None).unwrap();
-        apply_patch(&mut a, &serde_json::json!({ "role": "reviewer" })).unwrap();
-        assert_eq!(a.role, "reviewer");
-        assert!(apply_patch(&mut a, &serde_json::json!({ "role": "qa" })).is_err());
+        assert_eq!(a.role, "custom", "a new agent is Custom");
+        for role in ["dev", "code_reviewer", "qa", "security", "custom"] {
+            apply_patch(&mut a, &serde_json::json!({ "role": role })).unwrap();
+            assert_eq!(a.role, role);
+        }
+        for role in ["reviewer", "", "Lead"] {
+            assert!(apply_patch(&mut a, &serde_json::json!({ "role": role })).is_err(), "{role:?}");
+        }
     }
 
     async fn patch(st: &crate::state::AppState, id: &str, p: serde_json::Value) -> Result<serde_json::Value, super::ApiError> {
@@ -964,29 +965,31 @@ pub(crate) mod tests {
         }
         let get = |i: usize| st.db.get_agent(&ids[i]).unwrap().unwrap();
 
-        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true })).await.unwrap();
-        assert_eq!((v["lead"].clone(), v.get("notice")), (true.into(), None));
-        patch(&st, &ids[2], serde_json::json!({ "lead": true })).await.unwrap();
+        let lead = serde_json::json!({ "role": "lead" });
+        let v = patch(&st, &ids[0], lead.clone()).await.unwrap();
+        assert_eq!((v["role"].clone(), v.get("notice")), ("lead".into(), None));
+        patch(&st, &ids[2], lead.clone()).await.unwrap();
 
-        // A second Lead in the same project moves the mark; other projects keep theirs.
-        let v = patch(&st, &ids[1], serde_json::json!({ "lead": true })).await.unwrap();
+        // A second Lead in the same project takes the role: the first becomes Custom. Other projects keep theirs.
+        let v = patch(&st, &ids[1], lead.clone()).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
         assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
-        assert!(!get(0).lead);
-        assert!(get(1).lead && get(2).lead);
+        assert_eq!(get(0).role, "custom");
+        assert_eq!((get(1).role.as_str(), get(2).role.as_str()), ("lead", "lead"));
 
         // No project, no Lead: neither setting it nor clearing the Lead's project.
-        let err = patch(&st, &ids[3], serde_json::json!({ "lead": true })).await.unwrap_err();
+        let err = patch(&st, &ids[3], lead.clone()).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
         assert!(err.1.starts_with("Only an agent with a project can be Lead"), "{}", err.1);
-        assert!(!get(3).lead);
+        assert_eq!(get(3).role, "custom");
         assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
-        patch(&st, &ids[1], serde_json::json!({ "lead": false, "project": "" })).await.unwrap();
-        assert!(!get(1).lead);
+        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "project": "" })).await.unwrap();
+        assert_eq!(get(1).role, "dev");
 
-        // Moving the Lead to another project takes that project's mark.
-        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true, "project": "imole" })).await.unwrap();
+        // Moving the Lead to another project takes that project's Lead role.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "imole" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Other to Dev.");
+        assert_eq!(get(2).role, "custom");
     }
 
     #[test]

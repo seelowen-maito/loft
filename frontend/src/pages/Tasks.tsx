@@ -257,7 +257,7 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
         </div>
         {t.note && t.status === "in_progress" && <div className="mt-1 truncate text-[12px] text-fg-2">{t.note}</div>}
       </div>
-      {agent && <Sticker avatar={agent.avatar} lead={agent.lead} size={22} />}
+      {agent && <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={22} />}
     </button>
   );
 }
@@ -345,7 +345,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
-          <Sticker avatar={agent.avatar} lead={agent.lead} size={36} />
+          <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={36} />
           <div className="min-w-0 flex-1">
             <div className="text-[13.5px]">{agent.name}</div>
             <div className="truncate font-mono text-[11px] text-fg-3">{agent.running ? agent.status_text || "Working…" : "Open conversation"}</div>
@@ -412,7 +412,7 @@ function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Ta
       <section className="panel p-4">
         <div className="eyebrow mb-2">In Loft</div>
         <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
-        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.lead} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
+        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
         <Fact label="Priority">{t.priority}</Fact>
         <Fact label="When done">closes #{g.number} on GitHub</Fact>
         <div className="mt-2 font-mono text-[10.5px] text-fg-3">Who works on it, its progress, priority and notes stay in Loft.</div>
@@ -474,7 +474,7 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   return (
     <li className="flex gap-3">
       {agent ? (
-        <Sticker avatar={agent.avatar} lead={agent.lead} size={26} />
+        <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={26} />
       ) : c.author === "github" ? (
         <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-white/[0.08] font-mono text-[10px] text-fg-2">gh</span>
       ) : (

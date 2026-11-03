@@ -81,8 +81,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let args = ProcessInfo.processInfo.arguments
         // `-fixture-lead`: QA leads loft (initials, no sticker) and the Docs Agent leads website (with its sticker).
         if args.contains("-fixture-lead") {
-            agentList[3].lead = true
-            agentList[4].lead = true
+            agentList[3].role = "lead"
+            agentList[4].role = "lead"
         }
         // `-fixture-many-agents`: six more idle agents, more than fit in the @ picker without scrolling.
         if args.contains("-fixture-many-agents") {

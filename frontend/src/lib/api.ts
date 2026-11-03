@@ -23,9 +23,7 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** Leads its project's team (one per project). Wears a captain hat. */
-  lead?: boolean;
-  /** Its part in the end-of-planning team check: "dev", "reviewer" or "" (neither). */
+  /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
   role?: string;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
@@ -53,6 +51,18 @@ export type Agent = {
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
 };
+
+/** The roles an agent can have, as stored in `Agent.role`, with what each does. */
+export const ROLES: { value: string; label: string; hint: string }[] = [
+  { value: "lead", label: "Lead", hint: "plans with you" },
+  { value: "dev", label: "Dev", hint: "builds the tickets" },
+  { value: "code_reviewer", label: "Code reviewer", hint: "reviews the code" },
+  { value: "qa", label: "QA", hint: "tests the work" },
+  { value: "security", label: "Security", hint: "checks for security problems" },
+  { value: "custom", label: "Custom", hint: "follows only its own instructions" },
+];
+
+export const roleLabel = (role: string) => ROLES.find((r) => r.value === role)?.label ?? role;
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 

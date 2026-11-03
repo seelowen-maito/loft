@@ -49,11 +49,9 @@ pub struct Agent {
     /// run of that Session, so saving a memory doesn't break the prompt cache. Clear and Compact drop it.
     #[serde(default)]
     pub memory_index: Option<String>,
-    /// Leads its team (the agents sharing its project): at most one per project.
-    #[serde(default)]
-    pub lead: bool,
-    /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
-    /// the template it came from; agents saved before roles existed get one inferred once at startup.
+    /// What it does in its team: "lead", "dev", "code_reviewer", "qa", "security" or "custom"
+    /// (`planning::ROLES`). A team (the agents sharing a project) has at most one Lead. Set from the
+    /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
     pub avatar: Avatar,
@@ -591,17 +589,18 @@ impl Db {
         )?;
         per_run_costs(&conn)?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
-        // Agents saved before roles existed get one from their name and title, once; the user can change it.
-        let unroled: Vec<String> = {
+        // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
+        // from their old role, name and title. The user can change it.
+        let unroled: Vec<(Value, &str)> = {
             let mut st = conn.prepare("SELECT data FROM agents")?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter().filter(|d| serde_json::from_str::<Value>(d).is_ok_and(|v| v.get("role").is_none())).collect()
+            rows.into_iter().filter_map(|d| serde_json::from_str::<Value>(&d).ok()).filter_map(|v| crate::planning::migrated_role(&v).map(|r| (v, r))).collect()
         };
         // Anything left "running" from a previous backend process is stale.
         let db = Db(Arc::new(Mutex::new(conn)));
-        for d in unroled {
-            if let Ok(mut a) = serde_json::from_str::<Agent>(&d) {
-                a.role = crate::planning::infer_role(&a.name, &a.title).into();
+        for (v, role) in unroled {
+            if let Ok(mut a) = serde_json::from_value::<Agent>(v) {
+                a.role = role.into();
                 db.save_agent(&a)?;
             }
         }

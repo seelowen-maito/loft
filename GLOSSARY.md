@@ -21,7 +21,7 @@ The agent with the Lead role: it plans with the user (grill, spec, tickets) and 
 _Avoid_: Orchestrator, manager, planner
 
 **Role**:
-What an agent does in its team: Lead, Dev, Code reviewer, QA or Security. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake. An agent has at most one role.
+What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake; a Custom agent has no step and follows only its own instructions. An agent has exactly one role.
 _Avoid_: Job, type, flag
 
 **Delivery**:

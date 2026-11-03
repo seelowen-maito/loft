@@ -1152,7 +1152,7 @@ pub(crate) mod tests {
             "id": uuid::Uuid::new_v4().to_string(), "name": name, "title": "", "personality": "", "prompt": "",
             "model": "haiku", "effort": "", "interval_minutes": 0, "allowed_tools": [], "disallowed_tools": [],
             "mcp_servers": {}, "permission_mode": "auto", "avatar": { "svg": "<svg/>" }, "status": "idle",
-            "status_text": "", "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0,
+            "status_text": "", "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "role": "custom",
             "created_at": now(),
         }))
         .unwrap();
@@ -1613,7 +1613,7 @@ pub(crate) mod tests {
                 "id": uuid::Uuid::new_v4().to_string(), "name": name, "title": "", "personality": "", "prompt": "",
                 "model": "haiku", "effort": "", "interval_minutes": 0, "allowed_tools": [], "disallowed_tools": [],
                 "mcp_servers": {}, "permission_mode": "auto", "avatar": { "svg": "<svg/>" }, "status": "idle",
-                "status_text": "", "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0,
+                "status_text": "", "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "role": "custom",
                 "created_at": now(),
             }))
             .unwrap();

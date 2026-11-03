@@ -203,7 +203,12 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     };
     let missing = crate::planning::missing_roles(state, &me.project);
     let setup = (!missing.is_empty()).then(|| {
-        let roles = missing.iter().map(|r| if *r == "dev" { "Dev" } else { "reviewer" }).collect::<Vec<_>>().join(" or ");
+        let labels: Vec<&str> = missing.iter().map(|r| crate::planning::role_label(r)).collect();
+        let roles = match labels.split_last() {
+            Some((last, [])) => last.to_string(),
+            Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+            None => unreachable!("only a team missing a role gets a setup"),
+        };
         let plan = match (&p.spec, p.tickets.first()) {
             _ if p.repo.is_empty() => format!("“{}”, saved as Loft issues", p.spec.as_ref().or(p.tickets.first()).map_or("", |i| i.title.as_str())),
             (Some(sp), _) => format!("spec #{}: {}", sp.number, url(sp)),
@@ -1062,9 +1067,9 @@ When the user asks for an issue or a plan without a grill ("create an issue for 
 When you work on a ticket of a project with a GitHub repo (a plan kept in Loft issues keeps its own flow: mark the ticket's Loft issue done):
 - A ticket of a spec goes on the spec branch named in its "## Branch" section. Pull it, commit there and push. Open no PR for the ticket: the spec PR, which Loft opened as a draft, is the spec's only one.
 - One or more commits per ticket, each message ending with `Refs #<ticket>`.
-- If your project has an agent with the reviewer role (`mcp__loft__list_agents` shows roles), ask it to review the ticket's commits and wait for its comment on the spec PR "Ticket #N passed at `<sha>`". Without a reviewer, the ticket passes once its commits are pushed and the tests pass.
+- If your project has agents with the Code reviewer, QA or Security role (`mcp__loft__list_agents` shows roles), ask them to review the ticket's commits and wait for their comments on the spec PR "Ticket #N passed at `<sha>`". Without a reviewer, the ticket passes once its commits are pushed and the tests pass.
 - When it passes, close it with `mcp__loft__close_ticket` (its number and its commit SHAs). Loft comments on it, closes it so the tickets it blocks can start, and marks the spec PR ready for review after the spec's last ticket. Never close a ticket another way.
-- If you are the reviewer: when a ticket's commits pass, comment "Ticket #N passed at `<sha>`" on the spec PR.
+- If you are a reviewer (Code reviewer, QA or Security): when a ticket's commits pass, comment "Ticket #N passed at `<sha>`" on the spec PR.
 - Fixes from the final review of the spec PR are new commits on the spec branch. Closed tickets aren't reopened.
 - A standalone ticket (no spec) goes on its own branch `ticket/<N>-<slug>`, with a PR whose body has `Closes #N`. It closes when that PR merges."###
 }
@@ -1137,7 +1142,7 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 {TICKETS}
 
 # Planning: the end
-- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
 - Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
 - When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
 

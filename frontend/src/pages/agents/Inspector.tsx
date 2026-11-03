@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Brain, ChevronRight, Code2, Copy, Dices, File, Folder, FolderGit2, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
 } from "lucide-react";
-import { api, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
+import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
@@ -91,13 +91,13 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
@@ -126,7 +126,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   return (
     <div className="space-y-6 p-5">
       <div className="flex items-center gap-4">
-        <Sticker avatar={agent.avatar} lead={agent.lead} size={88} />
+        <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
           <button className="btn" onClick={() => api.randomizeAvatar(agent.id)}>
             <Dices className="size-3.5" /> Randomize
@@ -191,24 +191,13 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Lead" hint={draft.project.trim() ? `Leads the agents in ${draft.project.trim()} and wears the captain hat. One per project: marking it here moves the mark from any other.` : "Only an agent with a project can lead: set its project first."}>
-        <label className={cx("flex items-center gap-2 text-[12.5px]", draft.project.trim() || draft.lead ? "text-fg" : "text-fg-3")}>
-          <input
-            type="checkbox"
-            checked={draft.lead}
-            disabled={!draft.project.trim() && !draft.lead}
-            onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked }))}
-            className="accent-[var(--color-accent)]"
-          />
-          Leads its team
-        </label>
-      </Field>
-
-      <Field label="Team role" hint="What it does in its project's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
+      <Field label="Role" hint={draft.project.trim() ? `What it does in ${draft.project.trim()}'s team. One Lead per project, with the captain hat: making it Lead takes the role from any other.` : "What it does in its project's team. Only an agent with a project can be Lead: set its project first."}>
         <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
-          <option value="">None</option>
-          <option value="dev">Dev: builds the tickets</option>
-          <option value="reviewer">Reviewer: code review, QA or security</option>
+          {ROLES.map((r) => (
+            <option key={r.value} value={r.value} disabled={r.value === "lead" && !draft.project.trim() && draft.role !== "lead"}>
+              {r.label}: {r.hint}
+            </option>
+          ))}
         </select>
       </Field>
 

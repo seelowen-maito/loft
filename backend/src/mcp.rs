@@ -135,7 +135,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, project, role (dev or reviewer, when set), and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, project, role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -350,7 +350,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
-                        let role = if a.role.is_empty() { String::new() } else { format!(" · role {}", a.role) };
+                        let role = if a.role.is_empty() { String::new() } else { format!(" · role {}", crate::planning::role_label(&a.role)) };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
@@ -529,19 +529,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_agents_shows_each_agents_role_when_it_has_one() {
+    async fn list_agents_shows_each_agents_role() {
         let st = crate::tasks::tests::state();
         let me = crate::tasks::tests::agent(&st, "Worker");
         let mut rev = crate::tasks::tests::agent(&st, "Checker");
-        rev.role = "reviewer".into();
+        rev.role = "code_reviewer".into();
         st.db.save_agent(&rev).unwrap();
         crate::tasks::tests::agent(&st, "Plain");
         let r = call_tool(&st, &me.id, "list_agents", json!({})).await;
         let (t, err) = said(&r);
         assert!(!err, "{t}");
         let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
-        assert!(line("Checker").contains(" · role reviewer · "), "{t}");
-        assert!(!line("Plain").contains("role"), "{t}");
+        assert!(line("Checker").contains(" · role Code reviewer · "), "{t}");
+        assert!(line("Plain").contains(" · role Custom · "), "{t}");
     }
 
     #[tokio::test]

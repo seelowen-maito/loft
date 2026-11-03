@@ -135,7 +135,7 @@ struct AgentAvatar: View {
         // The sticker canvas has 14/128 of padding for its border and shadow; draw it a bit larger
         // so the character fills about the same circle the initials did.
         let agent = store.agents.first(where: { $0.id == id })
-        let lead = agent?.lead == true
+        let lead = agent?.isLead == true
         if let svg = agent?.avatar?.svg,
            StickerRenderer.image(svg: svg, points: size * 1.25, scale: displayScale, lead: lead) != nil {
             StickerImage(svg: svg, size: size * 1.25, lead: lead)

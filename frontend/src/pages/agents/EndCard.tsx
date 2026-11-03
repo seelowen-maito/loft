@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { CircleDot, Eraser, ExternalLink, FileText, Loader2, Users } from "lucide-react";
-import { api, type EndCard as Card, type PlannedIssue } from "../../lib/api";
-
-const ROLE: Record<string, string> = { dev: "Dev", reviewer: "reviewer" };
+import { api, roleLabel, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
 function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
@@ -48,7 +46,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       </div>
       {setup && (
         <div className="mt-3 rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
-          The team has no {card.missing_roles.map((r) => ROLE[r] ?? r).join(" or ")} yet.
+          The team has no {card.missing_roles.map(roleLabel).join(", ").replace(/, ([^,]*)$/, " or $1")} yet.
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
