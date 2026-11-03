@@ -549,6 +549,11 @@ pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -
 /// Unstick a run that waits on background work or has gone quiet: stop it, keeping the queue. With nothing
 /// queued, the agent is told it was restarted and picks up where it left off.
 pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    restart_run(state, id, "user").await
+}
+
+/// Restart as `by`: "user" (the Restart button) or "Loft" (a run gone quiet, agents::restart_quiet).
+pub(crate) async fn restart_run(state: AppState, id: String, by: &'static str) -> ApiResult<Value> {
     {
         let mut rt = state.rt.lock().unwrap();
         if !rt.running.contains_key(&id) {
@@ -563,7 +568,8 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
         };
         if rt.queued.get(&id).is_none_or(|q| q.is_empty()) {
             rt.queued.entry(id.clone()).or_default().push(format!(
-                "[Loft: the user restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]"
+                "[Loft: {} restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]",
+                if by == "user" { "the user" } else { "Loft" }
             ));
             // The restarted run picks up the same work: if it was answering the user, so is this one.
             // A queue already waiting runs next instead, and counts only if its own messages came from the user.
@@ -571,7 +577,7 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
                 rt.queued_for_user.insert(id.clone());
             }
         }
-        rt.restarting.insert(id.clone());
+        rt.restarting.insert(id.clone(), by);
     }
     stop_agent(State(state), Path(id)).await
 }
