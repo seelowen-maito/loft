@@ -139,7 +139,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         <Field label="Name">
           <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
         </Field>
-        <Field label="Role">
+        <Field label="Title">
           <input className="input" value={draft.title} placeholder="e.g. Release captain" onChange={(e) => set("title", e.target.value)} />
         </Field>
       </div>

@@ -2120,6 +2120,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_setup_message_names_every_missing_role() {
+        let (fake, st) = (fake_github(), state());
+        for (project, n, team, roles, text) in [
+            ("card-empty", 11, &[][..], json!(["dev", "code_reviewer", "qa", "security"]), "no Dev, Code reviewer, QA or Security yet"),
+            ("card-qa", 12, &["qa"][..], json!(["dev", "code_reviewer", "security"]), "no Dev, Code reviewer or Security yet"),
+            ("card-two", 13, &["dev", "qa"][..], json!(["code_reviewer", "security"]), "no Code reviewer or Security yet"),
+        ] {
+            let a = planner_on(&st, project, Some(&format!("git@github.com:octo/{project}.git")));
+            tickets_repo(&fake, &format!("octo/{project}"), n, &[n]);
+            for role in team {
+                let mut x = crate::tasks::tests::agent(&st, role);
+                (x.project, x.role) = (project.into(), role.to_string());
+                st.db.save_agent(&x).unwrap();
+            }
+            crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+            crate::grill::tests::send(&st, &a).unwrap();
+            publish(&st, &a, "Roles").await.unwrap();
+            crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+            let card = &summary(&st, &a).meta["grill"]["end_card"];
+            assert_eq!(card["missing_roles"], roles, "{project}");
+            assert_eq!(
+                card["setup"]["message"],
+                format!("Set up the team for the {project} project: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve.", a.name),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_full_team_gets_no_setup_button_and_an_unpublished_grill_no_card() {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "card-full", Some("git@github.com:octo/card-full.git"));
