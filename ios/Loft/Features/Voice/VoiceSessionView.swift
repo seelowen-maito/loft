@@ -6,7 +6,6 @@ import SwiftUI
 struct VoiceSessionView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
-    @Environment(Router.self) private var router
     @Environment(\.dynamicTypeSize) private var typeSize
     let dismiss: () -> Void
 
@@ -46,7 +45,7 @@ struct VoiceSessionView: View {
                 VoicePresentation.shared.statusAgentId = id
                 // Also for a chat that's already open, which keeps its own box.
                 VoicePresentation.shared.returnedText = text
-                router.openChat(id, draft: text)
+                VoicePresentation.shared.closeThenOpen(id, draft: text)
                 dismiss()
             }
         }
@@ -214,10 +213,20 @@ struct VoiceSessionView: View {
     var statusAgentId: String?
     /// Talk: text Undo sends back to that chat's message box.
     var returnedText: String?
+
+    /// The chat to open once the Talk screen is gone. Opening it while the screen closes switched tabs under the
+    /// closing cover, and SwiftUI then dropped the close: the screen stayed up until you tapped Close.
+    struct PendingChat: Equatable { var agentId: String; var draft: String? }
+    var pendingChat: PendingChat?
+
+    func closeThenOpen(_ agentId: String, draft: String? = nil) {
+        pendingChat = PendingChat(agentId: agentId, draft: draft)
+    }
 }
 
 struct VoicePresenter: ViewModifier {
     @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
     @Bindable private var presentation = VoicePresentation.shared
     private var shown: Bool {
         get { presentation.shown }
@@ -229,7 +238,14 @@ struct VoicePresenter: ViewModifier {
             .onChange(of: voice.phase, initial: true) { old, new in
                 if new != .idle && (old == .idle || !shown) { shown = true }
             }
-            .fullScreenCover(isPresented: $presentation.shown, onDismiss: { voice.close() }) {
+            .fullScreenCover(isPresented: $presentation.shown, onDismiss: {
+                voice.close()
+                // Now that the screen is gone, the chat it handed over to.
+                if let p = presentation.pendingChat {
+                    presentation.pendingChat = nil
+                    router.openChat(p.agentId, draft: p.draft)
+                }
+            }) {
                 VoiceSessionView { shown = false }
             }
     }

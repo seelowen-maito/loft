@@ -235,6 +235,22 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
     }
 
+    /// A new Talk: Done after talking tidies it up, then the Talk screen closes by itself and you're in the agent's
+    /// chat with the text in the box. With animations on: the close used to be dropped when the chat opened
+    /// underneath the closing screen, and it stayed up until you tapped Close.
+    func testTalkClosesByItselfIntoTheChat() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "-no-speech", "-no-ai", "-AppleLanguages", "(en)", "-fixture-voice", "listening"]
+        app.launch()
+        let done = app.descendants(matching: .any)["voiceHoldToTalk"]
+        XCTAssertTrue(done.appears(timeout: 8))
+        done.tap()
+        XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 10), "the Talk screen closes by itself")
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.appears(timeout: 5), "in the agent's chat")
+        XCTAssertTrue((field.value as? String)?.contains("diagnostics") == true, "with the tidied text in the box")
+    }
+
     /// Talk's message box step: after a pause it asks "Send it?" (it never sends by itself); its Send sends as the
     /// box's own button does, with the status and Undo.
     func testTalkAsksToSendAfterAPause() {

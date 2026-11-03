@@ -62,7 +62,6 @@ struct CaptionTranscript: View {
 struct VoiceStatusView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
-    @Environment(Router.self) private var router
     let status: VoiceStatus
     let dismiss: () -> Void
 
@@ -227,7 +226,7 @@ struct VoiceStatusView: View {
         // Sending it again from the box brings the status back.
         VoicePresentation.shared.statusAgentId = agentId
         VoicePresentation.shared.returnedText = text
-        router.openChat(agentId, draft: text)
+        VoicePresentation.shared.closeThenOpen(agentId, draft: text)
         dismiss()
     }
 
@@ -241,7 +240,7 @@ struct VoiceStatusView: View {
         }
         voice.speaker.stop()
         voice.discard()
-        router.openChat(id)
+        VoicePresentation.shared.closeThenOpen(id)
         dismiss()
     }
 }
