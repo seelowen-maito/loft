@@ -623,13 +623,7 @@ pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, sl
     if let Some((mut t, _)) = crate::mirror::bring_in(state, project.trim(), &slug, &closed)
         && t.status != "done"
     {
-        t.status = "done".into();
-        t.completed_at = Some(crate::db::now());
-        t.updated_at = crate::db::now();
-        if state.db.save_task(&t).is_ok() {
-            crate::tasks::emit(state, &t);
-            crate::tasks::log_status(state, &t, &by.id, &format!("Closed by Loft: {}'s work passed review", by.name));
-        }
+        crate::tasks::set_status(state, &mut t, "done", &by.id, Some(&format!("Closed by Loft: {}'s work passed review", by.name)));
     }
     state.emit(crate::state::Event::Issues { project: project.trim().to_string() });
     let ready = match ready_when_last(state, &slug, n, i["body"].as_str().unwrap_or("")).await {
@@ -2451,7 +2445,7 @@ pub(crate) mod tests {
     /// Where a Delivery stands on ticket #n: its state, the current ticket, and the next one to start.
     fn standing(st: &AppState, slug: &str, n: i64) -> (String, Option<i64>, Option<i64>) {
         let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
-        let t = d.tickets.iter().find(|t| t.number == n).unwrap().state.clone();
+        let t = d.ticket(n).unwrap().state.clone();
         (t, d.current, crate::delivery::next_ticket(&d).map(|t| t.number))
     }
 

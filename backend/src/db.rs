@@ -76,6 +76,17 @@ pub struct Delivery {
     pub created_at: String,
 }
 
+impl Delivery {
+    /// Ticket #n of the record.
+    pub fn ticket(&self, n: i64) -> Option<&DeliveryTicket> {
+        self.tickets.iter().find(|t| t.number == n)
+    }
+
+    pub fn ticket_mut(&mut self, n: i64) -> Option<&mut DeliveryTicket> {
+        self.tickets.iter_mut().find(|t| t.number == n)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryTicket {
     pub number: i64,

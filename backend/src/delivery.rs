@@ -122,7 +122,7 @@ pub fn of_ticket(state: &AppState, repo: &str, number: i64) -> Option<Delivery> 
 pub fn ticket_closed(state: &AppState, repo: &str, number: i64) -> Option<Delivery> {
     let d = of_ticket(state, repo, number)?;
     update(state, repo, d.spec, |d| {
-        if let Some(t) = d.tickets.iter_mut().find(|t| t.number == number) {
+        if let Some(t) = d.ticket_mut(number) {
             t.state = "closed".into();
         }
         if d.current == Some(number) {
@@ -312,7 +312,7 @@ fn note(state: &AppState, id: &str, author: &str, text: &str) {
 /// holds the repo's publish lock.
 async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent) -> Result<(), String> {
     if d.local {
-        let t = d.tickets.iter().find(|x| x.number == n).ok_or("The ticket left the Delivery record.")?;
+        let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
         note(state, &t.id, &agent.id, &format!("Started by Loft's Delivery: with {} on the spec branch `{}`.", agent.name, d.branch));
     } else {
         crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{n}/labels", d.repo), Some(json!({ "labels": ["in-progress"] })))
@@ -322,12 +322,12 @@ async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent)
     let d = update(state, &d.repo, d.spec, |d| {
         d.state = "running".into();
         (d.current, d.dev) = (Some(n), agent.id.clone());
-        if let Some(x) = d.tickets.iter_mut().find(|x| x.number == n) {
+        if let Some(x) = d.ticket_mut(n) {
             x.state = "started".into();
         }
     })
     .ok_or("The Delivery record couldn't be saved.")?;
-    let t = d.tickets.iter().find(|x| x.number == n).ok_or("The ticket left the Delivery record.")?;
+    let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
     crate::agents::wake(state, &agent.id, dev_brief(state, &d, t), "delivery");
     Ok(())
 }
@@ -448,7 +448,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return out;
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "submit_ticket").await?;
-    let t = d.tickets.iter().find(|t| t.number == n).expect("of_ticket found it");
+    let t = d.ticket(n).expect("of_ticket found it");
     let name = tag(&d, t);
     if d.current != Some(n) || t.state != "started" {
         let why = match t.state.as_str() {
@@ -465,7 +465,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
     let d = update(state, &slug, d.spec, |d| {
-        if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+        if let Some(t) = d.ticket_mut(n) {
             t.state = "review".into();
             t.commits = commits.clone();
             t.verdicts = reviewers.iter().map(|(r, _)| (r.to_string(), "pending".to_string())).collect();
@@ -476,7 +476,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted.{closed}"));
     }
-    let t = d.tickets.iter().find(|t| t.number == n).expect("just saved");
+    let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
         crate::agents::wake(state, &a.id, review_brief(state, &d, t, role), "delivery");
     }
@@ -503,7 +503,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "review_ticket").await?;
     let role = me.role.as_str();
-    let t = d.tickets.iter().find(|t| t.number == n).expect("of_ticket found it").clone();
+    let t = d.ticket(n).expect("of_ticket found it").clone();
     let name = tag(&d, &t);
     if t.state != "review" {
         return Err(format!("{name} isn't waiting for a review: nothing was posted."));
@@ -536,12 +536,12 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
 
     if verdict == "pass" {
         let d = update(state, &slug, d.spec, |d| {
-            if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+            if let Some(t) = d.ticket_mut(n) {
                 t.verdicts.insert(role.into(), "pass".into());
             }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
-        let t = d.tickets.iter().find(|t| t.number == n).expect("just saved");
+        let t = d.ticket(n).expect("just saved");
         if t.verdicts.values().any(|v| v != "pass") {
             return Ok(format!("Posted your pass on {on}.{labelled} {name} waits for its other reviewers."));
         }
@@ -552,7 +552,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let rounds = t.rounds + 1;
     let stuck = rounds >= MAX_ROUNDS;
     update(state, &slug, d.spec, |d| {
-        if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+        if let Some(t) = d.ticket_mut(n) {
             t.rounds = rounds;
             t.verdicts.clear();
             t.state = if stuck { "needs_human" } else { "started" }.into();
@@ -603,12 +603,8 @@ async fn needs_human(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>,
         None => final_tag(d),
     };
     let blocked = |mut x: crate::db::Task| {
-        x.status = "blocked".into();
         x.error = format!("{rounds} rounds of changes on {what}: it needs you. Last notes: {}", notes.lines().next().unwrap_or(""));
-        x.updated_at = crate::db::now();
-        if state.db.save_task(&x).is_ok() {
-            crate::tasks::emit(state, &x);
-        }
+        crate::tasks::set_status(state, &mut x, "blocked", "loft", None);
     };
     if d.local {
         let id = t.map_or(d.spec_id.as_str(), |t| t.id.as_str());
@@ -638,7 +634,7 @@ async fn needs_human(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>,
 /// Every reviewer passed ticket #n: closes it on GitHub and starts the next one. A failed close is kept as
 /// "closing" and retried on the mirror's next poll. The lines for the reply.
 async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String> {
-    let t = d.tickets.iter().find(|t| t.number == n).ok_or("The ticket left the Delivery record.")?;
+    let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
     if d.local {
         // A plan kept in Loft: its Loft issue is marked done, with the commits.
         let by = state.db.get_agent(&d.dev).ok().flatten();
@@ -646,16 +642,10 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
             let shas = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
             let author = by.as_ref().map_or("loft", |a| a.id.as_str());
             crate::tasks::log(state, &x, author, "comment", &format!("Done in {shas}, on the spec branch `{}`.", d.branch), json!({}));
-            x.status = "done".into();
-            x.completed_at = Some(crate::db::now());
-            x.updated_at = crate::db::now();
-            if state.db.save_task(&x).is_ok() {
-                crate::tasks::emit(state, &x);
-                crate::tasks::log_status(state, &x, author, "Closed by Loft: its reviewers passed it");
-            }
+            crate::tasks::set_status(state, &mut x, "done", author, Some("Closed by Loft: its reviewers passed it"));
         }
         let d = update(state, &d.repo, d.spec, |d| {
-            if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+            if let Some(t) = d.ticket_mut(n) {
                 t.state = "closed".into();
             }
             d.current = None;
@@ -668,7 +658,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
     if d.standalone {
         // Its PR closes it when it merges: Loft doesn't close it now.
         let d = update(state, &d.repo, d.spec, |d| {
-            if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+            if let Some(t) = d.ticket_mut(n) {
                 t.state = "closed".into();
             }
             d.current = None;
@@ -683,7 +673,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
     }
     let by = state.db.get_agent(&d.dev).ok().flatten().ok_or("The agent that built the ticket is gone.")?;
     update(state, &d.repo, d.spec, |d| {
-        if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+        if let Some(t) = d.ticket_mut(n) {
             t.state = "closing".into();
         }
     });
@@ -1094,13 +1084,7 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
     }
     update(state, repo, spec, |d| d.state = "merged".into());
     if let Ok(Some(mut t)) = state.db.get_task(&d.spec_id) {
-        t.status = "done".into();
-        t.completed_at = Some(crate::db::now());
-        t.updated_at = crate::db::now();
-        if state.db.save_task(&t).is_ok() {
-            crate::tasks::emit(state, &t);
-            crate::tasks::log_status(state, &t, "user", &format!("Merged `{}` into `{}`", d.branch, d.base));
-        }
+        crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into `{}`", d.branch, d.base)));
     }
     Ok(format!("Merged `{}` into `{}` in `{shown}`.", d.branch, d.base))
 }
