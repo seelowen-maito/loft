@@ -29,9 +29,9 @@ The three variations are these two plus a hybrid. The screenshots show the agent
 
 The agent form gets **Group** (free text, with the groups in use as suggestions) and **Projects** (a multi-select of chips from the repos in the projects folder; the first is the main project). The list groups agents by group and shows each agent's project chips. A new issue limits Project to the assignee's projects (main one by default).
 
-![A1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/A1-agents-list.png?raw=true)
-![A2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/A2-edit-agent.png?raw=true)
-![A3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/A3-new-issue.png?raw=true)
+![A1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/A1-agents-list.png?raw=true)
+![A2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/A2-edit-agent.png?raw=true)
+![A3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/A3-new-issue.png?raw=true)
 
 - Pros: smallest change; no new entity; exactly what the user described first; today's single project is just a list of one.
 - Cons: the group's projects live only in its agents (a project nobody has isn't in the group); adding a repo to a team means editing every agent; "all 5" is an agent-by-agent copy.
@@ -41,10 +41,10 @@ The agent form gets **Group** (free text, with the groups in use as suggestions)
 
 A **Group** button on the Agents list creates a group with its projects (a checklist of repos, a main one) and its agents. The agent form picks a group from a list and shows its projects (all of them; narrowing is an exception link). A new issue shows the group and any project of it, warning when the assignee isn't set up for that project.
 
-![B1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/B1-agents-list.png?raw=true)
-![B2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/B2-new-group.png?raw=true)
-![B3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/B3-edit-agent.png?raw=true)
-![B4](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/B4-new-issue.png?raw=true)
+![B1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/B1-agents-list.png?raw=true)
+![B2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/B2-new-group.png?raw=true)
+![B3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/B3-edit-agent.png?raw=true)
+![B4](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/B4-new-issue.png?raw=true)
 
 - Pros: one place for "what is Dineout"; adding a repo is one edit; the list header can show the projects; clear ownership.
 - Cons: a new entity with its own screen, table, endpoints and events; creating a group before the first agent; the "agent with only 2 of 5" case still needs a per-agent override; more to explain.
@@ -54,10 +54,10 @@ A **Group** button on the Agents list creates a group with its projects (a check
 
 The group is created **by typing it** on an agent (free text, as the user asked), and it **holds the project list**, edited from the group header in the list (the sliders icon). An agent works in **all of the group's projects by default**, or **only some** (a switch, then chips; the star marks its main one). The issue form shows the agent's projects as chips, with the rest of the group dimmed and one click away (which offers to hand the issue to an agent that has that project).
 
-![C1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/C1-agents-list.png?raw=true)
-![C2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/C2-edit-agent.png?raw=true)
-![C3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/C3-group-settings.png?raw=true)
-![C4](https://github.com/seelowen-maito/loft/blob/pr-assets/pr__N__/C4-new-issue.png?raw=true)
+![C1](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/C1-agents-list.png?raw=true)
+![C2](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/C2-edit-agent.png?raw=true)
+![C3](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/C3-group-settings.png?raw=true)
+![C4](https://github.com/seelowen-maito/loft/blob/pr-assets/pr219/C4-new-issue.png?raw=true)
 
 - Pros: the group is free text like today's project (no setup step), yet "what is Dineout" exists in one place; the common case (an agent works across the group) is one click, the exception is a switch; the list shows narrowing only where it matters.
 - Cons: two levels of "projects" (the group's and the agent's) to explain; a group row appears implicitly when its first project is added.
