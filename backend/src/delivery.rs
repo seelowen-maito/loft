@@ -170,9 +170,18 @@ fn refs(d: &Delivery, t: &DeliveryTicket) -> String {
     if d.local { format!("Refs {}", t.id) } else { format!("Refs #{}", t.number) }
 }
 
-/// The project's own folder, where a plan kept in Loft keeps its spec branch.
-fn project_dir(state: &AppState, d: &Delivery) -> std::path::PathBuf {
-    state.settings.boot().projects_dir.join(d.project.trim())
+/// The project's own folder, where a plan kept in Loft keeps its spec branch: resolved inside the projects
+/// folder, never an agent's workspace, and a repo with its own `.git` folder, so Loft never runs git in a
+/// repo an agent made.
+fn project_dir(state: &AppState, d: &Delivery) -> Result<std::path::PathBuf, String> {
+    crate::repos::project_dir(state, &d.project)
+        .filter(|dir| crate::repos::own_git_dir(dir))
+        .ok_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", d.project.trim()))
+}
+
+/// The project's folder as briefs name it.
+fn project_shown(state: &AppState, d: &Delivery) -> String {
+    project_dir(state, d).unwrap_or_else(|_| state.settings.boot().projects_dir.join(d.project.trim())).display().to_string()
 }
 
 /// "spec PR", or "PR" for a standalone ticket.
@@ -201,7 +210,7 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         _ => format!(" and its spec #{}", d.spec),
     };
     let work = if d.local {
-        format!("Work on the spec branch `{}` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin {}`. There is no PR.", d.branch, project_dir(state, d).display(), d.branch)
+        format!("Work on the spec branch `{}` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin {}`. There is no PR.", d.branch, project_shown(state, d), d.branch)
     } else {
         format!("Work on the {} `{}`: pull it, commit there and push.{pr}", branch_name(d), d.branch)
     };
@@ -246,7 +255,7 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
         return Ok(Started { ticket: d.current.unwrap_or_default(), agent, already: true });
     }
     let d = if d.local && d.base.is_empty() {
-        let base = local_branch(&project_dir(state, &d), &d.branch).map_err(|e| format!("The Delivery didn't start: {e}"))?;
+        let base = project_dir(state, &d).and_then(|dir| local_branch(&dir, &d.branch)).map_err(|e| format!("The Delivery didn't start: {e}."))?;
         update(state, repo, spec, |d| d.base = base).ok_or("The Delivery record couldn't be saved.")?
     } else if d.standalone && d.pr.is_none() {
         let title = d.tickets.first().map(|t| t.title.clone()).unwrap_or_default();
@@ -263,9 +272,16 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     Ok(Started { ticket: n, agent, already: false })
 }
 
-/// Runs git in `dir`; its trimmed output, or what git said.
+/// Runs git in `dir`, with no fsmonitor command and no hooks, so a repo's own config can't make Loft run
+/// anything else; its trimmed output, or what git said.
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().map_err(|e| format!("couldn't run git: {e}"))?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .output()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -358,7 +374,7 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
     let repo = &d.repo;
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     let pr = d.pr.map(|pr| format!(" ({} https://github.com/{repo}/pull/{pr})", pr_name(d))).unwrap_or_default();
-    let place = if d.local { format!(" of the project's own repo `{}`", project_dir(state, d).display()) } else { String::new() };
+    let place = if d.local { format!(" of the project's own repo `{}`", project_shown(state, d)) } else { String::new() };
     let posted = if d.local { "on the ticket's Loft issue".to_string() } else { format!("on the {}", pr_name(d)) };
     let (who, job) = match role {
         "qa" => ("QA", "Test that they deliver the ticket's acceptance criteria: run the tests and try the behaviour the ticket changes."),
@@ -807,7 +823,7 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
             about = subject(d),
             spec_id = d.spec_id,
             branch = d.branch,
-            dir = project_dir(state, d).display(),
+            dir = project_shown(state, d),
             base = d.base,
         );
     }
@@ -1036,7 +1052,7 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
         "merged" => return Ok(format!("`{}` is already merged into `{}`.", d.branch, d.base)),
         _ => return Err(format!("{} isn't ready to merge yet: its reviews haven't all passed.", subject(&d))),
     }
-    let dir = project_dir(state, &d);
+    let dir = project_dir(state, &d).map_err(|e| format!("Nothing was merged: {e}."))?;
     let shown = dir.display();
     let on = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).map_err(|e| format!("Couldn't read the branch checked out in `{shown}`: {e}"))?;
     if on != d.base {

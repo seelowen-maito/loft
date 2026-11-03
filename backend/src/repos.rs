@@ -190,7 +190,7 @@ pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf
 
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
 /// could point the project at any repo on the Mac (and its origin).
-fn own_git_dir(dir: &Path) -> bool {
+pub(crate) fn own_git_dir(dir: &Path) -> bool {
     std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir())
 }
 

@@ -3058,7 +3058,7 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1);
         for want in [
             "[Loft Delivery: spec \"Offline mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Store\" (Loft issue ".to_string(),
-            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.display()),
+            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.canonicalize().unwrap().display()),
             format!("each message ending with `Refs {}`", store.id),
             format!("call `mcp__loft__submit_ticket` with \"{}\"", store.id),
         ] {
@@ -3128,7 +3128,7 @@ pub(crate) mod tests {
 
         assert!(merge().await.unwrap_err().ends_with("isn't ready to merge yet: its reviews haven't all passed."), "only after the last review");
         crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
-        let shown = dir.display().to_string();
+        let shown = dir.canonicalize().unwrap().display().to_string();
         assert_eq!(merge().await.unwrap_err(), format!("`main` isn't checked out in `{shown}` (`spec/1-offline-mode` is). Run `git -C {shown} checkout main`, then press Merge again."));
         git_in(&dir, &["checkout", "-q", "main"]);
         std::fs::write(dir.join("README.md"), "edited\n").unwrap();
@@ -3136,15 +3136,69 @@ pub(crate) mod tests {
         assert!(!dir.join("store.rs").exists(), "nothing merged");
         git_in(&dir, &["checkout", "--", "README.md"]);
 
+        // The repo's own config can't make Loft run anything: no fsmonitor command, no hooks.
+        let marker = dir.parent().unwrap().join("ran-something");
+        git_in(&dir, &["config", "core.fsmonitor", &format!("touch {}", marker.display())]);
+        let hook = dir.join(".git/hooks/post-merge");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let git_user = |k: &str, v: &str| git_in(&dir, &["config", k, v]);
         git_user("user.name", "Test");
         git_user("user.email", "test@example.com");
         assert_eq!(merge().await.unwrap(), format!("Merged `spec/1-offline-mode` into `main` in `{shown}`."));
         assert!(dir.join("store.rs").exists());
         assert_eq!(git_in(&dir, &["log", "-1", "--format=%s"]), "Merge spec \"Offline mode\"");
+        assert!(!marker.exists(), "neither the fsmonitor command nor the post-merge hook ran");
         assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "merged");
         assert_eq!(st.db.get_task(&d.spec_id).unwrap().unwrap().status, "done");
         assert_eq!(merge().await.unwrap(), "`spec/1-offline-mode` is already merged into `main`.");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_aborts_the_merge_and_says_what_to_run() {
+        let st = state();
+        let (a, m, _team, dir) = local_plan(&st, "local-conflict", &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let d = crate::delivery::local_of(&st, "local-conflict", &loft_ticket(&st, "local-conflict", "Offline mode").id).unwrap();
+        // The spec branch and main both change README.md.
+        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
+        std::fs::write(dir.join("README.md"), "from the spec\n").unwrap();
+        git_in(&dir, &["commit", "-qam", "Spec edit"]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("README.md"), "from main\n").unwrap();
+        git_in(&dir, &["commit", "-qam", "Main edit"]);
+        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        let shown = dir.canonicalize().unwrap().display().to_string();
+        assert!(err.starts_with("`spec/1-offline-mode` doesn't merge cleanly into `main`"), "{err}");
+        assert!(err.ends_with(&format!("so nothing was merged. Run `git -C {shown} merge spec/1-offline-mode`, resolve the conflicts and commit.")), "{err}");
+        assert!(!dir.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
+        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "", "the tree is clean again");
+        assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "from main\n");
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready", "Merge can be pressed again once it's resolved");
+    }
+
+    #[tokio::test]
+    async fn git_never_runs_in_a_project_that_resolves_into_an_agent_workspace() {
+        let st = state();
+        // An agent's workspace holds a repo; a project folder links to it.
+        let inside = st.cfg.storage_dir.join("some-agent").join("x");
+        std::fs::create_dir_all(&inside).unwrap();
+        git_in(&inside, &["init", "-q", "-b", "main"]);
+        git_in(&inside, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::os::unix::fs::symlink(&inside, st.settings.boot().projects_dir.join("sneaky")).unwrap();
+        crate::delivery::record_local_spec(&st, "sneaky", "spec-id", "Offline mode", "");
+        crate::delivery::record_local_ticket(&st, "sneaky", "spec-id", "t1", "Store", &[]);
+        busy(&st, "Builder", "sneaky", "dev");
+        let d = crate::delivery::local_of(&st, "sneaky", "spec-id").unwrap();
+
+        let Err(err) = crate::delivery::start(&st, &d.repo, d.spec, "").await else { panic!("started in an agent's workspace") };
+        assert_eq!(err, "The Delivery didn't start: the project folder of sneaky isn't a git repo of its own in the projects folder, so Loft won't run git there.");
+        assert!(git_in(&inside, &["branch", "--list", "spec/*"]).is_empty(), "no branch was made there");
+        crate::delivery::update(&st, &d.repo, d.spec, |d| (d.state, d.base) = ("ready".into(), "main".into()));
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        assert!(err.starts_with("Nothing was merged: the project folder of sneaky isn't a git repo of its own"), "{err}");
     }
 
     #[test]
