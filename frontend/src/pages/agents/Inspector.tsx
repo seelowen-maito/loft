@@ -7,7 +7,8 @@ import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
-import { ProjectSelect } from "./ProjectSelect";
+import { GroupInput, ProjectsField } from "./ProjectsField";
+import { projectsOf } from "../../lib/team";
 import { QuietHours } from "./QuietHours";
 
 type Tab = "config" | "permissions" | "memory" | "workspace";
@@ -45,7 +46,7 @@ const MCP_TEMPLATES: Record<string, unknown> = {
   filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "~/projects"] },
 };
 
-export function Inspector({ agent, projects, perms, onCleared }: { agent: Agent; projects: string[]; perms: PermissionRequest[]; onCleared: () => void }) {
+export function Inspector({ agent, groups, projects, perms, onCleared }: { agent: Agent; groups: string[]; projects: string[]; perms: PermissionRequest[]; onCleared: () => void }) {
   const [tab, setTab] = useState<Tab>("config");
   const pending = perms.filter((p) => p.status === "pending").length;
   const tabs: { id: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
@@ -72,7 +73,7 @@ export function Inspector({ agent, projects, perms, onCleared }: { agent: Agent;
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "config" && <ConfigTab key={agent.id} agent={agent} projects={projects} onCleared={onCleared} />}
+        {tab === "config" && <ConfigTab key={agent.id} agent={agent} groups={groups} projects={projects} onCleared={onCleared} />}
         {tab === "permissions" && <AccessTab agent={agent} perms={perms} />}
         {tab === "memory" && <MemoryTab agent={agent} />}
         {tab === "workspace" && <FilesTab agent={agent} />}
@@ -91,12 +92,12 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "title" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
-function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
+function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; groups: string[]; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
-      name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
+      name: agent.name, title: agent.title, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
       model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
@@ -108,6 +109,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
+  const team = draft.group.trim() || draft.projects[0] || "";
 
   const save = async () => {
     setSaving(true);
@@ -144,8 +146,12 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Project" hint="A git repo, or any name or tag. Agents that share one are grouped together in the list.">
-        <ProjectSelect value={draft.project} projects={projects} onChange={(v) => set("project", v)} />
+      <Field label="Group" hint="Its team, such as Dineout: agents in the same group are listed together and share one Lead. Empty: its main project is its group.">
+        <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
+      </Field>
+
+      <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
+        <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">
@@ -191,12 +197,12 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Lead" hint={draft.project.trim() ? `Leads the agents in ${draft.project.trim()} and wears the captain hat. One per project: marking it here moves the mark from any other.` : "Only an agent with a project can lead: set its project first."}>
-        <label className={cx("flex items-center gap-2 text-[12.5px]", draft.project.trim() || draft.lead ? "text-fg" : "text-fg-3")}>
+      <Field label="Lead" hint={team ? `Leads the agents in ${team} and wears the captain hat. One per group: marking it here moves the mark from any other.` : "Only an agent with a group or a project can lead: set one first."}>
+        <label className={cx("flex items-center gap-2 text-[12.5px]", team || draft.lead ? "text-fg" : "text-fg-3")}>
           <input
             type="checkbox"
             checked={draft.lead}
-            disabled={!draft.project.trim() && !draft.lead}
+            disabled={!team && !draft.lead}
             onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked }))}
             className="accent-[var(--color-accent)]"
           />
@@ -204,7 +210,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </label>
       </Field>
 
-      <Field label="Team role" hint="What it does in its project's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
+      <Field label="Team role" hint="What it does in its group's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
         <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
           <option value="">None</option>
           <option value="dev">Dev: builds the tickets</option>

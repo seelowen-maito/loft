@@ -12,6 +12,7 @@ import { Origin } from "../components/Origin";
 import { filterIssues, SOURCES } from "../lib/issueFilter";
 import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
+import { projectsOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -334,7 +335,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
+          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.flatMap(projectsOf)])].sort()} />
         </div>
       </header>
 

@@ -3,7 +3,7 @@ import { Sparkles, X } from "lucide-react";
 import { api, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { INTERVALS, MODELS } from "./Inspector";
-import { ProjectSelect } from "./ProjectSelect";
+import { GroupInput, ProjectsField } from "./ProjectsField";
 
 const TEMPLATES = [
   {
@@ -34,11 +34,11 @@ const TEMPLATES = [
   },
 ];
 
-export function NewAgentDialog({ projects, onClose, onCreated }: { projects: string[]; onClose: () => void; onCreated: (a: Agent) => void }) {
-  const [form, setForm] = useState({ name: "", title: "", project: "", personality: "", prompt: "", model: "sonnet", interval_minutes: 0 });
+export function NewAgentDialog({ groups, projects, onClose, onCreated }: { groups: string[]; projects: string[]; onClose: () => void; onCreated: (a: Agent) => void }) {
+  const [form, setForm] = useState({ name: "", title: "", group: "", projects: [] as string[], personality: "", prompt: "", model: "sonnet", interval_minutes: 0 });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
+  const set = (k: keyof typeof form, v: string | number | string[]) => setForm((f) => ({ ...f, [k]: v }));
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -95,10 +95,16 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
               <input className="input" placeholder="e.g. Repo janitor" value={form.title} onChange={(e) => set("title", e.target.value)} />
             </label>
           </div>
-          <label className="block space-y-1.5">
-            <span className="eyebrow">Project</span>
-            <ProjectSelect value={form.project} projects={projects} onChange={(v) => set("project", v)} />
-          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="space-y-1.5">
+              <span className="eyebrow">Group</span>
+              <GroupInput value={form.group} groups={groups} onChange={(v) => set("group", v)} />
+            </label>
+            <div className="space-y-1.5">
+              <span className="eyebrow">Projects</span>
+              <ProjectsField value={form.projects} projects={projects} onChange={(v) => set("projects", v)} />
+            </div>
+          </div>
           <label className="block space-y-1.5">
             <span className="eyebrow">Personality</span>
             <textarea className="input min-h-[64px] resize-none" placeholder="How should it sound and behave?" value={form.personality} onChange={(e) => set("personality", e.target.value)} />

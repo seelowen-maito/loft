@@ -393,7 +393,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 # Workspace
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
-- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
+{team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
 - Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
@@ -431,6 +431,7 @@ Read a memory's full body with `mcp__loft__recall` when its title looks relevant
 # Style
 Be concise in chat. Lead with the answer or the result. When you finish a task, say what you did and where the output lives."#,
         name = a.name,
+        team = team_lines(a),
         subagents = subagents,
         grill = crate::grill::prompt_section(),
         messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
@@ -445,6 +446,23 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
             .unwrap_or_default(),
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
     )
+}
+
+/// The Workspace lines naming its group and projects, main first; none when it has neither.
+fn team_lines(a: &Agent) -> String {
+    let mut s = String::new();
+    if !a.group.trim().is_empty() {
+        s += &format!("- You belong to the group **{}**. `mcp__loft__list_agents` shows its other agents and their projects.\n", a.group.trim());
+    }
+    if let Some((main, rest)) = a.projects.split_first() {
+        let rest = rest.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+        s += &format!("- Your main project is `{main}`: the issues you create go there unless you pass another `project`.");
+        if !rest.is_empty() {
+            s += &format!(" You also work in {rest}. You can only create issues in your own projects.");
+        }
+        s += "\n";
+    }
+    s
 }
 
 // ---- running ----------------------------------------------------------
@@ -1357,6 +1375,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_prompt_names_the_agent_s_group_and_every_project_main_first() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Web");
+        (a.group, a.project, a.projects) = ("Dineout".into(), "b2c".into(), vec!["b2c".into(), "b2b".into(), "apps".into()]);
+        let p = system_prompt(&st, &a);
+        assert!(p.contains("- You belong to the group **Dineout**."), "{p}");
+        assert!(p.contains("- Your main project is `b2c`: the issues you create go there unless you pass another `project`. You also work in `b2b`, `apps`."), "{p}");
+        (a.group, a.project, a.projects) = (String::new(), String::new(), vec![]);
+        let p = system_prompt(&st, &a);
+        assert!(!p.contains("You belong to the group") && !p.contains("Your main project"));
+    }
+
+    #[test]
     fn every_agent_gets_loft_s_messaging_rules_whatever_its_standing_instructions() {
         let st = crate::tasks::tests::state();
         st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), Arc::new(Notify::new()));
@@ -1999,12 +2030,17 @@ esac
         let _ = send("Please plan it, and @Web Dev take a look too").await.ok().unwrap();
         until("both runs", 10, || !is_running(&st, &dev.id) && !is_running(&st, &orch.id) && workspace(&st, &orch.id).join("prompts.log").exists()).await;
 
-        // Another project's agent isn't reachable, even by name, and doesn't shadow this one's.
+        // Another group's agent is reachable, but doesn't shadow this group's agent of the same name.
         let mut far = crate::tasks::tests::agent(&st, "Web Dev");
-        far.project = "imole".into();
+        far.group = "imole".into();
         st.db.save_agent(&far).unwrap();
         let r = send("@Web Dev again").await.ok().unwrap().0;
         assert_eq!(r["mentioned"], json!([{ "id": dev.id, "name": "Web Dev" }]));
+        let mut isa = crate::tasks::tests::agent(&st, "Isa");
+        isa.group = "imole".into();
+        st.db.save_agent(&isa).unwrap();
+        let r = send("@Isa have a look").await.ok().unwrap().0;
+        assert_eq!(r["mentioned"], json!([{ "id": isa.id, "name": "Isa" }]));
     }
 
     #[test]

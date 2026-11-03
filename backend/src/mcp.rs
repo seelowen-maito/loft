@@ -135,7 +135,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, project, and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, group, projects, and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -349,13 +349,18 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
-                        let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
+                        let group = if a.group.trim().is_empty() { String::new() } else { format!(" · group {}", a.group.trim()) };
+                        let project = match a.projects.as_slice() {
+                            [] if a.project.trim().is_empty() => String::new(),
+                            [] | [_] => format!(" · project {}", a.project.trim()),
+                            ps => format!(" · projects {} (main {})", ps.join(", "), a.project.trim()),
+                        };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{project} · {}", a.name, title, a.id, doing)
+                        format!("- {}{} · id {}{group}{project} · {}", a.name, title, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }

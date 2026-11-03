@@ -74,6 +74,23 @@ fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut met
     }
 }
 
+/// The warning for an issue whose assignee doesn't work in its project, if it doesn't. Agents with no
+/// projects take any.
+fn project_warning(state: &AppState, t: &Task) -> Option<String> {
+    let a = state.db.get_agent(t.agent_id.as_deref()?).ok()??;
+    if t.project.is_empty() || a.projects.is_empty() || a.has_project(&t.project) {
+        return None;
+    }
+    Some(format!("{} doesn't work in {}: its projects are {}.", a.name, t.project, a.projects.join(", ")))
+}
+
+/// Logs the project warning in the thread, if there is one.
+fn warn_project(state: &AppState, t: &Task, author: &str) {
+    if let Some(w) = project_warning(state, t) {
+        log(state, t, author, "status", &w, json!({ "status": t.status, "warning": true }));
+    }
+}
+
 /// A status entry: "Started by Web Dev", "Marked done by you".
 pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
@@ -270,6 +287,7 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
     state.db.save_task(&t).map_err(|e| e.to_string())?;
     emit(state, &t);
     log_status(state, &t, created_by, &format!("Created by {}", who(state, created_by)));
+    warn_project(state, &t, created_by);
     crate::mirror::auto_publish(state, &t);
     Ok((t, true))
 }
@@ -457,6 +475,9 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<String>, Json(
             None => "Unassigned by you".to_string(),
         };
         log_status(&state, &t, "user", &text);
+    }
+    if t.agent_id != before.agent_id || t.project != before.project {
+        warn_project(&state, &t, "user");
     }
     crate::mirror::write_through(&state, &before, &t).await;
     Ok(Json(json!(state.db.get_task(&id)?.unwrap_or(t))))
@@ -874,7 +895,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "parent_id": { "type": "string" },
                 "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of Loft issues that must finish first." },
                 "priority": { "type": "string", "enum": PRIORITIES },
-                "project": { "type": "string" },
+                "project": { "type": "string", "description": "One of your projects. Defaults to the assignee's main project, else yours." },
                 "start": { "type": "boolean", "description": "Hand it to the agent now." }
             }, "required": ["title"] }
         }),
@@ -1007,6 +1028,11 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             // No project given: the assignee's (in `create`), else the creating agent's.
             if s("project").is_empty() && assignee.is_none() && !me.project.is_empty() {
                 p["project"] = json!(me.project);
+            }
+            // An agent with projects creates issues only in them.
+            let project = s("project");
+            if !project.is_empty() && !me.projects.is_empty() && !me.has_project(&project) {
+                return Err(format!("You don't work in {project}, so you can't create issues there. Your projects: {}. Ask the user, or an agent that works in {project}.", me.projects.join(", ")));
             }
             let (t, _) = create(state, &p, &me.id)?;
             if let Some(parent) = t.parent_id.as_deref() {
@@ -1603,6 +1629,42 @@ pub(crate) mod tests {
         assert!(apply_fields(&st, &mut a2, &json!({ "parent_id": a.id })).is_err());
         assert!(apply_fields(&st, &mut a2, &json!({ "depends_on": [a.id] })).is_err());
         assert!(apply_fields(&st, &mut a2, &json!({ "depends_on": [b.id] })).is_ok());
+    }
+
+    #[tokio::test]
+    async fn issues_outside_the_assignee_s_projects_warn_the_user_and_are_refused_to_agents() {
+        let st = state();
+        let mk = |name: &str, projects: &[&str]| {
+            let mut a = agent(&st, name);
+            a.projects = projects.iter().map(|p| p.to_string()).collect();
+            a.project = a.projects.first().cloned().unwrap_or_default();
+            st.db.save_agent(&a).unwrap();
+            a
+        };
+        let web = mk("Web", &["b2c", "b2b"]);
+        let api = mk("Api", &["api"]);
+        let loose = mk("Loose", &[]);
+        let warnings = |id: &str| st.db.list_task_comments(id, 50, None).unwrap().into_iter().filter(|c| c.meta["warning"] == json!(true)).map(|c| c.text).collect::<Vec<_>>();
+
+        // The user: a warning in the thread, and the issue is created anyway.
+        let (t, _) = create(&st, &json!({ "title": "Outside", "agent_id": web.id, "project": "api" }), "user").unwrap();
+        assert_eq!(t.project, "api");
+        assert_eq!(warnings(&t.id), ["Web doesn't work in api: its projects are b2c, b2b."]);
+        let (t, _) = create(&st, &json!({ "title": "Inside", "agent_id": web.id, "project": "b2b" }), "user").unwrap();
+        assert!(warnings(&t.id).is_empty());
+        let (t, _) = create(&st, &json!({ "title": "Default", "agent_id": web.id }), "user").unwrap();
+        assert_eq!((t.project.as_str(), warnings(&t.id).len()), ("b2c", 0), "the main project by default");
+        // Reassigning to an agent without the project warns too.
+        let Json(_) = update(State(st.clone()), Path(t.id.clone()), Json(json!({ "agent_id": api.id }))).await.unwrap();
+        assert_eq!(warnings(&t.id), ["Api doesn't work in b2c: its projects are api."]);
+
+        // An agent: refused outside its own projects, with the list.
+        let find = |k: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == k).ok_or("none".to_string());
+        let err = mcp_call(&st, &web, "create_issue", &json!({ "title": "X", "project": "api" }), find).unwrap().unwrap_err();
+        assert_eq!(err, "You don't work in api, so you can't create issues there. Your projects: b2c, b2b. Ask the user, or an agent that works in api.");
+        assert!(mcp_call(&st, &web, "create_issue", &json!({ "title": "Y", "project": "b2b" }), find).unwrap().is_ok());
+        // An agent with no projects isn't limited.
+        assert!(mcp_call(&st, &loose, "create_issue", &json!({ "title": "Z", "project": "api" }), find).unwrap().is_ok());
     }
 
     #[test]
