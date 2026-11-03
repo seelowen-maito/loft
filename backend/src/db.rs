@@ -13,6 +13,54 @@ use crate::avatar::Avatar;
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
+/// A Delivery: Loft running a spec's tickets from published to merged. One per spec, keyed by its repo
+/// and spec number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Delivery {
+    /// `owner/repo` on GitHub.
+    pub repo: String,
+    pub spec: i64,
+    /// The Loft project whose team runs it; empty for one migrated from before Deliveries.
+    #[serde(default)]
+    pub project: String,
+    /// The agent that published the spec: it builds the tickets when the team has no Dev.
+    #[serde(default)]
+    pub planner: String,
+    /// The spec branch; empty for one migrated from before Deliveries, until a GitHub read fills it in.
+    #[serde(default)]
+    pub branch: String,
+    /// The draft spec PR, once it's open.
+    #[serde(default)]
+    pub pr: Option<i64>,
+    /// "planned" (published, not started), "running", "ready" (Loft marked the spec PR ready) or
+    /// "settled" (the PR was found ready, merged or closed).
+    pub state: String,
+    /// The ready-for-review call failed: the mirror retries it on its next poll.
+    #[serde(default)]
+    pub ready_retry: bool,
+    /// Its tickets, blockers first.
+    #[serde(default)]
+    pub tickets: Vec<DeliveryTicket>,
+    /// The ticket being built now: one at a time.
+    #[serde(default)]
+    pub current: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryTicket {
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub blocked_by: Vec<i64>,
+    /// "open", "started" or "closed".
+    pub state: String,
+    /// Changes-requested rounds so far.
+    #[serde(default)]
+    pub rounds: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
@@ -423,6 +471,13 @@ CREATE TABLE IF NOT EXISTS published_issues (
     created_at TEXT NOT NULL,
     PRIMARY KEY(slug, kind, key)
 );
+CREATE TABLE IF NOT EXISTS deliveries (
+    repo TEXT NOT NULL,
+    spec INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY(repo, spec)
+);
 CREATE TABLE IF NOT EXISTS pending_fyis (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
@@ -604,6 +659,7 @@ impl Db {
                 db.save_agent(&a)?;
             }
         }
+        db.deliveries_from_spec_prs()?;
         for mut a in db.list_agents()? {
             if a.status != "idle" {
                 a.status = "idle".into();
@@ -803,14 +859,6 @@ impl Db {
             params![slug, kind, key, number, now()],
         )?;
         Ok(())
-    }
-
-    /// The key and issue of every record of this kind on `slug`.
-    pub fn published_issues(&self, slug: &str, kind: &str) -> Result<Vec<(String, i64)>> {
-        let c = self.0.lock().unwrap();
-        let mut q = c.prepare("SELECT key, number FROM published_issues WHERE slug = ?1 AND kind = ?2 ORDER BY number")?;
-        let rows = q.query_map(params![slug, kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// When Loft recorded this kind and key on `slug`, if it did.
@@ -1088,6 +1136,89 @@ impl Db {
             message_from_row,
         )
         .optional()?)
+    }
+
+    /// Spec PRs recorded before Deliveries become Delivery records, once: the PR from `spec_pr`, the state
+    /// from `spec_pr_settled` and `spec_pr_retry`, and the tickets and their blockers from the sub-issue and
+    /// blocker links. The branch wasn't recorded, so it's read from GitHub when it's first needed.
+    fn deliveries_from_spec_prs(&self) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let rows = |kind: &str| -> Result<Vec<(String, String, i64)>> {
+            let mut q = c.prepare("SELECT slug, key, number FROM published_issues WHERE kind = ?1 ORDER BY slug, number")?;
+            let r = q.query_map([kind], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(r)
+        };
+        let (prs, settled, retry, subs, blocks) = (rows("spec_pr")?, rows("spec_pr_settled")?, rows("spec_pr_retry")?, rows("sub_issue")?, rows("blocked_by")?);
+        if prs.is_empty() {
+            return Ok(());
+        }
+        let tx = c.unchecked_transaction()?;
+        for (repo, spec, pr) in prs {
+            let Ok(spec) = spec.parse::<i64>() else { continue };
+            let has = |list: &[(String, String, i64)]| list.iter().any(|(r, _, p)| *r == repo && *p == pr);
+            let tickets = subs
+                .iter()
+                .filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(s, _)| s == spec.to_string()))
+                .map(|(_, _, n)| DeliveryTicket {
+                    number: *n,
+                    title: String::new(),
+                    blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
+                    state: "open".into(),
+                    rounds: 0,
+                })
+                .collect();
+            let d = Delivery {
+                repo: repo.clone(),
+                spec,
+                project: String::new(),
+                planner: String::new(),
+                branch: String::new(),
+                pr: Some(pr),
+                state: if has(&settled) { "settled" } else { "planned" }.into(),
+                ready_retry: has(&retry),
+                tickets,
+                current: None,
+                created_at: now(),
+            };
+            tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;
+        }
+        tx.execute("DELETE FROM published_issues WHERE kind IN ('spec_pr', 'spec_pr_settled', 'spec_pr_retry')", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_delivery(&self, repo: &str, spec: i64) -> Result<Option<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let d: Option<String> = c.query_row("SELECT data FROM deliveries WHERE repo = ?1 AND spec = ?2", params![repo, spec], |r| r.get(0)).optional()?;
+        Ok(d.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn save_delivery(&self, d: &Delivery) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)",
+            params![d.repo, d.spec, d.state, serde_json::to_string(d)?],
+        )?;
+        Ok(())
+    }
+
+    /// The Deliveries on `repo`, oldest spec first; only the ones not settled yet with `unsettled`.
+    pub fn deliveries(&self, repo: &str, unsettled: bool) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND (?2 = 0 OR state NOT IN ('ready', 'settled')) ORDER BY spec")?;
+        let rows = q.query_map(params![repo, unsettled], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// Records on an end-of-planning card that its Delivery started: who got which ticket.
+    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, started: &Value) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.delivery.started', json(?3))
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.delivery') = 'object'",
+            params![agent_id, id, started.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or

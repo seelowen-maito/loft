@@ -17,6 +17,9 @@ protocol LoftAPI: Sendable {
     /// "Set up the team with loft" on the end-of-planning card `messageId`: the server sends its setup message
     /// once and returns the card with `sent_at` (`duplicate` when it was already sent).
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse
+    /// "Start delivery" on the end-of-planning card `messageId`: the server starts the spec's first ready ticket
+    /// on the team's Dev once and returns the card with `delivery.started` (`duplicate` when it had started).
+    func startDelivery(agentId: String, messageId: Int64) async throws -> SendMessageResponse
     func taskPlan(id: String) async throws -> TaskPlan
     func needsYou() async throws -> NeedsYouList
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws
@@ -186,6 +189,10 @@ struct LiveLoftAPI: LoftAPI {
         try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/team-setup"))
     }
 
+    func startDelivery(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
+        try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/start-delivery"))
+    }
+
     /// The grill endpoints answer with the session either bare or wrapped as `{ "session": … }`
     /// (`{ "session": null }` when there is none).
     static func decodeGrillSession(_ data: Data) throws -> GrillSession? {
@@ -299,6 +306,7 @@ extension LoftAPI {
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
+    func startDelivery(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Delivery") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
     func taskPlan(id: String) async throws -> TaskPlan { throw APIError.unsupported("Plans") }
     func needsYou() async throws -> NeedsYouList { throw APIError.unsupported("Needs you") }

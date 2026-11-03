@@ -203,13 +203,17 @@ export type EndCard = {
   repo: string;
   spec: PlannedIssue | null;
   tickets: PlannedIssue[];
-  /** Left in the composer after Clear context, never sent by Loft. */
+  /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
   next_message: string;
-  /** Roles no agent in the project fills: "dev", "reviewer". */
+  /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
+  delivery?: { repo: string; spec: number; started?: DeliveryStarted } | null;
+  /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
   setup: { agent_id: string; message: string; sent_at?: string } | null;
 };
+
+export type DeliveryStarted = { ticket: number; agent_id: string; agent_name: string; at: string };
 
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
@@ -491,6 +495,9 @@ export const api = {
   /** "Set up the team with lofty" on an end-of-planning card: sends its setup message once. */
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
+  /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
+  startDelivery: (id: string, messageId: number) =>
+    req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery`),
   /** Stores a pasted image for the next message; send its `file` in `send`'s images. */
   upload: async (id: string, image: Blob) => {
     const res = await fetch(`/api/agents/${id}/uploads`, { method: "POST", body: image });

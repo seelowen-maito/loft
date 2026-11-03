@@ -23,6 +23,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     var failNextGrillCommand: APIError?
     /// Team setup messages the server sent to `loft`, for tests to check it happens once.
     private(set) var teamSetupsSent = 0
+    private(set) var deliveriesStarted = 0
 
     /// The text after `-<name>` on the command line. A value starting with `base64:` is decoded first: free text
     /// with an apostrophe reached the app mangled ("isn't hidden" as "isnt\ hidden") on its way through
@@ -270,9 +271,10 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             EndCard.Issue(number: n, title: t, url: URL(string: inLoft ? "/tasks/t\(n - 39)" : "https://github.com/octo/site/issues/\(n)")!)
         }
         let card = EndCard(repo: inLoft ? "" : "octo/site", spec: issue(40, "Pricing page"), tickets: [issue(41, "Plans table"), issue(42, "Yearly toggle")],
-                           nextMessage: "Implement spec #40: hand the ready tickets to the team", missingRoles: ["reviewer"],
-                           setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no reviewer yet.",
-                                        sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil))
+                           nextMessage: inLoft ? "Implement the plan: hand its ready Loft issues to the team" : "", missingRoles: ["code_reviewer", "qa"],
+                           setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no Code reviewer or QA yet.",
+                                        sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil),
+                           delivery: inLoft ? nil : .init(repo: "octo/site", spec: 40))
         grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
                      GrillMeta(sessionId: s.sessionId, role: .summary, final: true, endCard: card), role: "assistant")
     }
@@ -308,6 +310,24 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             msgs[setup.agentId, default: []].append(ChatMessage(id: nextId, agentId: setup.agentId, runId: nil, role: "user", kind: "text",
                                                                 content: setup.message, meta: nil, createdAt: Date()))
             teamSetupsSent += 1
+            return SendMessageResponse(ok: true, queued: nil, duplicate: false, message: m)
+        }
+    }
+
+    /// Like the backend: starts the card's Delivery once, on the fixture's Dev; a repeat is a duplicate.
+    func startDelivery(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
+        try check()
+        return try locked {
+            guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
+                throw APIError.server(status: 404, message: "not found")
+            }
+            guard var g = m.grill, var d = g.endCard?.delivery else { throw APIError.server(status: 400, message: "This card has no Delivery.") }
+            if d.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+            d.started = .init(ticket: 41, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
+            g.endCard?.delivery = d
+            m.meta = ["grill": Self.wire(g)]
+            msgs[agentId]?[i] = m
+            deliveriesStarted += 1
             return SendMessageResponse(ok: true, queued: nil, duplicate: false, message: m)
         }
     }

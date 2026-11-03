@@ -453,9 +453,10 @@ struct GrillSuggestionBar: View {
     }
 }
 
-/// The end of a planning grill: links to the spec and tickets (they open GitHub), Clear context with the next
-/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`. The
-/// server sends that once and marks the card (`setup.sent_at`), so it shows as sent everywhere and after a restart.
+/// The end of a planning grill: links to the spec and tickets (they open GitHub), Start delivery for a spec with a
+/// Delivery (otherwise Clear context leaves the next message in the composer), and, when the team lacks a role, a
+/// button that asks `loft`. The server does each once and marks the card (`delivery.started`, `setup.sent_at`), so it
+/// shows as done everywhere and after a restart.
 struct EndCardView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
@@ -465,6 +466,8 @@ struct EndCardView: View {
     var clearWith: (String) -> Void
     @State private var sendingSetup = false
     @State private var setupError: String?
+    @State private var starting = false
+    @State private var startError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -478,10 +481,41 @@ struct EndCardView: View {
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }
-            HStack(spacing: 8) {
-                Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
+            if let d = card.delivery {
+                if let s = d.started {
+                    Label("Delivery started · #\(s.ticket) with \(s.agentName)", systemImage: "play.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("endCardStarted")
+                } else {
+                    Button {
+                        starting = true
+                        startError = nil
+                        Task {
+                            do { try await store.startDelivery(agentId: message.agentId, messageId: message.id) }
+                            catch { startError = error.localizedDescription }
+                            starting = false
+                        }
+                    } label: { Label("Start delivery", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("endCardClear")
+                    .font(.footnote)
+                    .disabled(starting)
+                    .accessibilityIdentifier("endCardStart")
+                }
+                if let startError {
+                    Text("Not started: \(startError)").font(.caption2).foregroundStyle(.red)
+                }
+            }
+            HStack(spacing: 8) {
+                if card.delivery == nil {
+                    Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("endCardClear")
+                } else {
+                    Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("endCardClear")
+                }
                 if let setup = card.setup {
                     let sent = setup.sentAt != nil
                     Button {
@@ -504,7 +538,9 @@ struct EndCardView: View {
             if let setupError {
                 Text("Not sent: \(setupError)").font(.caption2).foregroundStyle(.red)
             }
-            Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+            if !card.nextMessage.isEmpty {
+                Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

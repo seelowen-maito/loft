@@ -189,13 +189,16 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 }
 
 /// The end-of-planning card for a grill that published something: links to the spec and tickets, the
-/// suggested next message for the composer after clearing context, and the roles the team lacks.
+/// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
     let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
+    let delivery = p.spec.as_ref().filter(|_| !p.repo.is_empty()).filter(|sp| matches!(state.db.get_delivery(&p.repo, sp.number), Ok(Some(_))));
     let next = match (&p.spec, p.tickets.as_slice()) {
+        _ if delivery.is_some() => String::new(),
         _ if p.repo.is_empty() => say(s, "Implement the plan: hand its ready Loft issues to the team", "Implemente o plano: entregue as issues prontas do Loft ao time"),
         (Some(sp), _) => say(s, &format!("Implement spec #{}: hand the ready tickets to the team", sp.number), &format!("Implemente a spec #{}: entregue os tickets prontos ao time", sp.number)),
         (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
@@ -225,6 +228,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         "spec": p.spec.as_ref().map(link),
         "tickets": p.tickets.iter().map(link).collect::<Vec<_>>(),
         "next_message": next,
+        "delivery": delivery.map(|sp| json!({ "repo": p.repo, "spec": sp.number })),
         "missing_roles": missing,
         "setup": setup,
     }))
@@ -1142,7 +1146,7 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 {TICKETS}
 
 # Planning: the end
-- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Start delivery button for a spec on GitHub (Loft starts its first ready ticket on the team's Dev, or on you when there's no Dev), a Clear context button (for a plan without a Delivery it leaves the next message, like "Implement ticket #N", in the user's composer), and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
 - Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
 - When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
 

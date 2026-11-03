@@ -242,8 +242,8 @@ final class LoftUITests: XCTestCase {
     }
 
     /// The end-of-planning card in one launch. "Set up the team with loft" sends once (the card then reads "Sent to loft"
-    /// and can't be tapped again), and Clear context leaves the next message unsent in the composer. A card the web
-    /// already sent is a unit test (GrillTests.testATeamSetupSentFromTheWebShowsAsSent).
+    /// and can't be tapped again), and Start delivery starts once (the card then says who has which ticket). A card the
+    /// web already sent is a unit test (GrillTests.testATeamSetupSentFromTheWebShowsAsSent).
     func testEndOfPlanningCard() {
         let app = openGrillChat(["-fixture-grill-ended"])
         let setup = app.buttons["endCardSetup"]
@@ -253,16 +253,16 @@ final class LoftUITests: XCTestCase {
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
         setup.tap()
-        var deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertEqual(setup.label, "Sent to loft")
         XCTAssertFalse(setup.isEnabled)
 
-        app.buttons["endCardClear"].tap()
-        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
-        deadline = Date().addingTimeInterval(5)
-        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
-        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
+        app.buttons["endCardStart"].tap()
+        let started = app.staticTexts["endCardStarted"]
+        XCTAssertTrue(started.appears(timeout: 5))
+        XCTAssertEqual(started.label, "Delivery started · #41 with Dev")
+        XCTAssertFalse(app.buttons["endCardStart"].exists)
     }
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),

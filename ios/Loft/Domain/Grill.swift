@@ -110,17 +110,34 @@ struct EndCard: Codable, Hashable {
         /// When the server sent it to `loft` (RFC 3339), from this phone, another one or the web; nil until then.
         var sentAt: String?
     }
+    /// The spec's Delivery, for "Start delivery"; `started` once it started: who got which ticket.
+    struct Delivery: Codable, Hashable {
+        struct Started: Codable, Hashable {
+            var ticket: Int
+            var agentId: String
+            var agentName: String
+            var at: String
+        }
+        var repo: String
+        var spec: Int
+        var started: Started?
+    }
     var repo: String
     var spec: Issue?
     var tickets: [Issue]
+    /// Left in the composer after Clear context; empty for a spec with a Delivery.
     var nextMessage: String
-    /// "dev", "reviewer".
+    /// "dev", "code_reviewer", "qa", "security".
     var missingRoles: [String]
     var setup: Setup?
+    var delivery: Delivery? = nil
 
-    /// "Dev or reviewer", as in "The team has no Dev or reviewer yet."
+    /// "Dev, QA or Security", as in "The team has no Dev, QA or Security yet."
     var missingText: String {
-        missingRoles.map { $0 == "dev" ? "Dev" : $0 }.joined(separator: " or ")
+        let labels = ["dev": "Dev", "code_reviewer": "Code reviewer", "qa": "QA", "security": "Security"]
+        let names = missingRoles.map { labels[$0] ?? $0 }
+        guard let last = names.last, names.count > 1 else { return names.first ?? "" }
+        return names.dropLast().joined(separator: ", ") + " or " + last
     }
 }
 

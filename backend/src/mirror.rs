@@ -65,9 +65,9 @@ pub struct Report {
     pub reconciled: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Bodies of the tickets this sync saw closed on GitHub: each may have been its spec's last.
+    /// Numbers and bodies of the tickets this sync saw closed on GitHub: each may have been its spec's last.
     #[serde(skip)]
-    pub closed_tickets: Vec<String>,
+    pub closed_tickets: Vec<(i64, String)>,
 }
 
 /// The projects the agents belong to, A–Z (case-insensitive), each once.
@@ -190,8 +190,8 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
     }
     drop(cursor);
     // A ticket closed on GitHub by hand: when it was its spec's last, the spec PR is ready for review.
-    for body in std::mem::take(&mut report.closed_tickets) {
-        if let Err(e) = crate::planning::ready_when_last(state, &repo, &body).await {
+    for (n, body) in std::mem::take(&mut report.closed_tickets) {
+        if let Err(e) = crate::planning::ready_when_last(state, &repo, n, &body).await {
             tracing::warn!("mirror {repo}: {e}");
         }
     }
@@ -339,7 +339,7 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             };
             let closed_under_work = moved && working && l.state == "closed";
             if t.github.as_ref().is_some_and(|g| g.state == "open") && l.state == "closed" && labels.iter().any(|l| l == "ready-for-agent") {
-                report.closed_tickets.push(description.clone());
+                report.closed_tickets.push((i["number"].as_i64().unwrap_or_default(), description.clone()));
             }
             t.title = if title.is_empty() { t.title } else { title };
             t.description = description;

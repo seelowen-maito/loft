@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { CircleDot, Eraser, ExternalLink, FileText, Loader2, Users } from "lucide-react";
-import { api, roleLabel, type EndCard as Card, type PlannedIssue } from "../../lib/api";
+import { CircleDot, Eraser, ExternalLink, FileText, Loader2, Play, Users } from "lucide-react";
+import { cx } from "../../lib/format";
+import { api, roleLabel, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
 function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
@@ -18,12 +19,14 @@ function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; in
   return inLoft ? <Link to={i.url} className={cls}>{inner}</Link> : <a href={i.url} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>;
 }
 
-/** The end of a planning grill: the spec and tickets it published, Clear context with the next message, and the team check. */
+/** The end of a planning grill: the spec and tickets it published, Start delivery for a spec with a Delivery
+ *  (otherwise Clear context leaves the next message in the composer), and the team check. */
 export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
-  const [busy, setBusy] = useState<"clear" | "setup" | null>(null);
+  const [busy, setBusy] = useState<"clear" | "setup" | "start" | null>(null);
   const [sent, setSent] = useState(false);
+  const [started, setStarted] = useState<DeliveryStarted | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const run = async (what: "clear" | "setup", f: () => Promise<unknown>) => {
+  const run = async (what: "clear" | "setup" | "start", f: () => Promise<unknown>) => {
     setBusy(what);
     setError(null);
     try {
@@ -36,6 +39,8 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   };
   const setup = card.setup;
   const shown = sent || !!setup?.sent_at;
+  const delivery = card.delivery;
+  const startedOn = started ?? delivery?.started ?? null;
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       {/* No repo: the plan was kept as Loft issues. */}
@@ -50,10 +55,28 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
+        {delivery && !startedOn && (
+          <button
+            className="btn btn-primary text-[12.5px]"
+            disabled={busy !== null}
+            title={`Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
+            onClick={() => run("start", async () => {
+              const r = await api.startDelivery(agentId, messageId);
+              setStarted(r.message.meta?.grill?.end_card?.delivery?.started ?? null);
+            })}
+          >
+            {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} Start delivery
+          </button>
+        )}
+        {delivery && startedOn && (
+          <Link to={`/agents/${startedOn.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
+            Delivery started · #{startedOn.ticket} with {startedOn.agent_name}
+          </Link>
+        )}
         <button
-          className="btn btn-primary text-[12.5px]"
+          className={cx("btn text-[12.5px]", !delivery && "btn-primary")}
           disabled={busy !== null}
-          title={`Starts a fresh session and leaves "${card.next_message}" in the composer.`}
+          title={card.next_message ? `Starts a fresh session and leaves "${card.next_message}" in the composer.` : "Starts a fresh session."}
           onClick={() => run("clear", () => onClear(card.next_message))}
         >
           {busy === "clear" ? <Loader2 className="size-3.5 animate-spin" /> : <Eraser className="size-3.5" />} Clear context
@@ -77,7 +100,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
           </Link>
         )}
       </div>
-      <div className="mt-2 font-mono text-[10.5px] text-fg-3">Next: {card.next_message}</div>
+      {card.next_message && <div className="mt-2 font-mono text-[10.5px] text-fg-3">Next: {card.next_message}</div>}
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </div>
   );
