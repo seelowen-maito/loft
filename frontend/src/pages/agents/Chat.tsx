@@ -17,7 +17,7 @@ import { ContextSize } from "./ContextSize";
 import { ResumeDialog } from "./ResumeDialog";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
-import { ATTACH } from "../../lib/attach";
+import { ATTACH } from "../../lib/issueFilter";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
