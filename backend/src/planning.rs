@@ -661,11 +661,13 @@ fn waits(d: &crate::db::Delivery) -> bool {
 
 /// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
 /// failed, and on a full read every one not settled yet (Loft may have been down when the last ticket
-/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197). The caller
-/// holds the repo's publish lock.
+/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197), and neither
+/// does one with no tickets yet (a spec published before its tickets) on a full read: a ticket closing on
+/// it still moves it on. The caller holds the repo's publish lock.
 pub(crate) async fn retry_ready(state: &AppState, slug: &str, full: bool) {
     let open = state.db.deliveries(slug, true).unwrap_or_default();
-    for d in open.into_iter().filter(|d| d.pr.is_some() && (full || d.ready_retry) && !waits(d)) {
+    let unticketed = |d: &crate::db::Delivery| !d.migrated && d.tickets.is_empty();
+    for d in open.into_iter().filter(|d| d.pr.is_some() && (d.ready_retry || full && !unticketed(d)) && !waits(d)) {
         match after_tickets(state, &d).await {
             Ok(Some(line)) => tracing::info!("mirror {slug}: a missed call caught up: {}", line.trim()),
             Ok(None) => {}
@@ -1594,6 +1596,28 @@ pub(crate) mod tests {
         // The record says #42 is open: neither a full read nor a change poll asks GitHub (#197).
         assert!(fake.seen("/repos/octo/ready-open/pulls/500").is_empty());
         assert!(fake.seen("/repos/octo/ready-open/issues/40/sub_issues").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_skips_a_spec_with_no_tickets_yet() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-none";
+        planner_on(&st, "ready-none", Some("git@github.com:octo/ready-none.git"));
+        // A spec published with its PR, before its tickets.
+        crate::delivery::record_spec(&st, slug, 40, "", "", "");
+        crate::delivery::update(&st, slug, 40, |d| d.pr = Some(500));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        subs(&st, &fake, slug, &[]);
+
+        crate::mirror::sync_project(&st, "ready-none", true).await.unwrap();
+        assert!(fake.seen(&format!("/repos/{slug}/pulls/500")).is_empty(), "a full read doesn't ask GitHub (#237)");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).is_empty());
+
+        // A call that failed is still retried.
+        crate::delivery::update(&st, slug, 40, |d| d.ready_retry = true);
+        crate::mirror::sync_project(&st, "ready-none", false).await.unwrap();
+        assert_eq!(fake.seen(&format!("/repos/{slug}/pulls/500")).len(), 1);
     }
 
     #[tokio::test]

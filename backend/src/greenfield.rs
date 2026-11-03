@@ -131,7 +131,7 @@ async fn add_all(dir: &Path) -> Result<(), String> {
     let matched = git([s(&["ls-files", "-z", "--cached", "--ignored"]), excludes()].concat()).await?;
     let added: Vec<String> = matched.split('\0').filter(|p| !p.is_empty() && !tracked.contains(p)).map(String::from).collect();
     for chunk in added.chunks(100) {
-        git([s(&["rm", "-q", "--cached", "--"]), chunk.to_vec()].concat()).await?;
+        git([s(&["--literal-pathspecs", "rm", "-q", "--cached", "--"]), chunk.to_vec()].concat()).await?;
     }
     Ok(())
 }

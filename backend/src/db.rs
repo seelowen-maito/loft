@@ -1260,6 +1260,14 @@ impl Db {
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
     }
 
+    /// The repo's Deliveries in `state`, picked by the state column so the others aren't decoded.
+    pub fn deliveries_in(&self, repo: &str, state: &str) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND state = ?2 ORDER BY spec")?;
+        let rows = q.query_map(params![repo, state], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
     /// Every Delivery in `state`, on any repo.
     pub fn deliveries_in_state(&self, state: &str) -> Result<Vec<Delivery>> {
         let c = self.0.lock().unwrap();

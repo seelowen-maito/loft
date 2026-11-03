@@ -719,7 +719,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
 /// ticket of a running Delivery that has none (its start failed).
 pub(crate) async fn retry(state: &AppState, repo: &str) {
     let _held = state.publish_locks.of(repo).lock_owned().await;
-    for d in state.db.deliveries(repo, false).unwrap_or_default().into_iter().filter(|d| d.state == "running") {
+    for d in state.db.deliveries_in(repo, "running").unwrap_or_default() {
         for t in d.tickets.iter().filter(|t| t.state == "closing") {
             match finish(state, &d, t.number).await {
                 Ok(line) => tracing::info!("delivery {repo}#{}: {}", d.spec, line.trim()),
