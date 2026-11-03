@@ -261,7 +261,8 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
         return Ok(Started { ticket: d.current.unwrap_or_default(), agent, already: true });
     }
     let d = if d.local && d.base.is_empty() {
-        let base = project_dir(state, &d).and_then(|dir| local_branch(&dir, &d.branch)).map_err(|e| format!("The Delivery didn't start: {e}."))?;
+        let dir = project_dir(state, &d).map_err(|e| format!("The Delivery didn't start: {e}."))?;
+        let base = local_branch(&dir, &d.branch).await.map_err(|e| format!("The Delivery didn't start: {e}."))?;
         update(state, repo, spec, |d| d.base = base).ok_or("The Delivery record couldn't be saved.")?
     } else if d.standalone && d.pr.is_none() {
         let title = d.tickets.first().map(|t| t.title.clone()).unwrap_or_default();
@@ -278,35 +279,23 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     Ok(Started { ticket: n, agent, already: false })
 }
 
-/// Runs git in `dir`, with no fsmonitor command and no hooks, so a repo's own config can't make Loft run
-/// anything else; its trimmed output, or what git said.
-fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
-        .args(args)
-        .output()
-        .map_err(|e| format!("couldn't run git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
+/// [`crate::repos::git`] in `dir`: its trimmed output, or what git said.
+async fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    crate::repos::git(dir, args).await.map(|o| o.trim().to_string()).map_err(|e| e.to_string())
 }
 
 /// Makes the spec branch of a plan kept in Loft in the project's own repo `dir`, from the branch checked
 /// out there, unless it's already there. That branch is what it merges into: returned.
-fn local_branch(dir: &std::path::Path, branch: &str) -> Result<String, String> {
-    if git(dir, &["rev-parse", "--is-inside-work-tree"]).is_err() {
+async fn local_branch(dir: &std::path::Path, branch: &str) -> Result<String, String> {
+    if git(dir, &["rev-parse", "--is-inside-work-tree"]).await.is_err() {
         return Err(format!("the project folder `{}` has no git repo", dir.display()));
     }
-    let base = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).map_err(|e| format!("couldn't read the branch checked out in `{}`: {e}", dir.display()))?;
+    let base = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await.map_err(|e| format!("couldn't read the branch checked out in `{}`: {e}", dir.display()))?;
     if base == "HEAD" {
         return Err(format!("`{}` has no branch checked out: check out its default branch first", dir.display()));
     }
-    if git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
-        git(dir, &["branch", branch, &base]).map_err(|e| format!("couldn't create the spec branch `{branch}`: {e}"))?;
+    if git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_err() {
+        git(dir, &["branch", branch, &base]).await.map_err(|e| format!("couldn't create the spec branch `{branch}`: {e}"))?;
     }
     Ok(base)
 }
@@ -1091,16 +1080,16 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
     }
     let dir = project_dir(state, &d).map_err(|e| format!("Nothing was merged: {e}."))?;
     let shown = dir.display();
-    let on = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).map_err(|e| format!("Couldn't read the branch checked out in `{shown}`: {e}"))?;
+    let on = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await.map_err(|e| format!("Couldn't read the branch checked out in `{shown}`: {e}"))?;
     if on != d.base {
         return Err(format!("`{}` isn't checked out in `{shown}` (`{on}` is). Run `git -C {shown} checkout {}`, then press Merge again.", d.base, d.base));
     }
-    let dirty = git(&dir, &["status", "--porcelain"]).map_err(|e| format!("Couldn't read the state of `{shown}`: {e}"))?;
+    let dirty = git(&dir, &["status", "--porcelain"]).await.map_err(|e| format!("Couldn't read the state of `{shown}`: {e}"))?;
     if !dirty.is_empty() {
         return Err(format!("`{shown}` has uncommitted changes, so nothing was merged. Commit or stash them (`git -C {shown} stash -u`), then press Merge again."));
     }
-    if let Err(e) = git(&dir, &["merge", "--no-ff", "-m", &format!("Merge {}", subject(&d)), &d.branch]) {
-        let _ = git(&dir, &["merge", "--abort"]);
+    if let Err(e) = git(&dir, &["merge", "--no-ff", "-m", &format!("Merge {}", subject(&d)), &d.branch]).await {
+        let _ = git(&dir, &["merge", "--abort"]).await;
         return Err(format!("`{}` doesn't merge cleanly into `{}` ({e}), so nothing was merged. Run `git -C {shown} merge {}`, resolve the conflicts and commit.", d.branch, d.base, d.branch));
     }
     update(state, repo, spec, |d| d.state = "merged".into());

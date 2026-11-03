@@ -176,7 +176,7 @@ pub(crate) async fn init_folder(dir: &Path) -> Result<(), String> {
     add_all(dir).await.map_err(|e| format!("Couldn't set up git: {e}"))?;
     let anonymous = crate::repos::git(dir, &["config", "user.email"]).await.map(|e| e.trim().is_empty()).unwrap_or(true);
     let who: &[&str] = if anonymous { &["-c", "user.name=Loft", "-c", "user.email=loft@localhost"] } else { &[] };
-    git(&[who, &["-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "First commit"]].concat()).await?;
+    git(&[who, &["commit", "-q", "--allow-empty", "-m", "First commit"]].concat()).await?;
     Ok(())
 }
 
