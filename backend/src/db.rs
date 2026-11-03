@@ -52,6 +52,10 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// Made from a spec PR recorded before Deliveries: its tickets' states weren't recorded, so GitHub
+    /// says whether they're closed.
+    #[serde(default)]
+    pub migrated: bool,
     pub created_at: String,
 }
 
@@ -1197,6 +1201,7 @@ impl Db {
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                migrated: true,
                 created_at: now(),
             };
             tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;

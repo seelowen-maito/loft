@@ -36,6 +36,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             current: None,
             dev: String::new(),
             final_rounds: 0,
+            migrated: false,
             created_at: crate::db::now(),
         },
         Err(e) => return tracing::warn!("delivery {repo}#{spec}: {e}"),
