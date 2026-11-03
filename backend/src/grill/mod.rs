@@ -1058,14 +1058,14 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
     }))
 }
 
-/// The system-prompt section every agent gets: what Planning overrides, what to do with a direct
-/// request for issues, and how a ticket is built and closed. The grill's own instructions come with
-/// the grill (`brief`).
+/// The system-prompt section every agent gets: what Planning overrides and what to do with a direct
+/// request for issues. The grill's own instructions come with the grill (`brief`), and how a ticket is
+/// built, reviewed and closed with each Delivery wake (its role brief, `delivery`).
 pub fn prompt_section() -> &'static str {
     r###"
 
 # Planning: precedence
-Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory), and on how a ticket is implemented: which branch it goes on, its commit messages, its PR, and how it's closed. Your standing instructions still set your role, your team and how the work itself is done and checked.
+Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). When Loft wakes you for a step of a Delivery, the wake brings your role's brief and says what your instructions can add to it. Your standing instructions still set your role, your team and how the work itself is done and checked.
 
 # Planning: direct requests
 When the user asks for an issue or a plan without a grill ("create an issue for X"):
@@ -1074,16 +1074,7 @@ When the user asks for an issue or a plan without a grill ("create an issue for 
 - One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
 - Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
 - When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: type `/grill <topic>` and I'll grill you on it."). Only the user starts a grill: Loft then sends you its instructions.
-- Work the user sends you as a task stays a task: don't open issues for it.
-
-# Planning: implementation
-When you work on a ticket of a project with a GitHub repo (a plan kept in Loft issues keeps its own flow: mark the ticket's Loft issue done):
-- A ticket of a spec goes on the spec branch named in its "## Branch" section. Pull it, commit there and push. Open no PR for the ticket: the spec PR, which Loft opened as a draft, is the spec's only one.
-- One or more commits per ticket, each message ending with `Refs #<ticket>`.
-- When its commits are pushed and the tests pass, hand it in with `mcp__loft__submit_ticket` (its number and commit SHAs). Loft wakes the team's QA and Security to review it, and closes it when they pass so the tickets it blocks can start. After the spec's last ticket, the team's Code reviewer reviews the whole spec PR once, and Loft marks it ready for review when it passes. Never close a ticket yourself.
-- If Loft wakes you as QA or Security on a ticket, or as the Code reviewer on the spec PR, give your verdict with `mcp__loft__review_ticket`; Loft posts it on the spec PR.
-- Fixes from the final review of the spec PR are new commits on the spec branch. Closed tickets aren't reopened.
-- A standalone ticket (no spec) goes on its own branch `ticket/<N>-<slug>`, with a PR whose body has `Closes #N`: Loft makes both when its Delivery starts, and it runs the same steps. It closes when that PR merges."###
+- Work the user sends you as a task stays a task: don't open issues for it."###
 }
 
 /// What a grill needs the agent to know, sent with the first grill run in a context (see `with_brief`).

@@ -199,6 +199,11 @@ fn branch_name(d: &Delivery) -> &'static str {
     if d.standalone { "ticket branch" } else { "spec branch" }
 }
 
+/// The line every role brief ends its rules with: what the agent's own instructions can and can't change.
+fn own_rules(what: &str) -> String {
+    format!("Your own instructions can add anything to this brief, like how to {what} in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges.")
+}
+
 /// The Dev role brief, sent with the wake that hands a ticket to the Dev.
 fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
     let repo = &d.repo;
@@ -219,12 +224,13 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
          - Read the ticket{spec} first, and build only what the ticket asks.\n\
          - {work}\n\
          - One or more commits, each message ending with `{refs}`.\n\
-         - Your own instructions say how to build and check the work in this project. They can add to this brief, but they don't change the branch, the PR or how the ticket closes.\n\
+         - {own}\n\
          - When the commits are pushed and the checks pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Loft hands them to the team's reviewers and closes the ticket when they pass: never close it yourself.",
         about = subject(d),
         ticket = ticket_ref(d, t),
         refs = refs(d, t),
         arg = ticket_arg(d, t),
+        own = own_rules("build and check the work"),
     )
 }
 
@@ -384,13 +390,14 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
         "[Loft Delivery: {about}] This is not a message from the user. You are {who} on this Delivery: review ticket {ticket}, submitted as {commits} on the {bname} `{branch}`{place}{pr}.\n\
          - Pull the branch and read the ticket and only these commits. {job}\n\
          - Don't fix the work yourself: say what's wrong and the Dev fixes it.\n\
-         - Your own instructions say how to check this project. They can add to this brief, but they don't change the branch, the PR or how the ticket closes.\n\
+         - {own}\n\
          - When you're done, call `mcp__loft__review_ticket` with {arg}, `verdict` \"pass\" or \"changes\", and `notes`: what you checked and, for changes, each problem and how to see it. Loft posts it {posted}.",
         about = subject(d),
         bname = branch_name(d),
         ticket = ticket_ref(d, t),
         arg = ticket_arg(d, t),
         branch = d.branch,
+        own = own_rules(if role == "qa" { "test it" } else { "check its security" }),
     )
 }
 
@@ -569,7 +576,8 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     let brief = format!(
         "[Loft Delivery: {about}] This is not a message from the user. {who} ({label}) asked for changes on ticket {ticket} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`, push, then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.",
+         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`, push, then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
+        own = own_rules("build and check the work"),
         about = subject(&d),
         bname = branch_name(&d),
         who = me.name,
@@ -818,25 +826,27 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
             "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: every ticket of the spec (Loft issue {spec_id}) is done, and you review the whole spec branch `{branch}` once, in the project's own repo `{dir}`, against `{base}` (`git diff {base}...{branch}`).\n\
              - Review the whole diff: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
              - Don't fix the work yourself.\n\
-             - Your own instructions say how to review this project. They can add to this brief, but they don't change the branch or how it's merged.\n\
+             - {own}\n\
              - When you're done, call `mcp__loft__review_ticket` with \"{spec_id}\": `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` Loft issue.",
             about = subject(d),
             spec_id = d.spec_id,
             branch = d.branch,
             dir = project_shown(state, d),
             base = d.base,
+            own = own_rules("review it"),
         );
     }
     format!(
         "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: {done}, and you review the whole {pname} https://github.com/{repo}/pull/{pr} once, on the {bname} `{branch}`.\n\
          - Pull the branch and review its whole diff against the default branch: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
          - Don't fix the work yourself.\n\
-         - Your own instructions say how to review this project. They can add to this brief, but they don't change the branch, the PR or how it's merged.\n\
+         - {own}\n\
          - When you're done, call `mcp__loft__review_ticket` with {pr}: `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` issue.",
         about = subject(d),
         pname = pr_name(d),
         bname = branch_name(d),
         branch = d.branch,
+        own = own_rules("review it"),
     )
 }
 
@@ -935,7 +945,8 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     let brief = if d.local {
         format!(
             "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the spec branch `{branch}` (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-             Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.",
+             Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
+        own = own_rules("build and check the work"),
             about = subject(&d),
             spec_id = d.spec_id,
             who = me.name,
@@ -944,7 +955,8 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     } else {
         format!(
             "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the {pname} https://github.com/{slug}/pull/{pr} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-             Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.",
+             Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
+        own = own_rules("build and check the work"),
             about = subject(&d),
             pname = pr_name(&d),
             bname = branch_name(&d),

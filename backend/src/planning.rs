@@ -2108,29 +2108,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn every_agent_learns_how_a_ticket_is_built_and_closed() {
+    fn no_system_prompt_carries_the_implementation_rules() {
         let st = state();
-        // Whatever its template or standing instructions say: Loft's section rides on every system prompt.
-        let mut a = crate::tasks::tests::agent(&st, "Own template");
-        a.prompt = "Open one PR per issue and close it with `gh issue close`.".into();
-        let p = crate::agents::system_prompt(&st, &a);
-        for want in [
-            "and on how a ticket is implemented: which branch it goes on, its commit messages, its PR, and how it's closed",
-            "# Planning: implementation",
-            "project with a GitHub repo",
-            "spec branch named in its \"## Branch\" section",
-            "each message ending with `Refs #<ticket>`",
-            "hand it in with `mcp__loft__submit_ticket` (its number and commit SHAs)",
-            "Loft wakes the team's QA and Security to review it, and closes it when they pass",
-            "the team's Code reviewer reviews the whole spec PR once",
-            "give your verdict with `mcp__loft__review_ticket`",
-            "new commits on the spec branch. Closed tickets aren't reopened",
-            "`ticket/<N>-<slug>`, with a PR whose body has `Closes #N`",
-        ] {
-            assert!(p.contains(want), "missing {want:?}");
+        // Whatever its role: the rules come only with a Delivery wake, in its role's brief.
+        for role in ["dev", "qa", "security", "code_reviewer", "lead", "custom"] {
+            let mut a = crate::tasks::tests::agent(&st, role);
+            a.role = role.into();
+            let p = crate::agents::system_prompt(&st, &a);
+            for gone in ["# Planning: implementation", "submit_ticket", "review_ticket", "Refs #", "spec branch", "`ticket/<N>-<slug>`", "and on how a ticket is implemented"] {
+                assert!(!p.contains(gone), "{role}'s prompt still has {gone:?}");
+            }
+            assert!(p.contains("override your standing instructions on how specs and tickets are written, labelled, linked and published"));
+            assert!(p.contains("When Loft wakes you for a step of a Delivery, the wake brings your role's brief and says what your instructions can add to it."));
         }
-        assert!(!p.contains("Your standing instructions still set your role, your team and how work is implemented"), "the old override is gone");
-        assert!(!p.contains("close_ticket") && !p.contains("Ticket #N passed"), "closing is Loft's now");
+        assert!(crate::grill::prompt_section().len() < 2000, "{} bytes", crate::grill::prompt_section().len());
     }
 
     #[tokio::test]
@@ -2366,7 +2357,7 @@ pub(crate) mod tests {
             "[Loft Delivery: spec #40] This is not a message from the user. You are the Dev on this Delivery: build ticket #41 \"Store\" (https://github.com/octo/dl-start/issues/41).",
             "Work on the spec branch `spec/40-rounds`: pull it, commit there and push. Open no PR: the spec PR https://github.com/octo/dl-start/pull/500 is the spec's only one.",
             "each message ending with `Refs #41`",
-            "they don't change the branch, the PR or how the ticket closes",
+            "Your own instructions can add anything to this brief, like how to build and check the work in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges.",
         ] {
             assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
         }
@@ -2730,6 +2721,46 @@ pub(crate) mod tests {
         fake.route("PATCH", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "closed", "## What to build\n\nAPI."));
         fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
         out
+    }
+
+    #[tokio::test]
+    async fn each_wake_carries_only_its_roles_brief_and_what_its_instructions_can_change() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, team) = building_both(&st, &fake, "brief-roles", &["qa", "security", "code_reviewer"]).await;
+        let (qa, sec, cr) = (&team[0], &team[1], &team[2]);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        let roles = ["You are the Dev on this Delivery", "You are QA on this Delivery", "You are Security on this Delivery", "You are the Code reviewer on this Delivery"];
+        let limit = "but they can't change the Delivery's tools, its branch or how the work closes or merges.";
+        let only = |w: &str, mine: Option<&str>| {
+            assert!(w.contains(limit), "no limits in {w}");
+            for r in roles {
+                assert_eq!(w.contains(r), Some(r) == mine, "{r:?} in {w}");
+            }
+        };
+        let dw = woken(&st, &dev);
+        only(&dw[0], Some(roles[0]));
+        assert!(dw[0].contains("like how to build and check the work in this project"));
+        only(&woken(&st, qa)[0], Some(roles[1]));
+        assert!(woken(&st, qa)[0].contains("like how to test it in this project"));
+        only(&woken(&st, sec)[0], Some(roles[2]));
+        assert!(woken(&st, sec)[0].contains("like how to check its security in this project"));
+        // A changes round: the Dev's fix wake carries no other role's brief either.
+        only(dw.last().unwrap(), None);
+        assert!(dw.last().unwrap().contains("asked for changes on ticket #41"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, sec, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let cw = woken(&st, cr);
+        assert_eq!(cw.len(), 1);
+        only(&cw[0], Some(roles[3]));
+        assert!(cw[0].contains("like how to review it in this project"));
+        tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "A race." })).await.unwrap();
+        only(woken(&st, &dev).last().unwrap(), None);
     }
 
     #[tokio::test]
