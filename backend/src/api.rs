@@ -48,6 +48,7 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     let mut v = agents::client_json(a);
     agents::run_fields(state, &a.id, &mut v);
     v["unread_reply"] = json!(a.unread_reply());
+    v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
     v
 }
@@ -208,6 +209,12 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
             v => Some(v.as_u64().filter(|n| *n <= 20).ok_or_else(|| bad("max_subagents must be null or 0-20"))? as u32),
         };
     }
+    if let Some(v) = str_field("fresh_context") {
+        if !crate::agents::FRESH_CONTEXT.contains(&v.as_str()) {
+            return Err(bad("fresh_context must be one of off, above_80k or always"));
+        }
+        a.fresh_context = v;
+    }
     if let Some(v) = p.get("role") {
         a.role = v.as_str().filter(|r| crate::planning::is_role(r)).ok_or_else(|| bad("role must be one of lead, dev, code_reviewer, qa, security or custom"))?.into();
     }
@@ -321,6 +328,8 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         grill_briefed: false,
         memory_index: None,
         role: "custom".into(),
+        fresh_context: crate::db::default_fresh_context(),
+        delivery_ticket: None,
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -545,16 +554,9 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
         rt.queued.remove(&id);
         rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
+        rt.fresh_before.remove(&id);
     }
-    let a = state.db.update_agent(&id, |a| {
-        a.session_id = None;
-        a.context_tokens = None;
-        a.grill_briefed = false;
-        a.memory_index = None;
-    })?.ok_or_else(not_found)?;
-    let m = state.db.add_message(&id, None, "system", "clear", "Context cleared. Long-term memory carries over.", json!({}))?;
-    state.emit(Event::Message { message: json!(m) });
-    emit_agent(&state, &a);
+    let a = agents::clear_context(&state, &id, "Context cleared. Long-term memory carries over.", json!({})).ok_or_else(not_found)?;
     Ok(Json(agent_json(&state, &a)))
 }
 
@@ -608,6 +610,7 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
+        rt.fresh_before.remove(id);
     }
     // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.
     let total = state.db.session_total(id, &s.id)?;

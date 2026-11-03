@@ -805,6 +805,10 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
+    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always".
+    func setFreshContext(_ agentId: String, _ value: String) async throws {
+        upsert(&agents, try await requireWrite().updateAgent(id: agentId, ["fresh_context": .string(value)]))
+    }
     func resetSession(_ agentId: String) async throws {
         try await requireWrite().resetSession(agentId: agentId)
         // As for restart: the header's "no session" shouldn't wait for the live stream.

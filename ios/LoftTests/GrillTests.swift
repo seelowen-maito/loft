@@ -224,6 +224,15 @@ final class GrillStoreTests: XCTestCase {
         return store
     }
 
+    /// Fresh context for each Delivery ticket, set from the agent's screen: the store keeps what the server saved.
+    func testSetFreshContext() async throws {
+        let store = try await store(FixtureAPI())
+        let id = try XCTUnwrap(store.agents.first?.id)
+        XCTAssertEqual(store.agents.first?.freshContext, "above_80k")
+        try await store.setFreshContext(id, "always")
+        XCTAssertEqual(store.agents.first { $0.id == id }?.freshContext, "always")
+    }
+
     private func endCard(_ store: LoftStore) throws -> ChatMessage {
         try XCTUnwrap(store.conversation("orch").last { $0.grill?.endCard != nil })
     }

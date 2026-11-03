@@ -91,13 +91,19 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+const FRESH_CONTEXT = [
+  { value: "above_80k", label: "Above 80k (default)" },
+  { value: "always", label: "Always" },
+  { value: "off", label: "Off" },
+];
+
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", fresh_context: agent.fresh_context ?? "above_80k", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
@@ -200,6 +206,15 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
           ))}
         </select>
       </Field>
+
+      {/* A Lead only follows it while it builds the tickets itself; one that coordinates is never cleared by Delivery. */}
+      {(draft.role !== "lead" || (agent.role === "lead" && agent.fresh_context_applies !== false)) && (
+        <Field label="Fresh context for each Delivery ticket" hint="Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.">
+          <select className="input" value={draft.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
+            {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+          </select>
+        </Field>
+      )}
 
       <Field label="Autonomy" hint="How often it wakes up on its own to work on its standing instructions.">
         <div className="flex gap-2">

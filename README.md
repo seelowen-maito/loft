@@ -92,6 +92,8 @@ The `ios/` folder has a native iPhone app for agent status, approvals, tasks and
 
 Each agent runs headless Claude Code in its own folder under `agent-local-storage/`. Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
+When loft hands an agent a new ticket, it can first clear the agent's context so each ticket starts fresh. By default it does this once the context is past 80k tokens. You can change it per agent (Off, Above 80k or Always). Long-term memory carries over, and review rounds on the same ticket keep their context.
+
 ## Development
 
 Run `./dev.sh` for hot reload and open http://localhost:7421. `LOFT_PORT` changes the backend port (default `7420`).

@@ -50,6 +50,28 @@ final class LoftUITests: XCTestCase {
 
     private func composerValue(_ app: XCUIApplication) -> String? { app.textFields["composerField"].value as? String }
 
+    /// Fresh context for each Delivery ticket on the agent's screen: Above 80k by default, and a choice sticks.
+    func testFreshContextPicker() {
+        let app = launch()
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("QA Agent", app)
+        XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
+        let picker = app.buttons["freshContext"].firstMatch
+        // Clear of the floating tab bar, as in `openAgent`: a tap under it lands on the bar.
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<8 where !picker.exists || picker.frame.maxY > bar.frame.minY - 8 { app.swipeUp() }
+        // Let the scroll settle, or the tap lands on a moving row and opens nothing.
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(picker.label.contains("Above 80k"), picker.label)
+        picker.tap()
+        let always = app.buttons["Always"].firstMatch
+        XCTAssertTrue(always.appears(timeout: 5))
+        always.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while !picker.label.contains("Always"), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(picker.label.contains("Always"), picker.label)
+    }
+
     // MARK: - Default fixture
 
     /// One launch: live state, the Needs you card, the Mac's temperature, plan usage, approving a permission and

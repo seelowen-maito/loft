@@ -25,6 +25,10 @@ export type Agent = {
   max_subagents: number | null;
   /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
   role?: string;
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
+  fresh_context?: string;
+  /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
+  fresh_context_applies?: boolean;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;

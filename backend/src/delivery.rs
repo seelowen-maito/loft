@@ -137,6 +137,18 @@ pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
 }
 
+/// How `Agent::delivery_ticket` names ticket #n of `d`, or with None the final review of its spec PR.
+fn ticket_key(d: &Delivery, n: Option<i64>) -> String {
+    format!("{}#{}/{}", d.repo, d.spec, n.map_or("final".to_string(), |n| n.to_string()))
+}
+
+/// Whether the Fresh context setting applies to `a`: to every agent but a Lead that only coordinates. A
+/// Lead builds the tickets when its team has no Dev (`builder`).
+pub fn fresh_context_applies(state: &AppState, a: &crate::db::Agent) -> bool {
+    let project = a.project.trim();
+    a.role != "lead" || project.is_empty() || !state.db.list_agents().unwrap_or_default().iter().any(|o| o.role == "dev" && o.project.trim() == project)
+}
+
 /// What a Delivery delivers: "spec #40", "ticket #7" for a standalone ticket, or `spec "Title"` for a
 /// plan kept in Loft.
 fn subject(d: &Delivery) -> String {
@@ -328,7 +340,7 @@ async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent)
     })
     .ok_or("The Delivery record couldn't be saved.")?;
     let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
-    crate::agents::wake(state, &agent.id, dev_brief(state, &d, t), "delivery");
+    crate::agents::wake_on_ticket(state, &agent.id, &ticket_key(&d, Some(n)), true, dev_brief(state, &d, t));
     Ok(())
 }
 
@@ -478,7 +490,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
-        crate::agents::wake(state, &a.id, review_brief(state, &d, t, role), "delivery");
+        crate::agents::wake_on_ticket(state, &a.id, &ticket_key(&d, Some(n)), false, review_brief(state, &d, t, role));
     }
     let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
     Ok(format!("Submitted {name}: {names} are reviewing it. Loft wakes you if they ask for changes, and closes it when they pass."))
@@ -575,7 +587,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         arg = ticket_arg(&d, &t),
         branch = d.branch,
     );
-    crate::agents::wake(state, &d.dev, brief, "delivery");
+    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, Some(n)), true, brief);
     Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
 }
 
@@ -812,7 +824,7 @@ pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Pat
 pub(crate) fn begin_final_review(state: &AppState, d: &Delivery) -> Option<String> {
     let cr = with_role(state, d, "code_reviewer")?;
     let d = update(state, &d.repo, d.spec, |d| d.state = "final_review".into())?;
-    crate::agents::wake(state, &cr.id, final_brief(state, &d), "delivery");
+    crate::agents::wake_on_ticket(state, &cr.id, &ticket_key(&d, None), false, final_brief(state, &d));
     let pr = if d.local { format!(" spec branch `{}`", d.branch) } else { d.pr.map(|pr| format!(" {} #{pr}", pr_name(&d))).unwrap_or_default() };
     let done = if d.standalone { "It passed its reviews" } else { "It was the spec's last open ticket" };
     Some(format!("\n{done}: {} (Code reviewer) is reviewing the whole{pr} now.", cr.name))
@@ -885,7 +897,7 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
         return Some(Err("The Delivery record couldn't be saved.".into()));
     };
     let shas = commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
-    crate::agents::wake(state, &cr.id, format!("{}\n- The fixes: {shas}.", final_brief(state, &d)), "delivery");
+    crate::agents::wake_on_ticket(state, &cr.id, &ticket_key(&d, None), false, format!("{}\n- The fixes: {shas}.", final_brief(state, &d)));
     Some(Ok(format!("Submitted the fixes for {}: {} (Code reviewer) is looking again.", final_tag(&d), cr.name)))
 }
 
@@ -969,7 +981,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
             branch = d.branch,
         )
     };
-    crate::agents::wake(state, &d.dev, brief, "delivery");
+    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, None), true, brief);
     Ok(format!("Posted your changes on {on}.{labelled}{filed_line} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the {what} {}.", if d.local { "isn't merged" } else { "stays a draft" }))
 }
 

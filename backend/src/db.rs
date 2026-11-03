@@ -152,6 +152,15 @@ pub struct Agent {
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
+    /// Fresh context for each Delivery ticket: "off", "above_80k" (cleared before a new ticket when its
+    /// context is at the context warning or above) or "always". A Lead follows it only as the agent
+    /// building the tickets.
+    #[serde(default = "default_fresh_context")]
+    pub fresh_context: String,
+    /// The Delivery ticket it last worked on (`<repo>#<spec>/<ticket>`, or `/final` for the spec PR's final
+    /// review): a Delivery wake on another one is a ticket boundary, where Fresh context applies.
+    #[serde(default)]
+    pub delivery_ticket: Option<String>,
     pub avatar: Avatar,
     pub status: String,
     pub status_text: String,
@@ -178,6 +187,10 @@ pub struct Agent {
     /// The user's read mark: they have seen its chat up to here, in any client.
     #[serde(default)]
     pub read_at: Option<String>,
+}
+
+pub fn default_fresh_context() -> String {
+    "above_80k".into()
 }
 
 impl Agent {

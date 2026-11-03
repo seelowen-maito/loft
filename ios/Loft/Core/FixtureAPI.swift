@@ -60,7 +60,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             Agent(id: id, name: name, title: nil, project: project, model: "opus", effort: nil, permissionMode: "auto",
                   intervalMinutes: 60, status: status, statusText: text, running: running, lastRunAt: ago(last),
                   nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil,
-                  sessionId: ctx == nil ? nil : "s-\(id)")
+                  sessionId: ctx == nil ? nil : "s-\(id)", freshContext: "above_80k", freshContextApplies: true)
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
@@ -502,6 +502,14 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     func runNow(agentId: String) async throws { try check() }
+    func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent {
+        try check()
+        return try locked {
+            guard let i = agentList.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "Not Found") }
+            if case .string(let f)? = fields["fresh_context"] { agentList[i].freshContext = f }
+            return agentList[i]
+        }
+    }
     func stopRun(agentId: String) async throws { try check() }
     /// The plan view the backend builds, from the fixture's tasks.
     func taskPlan(id: String) async throws -> TaskPlan {
