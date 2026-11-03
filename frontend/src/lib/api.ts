@@ -206,14 +206,14 @@ export type EndCard = {
   /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
   next_message: string;
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
-  delivery?: { repo: string; spec: number; standalone?: boolean; started?: DeliveryStarted } | null;
+  delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
   /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
   setup: { agent_id: string; message: string; sent_at?: string } | null;
 };
 
-export type DeliveryStarted = { ticket: number; agent_id: string; agent_name: string; at: string };
+export type DeliveryStarted = { ticket: number; title?: string; agent_id: string; agent_name: string; at: string };
 
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
@@ -498,6 +498,11 @@ export const api = {
   /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
   startDelivery: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery`),
+  /** Where a Delivery stands: for a plan kept in Loft, "ready" means Merge can run. */
+  deliveryState: (repo: string, spec: number) =>
+    req<{ state: string; local: boolean; branch: string; base: string }>("GET", `/deliveries/state?repo=${encodeURIComponent(repo)}&spec=${spec}`),
+  /** Merge for a plan kept in Loft: its spec branch into the project's checked-out base, when the tree is clean. */
+  mergeDelivery: (repo: string, spec: number) => req<{ ok: boolean; message: string }>("POST", "/deliveries/merge", { repo, spec }),
   /** Stores a pasted image for the next message; send its `file` in `send`'s images. */
   upload: async (id: string, image: Blob) => {
     const res = await fetch(`/api/agents/${id}/uploads`, { method: "POST", body: image });

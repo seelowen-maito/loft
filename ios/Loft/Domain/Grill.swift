@@ -114,12 +114,15 @@ struct EndCard: Codable, Hashable {
     struct Delivery: Codable, Hashable {
         struct Started: Codable, Hashable {
             var ticket: Int
+            /// The ticket's title; a plan kept in Loft names its tickets by title, not number.
+            var title: String? = nil
             var agentId: String
             var agentName: String
             var at: String
         }
         var repo: String
         var spec: Int
+        var local: Bool? = nil
         var started: Started?
     }
     var repo: String

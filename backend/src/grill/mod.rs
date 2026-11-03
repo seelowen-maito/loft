@@ -199,6 +199,8 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     // A spec's Delivery, or a single standalone ticket's.
     let has = |n: i64| matches!(state.db.get_delivery(&p.repo, n), Ok(Some(_)));
     let delivery = match (&p.spec, p.tickets.as_slice()) {
+        // A plan kept in Loft: its spec's Delivery, found by the spec's Loft issue.
+        (Some(sp), _) if p.repo.is_empty() => crate::delivery::local_of(state, &me.project, &sp.id).map(|d| json!({ "repo": d.repo, "spec": d.spec, "local": true })),
         _ if p.repo.is_empty() => None,
         (Some(sp), _) => has(sp.number).then(|| json!({ "repo": p.repo, "spec": sp.number })),
         (None, [t]) => has(t.number).then(|| json!({ "repo": p.repo, "spec": t.number, "standalone": true })),

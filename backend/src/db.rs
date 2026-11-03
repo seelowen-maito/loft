@@ -34,8 +34,9 @@ pub struct Delivery {
     pub pr: Option<i64>,
     /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
     /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
-    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready) or "settled" (the
-    /// PR was found ready, merged or closed).
+    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready; a plan kept in Loft
+    /// waits for Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready,
+    /// merged or closed).
     pub state: String,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
@@ -60,6 +61,18 @@ pub struct Delivery {
     /// PR, and the ticket closes when the PR merges, not when it passes review.
     #[serde(default)]
     pub standalone: bool,
+    /// A plan kept in Loft issues: `repo` is `loft:<project>`, `spec` a number Loft gives it in the project,
+    /// `spec_id` the spec's Loft issue, and the spec branch lives in the project's own git repo.
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
+    pub spec_id: String,
+    /// For a plan kept in Loft: the branch the spec branch started from and merges into.
+    #[serde(default)]
+    pub base: String,
+    /// For a plan kept in Loft: the spec's title, to name it.
+    #[serde(default)]
+    pub title: String,
     pub created_at: String,
 }
 
@@ -82,6 +95,9 @@ pub struct DeliveryTicket {
     /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
     #[serde(default)]
     pub verdicts: std::collections::BTreeMap<String, String>,
+    /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
+    #[serde(default)]
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1190,6 +1206,7 @@ impl Db {
                     rounds: 0,
                     commits: vec![],
                     verdicts: Default::default(),
+                    id: String::new(),
                 })
                 .collect();
             let d = Delivery {
@@ -1207,6 +1224,10 @@ impl Db {
                 final_rounds: 0,
                 migrated: true,
                 standalone: false,
+                local: false,
+                spec_id: String::new(),
+                base: String::new(),
+                title: String::new(),
                 created_at: now(),
             };
             tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;
@@ -1234,8 +1255,16 @@ impl Db {
     /// The Deliveries on `repo`, oldest spec first; only the ones not settled yet with `unsettled`.
     pub fn deliveries(&self, repo: &str, unsettled: bool) -> Result<Vec<Delivery>> {
         let c = self.0.lock().unwrap();
-        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND (?2 = 0 OR state NOT IN ('ready', 'settled')) ORDER BY spec")?;
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND (?2 = 0 OR state NOT IN ('ready', 'settled', 'merged')) ORDER BY spec")?;
         let rows = q.query_map(params![repo, unsettled], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// Every Delivery in `state`, on any repo.
+    pub fn deliveries_in_state(&self, state: &str) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE state = ?1 ORDER BY repo, spec")?;
+        let rows = q.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
     }
 

@@ -248,6 +248,7 @@ mod in_loft {
                 (t, msg)
             }
         };
+        crate::delivery::record_local_spec(state, &project, &t.id, &t.title, &me.id);
         Ok((msg, String::new(), IssueLink { number: 0, title: t.title.clone(), id: t.id.clone() }))
     }
 
@@ -288,6 +289,9 @@ mod in_loft {
                     (made, true)
                 }
             };
+            if let Some(s) = &spec {
+                crate::delivery::record_local_ticket(state, &project, &s.id, &made.id, &t.title, &blockers);
+            }
             let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone() });
             crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone() }]);
             let by: Vec<String> = t.blocked_by.iter().map(|&b| format!("\"{}\"", ts[b].title)).collect();
@@ -418,7 +422,7 @@ async fn spec_issue(state: &AppState, me: &Agent, slug: &str, title: &str, k: &s
 }
 
 /// The spec branch of spec #n: `spec/<N>-<slug>`, the slug from the first words of its title.
-fn spec_branch(n: i64, title: &str) -> String {
+pub(crate) fn spec_branch(n: i64, title: &str) -> String {
     branch_of("spec", n, title)
 }
 
@@ -651,7 +655,7 @@ pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, t
 
 /// A Delivery past its tickets, or waiting on someone: nothing to move on.
 fn waits(d: &crate::db::Delivery) -> bool {
-    matches!(d.state.as_str(), "ready" | "settled" | "final_review" | "final_fixes" | "needs_human")
+    matches!(d.state.as_str(), "ready" | "merged" | "settled" | "final_review" | "final_fixes" | "needs_human")
 }
 
 /// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
@@ -680,6 +684,9 @@ pub(crate) async fn after_tickets(state: &AppState, d: &crate::db::Delivery) -> 
         && let Some(line) = crate::delivery::begin_final_review(state, d)
     {
         return Ok(Some(line));
+    }
+    if d.local {
+        return Ok(Some(format!("\nIt was the spec's last open ticket.{}", crate::delivery::local_ready(state, d))));
     }
     let slug = &d.repo;
     Ok(ready_if_done(state, d).await?.map(|pr| format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}")))
@@ -1772,7 +1779,9 @@ pub(crate) mod tests {
         assert_eq!(card["repo"], "");
         assert_eq!(card["spec"], json!({ "number": 0, "title": "Offline mode", "url": format!("/tasks/{}", spec.id) }));
         assert_eq!(card["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect::<Vec<_>>()[..3], [format!("/tasks/{}", store.id), format!("/tasks/{}", ui.id), format!("/tasks/{}", sync.id)]);
-        assert_eq!(card["next_message"], "Implement the plan: hand its ready Loft issues to the team");
+        // Its Delivery, started from the card like a spec on GitHub.
+        let d = crate::delivery::local_of(&st, &a.project, &spec.id).unwrap();
+        assert_eq!((&card["next_message"], &card["delivery"]), (&json!(""), &json!({ "repo": d.repo, "spec": d.spec, "local": true })));
         assert!(fake.seen("/").is_empty(), "no GitHub request at all: {:?}", fake.seen("/"));
     }
 
@@ -2993,6 +3002,149 @@ pub(crate) mod tests {
         t44.parent_id = Some(t.id.clone());
         st.db.save_task(&t44).unwrap();
         assert!(start(t44.id).await.unwrap_err().1.starts_with("#44 is part of a spec"));
+    }
+
+    /// Runs git in `dir`, as a test author.
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=Test", "-c", "user.email=test@example.com"]).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A grill on `name`, a project whose folder is a git repo with no GitHub `origin` (one commit on
+    /// `main`), that saved the spec "Offline mode" with the tickets "Store" then "API" (blocked by Store)
+    /// as Loft issues and ended with its card. The team's `roles` (a Dev first) are busy.
+    async fn local_plan(st: &AppState, name: &str, roles: &[&str]) -> (Agent, crate::db::Message, Vec<Agent>, std::path::PathBuf) {
+        let a = planner_on(st, name, None);
+        let dir = st.settings.boot().projects_dir.join(name);
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "init"]);
+        crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish(st, &a, "Offline mode").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == name && t.labels == ["spec"]).unwrap();
+        mcp_call(st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": [ticket("API", &["Store"]), ticket("Store", &[])] })).await.unwrap().unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Offline it is." })).unwrap().unwrap();
+        let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
+        let m = summary(st, &a);
+        (a, m, team, dir)
+    }
+
+    /// The Loft issue of the ticket titled `title` in `project`.
+    fn loft_ticket(st: &AppState, project: &str, title: &str) -> crate::db::Task {
+        st.db.list_tasks().unwrap().into_iter().find(|t| t.project == project && t.title == title).unwrap()
+    }
+
+    fn notes_on(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_task_comments(id, 200, None).unwrap().into_iter().filter(|c| c.kind == "comment").map(|c| c.text).collect()
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_plan_kept_in_loft_makes_its_branch_in_the_project_repo() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (a, m, team, dir) = local_plan(&st, "local-start", &["dev"]).await;
+        let d = crate::delivery::local_of(&st, "local-start", &loft_ticket(&st, "local-start", "Offline mode").id).unwrap();
+        assert_eq!((d.local, d.branch.as_str(), d.tickets.iter().map(|t| (t.number, t.title.as_str(), t.blocked_by.clone())).collect::<Vec<_>>()), (true, "spec/1-offline-mode", vec![(1, "Store", vec![]), (2, "API", vec![1])]));
+
+        let v = press(&st, &a, &m).await.unwrap();
+        assert_eq!(v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["title"], "Store", "the card names the ticket");
+        assert_eq!(git_in(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "the checkout is left alone");
+        assert_eq!(git_in(&dir, &["rev-parse", "spec/1-offline-mode"]), git_in(&dir, &["rev-parse", "main"]), "the spec branch starts at main");
+        let store = loft_ticket(&st, "local-start", "Store");
+        let w = woken(&st, &team[0]);
+        assert_eq!(w.len(), 1);
+        for want in [
+            "[Loft Delivery: spec \"Offline mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Store\" (Loft issue ".to_string(),
+            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.display()),
+            format!("each message ending with `Refs {}`", store.id),
+            format!("call `mcp__loft__submit_ticket` with \"{}\"", store.id),
+        ] {
+            assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
+        }
+        assert!(notes_on(&st, &store.id).iter().any(|n| n.starts_with("Started by Loft's Delivery: with dev agent")), "{:?}", notes_on(&st, &store.id));
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().base, "main");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    #[tokio::test]
+    async fn a_plan_kept_in_loft_posts_verdicts_as_notes_closes_tickets_and_offers_merge() {
+        let st = state();
+        let fake = own_fake(&st);
+        let project = "local-flow";
+        let (a, m, team, _dir) = local_plan(&st, project, &["dev", "qa", "security", "code_reviewer"]).await;
+        let (dev, qa, sec, cr) = (&team[0], &team[1], &team[2], &team[3]);
+        press(&st, &a, &m).await.unwrap();
+        let (store, api, spec) = (loft_ticket(&st, project, "Store"), loft_ticket(&st, project, "API"), loft_ticket(&st, project, "Offline mode"));
+        let submit = |id: &str| json!({ "number": id, "commits": ["abc1234def"] });
+
+        let out = tool(&st, dev, "submit_ticket", submit(&store.id)).await.unwrap();
+        assert!(out.starts_with("Submitted \"Store\": qa agent (QA) and security agent (Security) are reviewing it."), "{out}");
+        assert!(woken(&st, qa)[0].contains("Loft posts it on the ticket's Loft issue."));
+        tool(&st, qa, "review_ticket", json!({ "number": store.id, "verdict": "changes", "notes": "Saving twice loses data." })).await.unwrap();
+        assert!(notes_on(&st, &store.id).contains(&"**QA** (qa agent) asks for changes on ticket \"Store\" at `abc1234`.\n\nSaving twice loses data.".to_string()));
+        assert!(woken(&st, dev).last().unwrap().contains(&format!("call `mcp__loft__submit_ticket` again with \"{}\"", store.id)));
+        tool(&st, dev, "submit_ticket", submit(&store.id)).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": store.id, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        let out = tool(&st, sec, "review_ticket", json!({ "number": store.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("\"Store\" is done.") && out.contains("Next: \"API\" is with dev agent."), "{out}");
+        let s = st.db.get_task(&store.id).unwrap().unwrap();
+        assert_eq!(s.status, "done");
+        assert!(notes_on(&st, &store.id).iter().any(|n| n == "Done in `abc1234`, on the spec branch `spec/1-offline-mode`."));
+
+        tool(&st, dev, "submit_ticket", submit(&api.id)).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": api.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let out = tool(&st, sec, "review_ticket", json!({ "number": api.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("code_reviewer agent (Code reviewer) is reviewing the whole spec branch `spec/1-offline-mode` now."), "{out}");
+        let w = woken(&st, cr);
+        assert!(w.len() == 1 && w[0].contains("against `main` (`git diff main...spec/1-offline-mode`)") && w[0].contains(&format!("`mcp__loft__review_ticket` with \"{}\"", spec.id)), "{w:?}");
+
+        let debt = json!([{ "title": "Index the store", "body": "Lookups scan." }]);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: Loft issue ") && out.ends_with("The spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge."), "{out}");
+        let filed = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == project && t.labels == ["tech-debt"]).unwrap();
+        assert_eq!(filed.title, "Index the store");
+        assert!(notes_on(&st, &spec.id).iter().any(|n| n.starts_with("**Code reviewer** (code_reviewer agent) passed the spec branch.")));
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "delivery_merge").unwrap_or_else(|| panic!("{v:#}"));
+        assert_eq!(item["title"], "Merge \"Offline mode\"");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    #[tokio::test]
+    async fn merge_merges_only_on_a_clean_checkout_of_the_base_and_says_what_to_run() {
+        let st = state();
+        let (a, m, _team, dir) = local_plan(&st, "local-merge", &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let d = crate::delivery::local_of(&st, "local-merge", &loft_ticket(&st, "local-merge", "Offline mode").id).unwrap();
+        // The Dev's work on the spec branch, pushed back to the project's repo.
+        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
+        std::fs::write(dir.join("store.rs"), "fn store() {}\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "Store"]);
+        let merge = || crate::delivery::merge(&st, &d.repo, d.spec);
+
+        assert!(merge().await.unwrap_err().ends_with("isn't ready to merge yet: its reviews haven't all passed."), "only after the last review");
+        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+        let shown = dir.display().to_string();
+        assert_eq!(merge().await.unwrap_err(), format!("`main` isn't checked out in `{shown}` (`spec/1-offline-mode` is). Run `git -C {shown} checkout main`, then press Merge again."));
+        git_in(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("README.md"), "edited\n").unwrap();
+        assert_eq!(merge().await.unwrap_err(), format!("`{shown}` has uncommitted changes, so nothing was merged. Commit or stash them (`git -C {shown} stash -u`), then press Merge again."));
+        assert!(!dir.join("store.rs").exists(), "nothing merged");
+        git_in(&dir, &["checkout", "--", "README.md"]);
+
+        let git_user = |k: &str, v: &str| git_in(&dir, &["config", k, v]);
+        git_user("user.name", "Test");
+        git_user("user.email", "test@example.com");
+        assert_eq!(merge().await.unwrap(), format!("Merged `spec/1-offline-mode` into `main` in `{shown}`."));
+        assert!(dir.join("store.rs").exists());
+        assert_eq!(git_in(&dir, &["log", "-1", "--format=%s"]), "Merge spec \"Offline mode\"");
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "merged");
+        assert_eq!(st.db.get_task(&d.spec_id).unwrap().unwrap().status, "done");
+        assert_eq!(merge().await.unwrap(), "`spec/1-offline-mode` is already merged into `main`.");
     }
 
     #[test]

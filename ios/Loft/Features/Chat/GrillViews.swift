@@ -483,7 +483,7 @@ struct EndCardView: View {
             }
             if let d = card.delivery {
                 if let s = d.started {
-                    Label("Delivery started · #\(s.ticket) with \(s.agentName)", systemImage: "play.circle")
+                    Label("Delivery started · \(d.local == true ? "“\(s.title ?? "")”" : "#\(s.ticket)") with \(s.agentName)", systemImage: "play.circle")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("endCardStarted")

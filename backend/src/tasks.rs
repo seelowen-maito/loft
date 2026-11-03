@@ -42,7 +42,7 @@ fn who(state: &AppState, author: &str) -> String {
 
 /// Adds an entry to the task's thread and tells open clients. Failures are logged, not fatal:
 /// the change it describes has already happened.
-fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut meta: Value) -> Option<TaskComment> {
+pub(crate) fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &str, mut meta: Value) -> Option<TaskComment> {
     if author != "user" {
         meta["author_name"] = json!(who(state, author));
     }

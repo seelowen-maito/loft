@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CircleDot, Eraser, ExternalLink, FileText, Loader2, Play, Users } from "lucide-react";
+import { CircleDot, Eraser, ExternalLink, FileText, GitMerge, Loader2, Play, Users } from "lucide-react";
 import { cx } from "../../lib/format";
 import { api, roleLabel, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
@@ -22,11 +22,11 @@ function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; in
 /** The end of a planning grill: the spec and tickets it published, Start delivery for a spec with a Delivery
  *  (otherwise Clear context leaves the next message in the composer), and the team check. */
 export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
-  const [busy, setBusy] = useState<"clear" | "setup" | "start" | null>(null);
+  const [busy, setBusy] = useState<"clear" | "setup" | "start" | "merge" | null>(null);
   const [sent, setSent] = useState(false);
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const run = async (what: "clear" | "setup" | "start", f: () => Promise<unknown>) => {
+  const run = async (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => {
     setBusy(what);
     setError(null);
     try {
@@ -41,6 +41,17 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const shown = sent || !!setup?.sent_at;
   const delivery = card.delivery;
   const startedOn = started ?? delivery?.started ?? null;
+  // A plan kept in Loft ends with Merge, once its reviews passed.
+  const [stage, setStage] = useState<{ state: string; branch: string; base: string } | null>(null);
+  const [merged, setMerged] = useState<string | null>(null);
+  useEffect(() => {
+    if (!delivery?.local || !startedOn) return;
+    let live = true;
+    api.deliveryState(delivery.repo, delivery.spec).then((s) => live && setStage(s)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [delivery?.local, delivery?.repo, delivery?.spec, !!startedOn]);
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       {/* No repo: the plan was kept as Loft issues. */}
@@ -70,9 +81,20 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         )}
         {delivery && startedOn && (
           <Link to={`/agents/${startedOn.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
-            Delivery started · #{startedOn.ticket} with {startedOn.agent_name}
+            Delivery started · {delivery.local ? `“${startedOn.title ?? ""}”` : `#${startedOn.ticket}`} with {startedOn.agent_name}
           </Link>
         )}
+        {delivery?.local && stage?.state === "ready" && !merged && (
+          <button
+            className="btn btn-primary text-[12.5px]"
+            disabled={busy !== null}
+            title={`Merges ${stage.branch} into ${stage.base} in the project's folder, when ${stage.base} is checked out and nothing is uncommitted.`}
+            onClick={() => run("merge", async () => setMerged((await api.mergeDelivery(delivery.repo, delivery.spec)).message))}
+          >
+            {busy === "merge" ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />} Merge
+          </button>
+        )}
+        {delivery?.local && (merged || stage?.state === "merged") && <span className="font-mono text-[11.5px] text-good">{merged ?? `Merged ${stage?.branch} into ${stage?.base}`}</span>}
         <button
           className={cx("btn text-[12.5px]", !delivery && "btn-primary")}
           disabled={busy !== null}
