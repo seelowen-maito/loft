@@ -7,7 +7,8 @@ import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
-import { ProjectSelect } from "./ProjectSelect";
+import { GroupInput, ProjectsField } from "./ProjectsField";
+import { projectsOf } from "../../lib/team";
 import { QuietHours } from "./QuietHours";
 
 type Tab = "config" | "permissions" | "memory" | "workspace";
@@ -45,7 +46,7 @@ const MCP_TEMPLATES: Record<string, unknown> = {
   filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "~/projects"] },
 };
 
-export function Inspector({ agent, projects, perms, onCleared }: { agent: Agent; projects: string[]; perms: PermissionRequest[]; onCleared: () => void }) {
+export function Inspector({ agent, groups, projects, perms, onCleared }: { agent: Agent; groups: string[]; projects: string[]; perms: PermissionRequest[]; onCleared: () => void }) {
   const [tab, setTab] = useState<Tab>("config");
   const pending = perms.filter((p) => p.status === "pending").length;
   const tabs: { id: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
@@ -72,7 +73,7 @@ export function Inspector({ agent, projects, perms, onCleared }: { agent: Agent;
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "config" && <ConfigTab key={agent.id} agent={agent} projects={projects} onCleared={onCleared} />}
+        {tab === "config" && <ConfigTab key={agent.id} agent={agent} groups={groups} projects={projects} onCleared={onCleared} />}
         {tab === "permissions" && <AccessTab agent={agent} perms={perms} />}
         {tab === "memory" && <MemoryTab agent={agent} />}
         {tab === "workspace" && <FilesTab agent={agent} />}
@@ -92,10 +93,10 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 /** The Role field's hint, for the agent's settings and the New agent dialog. */
-export const roleHint = (project: string) =>
-  project.trim()
-    ? `What it does in ${project.trim()}'s team. One Lead per project, with the captain hat: making it Lead takes the role from any other.`
-    : "What it does in its project's team. Only an agent with a project can be Lead: set its project first.";
+export const roleHint = (team: string) =>
+  team.trim()
+    ? `What it does in ${team.trim()}'s team. One Lead per group, with the captain hat: making it Lead takes the role from any other.`
+    : "What it does in its group's team. Only an agent with a group or a project can be Lead: set one first.";
 
 export const FRESH_CONTEXT_HINT =
   "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
@@ -106,12 +107,12 @@ export const FRESH_CONTEXT = [
   { value: "off", label: "Off" },
 ];
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "title" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
-function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
+function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; groups: string[]; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
-      name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
+      name: agent.name, title: agent.title, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
       model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", fresh_context: agent.fresh_context ?? "above_80k", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
@@ -123,6 +124,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
+  const team = draft.group.trim() || draft.projects[0] || "";
 
   const save = async () => {
     setSaving(true);
@@ -159,8 +161,12 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Project" hint="A git repo, or any name or tag. Agents that share one are grouped together in the list.">
-        <ProjectSelect value={draft.project} projects={projects} onChange={(v) => set("project", v)} />
+      <Field label="Group" hint="Its team, such as Acme: agents in the same group are listed together and share one Lead. Empty: its main project is its group.">
+        <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
+      </Field>
+
+      <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
+        <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">
@@ -206,10 +212,10 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Role" hint={roleHint(draft.project)}>
+      <Field label="Role" hint={roleHint(team)}>
         <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
           {ROLES.map((r) => (
-            <option key={r.value} value={r.value} disabled={r.value === "lead" && !draft.project.trim() && draft.role !== "lead"}>
+            <option key={r.value} value={r.value} disabled={r.value === "lead" && !team && draft.role !== "lead"}>
               {r.label}: {r.hint}
             </option>
           ))}

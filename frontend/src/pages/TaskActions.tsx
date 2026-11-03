@@ -6,6 +6,7 @@ import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
+import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
@@ -104,8 +105,9 @@ export function publishBlocked(t: { project: string }, repo: string | undefined)
 
 /** On an open issue nobody is working on: pick an agent and hand it over, from the issue itself. */
 export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }) {
-  // The project's agents first: they're on its repo.
-  const sorted = [...agents].sort((a, b) => Number(b.project.trim() === t.project) - Number(a.project.trim() === t.project) || a.name.localeCompare(b.name));
+  // The agents working in its project first: they're on its repo.
+  const has = (a: Agent) => projectsOf(a).includes(t.project);
+  const sorted = [...agents].sort((a, b) => Number(has(b)) - Number(has(a)) || a.name.localeCompare(b.name));
   const [agentId, setAgentId] = useState(sorted[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,7 +132,7 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
           </div>
         </div>
         <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Agent to hand it to">
-          {sorted.map((a) => <option key={a.id} value={a.id}>{a.name}{a.project.trim() === t.project ? "" : ` · ${a.project || "no project"}`}</option>)}
+          {sorted.map((a) => <option key={a.id} value={a.id}>{a.name}{has(a) ? "" : ` · ${a.project || "no project"}`}</option>)}
         </select>
         <button className="btn-primary" disabled={!agentId || busy} onClick={start}>
           <Play className="size-3 fill-current" /> Start
@@ -641,6 +643,15 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
   const [priority, setPriority] = useState<Task["priority"]>("normal");
   const [project, setProject] = useState("");
   const [start, setStart] = useState(true);
+  const agent = agents.find((a) => a.id === agentId);
+  const choices = projectChoices(agent, [...projects, ...agents.flatMap(projectsOf)]);
+  const warning = outsideWarning(agent, project);
+  // Picking an agent moves the project to its main one, unless one was typed that isn't the last agent's.
+  const pickAgent = (id: string) => {
+    const next = agents.find((a) => a.id === id);
+    if (!project.trim() || (agent && projectsOf(agent).includes(project.trim()))) setProject(next ? (projectsOf(next)[0] ?? "") : "");
+    setAgentId(id);
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const create = async () => {
@@ -662,14 +673,33 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
     <Modal title="New Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing" className={field} />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
-      <AgentSelect agents={agents} value={agentId} onChange={setAgentId} placeholder="No agent (a to-do for you)" />
+      <AgentSelect agents={agents} value={agentId} onChange={pickAgent} placeholder="No agent (a to-do for you)" />
       <div className="flex gap-2">
         <select value={priority} onChange={(e) => setPriority(e.target.value as Task["priority"])} className={field} aria-label="Priority">
           {["low", "normal", "high", "urgent"].map((p) => <option key={p} value={p}>{p} priority</option>)}
         </select>
-        <input list="task-projects" value={project} onChange={(e) => setProject(e.target.value)} placeholder="Project" className={field} />
-        <datalist id="task-projects">{projects.map((p) => <option key={p} value={p} />)}</datalist>
+        <input list="task-projects" value={project} onChange={(e) => setProject(e.target.value)} placeholder="Project" className={field} aria-label="Project" />
+        <datalist id="task-projects">{[...choices.mine, ...choices.others].map((p) => <option key={p} value={p} />)}</datalist>
       </div>
+      {agent && choices.mine.length + choices.others.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5" aria-label="Projects">
+          {[...choices.mine, ...choices.others].map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setProject(p)}
+              title={choices.mine.includes(p) ? `${agent.name} works in ${p}` : `${agent.name} doesn't work in ${p}`}
+              className={cx(
+                "rounded-full border px-2 py-0.5 font-mono text-[11px] transition",
+                project.trim() === p ? "border-accent/60 bg-accent/10 text-accent" : choices.mine.includes(p) ? "border-line-strong text-fg-2 hover:text-fg" : "border-line text-fg-3 opacity-60 hover:opacity-100",
+              )}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      )}
+      {warning && <div className="rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12px] text-fg-2">{warning}</div>}
       {agentId && (
         <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2">
           <input type="checkbox" checked={start} onChange={(e) => setStart(e.target.checked)} className="accent-[var(--color-accent)]" />

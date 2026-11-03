@@ -3,7 +3,9 @@
 export type NewAgentForm = {
   name: string;
   title: string;
-  project: string;
+  /** Its group, and its projects with the main one first. */
+  group: string;
+  projects: string[];
   role: string;
   fresh_context: string;
   personality: string;
@@ -13,7 +15,7 @@ export type NewAgentForm = {
 };
 
 export const EMPTY_FORM: NewAgentForm = {
-  name: "", title: "", project: "", role: "custom", fresh_context: "above_80k", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
+  name: "", title: "", group: "", projects: [], role: "custom", fresh_context: "above_80k", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
 };
 
 export const TEMPLATES = [
@@ -48,16 +50,18 @@ export const TEMPLATES = [
   },
 ];
 
-/** The form with its project set to `project`. Only an agent with a project can be Lead: without one it drops back to Custom. */
-export const withProject = (f: NewAgentForm, project: string): NewAgentForm => ({
-  ...f,
-  project,
-  role: !project.trim() && f.role === "lead" ? "custom" : f.role,
-});
+/** Its team (`teamOf`): the group, else the main project. */
+const formTeam = (f: NewAgentForm) => f.group.trim() || (f.projects[0] ?? "").trim();
 
-/** Whether the dialog offers Fresh context: to every role but a Lead that only coordinates, i.e. whose project has a Dev. */
-export const offersFreshContext = (f: NewAgentForm, agents: { role?: string; project: string }[]) =>
-  f.role !== "lead" || !agents.some((a) => a.role === "dev" && a.project.trim() === f.project.trim());
+/** The form with a new group or projects. Only an agent with a team can be Lead: without one it drops back to Custom. */
+export const withTeam = (f: NewAgentForm, change: { group?: string; projects?: string[] }): NewAgentForm => {
+  const next = { ...f, ...change };
+  return { ...next, role: !formTeam(next) && next.role === "lead" ? "custom" : next.role };
+};
+
+/** Whether the dialog offers Fresh context: to every role but a Lead that only coordinates, i.e. whose team has a Dev. */
+export const offersFreshContext = (f: NewAgentForm, agents: { role?: string; project: string; group?: string }[]) =>
+  f.role !== "lead" || !agents.some((a) => a.role === "dev" && (a.group?.trim() || a.project.trim()) === formTeam(f));
 
 /** What Create agent sends: the whole form, role and Fresh context included, with a name even when left blank. */
 export const createPayload = (f: NewAgentForm) => ({ ...f, name: f.name.trim() || "Unnamed" });

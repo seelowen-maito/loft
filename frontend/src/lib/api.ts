@@ -7,8 +7,12 @@ export type Agent = {
   id: string;
   name: string;
   title: string;
-  /** Free-form project or tag; agents sharing one are grouped. */
+  /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
+  /** Free-text group its team goes by (Acme); "" groups it by its main project. Missing from servers before groups. */
+  group?: string;
+  /** The projects it works in, main first. Missing from servers before groups. */
+  projects?: string[];
   personality: string;
   prompt: string;
   model: string;
@@ -23,7 +27,7 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
+  /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
   /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
   fresh_context?: string;

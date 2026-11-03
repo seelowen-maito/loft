@@ -120,9 +120,16 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// Free-form project or tag; agents sharing one are grouped in the UI.
+    /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
+    /// none), so clients that only know one project keep working.
     #[serde(default)]
     pub project: String,
+    /// Free-text label its team goes by (Acme); never a path. Empty: its main project is its team.
+    #[serde(default)]
+    pub group: String,
+    /// The projects it works in, main first.
+    #[serde(default)]
+    pub projects: Vec<String>,
     pub personality: String,
     pub prompt: String,
     pub model: String,
@@ -152,7 +159,7 @@ pub struct Agent {
     #[serde(default)]
     pub memory_index: Option<String>,
     /// What it does in its team: "lead", "dev", "code_reviewer", "qa", "security" or "custom"
-    /// (`planning::ROLES`). A team (the agents sharing a project) has at most one Lead. Set from the
+    /// (`planning::ROLES`). A team (the agents sharing a group, `Agent::team`) has at most one Lead. Set from the
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
@@ -199,6 +206,19 @@ pub fn default_fresh_context() -> String {
 }
 
 impl Agent {
+    /// Its team's name: its group, else its main project. Empty: it has no team.
+    pub fn team(&self) -> &str {
+        match self.group.trim() {
+            "" => self.project.trim(),
+            g => g,
+        }
+    }
+
+    /// Whether `project` is one it works in.
+    pub fn has_project(&self, project: &str) -> bool {
+        self.projects.iter().any(|p| p == project.trim())
+    }
+
     /// An Unread reply: a run the user started ended after their read mark.
     pub fn unread_reply(&self) -> bool {
         let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
@@ -757,6 +777,14 @@ impl Db {
             [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
         )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
+        // Agents saved before groups existed get their project as group and only project, once, so every
+        // team stays as it was until the user changes it. Before the roles below: they save each agent back.
+        conn.execute(
+            "UPDATE agents SET data = json_set(data, '$.group', COALESCE(json_extract(data, '$.project'), ''),
+                 '$.projects', CASE WHEN TRIM(COALESCE(json_extract(data, '$.project'), '')) = '' THEN json('[]') ELSE json_array(TRIM(json_extract(data, '$.project'))) END)
+             WHERE json_type(data, '$.projects') IS NULL",
+            [],
+        )?;
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
         let unroled: Vec<(Value, &str)> = {
@@ -812,7 +840,9 @@ impl Db {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c
             .query_row(
-                "SELECT data FROM agents WHERE json_extract(data, '$.role') = ?1 AND trim(json_extract(data, '$.project')) = ?2
+                // An agent works in `project` when it's its main project or one of its projects.
+                "SELECT data FROM agents a WHERE json_extract(data, '$.role') = ?1
+                   AND (trim(json_extract(data, '$.project')) = ?2 OR EXISTS (SELECT 1 FROM json_each(a.data, '$.projects') WHERE trim(value) = ?2))
                  ORDER BY position, created_at LIMIT 1",
                 [role, project],
                 |r| r.get(0),
@@ -1820,6 +1850,36 @@ mod tests {
         assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
         assert_eq!(found("loft", "qa"), None);
         assert_eq!(found("", "dev"), None, "no project, no team");
+        // An agent of a group works in each of its projects, not only its main one.
+        let mut web = agent("web-dev");
+        (web.project, web.projects, web.role) = ("b2c".into(), vec!["b2c".into(), "b2b".into()], "dev".into());
+        db.save_agent(&web).unwrap();
+        assert_eq!(found("b2b", "dev").as_deref(), Some("web-dev"), "a project that isn't its main one");
+        assert_eq!(found("b2", "dev"), None, "whole names only");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agents_saved_before_groups_get_their_project_as_group_and_only_project_once() {
+        let path = std::env::temp_dir().join(format!("loft-groups-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, project) in [("a", "api"), ("b", " api "), ("c", "")] {
+                db.save_agent(&agent(id)).unwrap();
+                // As agents were stored before groups: a project and nothing else.
+                let c = db.0.lock().unwrap();
+                c.execute("UPDATE agents SET data = json_remove(json_set(data, '$.project', ?1), '$.group', '$.projects') WHERE id = ?2", params![project, id]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let got = |id: &str| { let a = db.get_agent(id).unwrap().unwrap(); (a.group.trim().to_string(), a.projects.clone(), a.team().to_string()) };
+        assert_eq!(got("a"), ("api".into(), vec!["api".to_string()], "api".into()));
+        assert_eq!(got("b"), ("api".into(), vec!["api".to_string()], "api".into()), "same team as before");
+        assert_eq!(got("c"), ("".into(), vec![], "".into()));
+        // An edit after the migration stays.
+        db.update_agent("a", |a| a.group = "Acme".into()).unwrap();
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Acme", "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 

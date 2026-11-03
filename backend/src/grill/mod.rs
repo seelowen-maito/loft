@@ -213,7 +213,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
         (None, _) => say(s, "Implement the ready tickets: hand them to the team", "Implemente os tickets prontos: entregue-os ao time"),
     };
-    let missing = crate::planning::missing_roles(state, &me.project);
+    let missing = crate::planning::missing_roles(state, me.team());
     let setup = (!missing.is_empty()).then(|| {
         let labels: Vec<&str> = missing.iter().map(|r| crate::planning::role_label(r)).collect();
         let roles = match labels.split_last() {
@@ -229,7 +229,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         };
         json!({
             "agent_id": crate::setup::LOFT_ID,
-            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.project.trim(), me.name),
+            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.team(), me.name),
         })
     });
     Some(json!({

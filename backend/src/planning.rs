@@ -123,10 +123,10 @@ pub async fn send_team_setup(State(state): State<AppState>, Path((id, mid)): Pat
     Ok(Json(json!({ "ok": true, "message": m })))
 }
 
-/// The team check: the roles no agent in `project` fills, going by their stored roles.
-pub fn missing_roles(state: &AppState, project: &str) -> Vec<&'static str> {
-    let project = project.trim();
-    let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !project.is_empty() && a.project.trim() == project).map(|a| a.role).collect();
+/// The team check: the roles no agent of `team` (a group, else a main project) fills, going by their stored roles.
+pub fn missing_roles(state: &AppState, team: &str) -> Vec<&'static str> {
+    let name = team.trim();
+    let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !name.is_empty() && a.team() == name).map(|a| a.role).collect();
     TEAM_ROLES.iter().copied().filter(|r| !team.iter().any(|t| t == r)).collect()
 }
 
@@ -3704,6 +3704,17 @@ pub(crate) mod tests {
         st.db.save_agent(&dev).unwrap();
         assert!(missing_roles(&st, "team-a").is_empty(), "a full team");
         assert_eq!(missing_roles(&st, " "), all, "no project, no team");
+        // A group is one team across its projects; its agents leave their projects' teams.
+        let mut b = add("Web", "", "qa", "team-b");
+        b.group = "Acme".into();
+        st.db.save_agent(&b).unwrap();
+        for (name, role) in [("Api", "dev"), ("Rev", "code_reviewer"), ("Sec", "security")] {
+            let mut c = add(name, "", role, "team-c");
+            c.group = "Acme".into();
+            st.db.save_agent(&c).unwrap();
+        }
+        assert!(missing_roles(&st, "Acme").is_empty());
+        assert_eq!(missing_roles(&st, "team-b"), ["code_reviewer", "qa", "security"], "Web is in Acme now: team-b keeps only Builder, a Dev");
     }
 
     #[test]
