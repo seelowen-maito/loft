@@ -2563,6 +2563,61 @@ pub(crate) mod tests {
         assert_eq!(posts(&fake, slug, "issues/41/comments").len(), 1, "the retry doesn't comment twice");
     }
 
+    #[tokio::test]
+    async fn a_next_start_that_failed_is_retried_by_the_mirror() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rv-next";
+        let (dev, _) = building(&st, &fake, "rv-next", &[]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/42/labels"), 502, json!({ "message": "Server Error" }));
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("#42 is next, but Couldn't label #42 `in-progress`: GitHub 502"), "{out}");
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+        let before = woken(&st, &dev).len();
+
+        fake.route("POST", &format!("/repos/{slug}/issues/42/labels"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "rv-next", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 42), ("started".into(), Some(42), None));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        assert!(w.last().unwrap().contains("build ticket #42 \"API\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn a_close_whose_answer_was_lost_counts_as_closed_on_the_retry() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rv-lost";
+        let (dev, _) = building(&st, &fake, "rv-lost", &[]).await;
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 502, json!({ "message": "Server Error" }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "closing");
+
+        // The close went through on GitHub after all.
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", "## What to build\n\nStore."));
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "rv-lost", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().filter(|s| s.method == "PATCH").count(), 1, "not closed twice");
+        assert!(woken(&st, &dev).last().unwrap().contains("build ticket #42"));
+    }
+
+    #[tokio::test]
+    async fn a_pass_after_changes_takes_changes_requested_off_the_pr() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-relabel";
+        let (dev, team) = building(&st, &fake, "rv-relabel", &["qa"]).await;
+        let deletes = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert_eq!(deletes(), 0, "still waiting for changes");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(deletes(), 1);
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+    }
+
     #[test]
     fn spec_prs_recorded_before_deliveries_become_delivery_records() {
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
