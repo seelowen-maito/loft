@@ -151,6 +151,16 @@ export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState<{ agent_id: string; agent_name: string; pr: number | null } | null>(null);
+  // Started before (here, on another device or from the end-of-planning card): say who has it.
+  useEffect(() => {
+    let live = true;
+    api.issueDelivery(t.id)
+      .then((d) => live && d?.started && d.agent_id && setStarted({ agent_id: d.agent_id, agent_name: d.agent_name ?? "", pr: d.pr }))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [t.id]);
   const start = async () => {
     setBusy(true);
     setError(null);

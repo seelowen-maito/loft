@@ -540,6 +540,9 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** A standalone ticket's Delivery: whether it started, who has it and its PR; null when it has none. */
+  issueDelivery: (id: string) =>
+    req<{ state: string; started: boolean; agent_id: string | null; agent_name: string | null; pr: number | null } | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) =>
     req<{ ok: boolean; duplicate: boolean; ticket: number; agent_id: string; agent_name: string; pr: number | null }>("POST", `/issues/${id}/start-delivery`),

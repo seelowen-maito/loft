@@ -2927,9 +2927,17 @@ pub(crate) mod tests {
 
         tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
         assert!(woken(&st, qa)[0].contains("on the ticket branch `ticket/41-store` (PR https://github.com/octo/solo-flow/pull/500)"));
+        // A changes round first: the label it puts on the PR comes off with the later passes.
+        let deletes = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        assert!(woken(&st, dev).last().unwrap().contains("Fix it on the ticket branch `ticket/41-store`"));
+        tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(deletes(), 0);
         let out = tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
         assert!(out.contains("#41 passed its reviews. It stays open until its PR #500 merges.") && out.contains("It passed its reviews: code_reviewer agent (Code reviewer) is reviewing the whole PR #500 now."), "{out}");
+        assert_eq!(deletes(), 1, "changes-requested comes off the PR when the ticket passes");
         // Loft doesn't close it: its PR does, when it merges.
         assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|s| s.method != "PATCH"));
         assert!(posts(&fake, slug, "issues/41/comments").is_empty());
@@ -2966,6 +2974,9 @@ pub(crate) mod tests {
         assert!(woken(&st, &dev)[0].contains("build ticket #41 \"Ticket 41\""));
         assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
         assert_eq!(woken(&st, &dev).len(), 1);
+        // After a reload the page asks Loft, which says who has it.
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
+        assert_eq!(shown, json!({ "state": "running", "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -2975,7 +2986,13 @@ pub(crate) mod tests {
         plain["labels"] = json!([]);
         fake.route("GET", &format!("/repos/{slug}/issues/43"), 200, plain.clone());
         let (t43, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &plain).unwrap();
+        assert_eq!(crate::delivery::issue_delivery(State(st.clone()), Path(t43.id.clone())).await.unwrap().0, Value::Null, "no Delivery");
         assert!(start(t43.id).await.unwrap_err().1.starts_with("#43 isn't an open ticket"));
+        // A sub-issue of a spec with no Delivery isn't started on its own either.
+        let (mut t44, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &gh_ticket(slug, 44, "open", "x")).unwrap();
+        t44.parent_id = Some(t.id.clone());
+        st.db.save_task(&t44).unwrap();
+        assert!(start(t44.id).await.unwrap_err().1.starts_with("#44 is part of a spec"));
     }
 
     #[test]

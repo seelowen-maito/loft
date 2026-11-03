@@ -530,6 +530,9 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
     if let Some(d) = of_ticket(&state, &repo, n).filter(|d| !d.standalone) {
         return Err(bad(format!("#{n} is a ticket of spec #{}: start the spec's Delivery from its end-of-planning card.", d.spec)));
     }
+    if t.parent_id.is_some() {
+        return Err(bad(format!("#{n} is part of a spec: its tickets go through the spec's Delivery, not one of their own.")));
+    }
     if matches!(state.db.get_delivery(&repo, n), Ok(None)) {
         let i = crate::github::get(&state, &format!("/repos/{repo}/issues/{n}")).await.map_err(|e| bad(format!("Couldn't read #{n} on {repo}: {e}")))?;
         let ticket = i.get("pull_request").is_none() && i["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent");
@@ -542,6 +545,23 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
     let s = start(&state, &repo, n, "").await.map_err(bad)?;
     let pr = state.db.get_delivery(&repo, n)?.and_then(|d| d.pr);
     Ok(Json(json!({ "ok": true, "duplicate": s.already, "ticket": n, "agent_id": s.agent.id, "agent_name": s.agent.name, "pr": pr })))
+}
+
+/// `GET /api/issues/{id}/delivery`: the standalone Delivery of a ticket's Loft issue, for its page: whether
+/// it started, who has it and its PR. `null` when it has none.
+pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let Some(d) = t.github.as_ref().and_then(|g| state.db.get_delivery(&g.repo, g.number).ok().flatten()).filter(|d| d.standalone) else {
+        return Ok(Json(Value::Null));
+    };
+    let dev = state.db.get_agent(&d.dev).ok().flatten();
+    Ok(Json(json!({
+        "state": d.state,
+        "started": d.state != "planned",
+        "agent_id": dev.as_ref().map(|a| a.id.clone()),
+        "agent_name": dev.as_ref().map(|a| a.name.clone()),
+        "pr": d.pr,
+    })))
 }
 
 /// `POST /api/agents/{id}/messages/{mid}/start-delivery`: the end-of-planning card's "Start delivery".
