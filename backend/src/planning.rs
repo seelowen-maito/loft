@@ -2580,6 +2580,75 @@ pub(crate) mod tests {
         json!({ "number": 41, "commits": ["abc1234def", "fed4321abc"] })
     }
 
+    /// `a` set to Always with a Session, so any ticket boundary clears it.
+    fn always_fresh(st: &AppState, a: &Agent) {
+        st.db.update_agent(&a.id, |a| (a.fresh_context, a.session_id) = ("always".into(), Some("s-ticket".into()))).unwrap();
+    }
+
+    /// Whether the run that takes `a`'s queued wake starts by clearing its context. The agent is busy in these
+    /// tests, so this runs that step by hand. It gets a Session back for the next check.
+    fn cleared_at_next_run(st: &AppState, a: &Agent) -> bool {
+        let n = || st.db.list_messages(&a.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
+        let before = n();
+        crate::agents::fresh_boundary(st, &a.id);
+        st.db.update_agent(&a.id, |a| a.session_id = Some("s-ticket".into())).unwrap();
+        n() > before
+    }
+
+    #[tokio::test]
+    async fn the_dev_keeps_its_context_through_review_rounds_of_a_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "fc-rounds", &["qa"]).await;
+        fake.route("POST", "/repos/octo/fc-rounds/issues/41/labels", 200, json!([]));
+        always_fresh(&st, &dev);
+        // `building` already handed #41 to the Dev: a new ticket for it.
+        assert!(cleared_at_next_run(&st, &dev), "a new ticket");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert!(woken(&st, &dev).last().unwrap().contains("asked for changes on ticket #41"));
+        assert!(!cleared_at_next_run(&st, &dev), "round 2 of #41 needs round 1");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_is_cleared_for_a_new_ticket_but_not_to_review_the_same_one_again() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/fc-reviewer";
+        let (dev, team) = building(&st, &fake, "fc-reviewer", &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        let qa = &team[0];
+        always_fresh(&st, qa);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(cleared_at_next_run(&st, qa), "reviewing #41 for the first time");
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(!cleared_at_next_run(&st, qa), "#41 again");
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["1234567abc"] })).await.unwrap();
+        assert!(cleared_at_next_run(&st, qa), "a new ticket, #42");
+    }
+
+    #[tokio::test]
+    async fn a_lead_building_alone_is_cleared_before_its_first_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "fc-solo", vec![ticket("Store", &[])]).await;
+        for _ in 0..200 {
+            if !crate::agents::is_running(&st, &a.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        // The Lead that ran the grill is the whole team: it builds the tickets.
+        st.db.update_agent(&a.id, |a| a.role = "lead".into()).unwrap();
+        always_fresh(&st, &a);
+        let lead = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!(crate::delivery::fresh_context_applies(&st, &lead));
+        press(&st, &a, &m).await.unwrap();
+        assert!(woken(&st, &a).last().is_some_and(|p| p.contains("build ticket #41")));
+        assert!(cleared_at_next_run(&st, &a), "the grill's context goes before ticket #41");
+    }
+
     #[tokio::test]
     async fn submit_wakes_qa_and_security_with_their_briefs() {
         let (fake, st) = (fake_github(), state());

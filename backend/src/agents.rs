@@ -505,6 +505,14 @@ pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: b
     start_with(state, agent_id, Some(prompt), "delivery", false, new && (builder || a.role != "lead"));
 }
 
+/// The start of a run: if its prompt starts a new Delivery ticket (`wake_on_ticket`), apply the agent's Fresh
+/// context setting now, between runs.
+pub(crate) fn fresh_boundary(state: &AppState, agent_id: &str) {
+    if state.rt.lock().unwrap().fresh_before.remove(agent_id) {
+        fresh_if_due(state, agent_id);
+    }
+}
+
 /// At a ticket boundary: clear the agent's context if its setting says so. Off never, Always whenever it
 /// has a session, and Above 80k (the default) when its context is at the warning or above.
 fn fresh_if_due(state: &AppState, agent_id: &str) {
@@ -649,9 +657,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         let mut for_user = for_user;
         loop {
             // Only between runs: a ticket boundary queued behind a run waits for it to end.
-            if state.rt.lock().unwrap().fresh_before.remove(&agent_id) {
-                fresh_if_due(&state, &agent_id);
-            }
+            fresh_boundary(&state, &agent_id);
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
@@ -1745,6 +1751,26 @@ esac
         let rt = st.rt.lock().unwrap();
         assert!(rt.queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.queued.get(&a.id));
         assert!(rt.grill_queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.grill_queued.get(&a.id));
+    }
+
+    /// A ticket boundary waiting in the queue is dropped with the queue: the Session the user picked (or the
+    /// fresh one they asked for) isn't cleared by the next run.
+    #[tokio::test]
+    async fn clear_and_resume_drop_a_pending_ticket_boundary() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.db.update_agent(&a.id, |a| (a.fresh_context, a.session_id) = ("always".into(), Some("s-now".into()))).unwrap();
+        let pending = |st: &AppState| st.rt.lock().unwrap().fresh_before.contains(&a.id);
+        st.rt.lock().unwrap().fresh_before.insert(a.id.clone());
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past.clone()).await.unwrap();
+        assert!(!pending(&st), "resume drops it");
+        fresh_boundary(&st, &a.id);
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id, Some(past), "the resumed Session stays");
+
+        st.rt.lock().unwrap().fresh_before.insert(a.id.clone());
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        assert!(!pending(&st), "Clear context drops it");
     }
 
     #[tokio::test]
