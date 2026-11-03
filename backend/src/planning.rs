@@ -201,7 +201,7 @@ pub struct Known {
 }
 
 /// Same spec, same key: case and spacing don't make a new one.
-fn key(title: &str) -> String {
+pub(crate) fn key(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
@@ -344,7 +344,7 @@ async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
 }
 
 /// The login of the token's user: everything Loft publishes is assigned to them.
-async fn login(state: &AppState) -> Result<String, String> {
+pub(crate) async fn login(state: &AppState) -> Result<String, String> {
     let token = crate::github::token(state).unwrap_or_default();
     if let Some(l) = state.publish_known.logins.lock().unwrap_or_else(|e| e.into_inner()).get(&token) {
         return Ok(l.clone());
@@ -610,52 +610,74 @@ pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, sl
     }
     state.emit(crate::state::Event::Issues { project: project.trim().to_string() });
     let ready = match ready_when_last(state, &slug, n, i["body"].as_str().unwrap_or("")).await {
-        Ok(Some(pr)) => format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}"),
-        Ok(None) => String::new(),
+        Ok(line) => line.unwrap_or_default(),
         Err(e) => format!("\nThe ticket is closed, but {e}."),
     };
     Ok(format!("Closed #{n} as completed with the comment \"{comment}\": https://github.com/{slug}/issues/{n}{ready}"))
 }
 
 /// After ticket #number closed: notes it on its Delivery (found by the ticket, or for a ticket the
-/// record doesn't list, by the spec PR its "## Branch" section links to), then when the spec PR is still
-/// an open draft and every ticket of the spec is closed, marks the PR ready for review. Some(PR) when it
-/// did; None when there's nothing to do.
-pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<i64>, String> {
+/// record doesn't list, by the spec PR its "## Branch" section links to), then moves the Delivery on
+/// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did.
+pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<String>, String> {
     let d = crate::delivery::ticket_closed(state, slug, number).or_else(|| {
         let pr = spec_pr_in(ticket_body, slug)?;
         state.db.deliveries(slug, false).ok()?.into_iter().find(|d| d.pr == Some(pr))
     });
     match d {
-        Some(d) if !matches!(d.state.as_str(), "ready" | "settled") => ready_if_done(state, &d).await,
+        Some(d) if !waits(&d) => after_tickets(state, &d).await,
         _ => Ok(None),
     }
 }
 
+/// A Delivery past its tickets, or waiting on someone: nothing to move on.
+fn waits(d: &crate::db::Delivery) -> bool {
+    matches!(d.state.as_str(), "ready" | "settled" | "final_review" | "final_fixes" | "needs_human")
+}
+
 /// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
-/// failed, and on a full read every one not settled yet (Loft may have been down when the last ticket closed).
+/// failed, and on a full read every one not settled yet (Loft may have been down when the last ticket
+/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197).
 pub(crate) async fn retry_ready(state: &AppState, slug: &str, full: bool) {
     let open = state.db.deliveries(slug, true).unwrap_or_default();
-    for d in open.into_iter().filter(|d| d.pr.is_some() && (full || d.ready_retry)) {
-        match ready_if_done(state, &d).await {
-            Ok(Some(pr)) => tracing::info!("mirror {slug}: marked spec PR #{pr} ready for review, a missed call caught up"),
+    for d in open.into_iter().filter(|d| d.pr.is_some() && (full || d.ready_retry) && !waits(d)) {
+        match after_tickets(state, &d).await {
+            Ok(Some(line)) => tracing::info!("mirror {slug}: a missed call caught up: {}", line.trim()),
             Ok(None) => {}
             Err(e) => tracing::warn!("mirror {slug}: {e}"),
         }
     }
 }
 
-/// [`ready_when_last`] for a Delivery. A call that fails is retried on the next poll; a PR found
-/// ready, merged or closed is settled and never asked about again.
-async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
+/// When every ticket of the Delivery is closed: a Delivery Loft ran goes to the team's Code reviewer for
+/// one review of the whole spec PR, and otherwise (no Code reviewer, or tickets closed outside a
+/// Delivery) its spec PR is marked ready for review. The record says whether the tickets are closed; only
+/// one migrated from before Deliveries, with no tickets listed, asks GitHub. Some(line) for the reply.
+async fn after_tickets(state: &AppState, d: &crate::db::Delivery) -> Result<Option<String>, String> {
+    if d.tickets.iter().any(|t| t.state != "closed") {
+        return Ok(None);
+    }
+    if d.state == "running" && !d.tickets.is_empty()
+        && let Some(line) = crate::delivery::begin_final_review(state, d)
+    {
+        return Ok(Some(line));
+    }
+    let slug = &d.repo;
+    Ok(ready_if_done(state, d).await?.map(|pr| format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}")))
+}
+
+/// [`mark_ready`], noting a call that failed for the mirror to retry on its next poll; a PR found ready,
+/// merged or closed is settled and never asked about again.
+pub(crate) async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
     let out = mark_ready(state, d).await;
-    // Done, settled, or a ticket still open whose close asks again: nothing left to retry.
     let failed = out.is_err();
     crate::delivery::update(state, &d.repo, d.spec, |d| d.ready_retry = failed);
     out
 }
 
-/// Marks the Delivery's spec PR ready for review when it's an open draft and every ticket of its spec is closed.
+/// Marks the Delivery's spec PR ready for review when it's still an open draft, and has Loft watch it, so
+/// it reaches Needs you (with a push) once it can be merged. The caller knows every ticket is closed; a
+/// Delivery with no tickets listed checks the spec's sub-issues on GitHub instead.
 async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
     let (slug, spec) = (d.repo.as_str(), d.spec);
     let Some(pr) = d.pr else { return Ok(None) };
@@ -668,10 +690,12 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
         settle("settled");
         return Ok(None);
     }
-    let subs = crate::github::get(state, &format!("/repos/{slug}/issues/{spec}/sub_issues?per_page=100")).await.map_err(|e| format!("couldn't read the tickets of spec #{spec}: {e}"))?;
-    let subs = subs.as_array().cloned().unwrap_or_default();
-    if subs.is_empty() || subs.iter().any(|s| s["state"] != "closed") {
-        return Ok(None);
+    if d.tickets.is_empty() {
+        let subs = crate::github::get(state, &format!("/repos/{slug}/issues/{spec}/sub_issues?per_page=100")).await.map_err(|e| format!("couldn't read the tickets of spec #{spec}: {e}"))?;
+        let subs = subs.as_array().cloned().unwrap_or_default();
+        if subs.is_empty() || subs.iter().any(|s| s["state"] != "closed") {
+            return Ok(None);
+        }
     }
     let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
     let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
@@ -681,6 +705,14 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
         return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
     }
     settle("ready");
+    // Watched like a PR an agent opened: Needs you lists it, with a push and a Merge button, once GitHub
+    // says it can be merged.
+    let owner = [&d.dev, &d.planner].into_iter().find(|id| !id.is_empty() && matches!(state.db.get_agent(id), Ok(Some(_))));
+    if let Some(owner) = owner
+        && let Err(e) = crate::prs::register(state, owner, slug, pr, None).await
+    {
+        tracing::warn!("delivery {slug}#{spec}: couldn't watch spec PR #{pr}: {e}");
+    }
     Ok(Some(pr))
 }
 
@@ -1318,9 +1350,15 @@ pub(crate) mod tests {
         body
     }
 
-    fn subs(fake: &Fake, slug: &str, states: &[&str]) {
+    /// Spec #40's tickets #41, #42… in these states, on GitHub and on its Delivery record.
+    fn subs(st: &AppState, fake: &Fake, slug: &str, states: &[&str]) {
         let list: Vec<Value> = states.iter().enumerate().map(|(i, s)| json!({ "number": 41 + i as i64, "state": s })).collect();
         fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!(list));
+        crate::delivery::update(st, slug, 40, |d| {
+            for (t, s) in d.tickets.iter_mut().zip(states) {
+                t.state = s.to_string();
+            }
+        });
     }
 
     #[tokio::test]
@@ -1331,12 +1369,12 @@ pub(crate) mod tests {
         let a = planner_on(&st, "ready-last", Some("git@github.com:octo/ready-last.git"));
         spec_with_tickets(&st, &fake, slug);
 
-        subs(&fake, slug, &["closed", "open"]);
+        subs(&st, &fake, slug, &["closed", "open"]);
         let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
         assert!(!out.contains("ready for review"), "{out}");
         assert!(fake.seen("/graphql").is_empty(), "#42 is still open");
 
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
         let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
         assert!(out.ends_with("\nIt was the spec's last open ticket: spec PR #500 is now ready for review: https://github.com/octo/ready-last/pull/500"), "{out}");
         let calls = fake.seen("/graphql");
@@ -1352,7 +1390,7 @@ pub(crate) mod tests {
         let slug = "octo/ready-refused";
         let a = planner_on(&st, "ready-refused", Some("git@github.com:octo/ready-refused.git"));
         spec_with_tickets(&st, &fake, slug);
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
         // GraphQL turns a mutation down with a 200 and `errors`.
         fake.route("POST", "/graphql", 200, json!({ "errors": [{ "message": "Resource not accessible by integration" }] }));
 
@@ -1371,7 +1409,7 @@ pub(crate) mod tests {
         let slug = "octo/ready-done";
         let a = planner_on(&st, "ready-done", Some("git@github.com:octo/ready-done.git"));
         spec_with_tickets(&st, &fake, slug);
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
 
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "body": "Closes #40" }));
         assert!(!close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("ready for review"));
@@ -1387,7 +1425,7 @@ pub(crate) mod tests {
         let slug = "octo/ready-hand";
         planner_on(&st, "ready-hand", Some("git@github.com:octo/ready-hand.git"));
         let body = spec_with_tickets(&st, &fake, slug);
-        subs(&fake, slug, &["closed", "open"]);
+        subs(&st, &fake, slug, &["closed", "open"]);
         let mut spec = gh_ticket(slug, 40, "open", "Spec.");
         spec["labels"] = json!([{ "name": "spec" }]);
         fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
@@ -1399,7 +1437,7 @@ pub(crate) mod tests {
 
         crate::mirror::sync_project(&st, "ready-hand", true).await.unwrap();
         assert!(fake.seen("/graphql").is_empty(), "nothing closed yet");
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
         crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
         assert_eq!(fake.seen("/graphql").len(), 1, "the last ticket closed: the PR is ready");
         assert_eq!(fake.seen("/graphql")[0].body["variables"], json!({ "id": "PR_500" }));
@@ -1422,10 +1460,10 @@ pub(crate) mod tests {
         let a = planner_on(&st, "ready-retry", Some("git@github.com:octo/ready-retry.git"));
         spec_with_tickets(&st, &fake, slug);
         recorded_spec_pr(&st, &fake, slug);
-        subs(&fake, slug, &["closed", "open"]);
+        subs(&st, &fake, slug, &["closed", "open"]);
         crate::mirror::sync_project(&st, "ready-retry", true).await.unwrap();
 
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
         fake.in_turn("POST", "/graphql", vec![
             (502, json!({ "message": "Server Error" })),
             (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } })),
@@ -1450,7 +1488,7 @@ pub(crate) mod tests {
         spec_with_tickets(&st, &fake, slug);
         recorded_spec_pr(&st, &fake, slug);
         // Every ticket closed while Loft was down.
-        subs(&fake, slug, &["closed", "closed"]);
+        subs(&st, &fake, slug, &["closed", "closed"]);
 
         crate::mirror::sync_project(&st, "ready-missed", true).await.unwrap();
         assert_eq!(fake.seen("/graphql").len(), 1);
@@ -1466,7 +1504,7 @@ pub(crate) mod tests {
             planner_on(&st, &name, Some(&format!("git@github.com:{slug}.git")));
             spec_with_tickets(&st, &fake, &slug);
             recorded_spec_pr(&st, &fake, &slug);
-            subs(&fake, &slug, &["closed", "closed"]);
+            subs(&st, &fake, &slug, &["closed", "closed"]);
             fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "body": "Closes #40", "state": pr["state"], "draft": pr["draft"] }));
 
             crate::mirror::sync_project(&st, &name, true).await.unwrap();
@@ -1484,13 +1522,14 @@ pub(crate) mod tests {
         planner_on(&st, "ready-open", Some("git@github.com:octo/ready-open.git"));
         spec_with_tickets(&st, &fake, slug);
         recorded_spec_pr(&st, &fake, slug);
-        subs(&fake, slug, &["closed", "open"]);
+        subs(&st, &fake, slug, &["closed", "open"]);
 
         crate::mirror::sync_project(&st, "ready-open", true).await.unwrap();
-        assert!(fake.seen("/graphql").is_empty());
-        // Nothing failed, so change polls don't look at it until the next full read.
         crate::mirror::sync_project(&st, "ready-open", false).await.unwrap();
-        assert_eq!(fake.seen("/repos/octo/ready-open/pulls/500").len(), 1);
+        assert!(fake.seen("/graphql").is_empty());
+        // The record says #42 is open: neither a full read nor a change poll asks GitHub (#197).
+        assert!(fake.seen("/repos/octo/ready-open/pulls/500").is_empty());
+        assert!(fake.seen("/repos/octo/ready-open/issues/40/sub_issues").is_empty());
     }
 
     #[tokio::test]
@@ -2018,7 +2057,8 @@ pub(crate) mod tests {
             "spec branch named in its \"## Branch\" section",
             "each message ending with `Refs #<ticket>`",
             "hand it in with `mcp__loft__submit_ticket` (its number and commit SHAs)",
-            "Loft wakes the team's QA and Security to review it, closes it when they pass",
+            "Loft wakes the team's QA and Security to review it, and closes it when they pass",
+            "the team's Code reviewer reviews the whole spec PR once",
             "give your verdict with `mcp__loft__review_ticket`",
             "new commits on the spec branch. Closed tickets aren't reopened",
             "`ticket/<N>-<slug>`, with a PR whose body has `Closes #N`",
@@ -2360,7 +2400,6 @@ pub(crate) mod tests {
             d.tickets[1].blocked_by = vec![41];
         });
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
-        subs(&fake, slug, &["closed", "open"]);
         let body = "## What to build\n\nStore.";
         fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
             (200, json!([gh_ticket(slug, 41, "open", body), gh_ticket(slug, 42, "open", body)])),
@@ -2386,7 +2425,7 @@ pub(crate) mod tests {
         fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
         fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", &body));
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
-        subs(&fake, slug, &["closed"]);
+        subs(&st, &fake, slug, &["closed"]);
         fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
 
         let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
@@ -2536,7 +2575,7 @@ pub(crate) mod tests {
         assert_eq!(tool(&st, &dev, "submit_ticket", json!({ "number": 41, "commits": [] })).await.unwrap_err(), "commits is required: the SHAs of the ticket's commits");
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         assert_eq!(tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err(), "#41 can't be submitted: it's already submitted and waiting for its reviewers.");
-        assert_eq!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't waiting for a Code reviewer review: QA and Security review tickets.");
+        assert_eq!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
         assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "maybe", "notes": "x" })).await.unwrap_err(), "verdict must be \"pass\" or \"changes\"");
         // The old tool is gone.
         let names: Vec<String> = crate::mcp::tools(&st).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -2616,6 +2655,121 @@ pub(crate) mod tests {
         tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
         assert_eq!(deletes(), 1);
         assert_eq!(standing(&st, slug, 41).0, "closed");
+    }
+
+    /// `building` for both tickets: closing #42 is routed too.
+    async fn building_both(st: &AppState, fake: &Fake, name: &str, roles: &[&str]) -> (Agent, Vec<Agent>) {
+        let out = building(st, fake, name, roles).await;
+        let slug = format!("octo/{name}");
+        fake.route("POST", &format!("/repos/{slug}/issues/42/comments"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "open", "## What to build\n\nAPI."));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "closed", "## What to build\n\nAPI."));
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        out
+    }
+
+    #[tokio::test]
+    async fn the_last_close_wakes_the_code_reviewer_once_for_the_whole_spec_pr() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-wake";
+        let (dev, team) = building_both(&st, &fake, "cr-wake", &["code_reviewer"]).await;
+        let cr = &team[0];
+        // No QA or Security: each ticket passes on submit, and the Code reviewer isn't asked about either.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("Next: #42 is with Builder."), "{out}");
+        assert!(woken(&st, cr).is_empty(), "no per-ticket Code Review");
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        assert!(out.contains("It was the spec's last open ticket: code_reviewer agent (Code reviewer) is reviewing the whole spec PR #500 now."), "{out}");
+        let w = woken(&st, cr);
+        assert_eq!(w.len(), 1);
+        for want in [
+            "You are the Code reviewer on this Delivery: every ticket of spec #40 is closed (#41, #42), and you review the whole spec PR https://github.com/octo/cr-wake/pull/500 once, on the spec branch `spec/40-rounds`.",
+            "call `mcp__loft__review_ticket` with 500",
+            "Put findings that can wait in `tech_debt`",
+        ] {
+            assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
+        }
+        assert!(fake.seen("/graphql").is_empty(), "the spec PR stays a draft until the Code Review passes");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "final_review");
+        // A catch-up poll doesn't wake it again or mark the PR ready.
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "cr-wake", true).await.unwrap();
+        assert_eq!((woken(&st, cr).len(), fake.seen("/graphql").len()), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn blocking_findings_go_to_the_dev_and_a_pass_marks_the_pr_ready_and_tells_the_user() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-flow";
+        let (dev, team) = building_both(&st, &fake, "cr-flow", &["code_reviewer"]).await;
+        let cr = &team[0];
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.in_turn("POST", &format!("/repos/{slug}/issues"), vec![(201, json!({ "number": 77 })), (201, json!({ "number": 78 }))]);
+        let debt = json!([{ "title": "Split delivery.rs", "body": "It grew past 600 lines." }]);
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
+
+        // Blocking: back to the Dev, the PR stays a draft, and what can wait is filed.
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: #77.") && out.ends_with("The Dev is fixing them (round 1 of 3); the spec PR stays a draft."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) asks for changes on the spec PR.\n\nstore.rs:12 drops the error.\n\nFiled as tech debt: #77.");
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        let filed = posts(&fake, slug, "issues");
+        let issue = filed.last().unwrap();
+        assert_eq!((&issue["title"], &issue["labels"], &issue["assignees"]), (&json!("Split delivery.rs"), &json!(["tech-debt"]), &json!(["octo-me"])));
+        assert_eq!(issue["body"], "Found in the Code Review of spec PR #500, spec #40.\n\nIt grew past 600 lines.");
+        assert!(posts(&fake, slug, "labels").iter().any(|l| l["name"] == "tech-debt"), "the label is created");
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        assert!(w.last().unwrap().contains("asked for changes on the spec PR https://github.com/octo/cr-flow/pull/500 (round 1 of 3):\n\nstore.rs:12 drops the error."), "{w:?}");
+        assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` with 500"));
+        assert!(fake.seen("/graphql").is_empty());
+
+        // The fixes go back to the Code reviewer.
+        assert!(tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "x" })).await.is_err(), "not before the fixes");
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert_eq!(out, "Submitted the fixes for spec PR #500: code_reviewer agent (Code reviewer) is looking again.");
+        let again = woken(&st, cr);
+        assert!(again.len() == 2 && again[1].contains("The Dev pushed fixes for your last notes") && again[1].contains("The fixes: `feed123`."), "{again:?}");
+
+        // A pass: the PR is marked ready from the record alone, and watched so Needs you offers to merge it.
+        let sub_reads = fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len();
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![
+            (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true })),
+            (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean", "title": "Rounds", "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } })),
+        ]);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Fixed.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: #77.") && out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues").len(), filed.len(), "the same finding isn't filed twice");
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len(), sub_reads, "the tickets aren't read again from GitHub");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().any(|s| s.method == "DELETE"));
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "pr_ready").unwrap_or_else(|| panic!("{v:#}"));
+        assert!(item["title"].as_str().unwrap().starts_with("octo/cr-flow#500"), "{item}");
+    }
+
+    #[tokio::test]
+    async fn without_a_code_reviewer_the_last_close_marks_the_pr_ready() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-none";
+        let (dev, team) = building_both(&st, &fake, "cr-none", &["qa"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty());
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("It was the spec's last open ticket: spec PR #500 is now ready for review"), "{out}");
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
+        assert!(st.db.list_pull_requests(None).unwrap().iter().any(|p| p.slug == slug && p.number == 500), "watched for Needs you");
+        // QA can't file tech debt: that's the Code reviewer's.
+        assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok", "tech_debt": [{ "title": "x", "body": "y" }] })).await.unwrap_err().starts_with("Only the Code reviewer files tech_debt"));
     }
 
     #[test]

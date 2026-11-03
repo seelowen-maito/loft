@@ -32,8 +32,10 @@ pub struct Delivery {
     /// The draft spec PR, once it's open.
     #[serde(default)]
     pub pr: Option<i64>,
-    /// "planned" (published, not started), "running", "ready" (Loft marked the spec PR ready) or
-    /// "settled" (the PR was found ready, merged or closed).
+    /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
+    /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
+    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready) or "settled" (the
+    /// PR was found ready, merged or closed).
     pub state: String,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
@@ -47,6 +49,9 @@ pub struct Delivery {
     /// The agent building the current ticket: the team's Dev, or the planner without one.
     #[serde(default)]
     pub dev: String,
+    /// Changes rounds of the final Code Review of the whole spec PR.
+    #[serde(default)]
+    pub final_rounds: u32,
     pub created_at: String,
 }
 
@@ -1191,6 +1196,7 @@ impl Db {
                 tickets,
                 current: None,
                 dev: String::new(),
+                final_rounds: 0,
                 created_at: now(),
             };
             tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;
