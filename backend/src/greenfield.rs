@@ -54,7 +54,9 @@ pub fn needs_repo(state: &AppState, a: &Agent) -> bool {
         return false;
     }
     let dir = project_dir(state, a);
-    dir.is_dir() && !std::process::Command::new("git").arg("-C").arg(&dir).args(["remote", "get-url", "origin"]).output().is_ok_and(|o| o.status.success())
+    // Blocking: the grill asks from sync code, and reading one config value is quick.
+    let origin = std::process::Command::new("git").arg("-C").arg(&dir).args(crate::repos::SAFE_GIT).args(["remote", "get-url", "origin"]).output();
+    dir.is_dir() && !origin.is_ok_and(|o| o.status.success())
 }
 
 fn project_dir(state: &AppState, a: &Agent) -> PathBuf {
@@ -375,6 +377,7 @@ async fn git_push(dir: &Path, token: &str) -> Result<(), String> {
     let out = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(crate::repos::SAFE_GIT)
         .args(["push", "-u", "origin", "HEAD"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_COUNT", "1")
@@ -603,6 +606,15 @@ mod tests {
         git(&dir, &["init", "-q"]);
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-q", "-m", "mine"]);
+        // The repo's own hooks would see the commit and the push, and the push's token.
+        let marker = dir.parent().unwrap().join("gf-org-hook-ran");
+        for hook in ["pre-commit", "pre-push"] {
+            let path = dir.join(".git/hooks").join(hook);
+            std::fs::write(&path, format!("#!/bin/sh\nenv >> {}\n", marker.display())).unwrap();
+            let mut perm = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+            std::fs::set_permissions(&path, perm).unwrap();
+        }
         for (p, body) in [("b.txt", "b"), ("target/out", "build"), (".remember/x", "x"), ("deploy.key", "key"), (".env.example", "KEY=")] {
             std::fs::create_dir_all(dir.join(p).parent().unwrap()).unwrap();
             std::fs::write(dir.join(p), body).unwrap();
@@ -629,6 +641,7 @@ mod tests {
         let rules = "target\n/.DS_Store\n!.env.example\n.remember/\n.env\n.env.*\n!.env.example\n!.env.sample\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\n";
         assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), rules, "only the missing rules are added, and the `!` rule again after its rule");
         assert_eq!(git(&r, &["log", "--format=%s", "HEAD"]), "Publish the project folder\nmine", "the user's history is kept");
+        assert!(!marker.exists(), "no hook of the repo ran, so none saw the token");
     }
 
     #[tokio::test]

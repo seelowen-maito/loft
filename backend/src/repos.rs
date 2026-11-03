@@ -142,14 +142,17 @@ pub struct GithubItem {
 const GIT_AT_ONCE: usize = 16;
 static GIT_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GIT_AT_ONCE);
 
-/// Runs git in `dir`, with no fsmonitor command and no hooks, so a repo's own config can't make Loft run
-/// anything else; its output, or what git said.
+/// Flags for every git Loft runs in a project folder: no fsmonitor command and no hooks, so a repo's own
+/// config can't make Loft run anything else, nor read what Loft hands git (the push token).
+pub(crate) const SAFE_GIT: [&str; 4] = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+
+/// Runs git in `dir` with [`SAFE_GIT`]; its output, or what git said.
 pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let _slot = GIT_SLOTS.acquire().await?;
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
+        .args(crate::repos::SAFE_GIT)
         .args(args)
         .output()
         .await
