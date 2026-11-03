@@ -206,7 +206,7 @@ export type EndCard = {
   /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
   next_message: string;
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
-  delivery?: { repo: string; spec: number; started?: DeliveryStarted } | null;
+  delivery?: { repo: string; spec: number; standalone?: boolean; started?: DeliveryStarted } | null;
   /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
@@ -540,6 +540,9 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** "Start delivery" on a standalone ticket: its branch, its draft PR and the team's Dev, once. */
+  startIssueDelivery: (id: string) =>
+    req<{ ok: boolean; duplicate: boolean; ticket: number; agent_id: string; agent_name: string; pr: number | null }>("POST", `/issues/${id}/start-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

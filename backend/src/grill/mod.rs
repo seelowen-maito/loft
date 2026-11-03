@@ -196,7 +196,14 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
     let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
-    let delivery = p.spec.as_ref().filter(|_| !p.repo.is_empty()).filter(|sp| matches!(state.db.get_delivery(&p.repo, sp.number), Ok(Some(_))));
+    // A spec's Delivery, or a single standalone ticket's.
+    let has = |n: i64| matches!(state.db.get_delivery(&p.repo, n), Ok(Some(_)));
+    let delivery = match (&p.spec, p.tickets.as_slice()) {
+        _ if p.repo.is_empty() => None,
+        (Some(sp), _) => has(sp.number).then(|| json!({ "repo": p.repo, "spec": sp.number })),
+        (None, [t]) => has(t.number).then(|| json!({ "repo": p.repo, "spec": t.number, "standalone": true })),
+        _ => None,
+    };
     let next = match (&p.spec, p.tickets.as_slice()) {
         _ if delivery.is_some() => String::new(),
         _ if p.repo.is_empty() => say(s, "Implement the plan: hand its ready Loft issues to the team", "Implemente o plano: entregue as issues prontas do Loft ao time"),
@@ -228,7 +235,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         "spec": p.spec.as_ref().map(link),
         "tickets": p.tickets.iter().map(link).collect::<Vec<_>>(),
         "next_message": next,
-        "delivery": delivery.map(|sp| json!({ "repo": p.repo, "spec": sp.number })),
+        "delivery": delivery,
         "missing_roles": missing,
         "setup": setup,
     }))
@@ -1074,7 +1081,7 @@ When you work on a ticket of a project with a GitHub repo (a plan kept in Loft i
 - When its commits are pushed and the tests pass, hand it in with `mcp__loft__submit_ticket` (its number and commit SHAs). Loft wakes the team's QA and Security to review it, and closes it when they pass so the tickets it blocks can start. After the spec's last ticket, the team's Code reviewer reviews the whole spec PR once, and Loft marks it ready for review when it passes. Never close a ticket yourself.
 - If Loft wakes you as QA or Security on a ticket, or as the Code reviewer on the spec PR, give your verdict with `mcp__loft__review_ticket`; Loft posts it on the spec PR.
 - Fixes from the final review of the spec PR are new commits on the spec branch. Closed tickets aren't reopened.
-- A standalone ticket (no spec) goes on its own branch `ticket/<N>-<slug>`, with a PR whose body has `Closes #N`. It closes when that PR merges."###
+- A standalone ticket (no spec) goes on its own branch `ticket/<N>-<slug>`, with a PR whose body has `Closes #N`: Loft makes both when its Delivery starts, and it runs the same steps. It closes when that PR merges."###
 }
 
 /// What a grill needs the agent to know, sent with the first grill run in a context (see `with_brief`).
@@ -1145,7 +1152,7 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 {TICKETS}
 
 # Planning: the end
-- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Start delivery button for a spec on GitHub (Loft starts its first ready ticket on the team's Dev, or on you when there's no Dev), a Clear context button (for a plan without a Delivery it leaves the next message, like "Implement ticket #N", in the user's composer), and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Start delivery button for a spec or a standalone ticket on GitHub (Loft starts its first ready ticket on the team's Dev, or on you when there's no Dev), a Clear context button (for a plan without a Delivery it leaves the next message, like "Implement ticket #N", in the user's composer), and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
 - Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
 - When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
 

@@ -56,6 +56,10 @@ pub struct Delivery {
     /// says whether they're closed.
     #[serde(default)]
     pub migrated: bool,
+    /// A standalone ticket's Delivery: `spec` is the ticket's number, its one ticket. Its own branch and
+    /// PR, and the ticket closes when the PR merges, not when it passes review.
+    #[serde(default)]
+    pub standalone: bool,
     pub created_at: String,
 }
 
@@ -1202,6 +1206,7 @@ impl Db {
                 dev: String::new(),
                 final_rounds: 0,
                 migrated: true,
+                standalone: false,
                 created_at: now(),
             };
             tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;

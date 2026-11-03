@@ -386,6 +386,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
         .route("/{id}/keep-working", post(crate::mirror::keep_working))
+        .route("/{id}/start-delivery", post(crate::delivery::start_from_issue))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
 }

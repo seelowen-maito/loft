@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type Task } from "../lib/api";
 import { cx } from "../lib/format";
@@ -135,6 +135,50 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
         <button className="btn-primary" disabled={!agentId || busy} onClick={start}>
           <Play className="size-3 fill-current" /> Start
         </button>
+      </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
+/** A standalone ticket on GitHub (open, `ready-for-agent`, under no spec): Loft runs it as a Delivery. */
+export function isStandaloneTicket(t: Task) {
+  return t.state === "open" && t.github?.state === "open" && t.labels.includes("ready-for-agent") && !t.parent_id;
+}
+
+/** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
+export function DeliveryCard({ task: t }: { task: Task }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [started, setStarted] = useState<{ agent_id: string; agent_name: string; pr: number | null } | null>(null);
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setStarted(await api.startIssueDelivery(t.id));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = t.github?.number;
+  return (
+    <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px]">Start delivery</div>
+          <div className="mt-0.5 text-[12.5px] text-fg-3">
+            {started
+              ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
+              : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
+          </div>
+        </div>
+        {!started && (
+          <button className="btn-primary" disabled={busy} onClick={start}>
+            <Play className="size-3 fill-current" /> Start delivery
+          </button>
+        )}
       </div>
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </section>

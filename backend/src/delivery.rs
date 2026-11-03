@@ -37,11 +37,23 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             dev: String::new(),
             final_rounds: 0,
             migrated: false,
+            standalone: false,
             created_at: crate::db::now(),
         },
         Err(e) => return tracing::warn!("delivery {repo}#{spec}: {e}"),
     };
     let _ = state.db.save_delivery(&d);
+}
+
+/// The Delivery of standalone ticket #n on `repo`, its only ticket, on the branch `ticket/<N>-<slug>`.
+/// One already there is left as it is. The branch and its PR are made when the Delivery starts.
+pub fn record_standalone(state: &AppState, repo: &str, n: i64, title: &str, project: &str, planner: &str) {
+    if !matches!(state.db.get_delivery(repo, n), Ok(None)) {
+        return;
+    }
+    record_spec(state, repo, n, project, planner, &crate::planning::ticket_branch(n, title));
+    update(state, repo, n, |d| d.standalone = true);
+    record_ticket(state, repo, n, n, title, vec![]);
 }
 
 /// Changes the Delivery of spec #spec on `repo`, if it has one, and saves it.
@@ -85,18 +97,36 @@ pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
 }
 
+/// What a Delivery delivers: "spec #40", or "ticket #7" for a standalone ticket.
+fn subject(d: &Delivery) -> String {
+    format!("{} #{}", if d.standalone { "ticket" } else { "spec" }, d.spec)
+}
+
+/// "spec PR", or "PR" for a standalone ticket.
+fn pr_name(d: &Delivery) -> &'static str {
+    if d.standalone { "PR" } else { "spec PR" }
+}
+
+/// "spec branch", or "ticket branch" for a standalone ticket.
+fn branch_name(d: &Delivery) -> &'static str {
+    if d.standalone { "ticket branch" } else { "spec branch" }
+}
+
 /// The Dev role brief, sent with the wake that hands a ticket to the Dev.
 fn dev_brief(d: &Delivery, t: &DeliveryTicket) -> String {
     let repo = &d.repo;
-    let pr = d.pr.map(|pr| format!(" Open no PR: the spec PR https://github.com/{repo}/pull/{pr} is the spec's only one.")).unwrap_or_default();
+    let whose = if d.standalone { "ticket" } else { "spec" };
+    let pr = d.pr.map(|pr| format!(" Open no PR: the {} https://github.com/{repo}/pull/{pr} is the {whose}'s only one.", pr_name(d))).unwrap_or_default();
+    let spec = if d.standalone { String::new() } else { format!(" and its spec #{}", d.spec) };
     format!(
-        "[Loft Delivery: spec #{spec}] This is not a message from the user. You are the Dev on this Delivery: build ticket #{n} \"{title}\" (https://github.com/{repo}/issues/{n}).\n\
-         - Read the ticket and its spec #{spec} first, and build only what the ticket asks.\n\
-         - Work on the spec branch `{branch}`: pull it, commit there and push.{pr}\n\
+        "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: build ticket #{n} \"{title}\" (https://github.com/{repo}/issues/{n}).\n\
+         - Read the ticket{spec} first, and build only what the ticket asks.\n\
+         - Work on the {bname} `{branch}`: pull it, commit there and push.{pr}\n\
          - One or more commits, each message ending with `Refs #{n}`.\n\
          - Your own instructions say how to build and check the work in this project. They can add to this brief, but they don't change the branch, the PR or how the ticket closes.\n\
          - When the commits are pushed and the checks pass, call `mcp__loft__submit_ticket` with {n} and all the ticket's commit SHAs, oldest first. Loft hands them to the team's reviewers and closes the ticket when they pass: never close it yourself.",
-        spec = d.spec,
+        about = subject(d),
+        bname = branch_name(d),
         n = t.number,
         title = t.title,
         branch = d.branch,
@@ -129,6 +159,13 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     if d.state != "planned" {
         return Ok(Started { ticket: d.current.unwrap_or_default(), agent, already: true });
     }
+    let d = if d.standalone && d.pr.is_none() {
+        let title = d.tickets.first().map(|t| t.title.clone()).unwrap_or_default();
+        crate::planning::branch_and_pr(state, repo, spec, &title, "ticket", None).await.map_err(|e| format!("The Delivery didn't start: {e}."))?;
+        state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or("The Delivery record is gone.")?
+    } else {
+        d
+    };
     if d.branch.is_empty() {
         return Err(format!("Spec #{spec} has no spec branch yet: call publish_spec again with the same title to make it."));
     }
@@ -191,18 +228,20 @@ fn short(sha: &str) -> &str {
 fn review_brief(d: &Delivery, t: &DeliveryTicket, role: &str) -> String {
     let repo = &d.repo;
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
-    let pr = d.pr.map(|pr| format!(" (spec PR https://github.com/{repo}/pull/{pr})")).unwrap_or_default();
+    let pr = d.pr.map(|pr| format!(" ({} https://github.com/{repo}/pull/{pr})", pr_name(d))).unwrap_or_default();
     let (who, job) = match role {
         "qa" => ("QA", "Test that they deliver the ticket's acceptance criteria: run the tests and try the behaviour the ticket changes."),
         _ => ("Security", "Check them for security problems an attacker could really use, tracing each input to where it's used. No speculative findings."),
     };
     format!(
-        "[Loft Delivery: spec #{spec}] This is not a message from the user. You are {who} on this Delivery: review ticket #{n} \"{title}\" (https://github.com/{repo}/issues/{n}), submitted as {commits} on the spec branch `{branch}`{pr}.\n\
+        "[Loft Delivery: {about}] This is not a message from the user. You are {who} on this Delivery: review ticket #{n} \"{title}\" (https://github.com/{repo}/issues/{n}), submitted as {commits} on the {bname} `{branch}`{pr}.\n\
          - Pull the branch and read the ticket and only these commits. {job}\n\
          - Don't fix the work yourself: say what's wrong and the Dev fixes it.\n\
          - Your own instructions say how to check this project. They can add to this brief, but they don't change the branch, the PR or how the ticket closes.\n\
-         - When you're done, call `mcp__loft__review_ticket` with {n}, `verdict` \"pass\" or \"changes\", and `notes`: what you checked and, for changes, each problem and how to see it. Loft posts it on the spec PR.",
-        spec = d.spec,
+         - When you're done, call `mcp__loft__review_ticket` with {n}, `verdict` \"pass\" or \"changes\", and `notes`: what you checked and, for changes, each problem and how to see it. Loft posts it on the {pname}.",
+        about = subject(d),
+        bname = branch_name(d),
+        pname = pr_name(d),
         n = t.number,
         title = t.title,
         branch = d.branch,
@@ -365,9 +404,10 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Ok(format!("Posted your changes on #{on}.{labelled} That's round {rounds} of changes on #{n}, so it waits for the user now{why}."));
     }
     let brief = format!(
-        "[Loft Delivery: spec #{spec}] This is not a message from the user. {who} ({label}) asked for changes on ticket #{n} \"{title}\" (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-         Fix it on the spec branch `{branch}` with new commits, each ending with `Refs #{n}`, push, then call `mcp__loft__submit_ticket` again with all the ticket's commits, oldest first.",
-        spec = d.spec,
+        "[Loft Delivery: {about}] This is not a message from the user. {who} ({label}) asked for changes on ticket #{n} \"{title}\" (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
+         Fix it on the {bname} `{branch}` with new commits, each ending with `Refs #{n}`, push, then call `mcp__loft__submit_ticket` again with all the ticket's commits, oldest first.",
+        about = subject(&d),
+        bname = branch_name(&d),
         who = me.name,
         title = t.title,
         branch = d.branch,
@@ -395,7 +435,7 @@ async fn label_issue(state: &AppState, slug: &str, n: i64, name: &str) -> Result
 /// issue of `issue` (the ticket, or the spec) is blocked, which puts it in Needs you and sends a push.
 /// Empty, or a note when GitHub refused the label.
 async fn needs_human(state: &AppState, d: &Delivery, labelled: i64, issue: i64, rounds: u32, notes: &str) -> String {
-    let what = if labelled == issue { format!("#{issue}") } else { format!("spec PR #{labelled}") };
+    let what = if labelled == issue { format!("#{issue}") } else { format!("{} #{labelled}", pr_name(d)) };
     let labelled = label_issue(state, &d.repo, labelled, "needs-human").await.err().map(|e| format!(" (and {e})")).unwrap_or_default();
     let mut task = state.db.list_tasks().unwrap_or_default().into_iter().find(|x| x.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == issue));
     if task.is_none() {
@@ -419,6 +459,22 @@ async fn needs_human(state: &AppState, d: &Delivery, labelled: i64, issue: i64, 
 /// "closing" and retried on the mirror's next poll. The lines for the reply.
 async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String> {
     let t = d.tickets.iter().find(|t| t.number == n).ok_or("The ticket left the Delivery record.")?;
+    if d.standalone {
+        // Its PR closes it when it merges: Loft doesn't close it now.
+        let d = update(state, &d.repo, d.spec, |d| {
+            if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
+                t.state = "closed".into();
+            }
+            d.current = None;
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
+        if let Some(pr) = d.pr {
+            let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{}/issues/{pr}/labels/changes-requested", d.repo), None).await;
+        }
+        let after = crate::planning::after_tickets(state, &d).await.unwrap_or_else(|e| Some(format!("\nBut {e}: Loft tries again on its next poll.")));
+        let pr = d.pr.map(|pr| format!(" PR #{pr}")).unwrap_or_default();
+        return Ok(format!("\n#{n} passed its reviews. It stays open until its{pr} merges.{}", after.unwrap_or_default()));
+    }
     let by = state.db.get_agent(&d.dev).ok().flatten().ok_or("The agent that built the ticket is gone.")?;
     update(state, &d.repo, d.spec, |d| {
         if let Some(t) = d.tickets.iter_mut().find(|t| t.number == n) {
@@ -462,6 +518,32 @@ pub(crate) async fn retry(state: &AppState, repo: &str) {
     }
 }
 
+/// `POST /api/issues/{id}/start-delivery`: "Start delivery" on a standalone ticket's Loft issue. Makes its
+/// Delivery the first time (only for an open `ready-for-agent` issue that isn't a spec's ticket), then
+/// starts it like the end-of-planning card does: its branch, its draft PR with `Closes #N`, and the Dev.
+pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let Some(g) = t.github.clone() else {
+        return Err(bad("This issue isn't on GitHub: its Delivery needs a GitHub repo."));
+    };
+    let (repo, n) = (g.repo.clone(), g.number);
+    if let Some(d) = of_ticket(&state, &repo, n).filter(|d| !d.standalone) {
+        return Err(bad(format!("#{n} is a ticket of spec #{}: start the spec's Delivery from its end-of-planning card.", d.spec)));
+    }
+    if matches!(state.db.get_delivery(&repo, n), Ok(None)) {
+        let i = crate::github::get(&state, &format!("/repos/{repo}/issues/{n}")).await.map_err(|e| bad(format!("Couldn't read #{n} on {repo}: {e}")))?;
+        let ticket = i.get("pull_request").is_none() && i["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent");
+        if !ticket || i["state"] != "open" {
+            return Err(bad(format!("#{n} isn't an open ticket (an issue labelled `ready-for-agent`), so it has no Delivery.")));
+        }
+        let planner = if t.created_by != "user" { t.created_by.as_str() } else { "" };
+        record_standalone(&state, &repo, n, i["title"].as_str().unwrap_or(&t.title), &t.project, planner);
+    }
+    let s = start(&state, &repo, n, "").await.map_err(bad)?;
+    let pr = state.db.get_delivery(&repo, n)?.and_then(|d| d.pr);
+    Ok(Json(json!({ "ok": true, "duplicate": s.already, "ticket": n, "agent_id": s.agent.id, "agent_name": s.agent.name, "pr": pr })))
+}
+
 /// `POST /api/agents/{id}/messages/{mid}/start-delivery`: the end-of-planning card's "Start delivery".
 /// Starts the card's Delivery once and records on the card who got which ticket, so it shows as started
 /// after a reload; a second press gets the card back without starting another ticket.
@@ -489,8 +571,9 @@ pub(crate) fn begin_final_review(state: &AppState, d: &Delivery) -> Option<Strin
     let cr = with_role(state, d, "code_reviewer")?;
     let d = update(state, &d.repo, d.spec, |d| d.state = "final_review".into())?;
     crate::agents::wake(state, &cr.id, final_brief(&d), "delivery");
-    let pr = d.pr.map(|pr| format!(" spec PR #{pr}")).unwrap_or_default();
-    Some(format!("\nIt was the spec's last open ticket: {} (Code reviewer) is reviewing the whole{pr} now.", cr.name))
+    let pr = d.pr.map(|pr| format!(" {} #{pr}", pr_name(&d))).unwrap_or_default();
+    let done = if d.standalone { "It passed its reviews" } else { "It was the spec's last open ticket" };
+    Some(format!("\n{done}: {} (Code reviewer) is reviewing the whole{pr} now.", cr.name))
 }
 
 /// The Code reviewer role brief, sent with the wake that asks for the final review of the spec PR.
@@ -498,14 +581,17 @@ fn final_brief(d: &Delivery) -> String {
     let repo = &d.repo;
     let pr = d.pr.unwrap_or_default();
     let tickets = d.tickets.iter().map(|t| format!("#{}", t.number)).collect::<Vec<_>>().join(", ");
+    let done = if d.standalone { format!("ticket #{} passed QA and Security", d.spec) } else { format!("every ticket of spec #{} is closed ({tickets})", d.spec) };
     let again = if d.final_rounds > 0 { "\n- The Dev pushed fixes for your last notes: look again, at those fixes first." } else { "" };
     format!(
-        "[Loft Delivery: spec #{spec}] This is not a message from the user. You are the Code reviewer on this Delivery: every ticket of spec #{spec} is closed ({tickets}), and you review the whole spec PR https://github.com/{repo}/pull/{pr} once, on the spec branch `{branch}`.\n\
+        "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: {done}, and you review the whole {pname} https://github.com/{repo}/pull/{pr} once, on the {bname} `{branch}`.\n\
          - Pull the branch and review its whole diff against the default branch: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
          - Don't fix the work yourself.\n\
          - Your own instructions say how to review this project. They can add to this brief, but they don't change the branch, the PR or how it's merged.\n\
          - When you're done, call `mcp__loft__review_ticket` with {pr}: `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` issue.",
-        spec = d.spec,
+        about = subject(d),
+        pname = pr_name(d),
+        bname = branch_name(d),
         branch = d.branch,
     )
 }
@@ -535,7 +621,7 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     };
     let shas = commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     crate::agents::wake(state, &cr.id, format!("{}\n- The fixes: {shas}.", final_brief(&d)), "delivery");
-    Some(Ok(format!("Submitted the fixes for spec PR #{}: {} (Code reviewer) is looking again.", d.pr.unwrap_or(n), cr.name)))
+    Some(Ok(format!("Submitted the fixes for {} #{}: {} (Code reviewer) is looking again.", pr_name(&d), d.pr.unwrap_or(n), cr.name)))
 }
 
 /// `review_ticket` from the Code reviewer: its verdict on the whole spec PR. Findings that can wait become
@@ -547,9 +633,9 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     let pr = d.pr.ok_or("The Delivery has no spec PR.")?;
     let filed = file_tech_debt(state, &d, args["tech_debt"].as_array().cloned().unwrap_or_default()).await;
     let head = if verdict == "pass" {
-        format!("**Code reviewer** ({}) passed the spec PR.", me.name)
+        format!("**Code reviewer** ({}) passed the {}.", me.name, pr_name(&d))
     } else {
-        format!("**Code reviewer** ({}) asks for changes on the spec PR.", me.name)
+        format!("**Code reviewer** ({}) asks for changes on the {}.", me.name, pr_name(&d))
     };
     let debt = if filed.0.is_empty() { String::new() } else { format!("\n\nFiled as tech debt: {}.", filed.0.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(", ")) };
     let body = format!("{head}{}{debt}", if notes.is_empty() { String::new() } else { format!("\n\n{notes}") });
@@ -579,17 +665,20 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     .ok_or("The Delivery record couldn't be saved.")?;
     if stuck {
         let why = needs_human(state, &d, pr, d.spec, rounds, notes).await;
-        return Ok(format!("Posted your changes on #{pr}.{labelled}{filed_line} That's round {rounds} of changes on the spec PR, so it waits for the user now{why}."));
+        return Ok(format!("Posted your changes on #{pr}.{labelled}{filed_line} That's round {rounds} of changes on the {}, so it waits for the user now{why}.", pr_name(&d)));
     }
     let brief = format!(
-        "[Loft Delivery: spec #{spec}] This is not a message from the user. {who} (Code reviewer) asked for changes on the spec PR https://github.com/{slug}/pull/{pr} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-         Fix them on the spec branch `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.",
+        "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the {pname} https://github.com/{slug}/pull/{pr} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
+         Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.",
+        about = subject(&d),
+        pname = pr_name(&d),
+        bname = branch_name(&d),
         spec = d.spec,
         who = me.name,
         branch = d.branch,
     );
     crate::agents::wake(state, &d.dev, brief, "delivery");
-    Ok(format!("Posted your changes on #{pr}.{labelled}{filed_line} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the spec PR stays a draft."))
+    Ok(format!("Posted your changes on #{pr}.{labelled}{filed_line} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the {} stays a draft.", pr_name(&d)))
 }
 
 /// Files the Code reviewer's findings that can wait as `tech-debt` issues assigned to the user, once each
@@ -617,8 +706,8 @@ async fn file_tech_debt(state: &AppState, d: &Delivery, items: Vec<Value>) -> (V
             out.push(n);
             continue;
         }
-        let pr = d.pr.map(|pr| format!("spec PR #{pr}, ")).unwrap_or_default();
-        let body = format!("Found in the Code Review of {pr}spec #{}.\n\n{body}", d.spec);
+        let pr = d.pr.map(|pr| format!("{} #{pr}, ", pr_name(d))).unwrap_or_default();
+        let body = format!("Found in the Code Review of {pr}{}.\n\n{body}", subject(d));
         let made = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues"), Some(json!({ "title": title, "body": body, "labels": ["tech-debt"], "assignees": [login] }))).await;
         match made.ok().and_then(|v| v["number"].as_i64()) {
             Some(n) => {

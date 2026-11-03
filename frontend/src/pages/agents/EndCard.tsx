@@ -59,7 +59,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
           <button
             className="btn btn-primary text-[12.5px]"
             disabled={busy !== null}
-            title={`Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
+            title={delivery.standalone ? `Opens #${delivery.spec}'s branch and draft PR and starts it on the team's Dev.` : `Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
             onClick={() => run("start", async () => {
               const r = await api.startDelivery(agentId, messageId);
               setStarted(r.message.meta?.grill?.end_card?.delivery?.started ?? null);
