@@ -1038,17 +1038,19 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 "agent_id": assignee.as_ref().map(|a| a.id.clone()),
                 "depends_on": args.get("depends_on").cloned().unwrap_or(json!([])),
             });
-            for k in ["parent_id", "priority", "project"] {
+            for k in ["parent_id", "priority"] {
                 if !s(k).is_empty() {
                     p[k] = json!(s(k));
                 }
             }
-            // No project given: the assignee's (in `create`), else the creating agent's.
-            if s("project").is_empty() && assignee.is_none() && !me.project.is_empty() {
-                p["project"] = json!(me.project);
-            }
+            // No project given: the assignee's main one, else the creating agent's. Resolved here, so the
+            // check below sees the project the issue really gets.
+            let project = match s("project") {
+                p if !p.is_empty() => p,
+                _ => assignee.as_ref().map_or(me.project.trim(), |a| a.project.trim()).to_string(),
+            };
+            p["project"] = json!(project);
             // An agent with projects creates issues only in them.
-            let project = s("project");
             if !project.is_empty() && !me.projects.is_empty() && !me.has_project(&project) {
                 return Err(format!("You don't work in {project}, so you can't create issues there. Your projects: {}. Ask the user, or an agent that works in {project}.", me.projects.join(", ")));
             }
@@ -1708,6 +1710,14 @@ pub(crate) mod tests {
         let err = mcp_call(&st, &web, "create_issue", &json!({ "title": "X", "project": "api" }), find).unwrap().unwrap_err();
         assert_eq!(err, "You don't work in api, so you can't create issues there. Your projects: b2c, b2b. Ask the user, or an agent that works in api.");
         assert!(mcp_call(&st, &web, "create_issue", &json!({ "title": "Y", "project": "b2b" }), find).unwrap().is_ok());
+        // Leaving the project out doesn't get around it: the assignee's main project is checked too.
+        let before = st.db.list_tasks().unwrap().len();
+        let err = mcp_call(&st, &web, "create_issue", &json!({ "title": "Via Api", "agent": "Api" }), find).unwrap().unwrap_err();
+        assert!(err.starts_with("You don't work in api"), "{err}");
+        assert_eq!(st.db.list_tasks().unwrap().len(), before, "nothing created");
+        let r = mcp_call(&st, &web, "create_issue", &json!({ "title": "For me", "agent": "Web" }), find).unwrap().unwrap();
+        let id = r.split_whitespace().nth(2).unwrap().trim_end_matches('.');
+        assert_eq!(st.db.get_task(id).unwrap().unwrap().project, "b2c", "its own main project");
         // An agent with no projects isn't limited.
         assert!(mcp_call(&st, &loose, "create_issue", &json!({ "title": "Z", "project": "api" }), find).unwrap().is_ok());
     }

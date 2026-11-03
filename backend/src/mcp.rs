@@ -169,16 +169,22 @@ fn base_tools() -> Value {
     ])
 }
 
-/// An agent by id, or by name ignoring case.
-fn find_agent(state: &AppState, key: &str) -> Result<Agent, Value> {
+/// An agent by id, or by name ignoring case; where two share a name, the one in `team` (the caller's) wins, as with @mentions.
+fn find_agent(state: &AppState, team: &str, key: &str) -> Result<Agent, Value> {
     let key = key.trim();
     if key.is_empty() {
         return Err(tool_error("agent is required"));
     }
-    let all = state.db.list_agents().map_err(|e| tool_error(e.to_string()))?;
+    let mut all = state.db.list_agents().map_err(|e| tool_error(e.to_string()))?;
+    all.sort_by_key(|a| a.team() != team);
     let i = all.iter().position(|a| a.id == key).or_else(|| all.iter().position(|a| a.name.eq_ignore_ascii_case(key)));
     i.map(|i| all[i].clone())
         .ok_or_else(|| tool_error(format!("No agent called {key}. Call list_agents to see who exists.")))
+}
+
+/// The team of the agent calling a tool; "" when it's gone.
+fn team(state: &AppState, agent_id: &str) -> String {
+    state.db.get_agent(agent_id).ok().flatten().map(|a| a.team().to_string()).unwrap_or_default()
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -213,7 +219,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Err(e) => tool_error(e),
             };
         }
-        let find = |k: &str| find_agent(state, k).map_err(|e| e["content"][0]["text"].as_str().unwrap_or("").to_string());
+        let find = |k: &str| find_agent(state, me.team(), k).map_err(|e| e["content"][0]["text"].as_str().unwrap_or("").to_string());
         if let Some(r) = crate::tasks::mcp_call(state, &me, name, &args, find).or_else(|| crate::grill::mcp_call(state, &me, name, &args)) {
             return match r {
                 Ok(t) => text(t),
@@ -374,7 +380,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             Err(e) => tool_error(e.to_string()),
         },
         "read_agent_chat" => {
-            let a = match find_agent(state, &s("agent")) {
+            let a = match find_agent(state, &team(state, agent_id), &s("agent")) {
                 Ok(a) => a,
                 Err(e) => return e,
             };
@@ -404,7 +410,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             if lines.is_empty() { text(format!("{}'s chat is empty.", a.name)) } else { text(lines.join("\n")) }
         }
         "message_agent" => {
-            let to = match find_agent(state, &s("agent")) {
+            let to = match find_agent(state, &team(state, agent_id), &s("agent")) {
                 Ok(a) => a,
                 Err(e) => return e,
             };
@@ -529,6 +535,24 @@ mod tests {
 
     fn said(r: &Value) -> (&str, bool) {
         (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[test]
+    fn a_name_two_agents_share_finds_the_one_in_the_caller_s_group() {
+        let st = crate::tasks::tests::state();
+        let mk = |name: &str, group: &str| {
+            let mut a = crate::tasks::tests::agent(&st, name);
+            a.group = group.into();
+            st.db.save_agent(&a).unwrap();
+            a
+        };
+        let far = mk("Dev", "Imole");
+        let near = mk("Dev", "Dineout");
+        let me = mk("Lead", "Dineout");
+        let other = mk("Isa", "Imole");
+        assert_eq!(find_agent(&st, &team(&st, &me.id), "dev").unwrap().id, near.id);
+        assert_eq!(find_agent(&st, &team(&st, &other.id), "Dev").unwrap().id, far.id);
+        assert_eq!(find_agent(&st, &team(&st, &me.id), &far.id).unwrap().id, far.id, "an id is exact");
     }
 
     #[tokio::test]
