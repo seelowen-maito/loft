@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { api, type MacAccess as Check } from "../lib/api";
 import { cx } from "../lib/format";
@@ -15,6 +15,21 @@ export function MacAccess() {
   const [check, setCheck] = useState<Check | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const card = useRef<HTMLElement>(null);
+  // Needs you links here when macOS is asking on the Mac. The sections above load after this one
+  // mounts and push it down, so it's scrolled to again while the page grows (for a few seconds).
+  useEffect(() => {
+    if (window.location.hash !== "#mac-access") return;
+    const go = () => card.current?.scrollIntoView({ block: "start" });
+    go();
+    const grows = new ResizeObserver(go);
+    grows.observe(card.current?.parentElement ?? document.body);
+    const stop = setTimeout(() => grows.disconnect(), 3000);
+    return () => {
+      clearTimeout(stop);
+      grows.disconnect();
+    };
+  }, []);
 
   const run = async () => {
     setBusy(true);
@@ -31,13 +46,14 @@ export function MacAccess() {
   const fullDisk = check?.items.find((i) => i.id === "full_disk")?.state === "allowed";
   const needsHelp = check && !fullDisk && check.items.some((i) => i.state === "blocked" || i.state === "waiting");
   return (
-    <section className="panel space-y-4 p-5">
+    <section id="mac-access" ref={card} className="panel scroll-mt-4 space-y-4 p-5">
       <div className="flex items-start gap-3">
         <div className="flex-1">
           <h2 className="text-[15px] font-medium tracking-tight">Mac access</h2>
           <p className="mt-1 text-[12.5px] text-fg-3">
             macOS asks before any app reads Desktop, Documents, Downloads or iCloud Drive. On a Mac with no screen nobody sees it, and an agent waits
-            for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing.
+            for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing. Loft also
+            watches macOS's privacy log for prompts in its own name (only those) and tells you in Needs you.
           </p>
         </div>
         <button className="btn shrink-0" disabled={busy} onClick={run}>

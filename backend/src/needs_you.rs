@@ -516,6 +516,37 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // macOS asking on a Mac nobody's looking at: an agent's file read waits until someone answers.
+    let asking = state.rt.lock().unwrap().tcc.asking(std::time::Instant::now());
+    let host = crate::tailnet::host();
+    let mac = host.as_deref().and_then(|h| h.split('.').next()).unwrap_or("this Mac").to_string();
+    for a in asking {
+        let id = format!("mac_access:{}:{}", a.service, a.since);
+        let mut actions = vec![];
+        if let Some(h) = &host {
+            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("http://{h}:{}/settings#mac-access", state.cfg.port) } }));
+            actions.push(json!({ "kind": "open", "label": "Screen Sharing", "target": { "url": format!("vnc://{h}") } }));
+        }
+        actions.push(action("check", "Check again", "POST", "/api/system/mac-access".into(), json!({})));
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "mac_access",
+            urgency: 3,
+            agent: None,
+            task_id: None,
+            title: text(&format!("macOS is asking for access to {} on {mac}", a.folder), MAX_TITLE),
+            reason: text("A prompt is up on the Mac's screen; an agent's work waits until someone answers it.", MAX_REASON),
+            text: text("Answer it over Screen Sharing, or give Loft Full Disk Access (Settings → Mac access) so macOS stops asking.", MAX_TEXT),
+            created_at: a.since,
+            links: vec![],
+            actions,
+            push: ("macOS is asking for access".to_string(), format!("{} on {mac}", a.folder)),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
     let dismissed: HashSet<String> = state.db.dismissed_needs_you().map_err(e)?.into_iter().collect();
     items.retain(|i| !dismissed.contains(&i.id));
     // Most urgent first; within the same urgency, the longest waiting first.
@@ -571,7 +602,8 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        kind: i.kind,
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
+        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),
