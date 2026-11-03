@@ -580,15 +580,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["testConnection"].isEnabled)
     }
 
-    /// Spec #144: "Try the demo" opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
+    /// Spec #144: the demo address opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
     func testTheDemoShowsIssuesAndLeaves() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai"]
         app.launch()
-        let demo = app.buttons["tryDemo"]
-        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5))
-        if !demo.isHittable { app.swipeUp() }
-        demo.tap()
+        let field = app.textFields["serverAddressField"]
+        XCTAssertTrue(field.appears(timeout: 5))
+        XCTAssertFalse(app.buttons["tryDemo"].exists, "no demo button: App Review types the demo address")
+        field.tap()
+        // A saved address from another run would prefill the field.
+        if let v = field.value as? String, v.contains(".") { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: v.count)) }
+        field.typeText("demo-loft-dev.get-loft.com")
+        app.buttons["saveServer"].tap()
         XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
         app.tabBars.buttons["Tasks"].tap()
         XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
@@ -598,10 +602,10 @@ final class LoftUITests: XCTestCase {
         // #146: the Lead answers, from a script.
         app.tabBars.buttons["Chat"].tap()
         app.buttons["orchestratorConversation"].firstMatch.tap()
-        let field = app.textFields["composerField"]
-        XCTAssertTrue(field.appears(timeout: 5))
-        field.tap()
-        field.typeText("What is the status")
+        let composer = app.textFields["composerField"]
+        XCTAssertTrue(composer.appears(timeout: 5))
+        composer.tap()
+        composer.typeText("What is the status")
         app.buttons["sendButton"].tap()
         XCTAssertTrue(text(containing: "3 of 4 endpoints", app).appears(timeout: 5), "a scripted answer, shown at once")
         app.buttons["exitDemo"].tap()

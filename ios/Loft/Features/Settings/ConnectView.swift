@@ -85,14 +85,7 @@ struct ConnectView: View {
             } footer: {
                 Text("Loft has no login of its own: only devices on your tailnet can reach it. Keep it off the public internet.")
             }
-            if isOnboarding {
-                Section {
-                    Button { store.enterDemo() } label: { Label("Try the demo", systemImage: "play.circle") }
-                        .accessibilityIdentifier("tryDemo")
-                } footer: {
-                    Text("Sample data on this iPhone, with no server: nothing is sent anywhere, and it resets when you leave.")
-                }
-            }
+
         }
         .navigationTitle(isOnboarding ? "" : "Server")
         .navigationBarTitleDisplayMode(.inline)
@@ -104,6 +97,8 @@ struct ConnectView: View {
     }
 
     private func test() async {
+        // The demo address is answered here, with no request.
+        if LoftStore.isDemoAddress(address) { return save() }
         guard let url else { return }
         testing = true
         defer { testing = false }
@@ -114,12 +109,8 @@ struct ConnectView: View {
         }
     }
 
+    /// The demo address opens the bundled demo instead (App Review types it in): nothing is saved and nothing goes out.
     private func save() {
-        guard let url else { return }
-        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
-        UserDefaults.standard.removeObject(forKey: "serverURL-override")
-        store.configure(LiveLoftAPI(baseURL: url))
-        store.activate()
-        if !isOnboarding { dismiss() }
+        if store.connect(address: address), !isOnboarding { dismiss() }
     }
 }
