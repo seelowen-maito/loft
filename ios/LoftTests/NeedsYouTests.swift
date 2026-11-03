@@ -10,7 +10,7 @@ final class NeedsYouTests: XCTestCase {
         let l = try fixture()
         XCTAssertEqual(l.version, 1)
         XCTAssertEqual(l.items.first?.type, "permission", "the server's order is kept")
-        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "comment_approval", "task_done"])
+        XCTAssertEqual(Set(l.items.map(\.type)), ["permission", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "closed_on_github", "comment_approval", "task_done"])
         let open = try XCTUnwrap(l.items.first { $0.type == "question" }?.openAction)
         XCTAssertEqual(open.target?.screen, "chat")
         XCTAssertFalse(l.items.first { $0.type == "permission" }!.canDismiss, "permissions can't be dismissed")
@@ -24,6 +24,14 @@ final class NeedsYouTests: XCTestCase {
         // Other actions are sent exactly as given.
         let approve = try XCTUnwrap(try fixture().items.first { $0.type == "permission" }?.actions.first { $0.kind == "approve" })
         XCTAssertEqual(approve.body(text: nil, clientId: "c2"), approve.body)
+    }
+
+    /// Closed on GitHub while an agent works on it (#177): Cancel or Keep working, which reopens the GitHub issue.
+    func testClosedOnGitHubAsksCancelOrKeepWorking() throws {
+        let item = try XCTUnwrap(try fixture().items.first { $0.type == "closed_on_github" })
+        XCTAssertEqual(item.actions.filter(\.isRequest).map(\.kind), ["deny", "approve"])
+        XCTAssertEqual(item.actions.first { $0.kind == "approve" }?.path, "/api/issues/t2/keep-working")
+        XCTAssertEqual(item.openAction?.target?.taskId, "t2")
     }
 
     /// A comment waiting for GitHub (spec #65): Approve, "Edit and approve" starting from the comment's text, Keep in Loft.

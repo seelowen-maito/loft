@@ -1,8 +1,7 @@
-#if DEBUG
 import Foundation
 
-/// Deterministic in-memory server for UI tests (`-ui-testing`). Debug builds only;
-/// the shipping app always talks to a real Loft.
+/// Deterministic in-memory server: UI tests (`-ui-testing`, debug builds) and demo mode (spec #144: "Try the demo"
+/// on the connect screen, in every build). It never touches the network.
 final class FixtureAPI: LoftAPI, @unchecked Sendable {
     enum Mode { case normal, empty, offline, failSends }
 
@@ -44,13 +43,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
     }
 
-    /// The agent answers each message two seconds later, with no live event (like one missed in a reconnect).
+    /// The agent answers each message half a second later, with no live event (like one missed in a reconnect).
     private let replies: Bool
+    /// The demo's answers come from `demoReply` instead of one fixed line.
+    private let scripted: Bool
 
     /// `grillEnded` and `setupSent` are `-fixture-grill-ended` and `-fixture-setup-sent` for unit tests.
-    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, grillEnded: Bool = false, setupSent: Bool = false) {
+    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, scripted: Bool = false, grillEnded: Bool = false, setupSent: Bool = false) {
         self.mode = mode
-        self.replies = replies
+        self.replies = replies || scripted
+        self.scripted = scripted
         self.grill = grill && mode != .empty
         let now = Date()
         func ago(_ m: Double) -> Date { now.addingTimeInterval(-m * 60) }
@@ -114,6 +116,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             task("t6", "Renew the domain", "inbox", agent: nil, minutes: 300),
             task("t7", "Fix broken docs links", "failed", agent: "docs", error: "Link checker crashed", minutes: 60),
         ]
+        // t1 mirrors a GitHub issue (spec #65): labels, an owner and its sub-issues; t2 a closed one.
+        taskList[0].labels = ["spec", "ios"]
+        taskList[0].owner = "octo-dev"
+        taskList[0].github = .init(repo: "octo/loft", number: 42, url: "https://github.com/octo/loft/issues/42", state: "open", subTotal: 4, subDone: 1)
+        taskList[1].labels = ["ready-for-agent"]
+        taskList[1].github = .init(repo: "octo/loft", number: 43, url: "https://github.com/octo/loft/issues/43", state: "closed")
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
         }
@@ -404,15 +412,35 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                     self?.locked {
                         guard let self else { return }
                         self.nextId += 1
-                        self.msgs[agentId, default: []].append(ChatMessage(
+                        let reply = ChatMessage(
                             id: self.nextId, agentId: agentId, runId: nil, role: "assistant", kind: "text",
                             content: ProcessInfo.processInfo.arguments.contains("-fixture-long-reply") ? Self.longReply
-                                : "Done. I ran it and everything passed.", meta: nil, createdAt: Date()))
+                                : self.scripted ? Self.demoReply(to: text, from: self.agentList.first { $0.id == agentId }?.name ?? "The agent")
+                                : "Done. I ran it and everything passed.",
+                            meta: nil, createdAt: Date())
+                        self.msgs[agentId, default: []].append(reply)
+                        // The demo's chat shows it at once, as a live server would.
+                        if self.scripted { self.push(type: "message", ["message": reply]) }
                     }
                 }
             }
             return SendMessageResponse(ok: true, queued: false, duplicate: false, message: m)
         }
+    }
+
+    /// The demo's scripted answers (spec #144): no AI call, picked by what the message is about.
+    static func demoReply(to text: String, from agent: String) -> String {
+        let t = text.lowercased()
+        if ["hi", "hello", "hey", "olá", "oi"].contains(where: { t.hasPrefix($0) }) {
+            return "Hi! I'm \(agent), the Lead of this demo team. Ask me about the work in progress, or give me something to plan."
+        }
+        if t.contains("status") || t.contains("progress") || t.contains("how") {
+            return "The settings work is in progress: Backend Agent has 3 of 4 endpoints done, iOS Agent is waiting for your approval on the settings screen, and QA Agent starts once both are in."
+        }
+        if t.contains("test") || t.contains("qa") {
+            return "QA Agent will run the integrated tests once the backend and iOS work are done. I'll tell you if anything fails."
+        }
+        return "Got it. I'll plan that, hand the parts to the team and report back here. (This is the demo: replies are scripted, and nothing leaves your iPhone.)"
     }
 
     func grillSession(agentId: String) async throws -> GrillSession? {
@@ -635,6 +663,87 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
+    /// t1's thread: a GitHub comment, a status change, an agent's note, a comment waiting for GitHub (the Needs you
+    /// item's 77) and one of yours already posted.
+    private var comments: [TaskComment] = {
+        let now = Date()
+        func c(_ id: Int64, _ author: String, _ kind: String, _ text: String, _ minutes: Double, _ meta: JSONValue? = nil) -> TaskComment {
+            TaskComment(id: id, taskId: "t1", author: author, kind: kind, text: text, meta: meta, createdAt: now.addingTimeInterval(-minutes * 60))
+        }
+        return [
+            c(70, "github", "comment", "Can the sync time show in the user's time zone?", 50, ["author_name": "octo-dev", "github": ["state": "from_github"]]),
+            c(71, "user", "status", "Started by Orchestrator", 40),
+            c(72, "be", "note", "3 of 4 endpoints done", 20, ["author_name": "Backend Agent"]),
+            c(77, "be", "comment", "Backend is done: 4 endpoints with tests. iOS screen next.", 2, ["author_name": "Backend Agent", "github": ["state": "pending"]]),
+            c(78, "user", "comment", "Yes, local time with the zone name.", 1, ["github": ["state": "posted"]]),
+        ]
+    }()
+
+    func taskComments(id: String) async throws -> [TaskComment] {
+        try check()
+        return locked { comments.filter { $0.taskId == id } }
+    }
+
+    /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
+    private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
+                                       "auto_update": true, "messaging_rules": true]
+    /// Settings PUT so far, for tests to check what went to the server.
+    private(set) var settingsPut: [JSONValue] = []
+
+    func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+
+    func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
+        try check()
+        return locked {
+            settingsPut.append(s)
+            guard case .object(var o) = s else { return settings }
+            // As the server: no `github_token` keeps the saved one.
+            if o["github_token"] == nil { o["github_token"] = settings["github_token"] }
+            settings = .object(o)
+            return settings
+        }
+    }
+
+    func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws {
+        try check()
+        locked {
+            let mirrored = taskList.first { $0.id == id }?.github != nil && github != false
+            comments.append(TaskComment(id: (comments.map(\.id).max() ?? 0) + 1, taskId: id, author: "user", kind: "comment", text: text,
+                                        meta: mirrored ? ["github": ["state": "pending"]] : nil, createdAt: Date()))
+        }
+    }
+
+    func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            if let text { comments[i].text = text }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "posted"]]
+        }
+    }
+
+    func keepComment(taskId: String, commentId: Int64) async throws {
+        try check()
+        locked {
+            guard let i = comments.firstIndex(where: { $0.id == commentId }) else { return }
+            comments[i].meta = ["author_name": comments[i].meta?["author_name"] ?? .null, "github": ["state": "kept"]]
+        }
+    }
+
+    /// As the server: a Loft-only issue in a project gets the next number on octo/<project>.
+    func publishTask(id: String) async throws -> HBTask {
+        try check()
+        return try locked {
+            guard let i = taskList.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            guard !taskList[i].project.isEmpty else {
+                throw APIError.server(status: 400, message: "This Loft issue has no project, so there's no GitHub repo to publish it to.")
+            }
+            let repo = "octo/\(taskList[i].project)"
+            taskList[i].github = .init(repo: repo, number: 50, url: "https://github.com/\(repo)/issues/50", state: "open")
+            return taskList[i]
+        }
+    }
+
     func deleteTask(id: String) async throws { try check(); locked { taskList.removeAll { $0.id == id } } }
 
     func executeTask(id: String, agentId: String?, note: String) async throws -> ExecuteResponse {
@@ -722,13 +831,26 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return VoiceCleanResponse(text: text.replacingOccurrences(of: " uh", with: ""), cleaned: true, reason: nil)
     }
 
+    /// The open event stream, for `push` (the demo's replies; tests rely on replies arriving without events).
+    private var live: AsyncThrowingStream<String, Error>.Continuation?
+
     func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         try check()
         // A stream that stays open, like a quiet server.
         return AsyncThrowingStream { c in
+            locked { live = c }
             let t = Task { while !Task.isCancelled { try? await Task.sleep(for: .seconds(3600)) }; c.finish() }
             c.onTermination = { _ in t.cancel() }
         }
+    }
+
+    /// One server-sent event on the open stream, as the backend writes it. Called with the lock held.
+    private func push(type: String, _ body: [String: ChatMessage]) {
+        guard let live, var o = try? JSONSerialization.jsonObject(with: JSONCoding.encoder.encode(body)) as? [String: Any] else { return }
+        o["type"] = type
+        guard let data = try? JSONSerialization.data(withJSONObject: o), let line = String(data: data, encoding: .utf8) else { return }
+        live.yield("data: \(line)")
+        live.yield("")
     }
 }
 /// GrillMeta in the server's snake_case, for fixture messages.
@@ -742,7 +864,6 @@ private struct GrillMetaWire: Encodable {
         try c.encode(try JSONDecoder().decode(JSONValue.self, from: try e.encode(g)))
     }
 }
-#endif
 
 /// Hand-drawn stickers in the backend's avatar format, exercising paths (curves, arcs), gradients,
 /// clip paths, transforms and strokes.

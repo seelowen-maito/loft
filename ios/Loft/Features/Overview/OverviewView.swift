@@ -173,7 +173,10 @@ private struct TalkButton: View {
 
     var body: some View {
         Button {
-            if let o = store.orchestrator { startVoice(o.id) } else { picking = true }
+            // Talk starts with whoever you talked to last.
+            if let id = UserDefaults.standard.string(forKey: "voiceLastAgent"), store.agent(id) != nil {
+                startVoice(id)
+            } else if let o = store.orchestrator { startVoice(o.id) } else { picking = true }
         } label: {
             Image(systemName: "mic.fill")
                 .font(.title2.weight(.semibold))

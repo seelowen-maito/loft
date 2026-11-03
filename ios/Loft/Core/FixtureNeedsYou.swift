@@ -6,7 +6,7 @@ import Foundation
 enum FixtureNeedsYou {
     static let json = #"""
 {
- "count": 9,
+ "count": 10,
  "generated_at": "2026-10-23T14:37:36.766739+00:00",
  "items": [
   {
@@ -323,6 +323,25 @@ enum FixtureNeedsYou {
    "title": "o/r#7: Fix it",
    "type": "pr_ready",
    "urgency": 1
+  },
+  {
+   "actions": [
+    {"body": {}, "kind": "deny", "label": "Cancel issue", "method": "POST", "path": "/api/issues/t2/cancel"},
+    {"body": {}, "kind": "approve", "label": "Keep working (reopens #43)", "method": "POST", "path": "/api/issues/t2/keep-working"},
+    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t2"}}
+   ],
+   "age_seconds": 300,
+   "agent": {"id": "be", "name": "Backend Agent"},
+   "created_at": "2026-10-23T14:32:36.763574+00:00",
+   "id": "closed_on_github:t2:2026-10-23T14:32:00Z",
+   "links": [{"label": "Task", "path": "/tasks/t2"}],
+   "project": "loft",
+   "reason": "#43 was closed on GitHub while it's being worked on.",
+   "task_id": "t2",
+   "text": "",
+   "title": "Implement backend endpoints",
+   "type": "closed_on_github",
+   "urgency": 2
   },
   {
    "actions": [

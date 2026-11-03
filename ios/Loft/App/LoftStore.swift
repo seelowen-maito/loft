@@ -181,6 +181,26 @@ final class LoftStore {
 
     // MARK: - Configuration & lifecycle
 
+    /// Demo mode (spec #144): the app on bundled sample data, with no server. Nothing is cached, and the saved
+    /// connection is left as it was; a relaunch starts from it again.
+    private(set) var isDemo = false
+
+    func enterDemo() {
+        deactivate()
+        isDemo = true
+        // The Lead answers, from a script.
+        configure(FixtureAPI(scripted: true))
+        activate()
+    }
+
+    /// Back to the connect screen, or to the saved server if there is one.
+    func exitDemo() {
+        deactivate()
+        isDemo = false
+        configure(UserDefaults.standard.string(forKey: Prefs.serverURL).flatMap(LiveLoftAPI.normalize).map(LiveLoftAPI.init(baseURL:)))
+        if api != nil { activate() }
+    }
+
     func configure(_ api: LoftAPI?) {
         connectionTask?.cancel()
         connectionTask = nil
@@ -837,6 +857,39 @@ final class LoftStore {
         return t
     }
 
+    func taskComments(_ id: String) async throws -> [TaskComment] { try await requireTasks().taskComments(id: id) }
+
+    func addTaskComment(_ id: String, text: String, github: Bool? = nil) async throws {
+        try await requireTasks().addTaskComment(id: id, text: text, clientId: UUID().uuidString, github: github)
+    }
+
+    /// Settings › GitHub issues, or nil when this server has none.
+    func issueSettings() async throws -> IssueSettings? {
+        IssueSettings(try await requireWrite().serverSettings())
+    }
+
+    /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
+    func saveIssueSettings(_ s: IssueSettings) async throws {
+        let api = try requireWrite()
+        _ = try await api.putServerSettings(s.applied(to: try await api.serverSettings()))
+    }
+
+    func approveComment(_ c: TaskComment, text: String? = nil) async throws {
+        try await requireTasks().approveComment(taskId: c.taskId, commentId: c.id, text: text)
+    }
+
+    func keepComment(_ c: TaskComment) async throws {
+        try await requireTasks().keepComment(taskId: c.taskId, commentId: c.id)
+    }
+
+    /// Publish a Loft-only issue to GitHub; it comes back with its GitHub link.
+    @discardableResult
+    func publishTask(_ id: String) async throws -> HBTask {
+        let t = try await requireTasks().publishTask(id: id)
+        upsert(&tasks, t)
+        return t
+    }
+
     func deleteTask(_ id: String) async throws {
         try await requireTasks().deleteTask(id: id)
         tasks.removeAll { $0.id == id }
@@ -896,7 +949,8 @@ final class LoftStore {
     }
 
     func saveNow() {
-        guard let api, let lastSync else { return }
+        // The demo's sample data never replaces the cache of the real server.
+        guard !isDemo, let api, let lastSync else { return }
         cache.save(Snapshot(
             server: api.baseURL.absoluteString,
             savedAt: lastSync,

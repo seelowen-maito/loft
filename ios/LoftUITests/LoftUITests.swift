@@ -59,7 +59,7 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Connected"].appears(timeout: 5))
         // Servers with `needs_you` (the fixture) show the "Needs you" card instead of "Needs your attention".
-        XCTAssertTrue(app.staticTexts["Needs you · 9"].appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Needs you · 10"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Backend Agent wants to use Bash"].exists)
         XCTAssertTrue(app.staticTexts["Active work"].exists)
         let chip = any("macTemperature", app)
@@ -219,19 +219,32 @@ final class LoftUITests: XCTestCase {
 
     // MARK: - Other fixtures
 
-    func testClosingReviewKeepsDraftOnOverview() {
-        let app = launch(["-fixture-voice", "review"])
-        XCTAssertTrue(app.buttons["voiceSend"].appears(timeout: 5))
-        app.buttons["voiceClose"].tap()
-        let review = app.buttons["voiceDraftReview"]
-        XCTAssertTrue(review.appears(timeout: 5))
-        review.tap()
-        XCTAssertTrue(app.buttons["voiceSend"].appears(timeout: 5))
-        app.buttons["voiceClose"].tap()
-        let discard = app.buttons["voiceDraftDiscard"]
-        XCTAssertTrue(discard.appears(timeout: 5))
-        discard.tap()
-        XCTAssertTrue(discard.disappears(timeout: 5))
+    /// Talk: the tidied dictation lands in the chat's message box; sending it there shows the full-screen status,
+    /// whose Undo puts the text back in the box.
+    func testATalkDictationGoesToTheChatThenTheStatus() {
+        let app = launch(["-fixture-voice", "review", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "in the chat")
+        XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "the tidied text, in the box")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+        XCTAssertEqual(app.staticTexts["voiceStatusTitle"].label, "Sending to Orchestrator…")
+        app.buttons["Undo"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].disappears(timeout: 5))
+        let deadline = Date().addingTimeInterval(5)
+        while composerValue(app)?.contains("copy the diagnostics") != true, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
+    }
+
+    /// Talk's message box step: after a pause it asks "Send it?" (it never sends by itself); its Send sends as the
+    /// box's own button does, with the status and Undo.
+    func testTalkAsksToSendAfterAPause() {
+        let app = launch(["-fixture-voice", "confirm", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(any("talkConfirm", app).appears(timeout: 5))
+        XCTAssertTrue(any("talkListening", app).exists, "the mic is open, and it says so")
+        XCTAssertTrue(app.staticTexts["talkAsk"].appears(timeout: 8), "asks after the pause")
+        XCTAssertFalse(app.staticTexts["voiceStatusTitle"].exists, "nothing sent by itself")
+        app.buttons["talkSend"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
     }
 
     private func openGrillChat(_ extra: [String] = []) -> XCUIApplication {
@@ -567,6 +580,34 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["testConnection"].isEnabled)
     }
 
+    /// Spec #144: "Try the demo" opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
+    func testTheDemoShowsIssuesAndLeaves() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai"]
+        app.launch()
+        let demo = app.buttons["tryDemo"]
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5))
+        if !demo.isHittable { app.swipeUp() }
+        demo.tap()
+        XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
+        app.tabBars.buttons["Tasks"].tap()
+        XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
+        app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
+        XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
+        // #146: the Lead answers, from a script.
+        app.tabBars.buttons["Chat"].tap()
+        app.buttons["orchestratorConversation"].firstMatch.tap()
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.appears(timeout: 5))
+        field.tap()
+        field.typeText("What is the status")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "3 of 4 endpoints", app).appears(timeout: 5), "a scripted answer, shown at once")
+        app.buttons["exitDemo"].tap()
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
+    }
+
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
         let app = launch(["-fixture-risky-permission", "-fixture-explain", "Sends your commits to the main branch on GitHub."])
         app.tabBars.buttons["Agents"].tap()
@@ -585,7 +626,7 @@ final class LoftUITests: XCTestCase {
 
     func testNeedsYouGroupsPullRequestsByProject() {
         let app = launch(["-fixture-needs-you-projects"])
-        XCTAssertTrue(app.staticTexts["Needs you · 12"].firstMatch.appears(timeout: 5), "9 items, with the one PR swapped for four")
+        XCTAssertTrue(app.staticTexts["Needs you · 13"].firstMatch.appears(timeout: 5), "10 items, with the one PR swapped for four")
         app.buttons["needsYouSeeAll"].firstMatch.tap()
         let loft = app.buttons["needsYouProject-loft"]
         XCTAssertTrue(loft.appears(timeout: 5))

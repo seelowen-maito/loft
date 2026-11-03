@@ -85,6 +85,14 @@ struct ConnectView: View {
             } footer: {
                 Text("Loft has no login of its own: only devices on your tailnet can reach it. Keep it off the public internet.")
             }
+            if isOnboarding {
+                Section {
+                    Button { store.enterDemo() } label: { Label("Try the demo", systemImage: "play.circle") }
+                        .accessibilityIdentifier("tryDemo")
+                } footer: {
+                    Text("Sample data on this iPhone, with no server: nothing is sent anywhere, and it resets when you leave.")
+                }
+            }
         }
         .navigationTitle(isOnboarding ? "" : "Server")
         .navigationBarTitleDisplayMode(.inline)
