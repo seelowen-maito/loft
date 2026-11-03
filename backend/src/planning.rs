@@ -641,7 +641,8 @@ pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, sl
 
 /// After ticket #number closed: notes it on its Delivery (found by the ticket, or for a ticket the
 /// record doesn't list, by the spec PR its "## Branch" section links to), then moves the Delivery on
-/// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did.
+/// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did. The
+/// caller holds the repo's publish lock.
 pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<String>, String> {
     let d = crate::delivery::ticket_closed(state, slug, number).or_else(|| {
         let pr = spec_pr_in(ticket_body, slug)?;
@@ -660,7 +661,8 @@ fn waits(d: &crate::db::Delivery) -> bool {
 
 /// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
 /// failed, and on a full read every one not settled yet (Loft may have been down when the last ticket
-/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197).
+/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197). The caller
+/// holds the repo's publish lock.
 pub(crate) async fn retry_ready(state: &AppState, slug: &str, full: bool) {
     let open = state.db.deliveries(slug, true).unwrap_or_default();
     for d in open.into_iter().filter(|d| d.pr.is_some() && (full || d.ready_retry) && !waits(d)) {
@@ -2471,6 +2473,47 @@ pub(crate) mod tests {
         crate::mirror::sync_project(&st, "dl-hand", false).await.unwrap();
         assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
         assert!(fake.seen("/graphql").is_empty(), "#42 is still open: the spec PR stays a draft");
+    }
+
+    #[tokio::test]
+    async fn a_poll_waits_for_a_delivery_step_and_keeps_what_it_wrote() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/dl-race";
+        planner_on(&st, "dl-race", Some("git@github.com:octo/dl-race.git"));
+        delivery_40(&st, slug);
+        crate::delivery::update(&st, slug, 40, |d| {
+            (d.state, d.current) = ("running".into(), Some(41));
+            d.tickets[0].state = "started".into();
+            d.tickets[1].blocked_by = vec![41];
+        });
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        let body = "## What to build\n\nStore.";
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([gh_ticket(slug, 41, "open", body), gh_ticket(slug, 42, "open", body)])),
+            (200, json!([gh_ticket(slug, 41, "closed", body)])),
+        ]);
+        crate::mirror::sync_project(&st, "dl-race", true).await.unwrap();
+
+        // A Delivery step holds the lock (finish closing #41 and starting #42) while the poll sees #41 closed.
+        let held = st.publish_locks.of(slug).lock_owned().await;
+        let poll = tokio::spawn({
+            let st = st.clone();
+            async move { crate::mirror::sync_project(&st, "dl-race", false).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!poll.is_finished(), "the poll waits for the step");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.current, d.tickets[0].state.as_str()), (Some(41), "started"), "the poll hasn't touched the record while the step holds the lock");
+        crate::delivery::update(&st, slug, 40, |d| {
+            d.tickets[0].state = "closed".into();
+            d.tickets[1].state = "started".into();
+            d.current = Some(42);
+        });
+        drop(held);
+        poll.await.unwrap().unwrap();
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), (Some(42), "closed", "started"), "the step's write survives the poll");
     }
 
     #[tokio::test]

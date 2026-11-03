@@ -190,12 +190,18 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
     }
     drop(cursor);
     // A ticket closed on GitHub by hand: when it was its spec's last, the spec PR is ready for review.
-    for (n, body) in std::mem::take(&mut report.closed_tickets) {
-        if let Err(e) = crate::planning::ready_when_last(state, &repo, n, &body).await {
-            tracing::warn!("mirror {repo}: {e}");
+    // Delivery records change under the repo's publish lock, like every other Delivery step, so a poll
+    // can't write back a record a submit or review changed meanwhile.
+    {
+        let _held = state.publish_locks.of(&repo).lock_owned().await;
+        for (n, body) in std::mem::take(&mut report.closed_tickets) {
+            if let Err(e) = crate::planning::ready_when_last(state, &repo, n, &body).await {
+                tracing::warn!("mirror {repo}: {e}");
+            }
         }
+        crate::planning::retry_ready(state, &repo, full).await;
     }
-    crate::planning::retry_ready(state, &repo, full).await;
+    // Takes the lock itself.
     crate::delivery::retry(state, &repo).await;
     Some(report)
 }
