@@ -135,12 +135,19 @@ struct EndCard: Codable, Hashable {
     var setup: Setup?
     var delivery: Delivery? = nil
 
-    /// "Dev, QA or Security", as in "The team has no Dev, QA or Security yet."
-    var missingText: String {
-        let labels = ["dev": "Dev", "code_reviewer": "Code reviewer", "qa": "QA", "security": "Security"]
-        let names = missingRoles.map { labels[$0] ?? $0 }
-        guard let last = names.last, names.count > 1 else { return names.first ?? "" }
-        return names.dropLast().joined(separator: ", ") + " or " + last
+    /// The team check as a suggestion: a missing role never stops a Delivery (the planning agent builds when there
+    /// is no Dev, and a missing reviewer is skipped), so say that, then which agents would help. Empty for a full team.
+    var teamNote: String {
+        let has = { (r: String) in missingRoles.contains(r) }
+        let reviewers = [has("qa") ? "a QA" : nil, has("security") ? "a Security" : nil].compactMap { $0 }
+        var parts = [
+            has("dev") ? "a Dev to build them" : nil,
+            reviewers.isEmpty ? nil : reviewers.joined(separator: " and ") + " agent to have each ticket reviewed",
+            has("code_reviewer") ? "a Code reviewer for the spec PR" : nil,
+        ].compactMap { $0 }
+        guard let last = parts.popLast() else { return "" }
+        let works = has("dev") ? "Delivery works with this agent building the tickets." : "Delivery works with this team."
+        return "\(works) Add \(parts.isEmpty ? last : parts.joined(separator: ", ") + ", and " + last)."
     }
 }
 

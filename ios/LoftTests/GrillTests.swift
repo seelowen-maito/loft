@@ -71,10 +71,11 @@ final class GrillDecodingTests: XCTestCase {
         XCTAssertEqual(card.delivery?.started?.agentName, "Builder")
         XCTAssertEqual(card.setup?.agentId, "loft")
         XCTAssertNil(card.setup?.sentAt, "not sent yet")
-        XCTAssertEqual(card.missingText, "Dev, Code reviewer, QA or Security")
+        XCTAssertEqual(card.teamNote, "Delivery works with this agent building the tickets. Add a Dev to build them, a QA and a Security agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
         // A full team: no setup button.
         let full = try message(#"{"id": 13, "agent_id": "a", "role": "assistant", "kind": "text", "content": "x", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"role": "summary", "final": true, "end_card": {"repo": "octo/x", "spec": null, "tickets": [], "next_message": "Implement ticket #5", "missing_roles": [], "setup": null}}}}"#)
         XCTAssertNil(full.grill?.endCard?.setup)
+        XCTAssertEqual(full.grill?.endCard?.teamNote, "", "a full team gets no note")
         XCTAssertNil(full.grill?.endCard?.delivery, "a standalone ticket has no Delivery yet")
     }
 
@@ -258,7 +259,7 @@ final class GrillStoreTests: XCTestCase {
         let card = try endCard(store)
         XCTAssertEqual(card.grill?.endCard?.delivery?.spec, 40)
         XCTAssertEqual(card.grill?.endCard?.nextMessage, "")
-        XCTAssertEqual(card.grill?.endCard?.missingText, "Code reviewer or QA")
+        XCTAssertEqual(card.grill?.endCard?.teamNote, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
 
         try await store.startDelivery(agentId: "orch", messageId: card.id)
         XCTAssertEqual(try endCard(store).grill?.endCard?.delivery?.started?.ticket, 41)

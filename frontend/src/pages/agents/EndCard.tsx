@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2, Play, Users } from "lucide-react";
 import { cx } from "../../lib/format";
-import { api, roleLabel, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
+import { teamNote } from "../../lib/teamNote";
+import { api, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
 function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
@@ -87,8 +88,9 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
       {setup && (
-        <div className="mt-3 rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
-          The team has no {card.missing_roles.map(roleLabel).join(", ").replace(/, ([^,]*)$/, " or $1")} yet.
+        <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
+          <Users className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
+          {teamNote(card.missing_roles)}
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">

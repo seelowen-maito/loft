@@ -480,9 +480,10 @@ struct EndCardView: View {
                 ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
             }
             if card.setup != nil {
-                Label("The team has no \(card.missingText) yet.", systemImage: "person.2.slash")
+                Label(card.teamNote, systemImage: "person.2")
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("endCardTeamNote")
             }
             if let d = card.delivery {
                 if let s = d.started {

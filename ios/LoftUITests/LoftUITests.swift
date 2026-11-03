@@ -265,6 +265,7 @@ final class LoftUITests: XCTestCase {
         // The card is the last thing in the chat: bring it out from under the composer.
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
+        XCTAssertEqual(app.staticTexts["endCardTeamNote"].label, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
         setup.tap()
         let deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
