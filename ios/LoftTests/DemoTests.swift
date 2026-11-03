@@ -25,6 +25,24 @@ final class DemoTests: XCTestCase {
         store.deactivate()
     }
 
+    /// #147: the waiting comment's Approve, Edit and approve, and Keep in Loft each show in its issue's thread.
+    func testNeedsYouApprovalsShowInTheThread() async throws {
+        for (label, text, expected) in [("Approve", nil, "posted"), ("Edit and approve", "Edited in the demo", "posted"), ("Keep in Loft", nil, "kept")] {
+            let store = LoftStore(api: nil, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID()).json")))
+            store.enterDemo()
+            for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+            let list = try await store.api!.needsYou()
+            let item = try XCTUnwrap(list.items.first { $0.type == "comment_approval" })
+            let action = try XCTUnwrap(item.actions.first { $0.label == label })
+            _ = try await store.perform(action, text: text)
+            let thread = try await store.taskComments(item.taskId!)
+            let c = try XCTUnwrap(thread.first { $0.id == 77 })
+            XCTAssertEqual(c.githubState, expected, label)
+            if let text { XCTAssertEqual(c.text, text) }
+            store.deactivate()
+        }
+    }
+
     func testTheDemoNeverTouchesTheRealCacheOrServer() async throws {
         let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID()).json")
         let store = LoftStore(api: nil, cache: SnapshotStore(url: cacheURL))
