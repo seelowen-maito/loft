@@ -1139,7 +1139,7 @@ While you grill, build the project's language and record its hard decisions.
 When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
 - The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
 - Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
-- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
+- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for junk and secret files (`.env`, keys), runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
 - If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
 
 {TICKETS}

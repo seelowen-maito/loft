@@ -3312,14 +3312,16 @@ pub(crate) mod tests {
         assert_eq!((d.state.as_str(), d.base.as_str()), ("planned", ""));
         assert!(woken(&st, &dev).is_empty());
 
-        // Yes: git is set up with a first commit, then the Delivery starts.
+        // Yes: git is set up with a first commit that leaves secret files out, then the Delivery starts.
+        std::fs::write(dir.join(".env"), "KEY=1\n").unwrap();
         let v = press_with(&st, &a, &m, json!({ "init_git": true })).await.unwrap();
         assert_eq!(v["ok"], true);
         assert!(dir.join(".git").is_dir());
         assert!(std::fs::read_to_string(dir.join(".gitignore")).unwrap().contains(".DS_Store"));
         assert_eq!(git_in(&dir, &["log", "--format=%s"]), "First commit");
         assert_eq!(git_in(&dir, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\nnotes.md");
-        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "");
+        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "", "the ignored .env isn't left over as a change");
+        assert!(dir.join(".env").exists());
         let d = st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap();
         assert_eq!(d.state, "running");
         assert!(git_in(&dir, &["branch", "--list", "spec/1-offline-mode"]).contains("spec/1-offline-mode"));

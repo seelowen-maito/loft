@@ -73,7 +73,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       {askGit && (
         <div className="mt-3 space-y-2 rounded-xl border border-accent/25 bg-accent/[0.05] px-3 py-2 text-[12.5px] text-fg-2">
           <div>
-            <span className="break-all font-mono text-[11.5px] text-fg">{askGit}</span> has no git yet. Set it up? Loft runs <span className="font-mono">git init</span>, adds a <span className="font-mono">.gitignore</span> for <span className="font-mono">.DS_Store</span> and <span className="font-mono">.remember/</span>, and commits the folder as it is. Then the Delivery starts.
+            <span className="break-all font-mono text-[11.5px] text-fg">{askGit}</span> has no git yet. Set it up? Loft runs <span className="font-mono">git init</span>, adds a <span className="font-mono">.gitignore</span> for junk and secret files like <span className="font-mono">.env</span> and keys, and commits the folder as it is. Then the Delivery starts.
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary text-[12px]" disabled={busy !== null} onClick={() => start(true)}>
