@@ -752,6 +752,28 @@ impl Db {
         Ok(out)
     }
 
+    /// The first agent (in list order) with `role` in `project`, decoding only that one row. `project` is
+    /// compared trimmed; an empty one matches nobody.
+    pub fn agent_with_role(&self, project: &str, role: &str) -> Result<Option<Agent>> {
+        let project = project.trim();
+        if project.is_empty() {
+            return Ok(None);
+        }
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row(
+                "SELECT data FROM agents WHERE json_extract(data, '$.role') = ?1 AND trim(json_extract(data, '$.project')) = ?2
+                 ORDER BY position, created_at LIMIT 1",
+                [role, project],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match data {
+            Some(d) => Some(serde_json::from_str(&d)?),
+            None => None,
+        })
+    }
+
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
         read_agent(&self.0.lock().unwrap(), id)
     }
@@ -1693,6 +1715,28 @@ mod tests {
         // Opening again moves nothing twice.
         drop(db);
         assert_eq!(Db::open(&path).unwrap().count_pending_fyis("a").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agent_with_role_finds_the_first_in_list_order_within_the_trimmed_project() {
+        let path = std::env::temp_dir().join(format!("loft-roles-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let with = |id: &str, project: &str, role: &str| {
+            let mut a = agent(id);
+            a.project = project.into();
+            a.role = role.into();
+            db.save_agent(&a).unwrap();
+        };
+        with("other", "web", "dev");
+        with("lead", "loft", "lead");
+        with("dev1", " loft ", "dev");
+        with("dev2", "loft", "dev");
+        let found = |project: &str, role: &str| db.agent_with_role(project, role).unwrap().map(|a| a.id);
+        assert_eq!(found("loft", "dev").as_deref(), Some("dev1"), "padded project matches; list order picks the first");
+        assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
+        assert_eq!(found("loft", "qa"), None);
+        assert_eq!(found("", "dev"), None, "no project, no team");
         let _ = std::fs::remove_file(&path);
     }
 

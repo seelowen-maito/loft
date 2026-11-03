@@ -145,8 +145,7 @@ fn ticket_key(d: &Delivery, n: Option<i64>) -> String {
 /// Whether the Fresh context setting applies to `a`: to every agent but a Lead that only coordinates. A
 /// Lead builds the tickets when its team has no Dev (`builder`).
 pub fn fresh_context_applies(state: &AppState, a: &crate::db::Agent) -> bool {
-    let project = a.project.trim();
-    a.role != "lead" || project.is_empty() || !state.db.list_agents().unwrap_or_default().iter().any(|o| o.role == "dev" && o.project.trim() == project)
+    a.role != "lead" || state.db.agent_with_role(&a.project, "dev").ok().flatten().is_none()
 }
 
 /// What a Delivery delivers: "spec #40", "ticket #7" for a standalone ticket, or `spec "Title"` for a
@@ -368,8 +367,7 @@ const TICKET_REVIEWERS: &[&str] = &["qa", "security"];
 
 /// The team's agent with `role` in the Delivery's project, if it has one.
 fn with_role(state: &AppState, d: &Delivery, role: &str) -> Option<crate::db::Agent> {
-    let project = d.project.trim();
-    state.db.list_agents().ok()?.into_iter().find(|a| !project.is_empty() && a.project.trim() == project && a.role == role)
+    state.db.agent_with_role(&d.project, role).ok()?
 }
 
 fn short(sha: &str) -> &str {
