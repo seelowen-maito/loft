@@ -1223,10 +1223,9 @@ async fn run_process(
                             run_msg(hide, state, agent_id, rid, "assistant", "tool_use", &summary, json!({
                                 "id": b["id"], "name": name, "input": b["input"], "subagent": sub,
                             }));
+                            // The command shows in its tool row only; the status line keeps the agent's own words.
                             if name.starts_with("mcp__loft__grill_") {
                                 set_status_text(state, agent_id, "Preparing the next question…");
-                            } else if name != "mcp__loft__set_status" {
-                                set_status_text(state, agent_id, &summary);
                             }
                         }
                         _ => {}
@@ -1634,6 +1633,14 @@ case "$prompt" in *bg-agent*)
     echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"s1","task_type":"local_bash","description":"Run the QA suite"}]}'
     while [ ! -f go3 ]; do sleep 0.05; done;;
   esac;;
+esac
+case "$prompt" in *tool-status*)
+  echo '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"plan"},{"type":"tool_use","id":"u1","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}]}}'
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u2","name":"Read","input":{"file_path":"/x/config.toml"}}]}}'
+  while [ ! -f go2 ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u3","name":"mcp__loft__grill_round","input":{}}]}}'
+  while [ ! -f go3 ]; do sleep 0.05; done;;
 esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
@@ -2070,6 +2077,25 @@ esac
             std::fs::write(ws.join("go3"), "").unwrap();
             until("the run to end", 10, || !is_running(&st, &a.id)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_leaves_the_status_text_alone() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("tool-status".into()), "user");
+        let tool_rows = || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.kind == "tool_use").count();
+        until("the tool row", 10, || tool_rows() == 1).await;
+        assert_eq!(status_text(&st, &a.id), "Thinking…", "the command shows in its tool row only");
+        // The agent's own line (set_status) stays through the next tool call.
+        set_status_text(&st, &a.id, "Reading the config");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the second tool row", 10, || tool_rows() == 2).await;
+        assert_eq!(status_text(&st, &a.id), "Reading the config");
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("Loft's own state", 10, || status_text(&st, &a.id) == "Preparing the next question…").await;
+        std::fs::write(ws.join("go3"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -386,8 +386,8 @@ export function Chat({
             {agent.project && <span className="shrink-0 rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3">{agent.project}</span>}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
-            <StatusPill agent={agent} />
-            {/* The schedule is a detail: on a phone the status line gets the room. The context size stays, to warn. */}
+            <StatusPill agent={agent} elapsed />
+            {/* The schedule and run time are details: on a phone the context size gets the room, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}

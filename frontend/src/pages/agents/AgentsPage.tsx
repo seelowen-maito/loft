@@ -266,7 +266,7 @@ export default function AgentsPage() {
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10.5px] text-fg-3">
                           {a.running || a.status === "waiting" ? (
-                            <span className={s.text}>{a.status_text || s.label}</span>
+                            <span className={s.text}>{s.label}</span>
                           ) : (
                             <>{a.title || "agent"} · {a.last_run_at ? timeAgo(a.last_run_at) : "never run"}</>
                           )}
