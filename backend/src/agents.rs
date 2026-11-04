@@ -1743,6 +1743,10 @@ esac
         assert_eq!(costs()[5..], [0.001, 0.002]);
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
         assert!((a.total_cost_usd - 0.020).abs() < 1e-9, "{}", a.total_cost_usd);
+        // Each finished run also adds itself and its cost to the All-time spend.
+        let (runs, cost) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs, 7);
+        assert!((cost - 0.020).abs() < 1e-9, "{cost}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

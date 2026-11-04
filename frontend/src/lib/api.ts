@@ -375,6 +375,13 @@ export type AgentSummary = {
   prs: { total: number; open: number; merged: number };
 };
 
+/** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
+export type AgentsSummary = {
+  agents: AgentSummary[];
+  /** The All-time spend: every run since Loft started counting, deleted agents and cleared chats included. */
+  all_time: { runs: number; cost_usd: number };
+};
+
 export type FileEntry = { path: string; dir: boolean; depth: number; size: number; is_repo: boolean };
 
 export type UpdateStatus = {
@@ -500,7 +507,7 @@ export const api = {
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
-  agentsSummary: () => req<AgentSummary[]>("GET", "/agents/summary"),
+  agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),

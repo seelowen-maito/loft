@@ -824,10 +824,16 @@ pub async fn merge_pull_request(State(state): State<AppState>, Path(id): Path<St
 
 // ---- dashboard --------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct SummaryQuery {
+    totals: Option<bool>,
+}
+
 /// Per-agent activity for the home page over the last `DAYS` days: daily runs
 /// (local days, split autonomous vs on request), totals, PR outcomes, and
-/// anything waiting on the user.
-pub async fn agents_summary(State(state): State<AppState>) -> ApiResult<Value> {
+/// anything waiting on the user. With `?totals=true` the list comes as `agents`
+/// next to the home line's figures (`all_time`); without it, a bare list, as the iOS app reads it.
+pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<SummaryQuery>) -> ApiResult<Value> {
     const DAYS: i64 = 14;
     let today = chrono::Local::now().date_naive();
     let since14 = (chrono::Utc::now() - chrono::Duration::days(DAYS)).to_rfc3339();
@@ -868,7 +874,11 @@ pub async fn agents_summary(State(state): State<AppState>) -> ApiResult<Value> {
             },
         }));
     }
-    Ok(Json(json!(out)))
+    if !q.totals.unwrap_or(false) {
+        return Ok(Json(json!(out)));
+    }
+    let (runs, cost) = state.db.all_time_spend()?;
+    Ok(Json(json!({ "agents": out, "all_time": { "runs": runs, "cost_usd": cost } })))
 }
 
 // ---- editor -----------------------------------------------------------

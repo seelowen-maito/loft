@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { AlertCircle, ArrowRight, Brain, ChevronDown, ChevronUp, GitMerge, GitPullRequest, Plus, ShieldAlert, Wrench } from "lucide-react";
-import { api, type AgentSummary } from "../lib/api";
+import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule, timeAgo } from "../lib/format";
@@ -167,12 +167,19 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
 
 export function AgentActivity() {
   const [data, setData] = useState<AgentSummary[] | null>(null);
+  const [allTime, setAllTime] = useState<AgentsSummary["all_time"] | null>(null);
   const [expanded, setExpanded] = useState(false);
   const perRow = useSyncExternalStore(onResize, () => cardsPerRow(window.innerWidth));
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(() => {
-    api.agentsSummary().then(setData).catch(() => setData((d) => d ?? []));
+    api
+      .agentsSummary()
+      .then((r) => {
+        setData(r.agents);
+        setAllTime(r.all_time);
+      })
+      .catch(() => setData((d) => d ?? []));
   }, []);
   useEffect(load, [load]);
 
@@ -226,6 +233,12 @@ export function AgentActivity() {
                   {" "}
                   · {totals.runs} runs · <span title="API list-price equivalent">est. ${totals.cost.toFixed(2)} spent</span>
                 </span>
+                {allTime && (
+                  <span className="text-fg-3" title="Every run since Loft started counting, deleted agents and cleared chats included">
+                    {" "}
+                    · all time {allTime.runs} runs · ${allTime.cost_usd.toFixed(2)}
+                  </span>
+                )}
               </>
             )}
           </div>
