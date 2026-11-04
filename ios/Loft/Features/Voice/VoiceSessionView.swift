@@ -178,14 +178,14 @@ struct VoiceSessionView: View {
                 Button { Task { await voice.retrySend() } } label: {
                     Label("Retry sending", systemImage: "arrow.clockwise").frame(maxWidth: .infinity, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .disabled(!store.canWrite)
                 .accessibilityIdentifier("voiceRetrySend")
             } else {
                 Button { Task { await voice.start(agentId: agentId) } } label: {
                     Text("Try again").frame(maxWidth: .infinity, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityIdentifier("voiceRetry")
             }
             if voice.failureNeedsPermission, let url = URL(string: UIApplication.openSettingsURLString) {
@@ -273,7 +273,7 @@ struct VoiceDraftBanner: View {
                         } label: {
                             Text("Review").frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .accessibilityIdentifier("voiceDraftReview")
                         Button(role: .destructive) {
                             voice.discard()

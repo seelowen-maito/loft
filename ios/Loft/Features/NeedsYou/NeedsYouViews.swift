@@ -167,12 +167,12 @@ struct NeedsYouRow: View {
                         }
                     }
                 case "answer":
-                    Button(a.label) { answering = a.draft }.buttonStyle(.borderedProminent).controlSize(.small)
+                    Button(a.label) { answering = a.draft }.buttonStyle(.accent).controlSize(.small)
                 case "deny":
                     Button(a.label, role: .destructive) { run(a) }.buttonStyle(.bordered).controlSize(.small).disabled(busy)
                 default:
                     Button(a.label) { run(a) }
-                        .buttonStyle(a.kind == "approve" || a.kind == "merge" ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.bordered))
+                        .buttonStyle(a.kind == "approve" || a.kind == "merge" ? AnyButtonStyle(.accent) : AnyButtonStyle(.bordered))
                         .controlSize(.small)
                         .disabled(busy || !store.canWrite)
                 }

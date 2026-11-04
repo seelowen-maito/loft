@@ -113,7 +113,7 @@ struct VoiceStatusView: View {
                 if failed {
                     Image(systemName: "xmark").font(.callout.weight(.bold)).foregroundStyle(.white)
                 } else if done {
-                    Image(systemName: "checkmark").font(.callout.weight(.bold)).foregroundStyle(.white)
+                    Image(systemName: "checkmark").font(.callout.weight(.bold)).foregroundStyle(Theme.onAccent)
                 } else if active && status == .speaking {
                     Image(systemName: "waveform").font(.callout.weight(.bold)).foregroundStyle(Theme.working)
                         .symbolEffect(.variableColor.iterative, isActive: !TestMode.noAnimations)
@@ -207,7 +207,7 @@ struct VoiceStatusView: View {
 
     private func big(_ title: String, _ symbol: String, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Label(title, systemImage: symbol).frame(maxWidth: .infinity, minHeight: 30) }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.accent)
             .accessibilityIdentifier(id)
     }
 
@@ -286,7 +286,7 @@ struct HoldToTalkButton: View {
     var body: some View {
         Image(systemName: listening ? "waveform" : "mic.fill")
             .font(.system(size: 34, weight: .semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(Theme.onAccent)
             .frame(width: 96, height: 96)
             .background(Theme.accent.gradient, in: Circle())
             .scaleEffect(pressed ? 1.12 : 1)

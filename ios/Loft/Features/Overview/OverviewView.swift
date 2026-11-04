@@ -85,7 +85,7 @@ struct OverviewView: View {
                             Button { router.composer = .newTask(agentId: nil, parentId: nil) } label: {
                                 Label("New task", systemImage: "checklist")
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.accent)
                         }
                         Button {
                             if let o = store.orchestrator { router.openChat(o.id) } else { router.composer = .pickRecipient }
@@ -180,7 +180,7 @@ private struct TalkButton: View {
         } label: {
             Image(systemName: "mic.fill")
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Theme.onAccent)
                 .frame(width: min(size, 88), height: min(size, 88))
                 .background(Theme.accent, in: Circle())
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
@@ -515,7 +515,7 @@ struct ApprovalCard: View {
                 Button(role: .destructive) { decide("deny") } label: { Text("Deny").frame(maxWidth: .infinity) }
                     .buttonStyle(.bordered)
                 Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                 Menu {
                     Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
                 } label: {
