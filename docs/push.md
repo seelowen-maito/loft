@@ -1,9 +1,34 @@
 # Push notifications (APNs)
 
 Alerts reach the iPhone app when it's closed. The backend sends them through Apple's Push Notification
-service with token-based auth (an APNs auth key, `.p8`).
+service, by one of two paths (ADR 0002):
 
-## Setting it up (by hand, once)
+| | **The Loft relay** (default) | **Your own key** |
+|---|---|---|
+| When | No APNs key in Settings | A `.p8` key, key id and team id in Settings |
+| Setup | None | The steps below |
+| Path | Loft → push relay → Apple | Loft → Apple |
+| Who sees the push text | The relay, in transit only (never stored or logged) | Only Apple |
+| Apps | The official Loft app only | Any bundle id (your own build) |
+
+Settings → Push notifications shows which path is in use ("Using the Loft relay" or "Your own key"). Adding a key
+("Use my key") switches to it; "Remove key, use the Loft relay" goes back. `GET /api/push` reports it as
+`path: "relay" | "own_key"`. Everything else is the same on both paths: which phones, which kinds, quiet hours,
+the rate limit and the payload.
+
+## The Loft relay
+
+With no key, Loft asks the relay for a **relay token** on its first push and keeps it owner-only in the same folder as
+the key would be (`relay-token`). It's the install's identity: there's no sign-in. Each push sends the phone's token,
+its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's answer back, so a
+gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its limits are 20 a
+minute and 1,000 a day per install), the push is logged and dropped, and the next one is tried.
+
+If the relay stops accepting the token (the operator revoked it), Loft doesn't fetch a new one by itself. Delete
+`relay-token` from the key folder to get a new one, or add your own key. The relay itself, its API, deploying it and
+revoking a token are in [`relay/README.md`](../relay/README.md).
+
+## Setting up your own key (by hand, once)
 
 1. **App id:** developer.apple.com → Certificates, IDs & Profiles → Identifiers → your app id (`LOFT_BUNDLE_ID`) → tick **Push Notifications** → Save. (The app project adds the matching *Push Notifications* capability and the `aps-environment` entitlement.)
 2. **Auth key:** same portal → **Keys** → **+** → name it "Loft push", tick **Apple Push Notifications service (APNs)** → Continue → Register.
@@ -14,7 +39,8 @@ service with token-based auth (an APNs auth key, `.p8`).
 
 ## Where the key lives
 
-`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. That's outside the repo
+`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. The relay token, when
+the install has one, is `relay-token` in the same folder, with the same modes. That's outside the repo
 and outside Loft's data folder (`.loft/`), so the backup plan (#79) only includes it encrypted.
 
 - It's checked to be a P-256 private key before it's stored.
@@ -42,7 +68,7 @@ uses the right host per device. The same auth key works for both.
 | `PATCH /api/devices/{token}` | `{kinds?, quiet_hours? (null clears), name?}` |
 | `DELETE /api/devices/{token}` | Stop pushing to this phone. |
 | `POST /api/devices/{token}/test` | Sends a test push. 410 if Apple says the token is gone (the device is then removed). |
-| `GET /api/push` | `{configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key. |
+| `GET /api/push` | `{path: "relay"\|"own_key", relay_token (whether the install has one), configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay token. |
 | `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,

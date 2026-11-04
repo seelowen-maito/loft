@@ -60,9 +60,36 @@ token. Every authorized push request counts, whether or not it's forwarded.
 
 `APNS_HOST_PRODUCTION` and `APNS_HOST_DEVELOPMENT` replace Apple's hosts. They are for the tests only; leave them unset.
 
-## Deploy and test
+## Deploy
 
-Create a Vercel project with `relay/` as its root directory, connect a KV store, set the variables above and deploy.
-To revoke an install, delete its `relay-token:<sha256>` key from the store.
+1. Vercel → Add New → Project → this repo, with **Root Directory** `relay` and no framework or build command.
+   Name the project `loft-push-relay`. Loft's default relay URL is `https://loft-push-relay.vercel.app`
+   (`RELAY_URL` in `backend/src/apns.rs`); with another name, change that constant.
+2. Storage → connect an Upstash Redis (KV) store to the project. It adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
+3. Settings → Environment Variables (Production), all marked **Sensitive**: `APNS_KEY_P8` (paste the whole `.p8`),
+   `APNS_KEY_ID`, `APNS_TEAM_ID`, `LOFT_BUNDLE_ID`. Nothing secret goes in the repo.
+4. Deploy. Check it: `curl -X POST https://loft-push-relay.vercel.app/api/token` answers `201` with a token. A Loft
+   with no key then pushes through it: Settings → Push notifications → Send test push.
+
+`vercel.json` caps each call at 15 seconds, so a slow Apple can't hold a function longer.
+
+## Runbook: revoke a relay token
+
+A relay token can't be read back from the store: only `relay-token:<sha256 of the token>` is there. To stop an install:
+
+1. **Find the hash.**
+   - If the install's owner sends you their token (it's in `~/Library/Application Support/Loft/apns/relay-token` on
+     their Mac): `printf %s 'lrt_…' | shasum -a 256`.
+   - If you're stopping an install that's misbehaving: in the store's Data Browser, look at the counters
+     `limit:pushesPerDay:<hash>:<day>` and `limit:pushesPerMinute:<hash>:<minute>`. The `<hash>` of the busy ones is
+     the token's hash.
+2. **Delete** `relay-token:<hash>` in the Data Browser (or `DEL relay-token:<hash>` in its CLI).
+3. From then on that install gets `401` and its pushes stop. Loft doesn't fetch a new token by itself. If the owner
+   should get back in, they delete their `relay-token` file and Loft asks for a new one on its next push. The limit of
+   5 new tokens per IP per hour still applies.
+
+To stop the whole relay, remove the project's `APNS_KEY_P8`, or revoke the key in the Apple Developer portal.
+
+## Test
 
 `npm test` runs the tests with Node's own test runner (Node 22), against a fake Apple server and a fake store. No Apple key is needed.
