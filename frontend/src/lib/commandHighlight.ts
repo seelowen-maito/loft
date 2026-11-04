@@ -28,6 +28,19 @@ export function commandAt(text: string, caret: number, names: string[]): Command
   return command && command.start !== at.start ? null : at;
 }
 
+/** A message cut into its one command (lowercased, as it runs) and the rest of its text, trimmed, with the
+ * command taken out wherever it sat: "the login bug /grill" is `/grill` with "the login bug". A later `/word`
+ * stays in the rest. Null when the message holds no known command. */
+export function splitCommand(text: string, names: string[]): { command: string; rest: string } | null {
+  const c = messageCommand(text, names);
+  if (!c) return null;
+  const before = text.slice(0, c.start), after = text.slice(c.end);
+  const head = before.trimEnd(), tail = after.trimStart();
+  // The two sides meet with the whitespace that stood before the command (or after it, at the start).
+  const gap = before.slice(head.length) || after.slice(0, after.length - tail.length);
+  return { command: c.word.toLowerCase(), rest: (head && tail ? head + gap + tail : head + tail).trim() };
+}
+
 /** `text` with the `/word` `at` replaced by `name`, and where the caret goes: right after it. */
 export function completeCommand(text: string, at: CommandWord, name: string): { text: string; caret: number } {
   return { text: text.slice(0, at.start) + name + text.slice(at.end), caret: at.start + name.length };

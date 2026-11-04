@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commandAt, completeCommand, highlightParts, mentionRanges, messageCommand } from "../src/lib/commandHighlight.ts";
+import { commandAt, completeCommand, highlightParts, mentionRanges, messageCommand, splitCommand } from "../src/lib/commandHighlight.ts";
 
 const NAMES = ["/clear", "/compact", "/grill", "/code", "/resume"];
 const span = (text: string) => {
@@ -81,6 +81,31 @@ test("completing replaces the /word in place and puts the caret after it", () =>
   assert.deepEqual(completeCommand(text, at, "/grill"), { text: "fix the login bug /grill and more", caret: 24 });
   assert.deepEqual(completeCommand("/cl", commandAt("/cl", 3, NAMES)!, "/clear"), { text: "/clear", caret: 6 });
   assert.deepEqual(completeCommand("a /cl b", commandAt("a /cl b", 5, NAMES)!, ""), { text: "a  b", caret: 2 });
+});
+
+test("a message splits into its command and the rest, wherever the command sits", () => {
+  assert.deepEqual(splitCommand("the login bug /grill", NAMES), { command: "/grill", rest: "the login bug" });
+  assert.deepEqual(splitCommand("keep the API notes /compact", NAMES), { command: "/compact", rest: "keep the API notes" });
+  assert.deepEqual(splitCommand("/grill the login bug", NAMES), { command: "/grill", rest: "the login bug" });
+  assert.deepEqual(splitCommand("draft /CLEAR text", NAMES), { command: "/clear", rest: "draft text" }, "lowercased to run");
+  assert.deepEqual(splitCommand("/resume", NAMES), { command: "/resume", rest: "" });
+  assert.deepEqual(splitCommand("  /code  ", NAMES), { command: "/code", rest: "" });
+});
+
+test("the rest keeps its own line breaks", () => {
+  assert.deepEqual(splitCommand("first line\n/compact\nsecond line", NAMES), { command: "/compact", rest: "first line\nsecond line" });
+  assert.deepEqual(splitCommand("/compact\nkeep the plan", NAMES), { command: "/compact", rest: "keep the plan" });
+});
+
+test("a second /word stays in the rest as plain text", () => {
+  assert.deepEqual(splitCommand("/compact keep /grill notes", NAMES), { command: "/compact", rest: "keep /grill notes" });
+  assert.deepEqual(splitCommand("the bug /grill then /clear", NAMES), { command: "/grill", rest: "the bug then /clear" });
+});
+
+test("a message with no command doesn't split", () => {
+  assert.equal(splitCommand("fix src/grill please", NAMES), null);
+  assert.equal(splitCommand("try /gri", NAMES), null);
+  assert.equal(splitCommand("", NAMES), null);
 });
 
 const AGENTS = ["Loft Dev", "Loft Reviewer", "QA", "Web Developer", "Web Dev"];

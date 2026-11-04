@@ -28,7 +28,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { commandAt, completeCommand, highlightParts, type CommandWord } from "../../lib/commandHighlight";
+import { commandAt, completeCommand, highlightParts, splitCommand, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -216,11 +216,12 @@ export function Chat({
     setMenuIndex(0);
   }, [text]);
 
-  const clearContext = async () => {
+  // `keep`: the rest of a message /clear was sent in, left in the composer.
+  const clearContext = async (keep = "") => {
     setCmdError(null);
     try {
       await api.resetSession(agent.id);
-      putDraft(agent.id, EMPTY_DRAFT);
+      putDraft(agent.id, { ...EMPTY_DRAFT, text: keep });
       stick.current = true;
     } catch (e) {
       setCmdError((e as Error).message);
@@ -248,11 +249,11 @@ export function Chat({
     }
   };
 
-  const openEditor = async () => {
+  const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
       const r = await api.openEditor(agent.id);
-      putDraft(agent.id, { ...loadDraft(agent.id), text: "" });
+      putDraft(agent.id, { ...loadDraft(agent.id), text: keep });
       setCmdNote(r.url ? `Opening ${r.path} in VS Code over Remote-SSH` : `Opened ${r.path} in VS Code`);
     } catch (e) {
       setCmdError((e as Error).message);
@@ -273,13 +274,14 @@ export function Chat({
     }
   };
 
-  const runCommand = async (name: string) => {
+  // `keep`: the rest of the message the command was sent in, put back in the composer once it has run.
+  const runCommand = async (name: string, keep = "") => {
     setCmdNote(null);
-    if (name === "/clear") return clearContext();
+    if (name === "/clear") return clearContext(keep);
     if (name === "/compact") return compactContext("");
-    if (name === "/code") return openEditor();
+    if (name === "/code") return openEditor(keep);
     if (name === "/resume") {
-      setText("");
+      setText(keep);
       return setResuming(true);
     }
     if (name === "/grill") {
@@ -320,10 +322,12 @@ export function Chat({
       }
       return;
     }
-    const compact = /^\/compact(?:\s+([\s\S]*))?$/i.exec(v);
-    if (compact) return compactContext(compact[1]?.trim() ?? "");
-    const grillTopic = /^\/grill(?:\s+([\s\S]*))?$/i.exec(v);
-    if (grillTopic) return startGrill(grillTopic[1]?.trim() ?? "");
+    // The message's one command, wherever it sits: /compact and /grill take the rest as their instructions or
+    // topic, the others run and leave the rest in the composer.
+    const cmd = splitCommand(v, COMMANDS.map((c) => c.name));
+    if (cmd?.command === "/compact") return compactContext(cmd.rest);
+    if (cmd?.command === "/grill") return startGrill(cmd.rest);
+    if (cmd) return runCommand(cmd.command, cmd.rest);
     if (v.startsWith("/") && !/\s/.test(v)) return runCommand(v.toLowerCase());
     setSending(true);
     setCmdError(null);
@@ -391,7 +395,7 @@ export function Chat({
               <Clock className="size-3" /> {fmtSchedule(agent)}
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
-            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
+            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={() => clearContext()} onResume={() => setResuming(true)} />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -407,7 +411,7 @@ export function Chat({
           <button
             className="btn-ghost"
             title="Clear context (/clear). Memory is kept."
-            onClick={clearContext}
+            onClick={() => clearContext()}
             disabled={running}
           >
             <RotateCcw className="size-3.5" />
@@ -611,7 +615,9 @@ export function Chat({
                       }
                       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
-                        pickCommand(matches[menuIndex].name);
+                        // Typed in full mid-message: nothing left to complete, so Enter sends it.
+                        if (!alone && typing?.word.toLowerCase() === matches[menuIndex].name) send();
+                        else pickCommand(matches[menuIndex].name);
                         return;
                       }
                     }
