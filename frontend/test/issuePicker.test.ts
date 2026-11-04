@@ -23,6 +23,15 @@ test("#42 finds the issue mirroring GitHub #42, and only it", () => {
   assert.deepEqual(titles("#99", "all"), []);
 });
 
+test("a bare number finds the GitHub issue with that number, and the text that names it", () => {
+  // Spec #288's own title and body don't say 288; its tickets' bodies do ("Parent #288").
+  const spec = { ...(issue("Tech debt", 288) as object), description: "" } as never;
+  const ticket = { ...(issue("A ticket", 290) as object), description: "## Parent\n\n#288" } as never;
+  const found = filterIssues([spec, ticket, ...issues], "288", "all").map((t: { title: string }) => t.title);
+  assert.deepEqual(found, ["Tech debt", "A ticket"]);
+  assert.deepEqual(titles("42", "all"), ["Retry cap", "Fix #42 later"]);
+});
+
 test("text searches titles and labels, and combines with the origin", () => {
   assert.deepEqual(titles("retry", "all"), ["Retry cap", "Retry docs"]);
   assert.deepEqual(titles("docs", "github"), ["Retry docs"]);

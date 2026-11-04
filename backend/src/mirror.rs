@@ -276,14 +276,46 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
 }
 
 /// What changed since the last read, open or closed. An unchanged answer comes back as 304 with the same ETag.
+/// More than a page changed: the next page starts from the newest `updated_at` read so far, so an issue
+/// edited while paging moves to the end instead of pushing an unread one onto a page already read.
 async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Cursor, report: &mut Report) -> anyhow::Result<()> {
     let since = cursor.since.clone().unwrap_or_default();
-    let path = format!("/repos/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&since={}", url_encode(&since));
-    let Some((v, etag)) = crate::github::get_if_changed(state, &path, cursor.etag.as_deref()).await? else {
-        return Ok(());
-    };
+    let mut from = since.clone();
+    // Only when a full page shares one `updated_at` does the next page need GitHub's own page number.
+    let mut page = 1;
+    let mut changed: Vec<Value> = vec![];
+    let mut first_etag = None;
+    for read in 0..MAX_PAGES {
+        let path = format!("/repos/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&since={}{}", url_encode(&from), if page > 1 { format!("&page={page}") } else { String::new() });
+        let v = if read == 0 {
+            let Some((v, etag)) = crate::github::get_if_changed(state, &path, cursor.etag.as_deref()).await? else {
+                return Ok(());
+            };
+            first_etag = etag;
+            v
+        } else {
+            crate::github::get(state, &path).await?
+        };
+        let items = v.as_array().cloned().unwrap_or_default();
+        let full = items.len() == 100;
+        let newest = items.iter().filter_map(|i| i["updated_at"].as_str()).max().unwrap_or("").to_string();
+        for i in items {
+            let n = i["number"].as_i64();
+            changed.retain(|c| c["number"].as_i64() != n);
+            changed.push(i);
+        }
+        if !full {
+            break;
+        }
+        if newest > from {
+            from = newest;
+            page = 1;
+        } else {
+            page += 1;
+        }
+    }
+    let changed: Vec<&Value> = changed.iter().filter(|i| i.get("pull_request").is_none()).collect();
     let mut newest = since.clone();
-    let changed: Vec<&Value> = v.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).collect();
     for i in &changed {
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
         apply(state, project, repo, i, report);
@@ -293,13 +325,23 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
     }
+    // A ticket closing or reopening changes its spec's sub-issue count, but not the spec's `updated_at`,
+    // so the spec isn't among the changes: read each such parent again for its count.
+    let numbers: HashSet<i64> = changed.iter().filter_map(|i| i["number"].as_i64()).collect();
+    let mut parents: Vec<i64> = changed.iter().filter_map(|i| parent_number(repo, i)).filter(|p| !numbers.contains(p)).collect();
+    parents.sort();
+    parents.dedup();
+    let mirrored = linked(state, repo);
+    for p in parents.into_iter().filter(|p| mirrored.iter().any(|t| t.github.as_ref().is_some_and(|g| g.number == *p))) {
+        refresh_link(state, repo, p).await;
+    }
     // `since` is inclusive, so the newest issue comes back each time: the answer only changes, and the
     // ETag with it, when something new does. Keep the URL (and ETag) until then.
     if newest != since {
         cursor.since = Some(newest);
         cursor.etag = None;
     } else {
-        cursor.etag = etag;
+        cursor.etag = first_etag;
     }
     Ok(())
 }
@@ -828,10 +870,9 @@ fn keep_link(state: &AppState, repo: &str, v: &Value) {
 /// spec is dropped when the spec's sub-issues are read again.
 fn parents_from_github<'a>(state: &AppState, repo: &str, issues: impl IntoIterator<Item = &'a Value>) {
     let mut all = linked(state, repo);
-    let prefix = format!("https://api.github.com/repos/{}/issues/", repo.to_lowercase());
     for i in issues {
         let Some(n) = i["number"].as_i64() else { continue };
-        let Some(p) = i["parent_issue_url"].as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok())) else { continue };
+        let Some(p) = parent_number(repo, i) else { continue };
         let Some(k) = all.iter().position(|t| t.github.as_ref().is_some_and(|g| g.number == n)) else { continue };
         let Some(parent) = all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == p)).map(|x| x.id.clone()) else { continue };
         if parent == all[k].id || all[k].parent_id.as_deref() == Some(parent.as_str()) {
@@ -845,6 +886,12 @@ fn parents_from_github<'a>(state: &AppState, repo: &str, issues: impl IntoIterat
             crate::tasks::log_status(state, t, FROM_GITHUB, &format!("Made a sub-issue of #{p} on GitHub"));
         }
     }
+}
+
+/// The number of issue `i`'s parent in the same repo, from `parent_issue_url`.
+fn parent_number(repo: &str, i: &Value) -> Option<i64> {
+    let prefix = format!("https://api.github.com/repos/{}/issues/", repo.to_lowercase());
+    i["parent_issue_url"].as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok()))
 }
 
 /// GitHub's blocking links and sub-issues of issue `i` onto the Loft issues that mirror them. Only
@@ -1858,5 +1905,78 @@ pub(crate) mod tests {
         other.labels = vec!["SPEC".into()];
         st.db.save_task(&other).unwrap();
         assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_change_poll_reads_every_page_when_more_than_a_hundred_changed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-pages";
+        project(&st, "mir-pages", Some("https://github.com/octo/mir-pages"));
+        let path = "/repos/octo/mir-pages/issues";
+        let at = |n: i64| format!("2026-10-02T00:{:02}:{:02}Z", n / 60, n % 60);
+        let page1: Vec<Value> = (1..=100).map(|n| gh(repo, n, &format!("Issue {n}"), "open", &at(n))).collect();
+        fake.in_turn("GET", path, vec![
+            (200, json!([page1[0].clone()])),
+            // 101 issues changed: the first page is full, the next one starts from its newest.
+            (200, json!(page1)),
+            (200, json!([page1[99].clone(), gh(repo, 101, "Issue 101", "open", &at(101))])),
+        ]);
+        sync_project(&st, "mir-pages", true).await.unwrap();
+        let r = sync_project(&st, "mir-pages", false).await.unwrap();
+        assert_eq!((r.created, r.error), (100, None), "none is left on a page never read");
+        assert_eq!(mirrored(&st, repo).len(), 101);
+        let seen = fake.seen(path);
+        assert_eq!(seen.len(), 3);
+        assert!(seen[2].path.contains(&format!("since={}", url_encode(&at(100)))) && !seen[2].path.contains("&page="), "{}", seen[2].path);
+        assert_eq!(state_cursor(&st, repo), Some(at(101)));
+    }
+
+    #[tokio::test]
+    async fn a_full_page_changed_in_one_second_reads_the_next_page_by_number() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-burst";
+        project(&st, "mir-burst", Some("https://github.com/octo/mir-burst"));
+        let path = "/repos/octo/mir-burst/issues";
+        let t = "2026-10-02T00:00:00Z";
+        let page1: Vec<Value> = (1..=100).map(|n| gh(repo, n, &format!("Issue {n}"), "open", t)).collect();
+        fake.in_turn("GET", path, vec![(200, json!([page1[0].clone()])), (200, json!(page1)), (200, json!([gh(repo, 101, "Issue 101", "open", t)]))]);
+        sync_project(&st, "mir-burst", true).await.unwrap();
+        sync_project(&st, "mir-burst", false).await.unwrap();
+        assert_eq!(mirrored(&st, repo).len(), 101);
+        assert!(fake.seen(path)[2].path.ends_with("&page=2"), "{}", fake.seen(path)[2].path);
+    }
+
+    fn state_cursor(st: &AppState, repo: &str) -> Option<String> {
+        let c = st.mirror.cursor(repo);
+        let since = c.try_lock().unwrap().since.clone();
+        since
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closing_updates_its_specs_progress_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-progress";
+        project(&st, "mir-progress", Some("https://github.com/octo/mir-progress"));
+        let mut spec = gh(repo, 1, "A spec", "open", "2026-10-02T00:00:00Z");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        spec["sub_issues_summary"] = json!({ "total": 2, "completed": 0 });
+        let mut ticket = gh(repo, 2, "A ticket", "open", "2026-10-02T00:00:00Z");
+        ticket["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/1"));
+        let mut closed = ticket.clone();
+        closed["state"] = json!("closed");
+        closed["updated_at"] = json!("2026-10-03T00:00:00Z");
+        // Closing a sub-issue leaves the spec's own `updated_at` alone: only the ticket is listed as changed.
+        fake.in_turn("GET", "/repos/octo/mir-progress/issues", vec![(200, json!([spec.clone(), ticket])), (200, json!([closed]))]);
+        let mut now = spec.clone();
+        now["sub_issues_summary"] = json!({ "total": 2, "completed": 1 });
+        fake.route("GET", "/repos/octo/mir-progress/issues/1", 200, now);
+        sync_project(&st, "mir-progress", true).await.unwrap();
+        sync_project(&st, "mir-progress", false).await.unwrap();
+
+        let g = mirrored(&st, repo)[0]["github"].clone();
+        assert_eq!((g["sub_done"].as_i64(), g["sub_total"].as_i64()), (Some(1), Some(2)), "the spec's progress follows its ticket");
     }
 }
