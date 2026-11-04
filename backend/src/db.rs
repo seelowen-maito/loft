@@ -1586,13 +1586,14 @@ impl Db {
             .unwrap_or((0, 0.0)))
     }
 
-    /// Runs and estimated cost in USD of every run that ended since `since` (RFC 3339), all agents together.
-    pub fn spend_since(&self, since: &str) -> Result<(i64, f64)> {
+    /// Runs and estimated cost in USD of every run that ended from `since` until before `until`
+    /// (RFC 3339; no `until` means up to now), all agents together.
+    pub fn spend_between(&self, since: &str, until: Option<&str>) -> Result<(i64, f64)> {
         let c = self.0.lock().unwrap();
         Ok(c.query_row(
             "SELECT count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages
-             WHERE kind = 'run_end' AND created_at >= ?1",
-            [since],
+             WHERE kind = 'run_end' AND created_at >= ?1 AND (?2 IS NULL OR created_at < ?2)",
+            params![since, until],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
     }

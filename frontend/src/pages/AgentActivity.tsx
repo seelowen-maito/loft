@@ -5,6 +5,7 @@ import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule, timeAgo } from "../lib/format";
+import { costChangeText, weekResetText } from "../lib/usage";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
 import { StatusPill } from "./agents/Status";
@@ -213,6 +214,9 @@ export function AgentActivity() {
     };
   }, [data]);
 
+  const change = period && costChangeText(period.cost_usd, period.previous.cost_usd);
+  const reset = period?.kind === "usage_week" ? weekResetText(period.resets_at) : null;
+
   const ordered = useMemo(() => (data ? byActivity(data) : null), [data]);
   const hidden = ordered ? Math.max(0, ordered.length - perRow) : 0;
   const shown = ordered && !expanded ? ordered.slice(0, perRow) : ordered;
@@ -236,6 +240,13 @@ export function AgentActivity() {
                     <span title="API list-price equivalent">
                       est. ${period.cost_usd.toFixed(2)} {period.kind === "usage_week" ? "this week" : "last 7 days"}
                     </span>
+                    {change && (
+                      <span title={`${period.previous.runs} runs · est. $${period.previous.cost_usd.toFixed(2)} the period before`}>
+                        {" "}
+                        ({change})
+                      </span>
+                    )}
+                    {reset && <> · {reset}</>}
                   </span>
                 )}
                 {allTime && (

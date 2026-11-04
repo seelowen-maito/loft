@@ -833,7 +833,8 @@ pub struct SummaryQuery {
 /// (local days, split autonomous vs on request), totals, PR outcomes, and
 /// anything waiting on the user. With `?totals=true` the list comes as `agents`
 /// next to the home line's figures (`period`, `all_time`); without it, a bare list, as the iOS app reads it.
-/// `period` counts the current Usage week, or the last 7 days when the plan usage can't be read.
+/// `period` counts the current Usage week, or the last 7 days when the plan usage can't be read,
+/// with the same span just before it as `previous`.
 pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<SummaryQuery>) -> ApiResult<Value> {
     const DAYS: i64 = 14;
     let today = chrono::Local::now().date_naive();
@@ -883,8 +884,14 @@ pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<Summa
         Some((start, reset)) => ("usage_week", start, Some(reset)),
         None => ("last_7_days", now - chrono::Duration::days(7), None),
     };
-    let (runs, cost) = state.db.spend_since(&since.to_rfc3339())?;
-    let period = json!({ "kind": kind, "since": since.to_rfc3339(), "resets_at": resets_at.map(|r| r.to_rfc3339()), "runs": runs, "cost_usd": cost });
+    let (runs, cost) = state.db.spend_between(&since.to_rfc3339(), None)?;
+    // The period before: the usage week before this one, or the 7 days before the last 7.
+    let before = since - chrono::Duration::days(7);
+    let (prev_runs, prev_cost) = state.db.spend_between(&before.to_rfc3339(), Some(&since.to_rfc3339()))?;
+    let period = json!({
+        "kind": kind, "since": since.to_rfc3339(), "resets_at": resets_at.map(|r| r.to_rfc3339()), "runs": runs, "cost_usd": cost,
+        "previous": { "since": before.to_rfc3339(), "runs": prev_runs, "cost_usd": prev_cost },
+    });
     let (runs, cost) = state.db.all_time_spend()?;
     Ok(Json(json!({ "agents": out, "period": period, "all_time": { "runs": runs, "cost_usd": cost } })))
 }
@@ -975,8 +982,10 @@ pub(crate) mod tests {
         let now = Utc::now();
         let reset = now + Duration::days(2);
         let start = reset - Duration::days(7);
-        // Before the week, its first second, inside it; and one 10 days ago, still in the 14-day charts.
-        ended_runs_at(&st, &a.id, &[start - Duration::seconds(1), start, now - Duration::hours(1), now - Duration::days(10)]);
+        // Before the week, its first second, inside it; one 10 days ago, still in the 14-day charts;
+        // and the previous week's first second and the second before it.
+        let prev = start - Duration::days(7);
+        ended_runs_at(&st, &a.id, &[start - Duration::seconds(1), start, now - Duration::hours(1), now - Duration::days(10), prev, prev - Duration::seconds(1)]);
         crate::usage::fake(&st, serde_json::json!({ "windows": [
             { "key": "five_hour", "percent": 10.0, "resets_at": (now + Duration::hours(3)).to_rfc3339() },
             { "key": "seven_day", "percent": 40.0, "resets_at": reset.to_rfc3339() },
@@ -988,9 +997,12 @@ pub(crate) mod tests {
         assert_eq!(p["resets_at"], reset.to_rfc3339());
         assert_eq!(p["runs"], 2, "the run a second before the week starts isn't counted");
         assert_eq!(p["cost_usd"], 6.0);
+        assert_eq!(p["previous"]["since"], prev.to_rfc3339());
+        assert_eq!(p["previous"]["runs"], 3, "the previous week ends where this one starts");
+        assert_eq!(p["previous"]["cost_usd"], 25.0);
         let card = &s["agents"][0];
         assert_eq!(card["days"], 14);
-        assert_eq!(card["cost_usd"], 15.0, "the agent card still counts 14 days");
+        assert_eq!(card["cost_usd"], 63.0, "the agent card still counts 14 days");
     }
 
     #[tokio::test]
@@ -1004,7 +1016,11 @@ pub(crate) mod tests {
             let st = crate::tasks::tests::state();
             let a = crate::tasks::tests::agent(&st, "A");
             let now = Utc::now();
-            ended_runs_at(&st, &a.id, &[now - Duration::days(7) - Duration::minutes(1), now - Duration::days(7) + Duration::minutes(1), now - Duration::days(1)]);
+            // Just over and under 7 days ago, yesterday; just under and over 14 days ago.
+            ended_runs_at(&st, &a.id, &[
+                now - Duration::days(7) - Duration::minutes(1), now - Duration::days(7) + Duration::minutes(1), now - Duration::days(1),
+                now - Duration::days(14) + Duration::minutes(1), now - Duration::days(14) - Duration::minutes(1),
+            ]);
             crate::usage::fake(&st, usage).await;
             let s = summary(&st).await;
             let p = &s["period"];
@@ -1014,8 +1030,10 @@ pub(crate) mod tests {
             assert!((since.with_timezone(&Utc) - (now - Duration::days(7))).num_seconds().abs() < 5);
             assert_eq!(p["runs"], 2, "the run just over 7 days ago isn't counted");
             assert_eq!(p["cost_usd"], 6.0);
-            assert_eq!(s["agents"][0]["cost_usd"], 7.0, "the agent card still counts 14 days");
-            assert_eq!(s["all_time"]["runs"], 3);
+            assert_eq!(p["previous"]["runs"], 2, "the 7 days before the last 7, and not a minute more");
+            assert_eq!(p["previous"]["cost_usd"], 9.0);
+            assert_eq!(s["agents"][0]["cost_usd"], 15.0, "the agent card still counts 14 days");
+            assert_eq!(s["all_time"]["runs"], 5);
         }
     }
 
