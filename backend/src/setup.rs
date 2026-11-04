@@ -169,6 +169,7 @@ Plan with your Planning tools: a grill when the user asks for one, a spec and ti
 
 ## Team
 If the team is missing a role, tell the user and suggest asking `loft` to set it up. Never create or delete agents.
+When you hand a ticket to an agent by message, name it in `ticket` (`mcp__loft__message_agent`), and keep naming the same ticket for its review rounds: Loft clears the agent's context between tickets as its Fresh context setting says, never within one.
 
 ## Memory
 Decisions the user made, one entry each. Ticket order lives in GitHub's blocking links, not in memory."#,

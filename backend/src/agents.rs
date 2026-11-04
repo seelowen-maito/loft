@@ -348,7 +348,8 @@ These rules are Loft's and apply to every message you send another agent with `m
 2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
-5. Don't reply to an FYI.";
+5. Don't reply to an FYI.
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`: the recipient's context may be cleared between tickets, never within one.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -495,20 +496,54 @@ pub fn clear_context(state: &AppState, agent_id: &str, text: &str, meta: Value) 
     Some(a)
 }
 
-/// A Delivery wake on `ticket` (see `Agent::delivery_ticket`). On a ticket the agent hasn't worked on yet,
-/// its Fresh context setting applies just before the run, behind a running one if needed. A Lead follows
-/// it only when it wakes as the agent building the tickets (`builder`): otherwise it coordinates, and is
-/// never cleared by Delivery.
-pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String) {
-    let Ok(Some(a)) = state.db.get_agent(agent_id) else { return };
-    let new = a.delivery_ticket.as_deref() != Some(ticket);
-    if new {
-        let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
+/// The ticket boundary, shared by a Delivery wake and an agent's message naming a ticket: records that the
+/// agent now works on `ticket` (see `Agent::delivery_ticket`) and says whether its Fresh context setting
+/// applies before the run. Only on a ticket it hasn't worked on yet, so review rounds keep their context,
+/// and for a Lead only as the agent building the tickets (`builder`): otherwise it coordinates, and is
+/// never cleared.
+fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool) -> bool {
+    let Ok(Some(a)) = state.db.get_agent(agent_id) else { return false };
+    if a.delivery_ticket.as_deref() == Some(ticket) {
+        return false;
     }
-    start_with(state, agent_id, Some(prompt), "delivery", false, new && (builder || a.role != "lead"));
+    let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
+    builder || a.role != "lead"
 }
 
-/// The start of a run: if its prompt starts a new Delivery ticket (`wake_on_ticket`), apply the agent's Fresh
+/// A Delivery wake on `ticket`: at a ticket boundary, the Fresh context setting applies just before the
+/// run, behind a running one if needed.
+pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String) {
+    let fresh = ticket_boundary(state, agent_id, ticket, builder);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh);
+}
+
+/// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
+/// `owner/repo#N` for a GitHub issue given as `N`, `#N`, `owner/repo#N` or its link (a bare number is on
+/// `repo`, the recipient's project's repo, when it has one), and a Loft issue id as it is. None when blank.
+pub fn message_ticket_key(raw: &str, repo: Option<&str>) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let num = |s: &str| s.parse::<u64>().ok();
+    let link = raw.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.");
+    if let Some(path) = link.strip_prefix("github.com/") {
+        let parts: Vec<&str> = path.split(['/', '#', '?']).collect();
+        if let [owner, name, "issues" | "pull", n, ..] = parts[..]
+            && let Some(n) = num(n)
+        {
+            return Some(format!("{owner}/{name}#{n}"));
+        }
+    }
+    let (left, n) = raw.rsplit_once('#').unwrap_or(("", raw));
+    match (left.trim(), num(n.trim())) {
+        ("", Some(n)) => Some(repo.map_or(format!("#{n}"), |r| format!("{r}#{n}"))),
+        (r, Some(n)) if r.contains('/') => Some(format!("{r}#{n}")),
+        _ => Some(raw.to_string()),
+    }
+}
+
+/// The start of a run: if its prompt starts a new ticket (`ticket_boundary`), apply the agent's Fresh
 /// context setting now, between runs.
 pub(crate) fn fresh_boundary(state: &AppState, agent_id: &str) {
     if state.rt.lock().unwrap().fresh_before.remove(agent_id) {
@@ -527,7 +562,7 @@ fn fresh_if_due(state: &AppState, agent_id: &str) {
             _ => a.context_tokens.is_some_and(|n| n >= CONTEXT_WARN_AT),
         };
     if due {
-        clear_context(state, agent_id, "Context cleared for a new Delivery ticket. Long-term memory carries over.", json!({ "fresh_context": a.fresh_context }));
+        clear_context(state, agent_id, "Context cleared for a new ticket. Long-term memory carries over.", json!({ "fresh_context": a.fresh_context }));
     }
 }
 
@@ -568,12 +603,24 @@ pub fn compact(state: &AppState, agent_id: &str, instructions: &str) {
 
 /// Deliver a message from one agent to another. It shows in the recipient's chat
 /// under the sender's sticker, and the recipient is told how to answer.
+#[cfg(test)]
 pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     message_from_agent_with(state, from, to, text, json!({}));
 }
 
 /// `message_from_agent`, with extra `meta` on the stored message (e.g. which task it is about).
-pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value) {
+pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, meta: Value) {
+    message_on_ticket(state, from, to, text, meta, None);
+}
+
+/// `message_from_agent_with` about `ticket` (a `message_ticket_key`), if it names one: at a ticket boundary,
+/// the recipient's Fresh context setting applies before the run, as on a Delivery wake. A Lead builds the
+/// tickets itself when its team has no Dev.
+pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>) {
+    let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
+    if let Some(t) = ticket {
+        meta["ticket"] = json!(t);
+    }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     add_msg(state, &to.id, None, "user", "text", text, meta);
     let prompt = format!(
@@ -581,7 +628,7 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
         name = from.name,
         id = from.id,
     );
-    start(state, &to.id, Some(prompt), "agent", false);
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh);
 }
 
 /// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
@@ -1444,6 +1491,7 @@ pub(crate) mod tests {
                 "3. Send a verdict only to the agent that acts on it, not to everyone.",
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
+                "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`: the recipient's context may be cleared between tickets, never within one.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }
@@ -2359,7 +2407,7 @@ esac
         assert_eq!(count(&st, &a.id, "clear"), 1, "a new ticket above 80k");
         assert_eq!(resumed(&st, &a.id), before, "the ticket's run started a new session");
         let m = st.db.list_messages(&a.id, 400, None).unwrap().into_iter().find(|m| m.kind == "clear").unwrap();
-        assert_eq!(m.content, "Context cleared for a new Delivery ticket. Long-term memory carries over.");
+        assert_eq!(m.content, "Context cleared for a new ticket. Long-term memory carries over.");
         assert_eq!(st.db.list_memories(&a.id).unwrap().len(), 1, "long-term memory carries over");
 
         // Always: every new ticket, small context or not. Off: never.

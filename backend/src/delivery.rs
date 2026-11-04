@@ -137,9 +137,17 @@ pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
 }
 
-/// How `Agent::delivery_ticket` names ticket #n of `d`, or with None the final review of its spec PR.
+/// How `Agent::delivery_ticket` names ticket #n of `d`, or with None the final review of its spec PR. A
+/// ticket gets the key a message naming it gets (`agents::message_ticket_key`): `owner/repo#N` on GitHub,
+/// its Loft issue id in a plan kept in Loft. So a hand-off by message after a Delivery wake on the same
+/// ticket isn't a new one.
 fn ticket_key(d: &Delivery, n: Option<i64>) -> String {
-    format!("{}#{}/{}", d.repo, d.spec, n.map_or("final".to_string(), |n| n.to_string()))
+    let fallback = || format!("{}#{}/{}", d.repo, d.spec, n.map_or("final".to_string(), |n| n.to_string()));
+    match n {
+        Some(n) if d.local => d.tickets.iter().find(|t| t.number == n && !t.id.is_empty()).map_or_else(fallback, |t| t.id.clone()),
+        Some(n) => format!("{}#{n}", d.repo),
+        None => fallback(),
+    }
 }
 
 /// Whether the Fresh context setting applies to `a`: to every agent but a Lead that only coordinates. A
@@ -1097,4 +1105,22 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
         crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into `{}`", d.branch, d.base)));
     }
     Ok(format!("Merged `{}` into `{}` in `{shown}`.", d.branch, d.base))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keys an agent's message naming the same ticket gets (`agents::message_ticket_key`), so Delivery and
+    /// a hand-off by message share one ticket boundary.
+    #[test]
+    fn ticket_keys_match_a_message_naming_the_ticket() {
+        let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
+        assert_eq!(ticket_key(&d, Some(12)), crate::agents::message_ticket_key("#12", Some("o/r")).unwrap());
+        assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
+        d.repo = local_repo("team");
+        d.local = true;
+        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into() });
+        assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap());
+    }
 }

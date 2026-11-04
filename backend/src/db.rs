@@ -157,8 +157,9 @@ pub struct Agent {
     /// building the tickets.
     #[serde(default = "default_fresh_context")]
     pub fresh_context: String,
-    /// The Delivery ticket it last worked on (`<repo>#<spec>/<ticket>`, or `/final` for the spec PR's final
-    /// review): a Delivery wake on another one is a ticket boundary, where Fresh context applies.
+    /// The ticket it last worked on (`<repo>#<ticket>`, a Loft issue id in a plan kept in Loft, or
+    /// `<repo>#<spec>/final` for the spec PR's final review), from a Delivery wake or an agent's message
+    /// naming it: one about another ticket is a ticket boundary, where Fresh context applies.
     #[serde(default)]
     pub delivery_ticket: Option<String>,
     pub avatar: Avatar,
