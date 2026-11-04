@@ -772,7 +772,8 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
 /// card is gone. The first time (and while it hasn't started) Loft builds the Delivery from GitHub: the
 /// spec's sub-issues are its tickets, with their blocking links; closed ones are done, and one labelled
 /// `in-progress` or with an open PR of its own is built elsewhere, so it's never handed out. Then the spec
-/// branch and draft spec PR, reused when there, and the first unblocked ticket on the team's Dev.
+/// branch and draft spec PR, reused when there (a `spec/<N>-` PR from the repo itself, never a fork's), and
+/// the first unblocked ticket on the team's Dev.
 async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64) -> ApiResult<Value> {
     let planned = |d: &Delivery| d.state == "planned" && !d.local;
     if state.db.get_delivery(repo, spec)?.is_none_or(|d| planned(&d)) {
@@ -796,9 +797,20 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
             let by: Vec<i64> = v.as_array().into_iter().flatten().filter_map(|b| b["number"].as_i64()).filter(|b| numbers.contains(b) && *b != n).collect();
             blockers.insert(n, by);
         }
-        let prs: Vec<Value> = read("/pulls?state=open&per_page=100".into()).await?.as_array().cloned().unwrap_or_default();
+        let mut prs: Vec<Value> = vec![];
+        for page in 1..=10 {
+            let got = read(format!("/pulls?state=open&per_page=100&page={page}")).await?.as_array().cloned().unwrap_or_default();
+            let last = got.len() < 100;
+            prs.extend(got);
+            if last {
+                break;
+            }
+        }
+        // Only PRs from the repo itself: a public repo's fork PRs are anyone's, so one must never become the
+        // spec PR (agents would build and push to its head) nor mark a ticket built elsewhere.
+        prs.retain(|p| p["head"]["repo"]["full_name"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(repo)));
         let closes = |p: &Value, n: i64| closes_issue(p["body"].as_str().unwrap_or(""), n);
-        let spec_pr = prs.iter().find(|p| closes(p, spec));
+        let spec_pr = prs.iter().find(|p| closes(p, spec) && p["head"]["ref"].as_str().is_some_and(|r| r.starts_with(&format!("spec/{spec}-"))));
         let own_pr = |n: i64| prs.iter().find(|p| closes(p, n) || p["head"]["ref"].as_str().is_some_and(|r| r.starts_with(&format!("ticket/{n}-")))).and_then(|p| p["number"].as_i64());
 
         let title = i["title"].as_str().unwrap_or(&t.title).to_string();
@@ -817,7 +829,7 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                 let n = x["number"].as_i64().unwrap_or_default();
                 let skipped = if x["state"] != "open" {
                     None
-                } else if x["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "in-progress") {
+                } else if x["labels"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("in-progress"))) {
                     Some("is labelled in-progress".to_string())
                 } else {
                     own_pr(n).map(|pr| format!("has its own open PR #{pr}"))

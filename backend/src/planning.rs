@@ -3246,9 +3246,10 @@ pub(crate) mod tests {
         planner_on(&st, "spec-reuse", Some("git@github.com:octo/spec-reuse.git"));
         let dev = busy(&st, "Builder", "spec-reuse", "dev");
         let spec = spec_40_on(&st, &fake, "spec-reuse", slug, json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        let own = json!({ "full_name": "Octo/Spec-Reuse" });
         fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([
-            { "number": 77, "body": "Fixes: #42", "head": { "ref": "someone/work" } },
-            { "number": 600, "body": "Closes #40", "head": { "ref": "spec/40-old-title" } },
+            { "number": 77, "body": "Fixes: #42", "head": { "ref": "someone/work", "repo": own } },
+            { "number": 600, "body": "Closes #40", "head": { "ref": "spec/40-old-title", "repo": own } },
         ]));
 
         let v = crate::delivery::start_from_issue(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
@@ -3258,6 +3259,32 @@ pub(crate) mod tests {
         assert_eq!(d.branch, "spec/40-old-title");
         assert!(posts(&fake, slug, "pulls").is_empty() && posts(&fake, slug, "git/refs").is_empty(), "the spec branch and PR are reused");
         assert!(woken(&st, &dev)[0].contains("Work on the spec branch `spec/40-old-title`"));
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_ignores_fork_prs() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-fork";
+        planner_on(&st, "spec-fork", Some("git@github.com:octo/spec-fork.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "spec-fork", "dev");
+        let spec = spec_40_on(&st, &fake, "spec-fork", slug, json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        // An outsider's fork PRs: one closes the spec from a `main` head, one closes ticket #41. And one of
+        // the repo's own that closes the spec but isn't on a spec branch.
+        let fork = json!({ "full_name": "mallory/spec-fork" });
+        // The second read is the spec PR lookup by `head=octo:spec/40-rounds`, which GitHub filters.
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls"), vec![(200, json!([
+            { "number": 66, "body": "Closes #40", "head": { "ref": "main", "repo": fork } },
+            { "number": 67, "body": "Closes #41", "head": { "ref": "ticket/41-x", "repo": fork } },
+            { "number": 68, "body": "Closes #40", "head": { "ref": "fix-things", "repo": { "full_name": slug } } },
+        ])), (200, json!([]))]);
+
+        let v = crate::delivery::start_from_issue(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&v["ticket"], &v["pr"]), (&json!(41), &json!(500)), "neither fork PR is reused or skips a ticket");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().branch, "spec/40-rounds");
+        assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "spec/40-rounds");
+        assert!(woken(&st, &dev)[0].contains("Work on the spec branch `spec/40-rounds`"));
     }
 
     #[test]
