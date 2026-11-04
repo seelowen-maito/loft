@@ -450,6 +450,9 @@ impl Serialize for Task {
     }
 }
 
+/// How many days of run ends the run ledger keeps: enough for the previous Usage week.
+pub const RUN_LEDGER_DAYS: i64 = 15;
+
 pub fn now() -> String {
     Utc::now().to_rfc3339()
 }
@@ -641,14 +644,17 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What a run added to its session, given the running total it reported and the one before it.
-/// A total that went down is a fresh session, so all of it is this run's.
-/// Add one run, and the cost its run end's `meta` holds, to the All-time spend.
-fn add_all_time(c: &Connection, meta: &Value) -> Result<()> {
-    c.execute("UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1", [meta["cost_usd"].as_f64().unwrap_or(0.0)])?;
+/// Count a run that ended at `ended_at`, and the cost its run end's `meta` holds: one more run in the
+/// All-time spend, and a row in the run ledger the Usage week figures read.
+fn count_run_end(c: &Connection, meta: &Value, ended_at: &str) -> Result<()> {
+    let cost = meta["cost_usd"].as_f64().unwrap_or(0.0);
+    c.execute("UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1", [cost])?;
+    c.execute("INSERT INTO run_ledger (ended_at, cost_usd) VALUES (?1, ?2)", params![ended_at, cost])?;
     Ok(())
 }
 
+/// What a run added to its session, given the running total it reported and the one before it.
+/// A total that went down is a fresh session, so all of it is this run's.
 pub fn run_cost(total: f64, prev: f64) -> f64 {
     if total >= prev { total - prev } else { total }
 }
@@ -728,6 +734,24 @@ impl Db {
             "INSERT OR IGNORE INTO all_time_spend (id, runs, cost_usd)
              SELECT 1, count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0.0) FROM messages WHERE kind = 'run_end'",
             [],
+        )?;
+        // The run ledger: one row per run end, kept apart from the chats so clearing one or deleting an agent
+        // doesn't change the period figures. It starts from the run ends there are, once, and keeps
+        // RUN_LEDGER_DAYS of them (the All-time spend has its own total).
+        let has_ledger: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'run_ledger'", [], |r| r.get(0))?;
+        if !has_ledger {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE run_ledger (ended_at TEXT NOT NULL, cost_usd REAL NOT NULL);
+                 CREATE INDEX run_ledger_ended ON run_ledger(ended_at);
+                 INSERT INTO run_ledger (ended_at, cost_usd)
+                     SELECT created_at, COALESCE(json_extract(meta, '$.cost_usd'), 0.0) FROM messages WHERE kind = 'run_end' ORDER BY id;
+                 COMMIT;",
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM run_ledger WHERE ended_at < ?1",
+            [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
         )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
@@ -1213,7 +1237,7 @@ impl Db {
         )?;
         let id = c.last_insert_rowid();
         if kind == "run_end" {
-            add_all_time(&c, &meta)?;
+            count_run_end(&c, &meta, &created_at)?;
         }
         Ok(Message {
             id,
@@ -1573,9 +1597,10 @@ impl Db {
 
     // ---- activity summary ---------------------------------------------
 
-    /// Count a run whose run end isn't saved (a quiet run's) in the All-time spend; saved run ends count themselves.
+    /// Count a run whose run end isn't saved (a quiet run's) in the All-time spend and the run ledger;
+    /// saved run ends count themselves.
     pub fn add_unsaved_run_end(&self, meta: &Value) -> Result<()> {
-        add_all_time(&self.0.lock().unwrap(), meta)
+        count_run_end(&self.0.lock().unwrap(), meta, &now())
     }
 
     /// The All-time spend: (runs, estimated cost in USD).
@@ -1587,12 +1612,12 @@ impl Db {
     }
 
     /// Runs and estimated cost in USD of every run that ended from `since` until before `until`
-    /// (RFC 3339; no `until` means up to now), all agents together.
+    /// (RFC 3339; no `until` means up to now), all agents together, from the run ledger
+    /// (so only the last `RUN_LEDGER_DAYS` days).
     pub fn spend_between(&self, since: &str, until: Option<&str>) -> Result<(i64, f64)> {
         let c = self.0.lock().unwrap();
         Ok(c.query_row(
-            "SELECT count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages
-             WHERE kind = 'run_end' AND created_at >= ?1 AND (?2 IS NULL OR created_at < ?2)",
+            "SELECT count(*), COALESCE(sum(cost_usd), 0) FROM run_ledger WHERE ended_at >= ?1 AND (?2 IS NULL OR ended_at < ?2)",
             params![since, until],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
@@ -1967,5 +1992,52 @@ mod tests {
         near(&db, 4, 2.0);
         drop(db);
         near(&Db::open(&path).unwrap(), 4, 2.0);
+    }
+
+    #[test]
+    fn the_run_ledger_starts_from_the_run_ends_there_are_once() {
+        use chrono::Duration;
+        let path = std::env::temp_dir().join(format!("loft-ledger-{}.db", uuid::Uuid::new_v4()));
+        let now = Utc::now();
+        let ago = |d: i64| (now - Duration::days(d)).to_rfc3339();
+        // What the period figures read before the ledger, straight from the run ends.
+        let from_messages = |c: &Connection, since: &str| -> (i64, f64) {
+            c.query_row(
+                "SELECT count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages WHERE kind = 'run_end' AND created_at >= ?1",
+                [since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        {
+            let db = Db::open(&path).unwrap();
+            db.save_agent(&agent("a")).unwrap();
+            // Today, 3 and 10 days ago, a stopped run 2 days ago, and one past what the ledger keeps.
+            for (d, meta) in [
+                (0, serde_json::json!({ "cost_usd": 0.5, "session_cost_usd": 0.5 })),
+                (3, serde_json::json!({ "cost_usd": 1.0, "session_cost_usd": 1.0 })),
+                (10, serde_json::json!({ "cost_usd": 2.0, "session_cost_usd": 2.0 })),
+                (2, serde_json::json!({ "stopped": true })),
+                (RUN_LEDGER_DAYS + 1, serde_json::json!({ "cost_usd": 4.0, "session_cost_usd": 4.0 })),
+            ] {
+                let m = db.add_message("a", None, "system", "run_end", "", meta).unwrap();
+                db.conn().execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", params![ago(d), m.id]).unwrap();
+            }
+        }
+        // A database from before the ledger existed.
+        Connection::open(&path).unwrap().execute("DROP TABLE run_ledger", []).unwrap();
+        let db = Db::open(&path).unwrap();
+        for since in [ago(7), ago(14)] {
+            let before = from_messages(&db.conn(), &since);
+            assert_eq!(db.spend_between(&since, None).unwrap(), before, "since {since}");
+        }
+        assert_eq!(db.spend_between(&ago(7), None).unwrap(), (3, 1.5));
+        let rows = |db: &Db| db.conn().query_row("SELECT count(*) FROM run_ledger", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows(&db), 4, "the run end past what the ledger keeps is pruned");
+        drop(db);
+        // Opened again, the ledger isn't filled a second time.
+        let db = Db::open(&path).unwrap();
+        assert_eq!(rows(&db), 4);
+        assert_eq!(db.spend_between(&ago(14), None).unwrap(), (4, 3.5));
     }
 }

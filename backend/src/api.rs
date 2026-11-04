@@ -888,7 +888,9 @@ pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<Summa
     // The period before, like with like: the previous usage week up to the same point in it,
     // or the 7 days before the last 7 (where that point is the period's end).
     let before = since - chrono::Duration::days(7);
-    let until = before + (now - since);
+    // Capped at this period's start: right after the week resets, the cached plan usage can still
+    // hold the old reset time, putting `now` more than a week past `since`.
+    let until = (before + (now - since)).min(since);
     let (prev_runs, prev_cost) = state.db.spend_between(&before.to_rfc3339(), Some(&until.to_rfc3339()))?;
     let period = json!({
         "kind": kind, "since": since.to_rfc3339(), "resets_at": resets_at.map(|r| r.to_rfc3339()), "runs": runs, "cost_usd": cost,
@@ -968,6 +970,7 @@ pub(crate) mod tests {
         for (i, t) in at.iter().enumerate() {
             let m = st.db.add_message(agent, None, "system", "run_end", "", serde_json::json!({ "cost_usd": f64::from(1 << i) })).unwrap();
             st.db.conn().execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", rusqlite::params![t.to_rfc3339(), m.id]).unwrap();
+            st.db.conn().execute("UPDATE run_ledger SET ended_at = ?1 WHERE rowid = (SELECT max(rowid) FROM run_ledger)", [t.to_rfc3339()]).unwrap();
         }
     }
 
@@ -1012,6 +1015,52 @@ pub(crate) mod tests {
         let card = &s["agents"][0];
         assert_eq!(card["days"], 14);
         assert_eq!(card["cost_usd"], 255.0, "the agent card still counts 14 days");
+    }
+
+    #[tokio::test]
+    async fn the_week_keeps_its_runs_when_a_chat_is_cleared_or_an_agent_deleted_and_counts_grill_runs() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
+        let now = Utc::now();
+        ended_runs_at(&st, &a.id, &[now - Duration::hours(2), now - Duration::hours(1)]);
+        ended_runs_at(&st, &b.id, &[now - Duration::hours(3)]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "seven_day", "percent": 40.0, "resets_at": (now + Duration::days(2)).to_rfc3339() },
+        ], "error": null })).await;
+        let week = |s: &serde_json::Value| (s["period"]["runs"].as_i64().unwrap(), s["period"]["cost_usd"].as_f64().unwrap());
+        assert_eq!(week(&summary(&st).await), (3, 4.0));
+        // A grill run's run end isn't saved in the chat, but it counts.
+        st.db.add_unsaved_run_end(&serde_json::json!({ "cost_usd": 0.5 })).unwrap();
+        assert_eq!(week(&summary(&st).await), (4, 4.5));
+        st.db.clear_messages(&a.id).unwrap();
+        assert_eq!(week(&summary(&st).await), (4, 4.5), "clearing a chat changes nothing");
+        st.db.delete_agent(&b.id).unwrap();
+        let s = summary(&st).await;
+        assert_eq!(week(&s), (4, 4.5), "deleting an agent changes nothing");
+        assert_eq!(s["all_time"]["runs"], 4, "the week and the All-time spend agree");
+    }
+
+    #[tokio::test]
+    async fn the_previous_week_never_ends_after_this_one_starts() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "A");
+        let now = Utc::now();
+        // The cached plan usage still holds the reset that just passed, so the week it gives started 7 days and an hour ago.
+        let stale = now - Duration::hours(1);
+        let start = stale - Duration::days(7);
+        // One run in the hour just before the stale week's start: it belongs to that week, not the one before.
+        ended_runs_at(&st, &a.id, &[start - Duration::days(7) + Duration::hours(1), start - Duration::minutes(30), start + Duration::minutes(1)]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "seven_day", "percent": 0.0, "resets_at": stale.to_rfc3339() },
+        ], "error": null })).await;
+        let p = &summary(&st).await["period"];
+        assert_eq!(p["since"], start.to_rfc3339());
+        assert_eq!(p["previous"]["until"], p["since"], "capped at this week's start");
+        assert_eq!(p["runs"], 1);
+        assert_eq!(p["previous"]["runs"], 2, "the run 30 minutes before this week's start is last week's only");
+        assert_eq!(p["previous"]["cost_usd"], 3.0);
     }
 
     #[tokio::test]
