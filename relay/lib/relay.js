@@ -8,13 +8,35 @@ import { send } from "./apns.js";
 /** Apple's limit for an alert's payload. */
 export const MAX_PAYLOAD_BYTES = 4096;
 
-const json = (status, body) => Response.json(body, { status });
-const hashed = (token) => `relay-token:${createHash("sha256").update(token).digest("hex")}`;
+/** What one IP or one install can ask for: [requests, window in seconds]. */
+export const LIMITS = { tokensPerIp: [5, 3600], pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] };
+
+const json = (status, body, headers) => Response.json(body, { status, headers });
+const sha256 = (s) => createHash("sha256").update(s).digest("hex");
+const hashed = (token) => `relay-token:${sha256(token)}`;
+
+/**
+ * Counts one request against a fixed-window limit: null when it's within it, else a 429 saying when to try again.
+ * `who` is already a hash, so the store never holds an IP or a token.
+ */
+async function overLimit(store, name, who, now) {
+  const [max, seconds] = LIMITS[name];
+  const window = Math.floor(now / 1000 / seconds);
+  if ((await store.hit(`limit:${name}:${who}:${window}`, seconds)) <= max) return null;
+  const retry = (window + 1) * seconds - Math.floor(now / 1000);
+  return json(429, { error: `too many requests: at most ${max} per ${seconds === 60 ? "minute" : seconds === 3600 ? "hour" : "day"}` }, { "retry-after": String(retry) });
+}
+
+/** The caller's IP: Vercel puts the client first in x-forwarded-for. */
+const clientIp = (request) => (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || "unknown";
 
 /** `POST /api/token`: a new relay token. Only its hash is stored. */
-export async function issueToken(_request, env = process.env) {
+export async function issueToken(request, env = process.env, now = Date.now()) {
+  const store = makeKv(env);
+  const limited = await overLimit(store, "tokensPerIp", sha256(`ip:${clientIp(request)}`), now);
+  if (limited) return limited;
   const token = `lrt_${randomBytes(32).toString("base64url")}`;
-  await makeKv(env).set(hashed(token), new Date().toISOString());
+  await store.set(hashed(token), new Date(now).toISOString());
   return json(201, { token });
 }
 
@@ -33,11 +55,16 @@ function invalid(b, env) {
 /**
  * `POST /api/push`, with `Authorization: Bearer <relay token>` and `{device_token, environment, bundle_id, payload,
  * priority?, collapse_id?}`. When Apple answered: 200 `{apple_status, reason, apns_id}` (a 410, or a 400 with
- * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`.
+ * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`,
+ * 429 with Retry-After over a limit. Every authorized request counts, forwarded or not.
  */
-export async function push(request, env = process.env) {
+export async function push(request, env = process.env, now = Date.now()) {
+  const store = makeKv(env);
   const token = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  if (!token || !(await makeKv(env).exists(hashed(token)))) return json(401, { error: "a valid relay token is required" });
+  if (!token || !(await store.exists(hashed(token)))) return json(401, { error: "a valid relay token is required" });
+  const who = sha256(token);
+  const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
+  if (limited) return limited;
   const raw = await request.text();
   if (Buffer.byteLength(raw) > MAX_PAYLOAD_BYTES * 2) return json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
   let b;

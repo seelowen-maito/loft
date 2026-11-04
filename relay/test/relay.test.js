@@ -20,7 +20,13 @@ const kvServer = createServer((req, res) => {
     const [cmd, key, value] = JSON.parse(body);
     commands.push(body);
     if (req.headers.authorization !== "Bearer kv-secret") return res.writeHead(401).end();
-    const result = cmd === "SET" ? (store.set(key, value), "OK") : cmd === "EXISTS" ? (store.has(key) ? 1 : 0) : null;
+    const incr = () => (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
+    const result =
+      cmd === "SET" ? (store.set(key, value), "OK")
+      : cmd === "EXISTS" ? (store.has(key) ? 1 : 0)
+      : cmd === "INCR" ? incr()
+      : cmd === "EXPIRE" ? 1
+      : null;
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ result }));
   });
 });
@@ -64,9 +70,13 @@ beforeEach(() => {
   production.answer({ status: 200 });
 });
 
-const newToken = async () => (await (await issueToken(new Request("http://relay/api/token", { method: "POST" }), env)).json()).token;
+// Each install asks from its own IP, so the per-IP limit only bites where a test means it to.
+let ips = 0;
+const askToken = (ip = `10.0.${Math.floor(++ips / 250)}.${ips % 250}`, now) =>
+  issueToken(new Request("http://relay/api/token", { method: "POST", headers: { "x-forwarded-for": `${ip}, 76.76.21.21` } }), env, now);
+const newToken = async () => (await (await askToken()).json()).token;
 const payload = { aps: { alert: { title: "Web Dev needs your approval", body: "Bash" }, sound: "default", badge: 3 }, type: "permission" };
-const send = (token, body, raw) =>
+const send = (token, body, raw, now) =>
   push(
     new Request("http://relay/api/push", {
       method: "POST",
@@ -74,10 +84,11 @@ const send = (token, body, raw) =>
       body: raw ?? JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload, ...body }),
     }),
     env,
+    now,
   );
 
 test("a relay token is a secret: only its hash is stored", async () => {
-  const res = await issueToken(new Request("http://relay/api/token", { method: "POST" }), env);
+  const res = await askToken();
   assert.equal(res.status, 201);
   const { token } = await res.json();
   assert.match(token, /^lrt_[A-Za-z0-9_-]{43}$/);
@@ -178,7 +189,12 @@ test("no payload or device token is written to the store or to the logs", async 
     assert.ok(!written.includes(secret), `the store saw ${secret}`);
     assert.ok(!logged.join("\n").includes(secret), `the logs have ${secret}`);
   }
-  assert.ok(commands.every((c) => /^\["(SET|EXISTS)","relay-token:[0-9a-f]{64}"/.test(c)), commands.join("\n"));
+  // Only hashed tokens and counters keyed by hashes: no IP either.
+  assert.ok(
+    commands.every((c) => /^\["(SET|EXISTS)","relay-token:[0-9a-f]{64}"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"/.test(c)),
+    commands.join("\n"),
+  );
+  assert.ok(!written.includes("10.0."), "no IP is stored");
 });
 
 test("when Apple can't be reached the caller is told, without details", async () => {
@@ -193,4 +209,44 @@ test("when Apple can't be reached the caller is told, without details", async ()
   );
   assert.equal(res.status, 502);
   assert.deepEqual(await res.json(), { error: "couldn't reach Apple" });
+});
+
+const HOUR = 3600_000;
+const T0 = Date.UTC(2026, 10, 4, 10, 0, 0);
+
+test("the 6th token from one IP within an hour is refused; other IPs aren't, and the next hour starts over", async () => {
+  for (let i = 0; i < 5; i++) assert.equal((await askToken("203.0.113.7", T0 + i * 60_000)).status, 201);
+  const sixth = await askToken("203.0.113.7", T0 + 30 * 60_000);
+  assert.equal(sixth.status, 429);
+  assert.deepEqual(await sixth.json(), { error: "too many requests: at most 5 per hour" });
+  assert.equal(sixth.headers.get("retry-after"), String(30 * 60));
+  assert.equal((await askToken("203.0.113.8", T0 + 30 * 60_000)).status, 201, "another IP");
+  assert.equal((await askToken("203.0.113.7", T0 + HOUR)).status, 201, "the next hour");
+});
+
+test("the 21st push in a minute from one token is refused; other tokens aren't, and the next minute starts over", async () => {
+  const [a, b] = [await newToken(), await newToken()];
+  for (let i = 0; i < 20; i++) assert.equal((await send(a, {}, undefined, T0 + i * 1000)).status, 200);
+  const over = await send(a, {}, undefined, T0 + 30_000);
+  assert.equal(over.status, 429);
+  assert.deepEqual(await over.json(), { error: "too many requests: at most 20 per minute" });
+  assert.equal(over.headers.get("retry-after"), "30");
+  assert.equal(production.seen.length, 20, "the refused push never reached Apple");
+  assert.equal((await send(b, {}, undefined, T0 + 30_000)).status, 200, "another token");
+  assert.equal((await send(a, {}, undefined, T0 + 60_000)).status, 200, "the next minute");
+});
+
+test("the 1,001st push in a day from one token is refused until the next day", async () => {
+  const token = await newToken();
+  const day = Date.UTC(2026, 10, 5);
+  // 20 a minute, so only the daily limit is reached.
+  for (let i = 0; i < 1000; i++) {
+    const res = await send(token, {}, undefined, day + Math.floor(i / 20) * 60_000);
+    assert.equal(res.status, 200, `push ${i + 1}`);
+  }
+  const over = await send(token, {}, undefined, day + 51 * 60_000);
+  assert.equal(over.status, 429);
+  assert.deepEqual(await over.json(), { error: "too many requests: at most 1000 per day" });
+  assert.equal((await send(await newToken(), {}, undefined, day + 51 * 60_000)).status, 200, "another token");
+  assert.equal((await send(token, {}, undefined, day + 24 * HOUR)).status, 200, "the next day");
 });

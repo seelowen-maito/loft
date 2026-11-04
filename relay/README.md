@@ -35,8 +35,19 @@ Plain JavaScript Vercel functions with no dependencies and no build step. The st
 | `413` | The payload is over 4 KB. |
 | `400` | A malformed request. |
 | `502` | Apple couldn't be reached. |
+| `429` | Over a limit; `Retry-After` says in how many seconds to try again. |
 
 Every error body is `{"error": "…"}`.
+
+## Limits
+
+| | |
+|---|---|
+| New relay tokens | 5 per IP per hour |
+| Pushes | 20 per minute and 1,000 per day per relay token |
+
+These are fixed windows (the clock minute, hour and UTC day), counted in the store under hashes of the IP and the
+token. Every authorized push request counts, whether or not it's forwarded.
 
 ## Settings (Vercel environment variables)
 
