@@ -28,7 +28,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { commandAt, completeCommand, highlightParts, splitCommand, stillPicked, type CommandWord } from "../../lib/commandHighlight";
+import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -625,8 +625,9 @@ export function Chat({
                       }
                       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
-                        // Typed in full mid-message: nothing left to complete, so Enter picks it and sends it.
-                        if (!alone && typing?.word.toLowerCase() === matches[menuIndex].name) send(text, typing);
+                        // Mid-message, Enter sends only once the command is picked (and highlighted); typed by hand,
+                        // the first Enter picks it.
+                        if (!alone && typing && enterOnMenu(text, typing, matches[menuIndex].name, picked) === "send") send();
                         else pickCommand(matches[menuIndex].name);
                         return;
                       }

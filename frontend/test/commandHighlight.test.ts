@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commandAt, completeCommand, highlightParts, mentionRanges, messageCommand, splitCommand, type CommandWord } from "../src/lib/commandHighlight.ts";
+import { commandAt, completeCommand, enterOnMenu, highlightParts, mentionRanges, messageCommand, splitCommand, type CommandWord } from "../src/lib/commandHighlight.ts";
 
 const NAMES = ["/clear", "/compact", "/grill", "/code", "/resume"];
 const span = (text: string, picked?: CommandWord | null) => {
@@ -187,4 +187,24 @@ test("only a command that will run is coloured", () => {
   assert.deepEqual(coloured("/compact keep it short /grill"), ["/compact"]);
   assert.deepEqual(coloured("read src/grill"), []);
   assert.equal(highlightParts(text, NAMES, AGENTS, pick(text, 13)).map((p) => p.text).join(""), text);
+});
+
+test("Enter on a command typed by hand mid-message picks it instead of running it", () => {
+  const text = "explain /compact";
+  const at = commandAt(text, text.length, NAMES)!;
+  assert.equal(at.word, "/compact", "the menu is open on it");
+  assert.equal(enterOnMenu(text, at, "/compact", null), "pick", "the first Enter only picks it");
+  assert.equal(splitCommand(text, NAMES), null, "unpicked, the message would go as text");
+  assert.equal(enterOnMenu("how do I use /compact", commandAt("how do I use /compact", 21, NAMES)!, "/compact"), "pick");
+});
+
+test("Enter on a picked command mid-message sends it, and runs it", () => {
+  const text = "explain /compact", picked = pick(text, 8);
+  const at = commandAt(text, text.length, NAMES, picked)!;
+  assert.equal(enterOnMenu(text, at, "/compact", picked), "send");
+  assert.deepEqual(coloured(text, picked), ["/compact"], "highlighted before it runs");
+  assert.deepEqual(splitCommand(text, NAMES, picked), { command: "/compact", rest: "explain" });
+  const partial = "explain /comp";
+  assert.equal(enterOnMenu(partial, commandAt(partial, 13, NAMES)!, "/compact", null), "pick", "a partial word completes");
+  assert.equal(enterOnMenu("a /grill b /compact", commandAt("a /grill b /compact", 19, NAMES)!, "/compact", pick("a /grill b /compact", 2)), "pick", "another word picked doesn't count");
 });

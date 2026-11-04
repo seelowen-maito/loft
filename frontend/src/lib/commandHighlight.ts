@@ -51,6 +51,14 @@ export function splitCommand(text: string, names: string[], picked?: CommandWord
   return { command: c.word.toLowerCase(), rest: (head && tail ? head + gap + tail : head + tail).trim() };
 }
 
+/** What Enter does mid-message with the menu open on the `/word` `at` and `name` its highlighted match: "send"
+ * only once `at` is the command `picked` from the menu (so it runs and is highlighted), else "pick" it: complete
+ * it in place and mark it picked, leaving a second Enter to send. A command typed by hand in full is never run by
+ * the Enter that would have sent it as text. */
+export function enterOnMenu(text: string, at: CommandWord, name: string, picked?: CommandWord | null): "send" | "pick" {
+  return stillPicked(text, picked) && picked.start === at.start && at.word.toLowerCase() === name ? "send" : "pick";
+}
+
 /** `text` with the `/word` `at` replaced by `name`, and where the caret goes: right after it. */
 export function completeCommand(text: string, at: CommandWord, name: string): { text: string; caret: number } {
   return { text: text.slice(0, at.start) + name + text.slice(at.end), caret: at.start + name.length };
