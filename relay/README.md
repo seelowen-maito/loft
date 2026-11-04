@@ -62,8 +62,9 @@ counted in the store under the key's hash. Every authorized request counts, whet
 ## Deploy
 
 1. Vercel → Add New → Project → this repo, with **Root Directory** `relay` and no framework or build command.
-   Name the project `loft-push-relay`. Loft's relay URL is `https://loft-push-relay.vercel.app`
-   (`RELAY_URL` in `backend/src/apns.rs`); with another name, change that constant.
+   Name the project `loft-push-relay`. Then set Loft's relay URL to it: `RELAY_URL` in `backend/src/apns.rs` is
+   empty until the project exists, so a name nobody owns can't receive relay keys and push text. Until it's set
+   in a build, `LOFT_RELAY_URL=https://loft-push-relay.vercel.app` in Loft's environment does the same.
 2. Storage → connect an Upstash Redis (KV) store to the project. It adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
 3. Settings → Environment Variables (Production), all marked **Sensitive**: `APNS_KEY_P8` (paste the whole `.p8`),
    `APNS_KEY_ID`, `APNS_TEAM_ID`, `LOFT_BUNDLE_ID`. Nothing secret goes in the repo.

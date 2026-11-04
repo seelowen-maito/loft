@@ -11,7 +11,8 @@ service, by one of two paths (ADR 0002):
 | Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
 | Apps | Any bundle id (your own build) | The official Loft app only |
 
-Your own key wins when both are set. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+Your own key wins when both are set. A relay key only counts in a build that knows the relay's address (`RELAY_URL`,
+empty until the operator's relay is deployed, or `LOFT_RELAY_URL`). With neither, **nothing is pushed**: items that come in meanwhile aren't sent
 late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
 off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
 paths: which phones, which kinds, quiet hours, the rate limit and the payload.

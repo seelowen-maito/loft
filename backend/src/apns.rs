@@ -123,15 +123,18 @@ fn route_for(own_key: bool, relay_key: bool) -> Route {
     }
 }
 
+/// A relay key only routes through the relay when this build knows where the relay is.
 pub fn route(state: &AppState) -> Route {
-    route_for(own_key(state), relay_key_present())
+    route_for(own_key(state), relay_key_present() && relay_url().is_some())
 }
 
-/// The hosted push relay. LOFT_RELAY_URL replaces it; tests never reach the real one.
-const RELAY_URL: &str = "https://loft-push-relay.vercel.app";
+/// The hosted push relay. Empty until the operator's Vercel project exists (#259), so no one else's
+/// project can receive relay keys and push text under its name; LOFT_RELAY_URL sets it meanwhile.
+const RELAY_URL: &str = "";
 
-fn relay_url() -> String {
-    std::env::var("LOFT_RELAY_URL").unwrap_or_else(|_| if cfg!(test) { "http://127.0.0.1:9".into() } else { RELAY_URL.into() })
+fn relay_url() -> Option<String> {
+    let url = std::env::var("LOFT_RELAY_URL").unwrap_or_else(|_| if cfg!(test) { "http://127.0.0.1:9".into() } else { RELAY_URL.into() });
+    (!url.trim().is_empty()).then_some(url)
 }
 
 fn relay_key_path() -> PathBuf {
@@ -289,7 +292,7 @@ fn collapse(id: &str) -> String {
 pub async fn send(state: &AppState, device: &Device, push: &Push) -> Result<Outcome> {
     let (status, reason) = match route(state) {
         Route::OwnKey => direct(state, device, push).await?,
-        Route::Relay => via_relay(state, &relay_url(), device, push).await?,
+        Route::Relay => via_relay(state, &relay_url().unwrap_or_default(), device, push).await?,
         Route::Off => bail!("Push is off: sign in to get push (paste your relay key), or add your own APNs key in Settings"),
     };
     if status == 200 {
