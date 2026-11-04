@@ -8,6 +8,10 @@
 //! Each device says which APNs environment its build uses: Xcode/debug builds `development`
 //! (api.sandbox.push.apple.com), TestFlight and App Store builds `production` (api.push.apple.com).
 //! The same key works for both.
+//!
+//! An install with no key of its own sends through the hosted push relay instead (ADR 0002, `relay/`):
+//! on its first push it gets a relay token, kept next to where the key would be, and each push carries
+//! the phone's token and environment. The relay passes Apple's answer back.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -81,17 +85,40 @@ pub fn key_present() -> bool {
     key_path().is_file()
 }
 
+/// Whether this install sends with its own key, straight to Apple; otherwise it uses the push relay.
+pub fn own_key(state: &AppState) -> bool {
+    let s = state.settings.get().push;
+    key_present() && !s.key_id.trim().is_empty() && !s.team_id.trim().is_empty()
+}
+
+/// The hosted push relay. LOFT_RELAY_URL replaces it; tests never reach the real one.
+const RELAY_URL: &str = "https://loft-push-relay.vercel.app";
+
+fn relay_url() -> String {
+    std::env::var("LOFT_RELAY_URL").unwrap_or_else(|_| if cfg!(test) { "http://127.0.0.1:9".into() } else { RELAY_URL.into() })
+}
+
+fn relay_token_path() -> PathBuf {
+    key_dir().join("relay-token")
+}
+
+/// Writes `text` to `name` in the key folder, owner-only.
+fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
+    let dir = key_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Checks a `.p8` is a P-256 private key and stores it owner-only. The text never reaches a log.
 pub fn store_key(pem: &str) -> Result<()> {
     let pem = pem.trim();
     SigningKey::from_pkcs8_pem(pem).map_err(|_| anyhow!("That isn't an APNs auth key: expected the .p8 file Apple gives you (a P-256 private key)."))?;
-    let dir = key_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let tmp = dir.join("AuthKey.p8.tmp");
-    std::fs::write(&tmp, format!("{pem}\n"))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::rename(&tmp, key_path())?;
+    write_secret(&key_path(), &format!("{pem}\n"))?;
     // A new key invalidates any cached token.
     *JWT.lock().unwrap() = None;
     Ok(())
@@ -199,14 +226,31 @@ fn collapse(id: &str) -> String {
     format!("{h:016x}")
 }
 
-/// Sends to one device. A 410, or a 400 saying the token is bad or for another app, removes it.
+/// Sends to one device, with the install's own key or through the push relay. A 410, or a 400 saying
+/// the token is bad or for another app, removes it.
 pub async fn send(state: &AppState, device: &Device, push: &Push) -> Result<Outcome> {
-    let s = state.settings.get().push;
-    if s.key_id.trim().is_empty() || s.team_id.trim().is_empty() {
-        bail!("Push isn't set up: add the APNs key, key id and team id in Settings");
+    let (status, reason) = if own_key(state) { direct(state, device, push).await? } else { via_relay(state, &relay_url(), device, push).await? };
+    if status == 200 {
+        return Ok(Outcome::Sent);
     }
+    if status == 410 || (status == 400 && ["BadDeviceToken", "DeviceTokenNotForTopic"].contains(&reason.as_str())) {
+        state.db.delete_device(&device.token)?;
+        tracing::info!("apns: removed a device that is no longer registered ({reason})");
+        return Ok(Outcome::Unregistered);
+    }
+    bail!("APNs refused the push: {status} {reason}")
+}
+
+/// The app's bundle id for a device: the one it registered with, else the setting.
+fn topic(state: &AppState, device: &Device) -> String {
+    if device.bundle_id.is_empty() { state.settings.get().push.bundle_id } else { device.bundle_id.clone() }
+}
+
+/// Straight to Apple with the install's key: Apple's status and reason.
+async fn direct(state: &AppState, device: &Device, push: &Push) -> Result<(u16, String)> {
+    let s = state.settings.get().push;
     let jwt = provider_token(s.key_id.trim(), s.team_id.trim())?;
-    let topic = if device.bundle_id.is_empty() { s.bundle_id.clone() } else { device.bundle_id.clone() };
+    let topic = topic(state, device);
     if topic.trim().is_empty() {
         bail!("Push isn't set up: add the app's bundle id in Settings");
     }
@@ -230,16 +274,63 @@ pub async fn send(state: &AppState, device: &Device, push: &Push) -> Result<Outc
     }
     let res = req.send().await.context("APNs unreachable")?;
     let status = res.status().as_u16();
-    if status == 200 {
-        return Ok(Outcome::Sent);
-    }
     let reason = res.json::<Value>().await.ok().and_then(|v| v["reason"].as_str().map(String::from)).unwrap_or_default();
-    if status == 410 || (status == 400 && ["BadDeviceToken", "DeviceTokenNotForTopic"].contains(&reason.as_str())) {
-        state.db.delete_device(&device.token)?;
-        tracing::info!("apns: removed a device that is no longer registered ({reason})");
-        return Ok(Outcome::Unregistered);
+    Ok((status, reason))
+}
+
+/// One relay token per install, fetched once: two first pushes at the same time share it.
+static RELAY_TOKEN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// This install's relay token, asking the relay for one the first time. It's kept owner-only next to
+/// where the key would be, and never logged or returned by the API. A token the relay stops accepting
+/// (revoked) isn't replaced by itself: revocation must stick.
+async fn relay_token(state: &AppState, base: &str) -> Result<String> {
+    let _held = RELAY_TOKEN.lock().await;
+    if let Ok(t) = std::fs::read_to_string(relay_token_path())
+        && !t.trim().is_empty()
+    {
+        return Ok(t.trim().to_string());
     }
-    bail!("APNs refused the push: {status} {reason}")
+    let res = state.http.post(format!("{base}/api/token")).timeout(Duration::from_secs(15)).send().await.context("The push relay is unreachable")?;
+    if !res.status().is_success() {
+        bail!("The push relay didn't give this install a relay token: {}", res.status().as_u16());
+    }
+    let token = res.json::<Value>().await.ok().and_then(|v| v["token"].as_str().map(String::from)).filter(|t| t.starts_with("lrt_") && t.len() < 200);
+    let token = token.ok_or_else(|| anyhow!("The push relay's answer had no relay token"))?;
+    write_secret(&relay_token_path(), &token)?;
+    Ok(token)
+}
+
+/// Through the push relay at `base`: Apple's status and reason, as the relay passes them back.
+async fn via_relay(state: &AppState, base: &str, device: &Device, push: &Push) -> Result<(u16, String)> {
+    let token = relay_token(state, base).await?;
+    let mut body = json!({
+        "device_token": device.token,
+        "environment": device.environment,
+        "bundle_id": topic(state, device),
+        "payload": push.payload(),
+        "priority": if push.time_sensitive { 10 } else { 5 },
+    });
+    if let Some(c) = &push.collapse_id {
+        body["collapse_id"] = json!(collapse(c));
+    }
+    let res = state
+        .http
+        .post(format!("{base}/api/push"))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
+        .json(&body)
+        .send()
+        .await
+        .context("The push relay is unreachable")?;
+    let status = res.status().as_u16();
+    let v = res.json::<Value>().await.unwrap_or(Value::Null);
+    match status {
+        200 => Ok((v["apple_status"].as_u64().unwrap_or(0) as u16, v["reason"].as_str().unwrap_or("").to_string())),
+        401 => bail!("The push relay doesn't accept this install's relay token"),
+        429 => bail!("The push relay's limit for this install is reached; later pushes go through"),
+        s => bail!("The push relay refused the push: {s} {}", v["error"].as_str().unwrap_or("")),
+    }
 }
 
 /// Valid lowercase hex device token (APNs tokens are 32 bytes today; allow longer for the future).
@@ -254,6 +345,48 @@ pub(crate) mod tests {
 
     /// Requests the fake APNs server got: (device token, headers we check, body).
     pub(crate) type Seen = std::sync::Arc<Mutex<Vec<(String, Value, Value)>>>;
+
+    /// What the fake push relay got: token requests, and each push as (authorization, body).
+    #[derive(Default)]
+    pub(crate) struct Relayed {
+        pub tokens: usize,
+        pub pushes: Vec<(String, Value)>,
+    }
+    static RELAYED: std::sync::OnceLock<std::sync::Arc<Mutex<Relayed>>> = std::sync::OnceLock::new();
+
+    /// The fake push relay's log, shared by every test (started with the fake APNs).
+    pub(crate) fn relayed() -> std::sync::Arc<Mutex<Relayed>> {
+        fake_apns();
+        RELAYED.get().unwrap().clone()
+    }
+
+    /// A fake relay with the real one's contract: a token for anyone, and for a push Apple's answer
+    /// as the fake APNs would give it (410 for device tokens starting "dead"), or 503 when the alert's
+    /// title starts with "Refused".
+    fn relay_routes(log: std::sync::Arc<Mutex<Relayed>>) -> axum::Router {
+        use axum::http::{HeaderMap, StatusCode};
+        let l2 = log.clone();
+        axum::Router::new()
+            .route("/api/token", axum::routing::post(move || {
+                let log = l2.clone();
+                async move {
+                    log.lock().unwrap().tokens += 1;
+                    (StatusCode::CREATED, axum::Json(json!({ "token": "lrt_fake-relay-token" })))
+                }
+            }))
+            .route("/api/push", axum::routing::post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let log = log.clone();
+                async move {
+                    let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    log.lock().unwrap().pushes.push((auth, body.clone()));
+                    if body["payload"]["aps"]["alert"]["title"].as_str().is_some_and(|t| t.starts_with("Refused")) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "error": "busy" })));
+                    }
+                    let gone = body["device_token"].as_str().is_some_and(|t| t.starts_with("dead"));
+                    (StatusCode::OK, axum::Json(if gone { json!({ "apple_status": 410, "reason": "Unregistered" }) } else { json!({ "apple_status": 200, "reason": null }) }))
+                }
+            }))
+    }
 
     /// One fake APNs (HTTP/2, 200, or 410 for tokens starting "dead") for the whole test process,
     /// on its own thread so it outlives each test's runtime; LOFT_APNS_URL/DIR point at it and a
@@ -288,15 +421,19 @@ pub(crate) mod tests {
                         }),
                     );
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                    tx.send(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+                    let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let log = RELAYED.get_or_init(Default::default).clone();
+                    tx.send((format!("http://{}", listener.local_addr().unwrap()), format!("http://{}", relay.local_addr().unwrap()))).unwrap();
+                    tokio::spawn(async move { axum::serve(relay, relay_routes(log)).await.unwrap() });
                     axum::serve(listener, app).await.unwrap();
                 });
             });
-            let url = rx.recv().unwrap();
+            let (url, relay) = rx.recv().unwrap();
             let dir = std::env::temp_dir().join(format!("loft-apns-test-{}", uuid::Uuid::new_v4()));
             // Set once, before any test reads them.
             unsafe {
                 std::env::set_var("LOFT_APNS_URL", &url);
+                std::env::set_var("LOFT_RELAY_URL", &relay);
                 std::env::set_var("LOFT_APNS_DIR", &dir);
             }
             store_key(&test_key_pem()).unwrap();
@@ -318,6 +455,17 @@ pub(crate) mod tests {
     pub(crate) fn test_key_pem() -> String {
         use p256::pkcs8::{EncodePrivateKey, LineEnding};
         SigningKey::from_bytes(&[7u8; 32].into()).unwrap().to_pkcs8_pem(LineEnding::LF).unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_relay_is_an_error_not_a_crash() {
+        fake_apns();
+        let st = crate::tasks::tests::state();
+        let d = Device { token: "ab".repeat(32), environment: "production".into(), bundle_id: "com.example.loft".into(), ..Default::default() };
+        let p = Push { title: "t".into(), body: "b".into(), badge: None, thread_id: None, time_sensitive: false, collapse_id: None, custom: json!({}) };
+        let err = via_relay(&st, "http://127.0.0.1:9", &d, &p).await.unwrap_err();
+        // Whether this install's token is fetched yet or not, nothing gets through and nothing panics.
+        assert!(format!("{err:#}").starts_with("The push relay is unreachable"), "{err:#}");
     }
 
     #[test]

@@ -237,8 +237,11 @@ mod tests {
         let _ = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission"] })).unwrap())).await.unwrap();
         let _ = register(State(st.clone()), reg(&gone)).await.unwrap();
 
-        // Not set up yet: the test push says so.
-        assert!(test(State(st.clone()), Path(good.clone())).await.is_err());
+        // No key yet: the test push goes through the relay, not to Apple.
+        assert!(test(State(st.clone()), Path(good.clone())).await.is_ok());
+        let relayed = crate::apns::tests::relayed();
+        assert!(relayed.lock().unwrap().pushes.iter().any(|(_, b)| b["device_token"] == good && b["payload"]["type"] == "test"));
+        assert!(!seen.lock().unwrap().iter().any(|(t, ..)| *t == good));
 
         // Configure: a bad key is refused, a real P-256 .p8 is stored owner-only and never echoed.
         let cfg = |key: Option<String>| Json(serde_json::from_value::<Configure>(json!({ "key_id": "abc123defg", "team_id": "TEAM123456", "key_p8": key })).unwrap());
