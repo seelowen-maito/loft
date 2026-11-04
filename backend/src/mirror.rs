@@ -46,6 +46,8 @@ struct Cursor {
     since: Option<String>,
     /// ETag of the last change poll's answer, sent back so an unchanged repo answers 304.
     etag: Option<String>,
+    /// The closed issues were read for the authors their links lack (see `closed_authors`), this run.
+    authors_read: bool,
 }
 
 impl Mirror {
@@ -245,6 +247,10 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
     }
+    if !cursor.authors_read {
+        closed_authors(state, repo).await?;
+        cursor.authors_read = true;
+    }
     // Linked issues GitHub still had open last time but didn't list now: ask about each one.
     let gone: Vec<Task> = linked(state, repo).into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.state == "open" && !seen.contains(&g.number))).collect();
     for t in gone {
@@ -298,6 +304,38 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
     Ok(())
 }
 
+/// Links saved before authors were kept: the open ones get theirs from the full read's listing, but a
+/// closed issue is only read again when it changes. So read the closed issues, page by page, once per
+/// run, while a closed link still lacks its author, and keep just the author.
+async fn closed_authors(state: &AppState, repo: &str) -> anyhow::Result<()> {
+    let missing = || -> HashSet<i64> {
+        linked(state, repo).iter().filter_map(|t| t.github.as_ref()).filter(|g| g.state == "closed" && g.author.is_empty()).map(|g| g.number).collect()
+    };
+    if missing().is_empty() {
+        return Ok(());
+    }
+    for page in 1..=MAX_PAGES {
+        let v = crate::github::get(state, &format!("/repos/{repo}/issues?state=closed&per_page=100&page={page}")).await?;
+        let items = v.as_array().cloned().unwrap_or_default();
+        let wanted = missing();
+        for i in items.iter().filter(|i| i.get("pull_request").is_none() && i["number"].as_i64().is_some_and(|n| wanted.contains(&n))) {
+            let author = i["user"]["login"].as_str().unwrap_or("");
+            let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| Some(g.number) == i["number"].as_i64())) else { continue };
+            if author.is_empty() {
+                continue;
+            }
+            t.github.as_mut().unwrap().author = author.into();
+            if state.db.save_task(&t).is_ok() {
+                crate::tasks::emit(state, &t);
+            }
+        }
+        if items.len() < 100 || missing().is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// The Loft issues linked to issues of `repo`.
 fn linked(state: &AppState, repo: &str) -> Vec<Task> {
     state.db.list_tasks().unwrap_or_default().into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(repo))).collect()
@@ -342,6 +380,15 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
         Some(mut t) => {
             let l = link(repo, i);
             if t.github.as_ref() == Some(&l) {
+                return;
+            }
+            // A link saved before authors were kept, and only the author is new: nothing changed on
+            // GitHub, so it's no update (and costs no reads of its links and comments).
+            if t.github.as_ref().is_some_and(|g| g.author.is_empty() && GithubLink { author: l.author.clone(), ..g.clone() } == l) {
+                t.github = Some(l);
+                if state.db.save_task(&t).is_ok() {
+                    crate::tasks::emit(state, &t);
+                }
                 return;
             }
             // Open/closed follows GitHub only when GitHub moved: a Loft close still being written isn't undone.
@@ -935,19 +982,49 @@ pub(crate) mod tests {
         let st = state();
         let fake = own_fake(&st);
         project(&st, "mir-author", Some("https://github.com/octo/mir-author"));
-        fake.route("GET", "/repos/octo/mir-author/issues", 200, json!([gh("octo/mir-author", 1, "Retry cap", "open", "2026-10-02T00:00:00Z")]));
+        let path = "/repos/octo/mir-author/issues";
+        let open = gh("octo/mir-author", 1, "Retry cap", "open", "2026-10-02T00:00:00Z");
+        let mut closed = gh("octo/mir-author", 2, "Old work", "closed", "2026-10-01T00:00:00Z");
+        closed["user"]["login"] = json!("octo-me");
+        let pr = json!({ "number": 9, "title": "A PR", "state": "closed", "pull_request": {}, "user": { "login": "octo-me" } });
+        let was_open = { let mut c = closed.clone(); c["state"] = json!("open"); c };
+        fake.in_turn("GET", path, vec![
+            // Mirrored while both were open.
+            (200, json!([open.clone(), was_open])),
+            // #2 closed on GitHub: the change poll.
+            (200, json!([closed.clone()])),
+            // After the upgrade: the full read lists the open ones, then the closed ones are read for their authors.
+            (200, json!([open.clone()])),
+            (200, json!([closed.clone(), pr])),
+            // Every read after that.
+            (200, json!([open.clone()])),
+        ]);
         fake.route("GET", "/user", 200, json!({ "login": "octo-me" }));
         sync_project(&st, "mir-author", true).await.unwrap();
-        // As saved before the author was kept: a link without one.
-        let mut t = st.db.list_tasks().unwrap().pop().unwrap();
-        t.github.as_mut().unwrap().author = String::new();
-        st.db.save_task(&t).unwrap();
-        assert_eq!(json!(st.db.get_task(&t.id).unwrap().unwrap())["github"]["author"], "");
+        sync_project(&st, "mir-author", false).await.unwrap();
+        let author = |n: i64| linked(&st, "octo/mir-author").into_iter().find_map(|t| t.github.filter(|g| g.number == n)).unwrap().author;
+        assert_eq!((author(1), author(2)), ("octo-author".into(), "octo-me".into()));
+        // As saved before authors were kept: links without one. Then Loft restarts, so its next read is a full one.
+        for mut t in linked(&st, "octo/mir-author") {
+            t.github.as_mut().unwrap().author = String::new();
+            st.db.save_task(&t).unwrap();
+        }
+        assert_eq!(st.db.get_task(&linked(&st, "octo/mir-author")[0].id).unwrap().unwrap().github.unwrap().author, "");
+        st.mirror.repos.lock().unwrap().clear();
+        let before = fake.seen(path).len();
 
-        // The list's next read of it fills it in (after an upgrade, the first read is a full one: every open issue).
         let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
-        assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().github.unwrap().author, "octo-author");
+        assert_eq!((author(1), author(2)), ("octo-author".into(), "octo-me".into()), "the open one from the listing, the closed one from the closed issues");
+        assert_eq!((v["projects"][0]["created"].as_i64(), v["projects"][0]["updated"].as_i64()), (Some(0), Some(0)), "a new author alone isn't a change on GitHub");
+        let reads: Vec<String> = fake.seen(path)[before..].iter().map(|s| s.path.clone()).collect();
+        assert_eq!(reads.len(), 2, "{reads:?}");
+        assert!(reads[1].contains("state=closed&per_page=100&page=1"), "{reads:?}");
         assert_eq!(v["login"], "octo-me", "the list learns who Loft's token belongs to");
+
+        // Once every link has its author, the closed issues aren't read again.
+        st.mirror.repos.lock().unwrap().clear();
+        sync_project(&st, "mir-author", true).await.unwrap();
+        assert!(fake.seen(path)[before + 2..].iter().all(|s| !s.path.contains("state=closed")));
         let _ = sync_now(State(st.clone()), None).await.unwrap();
         assert_eq!(fake.seen("/user").len(), 1, "the login is read once");
     }
