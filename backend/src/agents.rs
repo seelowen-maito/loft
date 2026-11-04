@@ -349,7 +349,7 @@ These rules are Loft's and apply to every message you send another agent with `m
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
 5. Don't reply to an FYI.
-6. When a needs-action message hands over a ticket or is about one, name it in `ticket`: the recipient's context may be cleared between tickets, never within one.";
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -520,26 +520,29 @@ pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: b
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
 /// `owner/repo#N` for a GitHub issue given as `N`, `#N`, `owner/repo#N` or its link (a bare number is on
 /// `repo`, the recipient's project's repo, when it has one), and a Loft issue id as it is. None when blank.
-pub fn message_ticket_key(raw: &str, repo: Option<&str>) -> Option<String> {
+/// A pull request is refused, since its number isn't its ticket's, and so is anything else with a `#`
+/// (like "PR #183 (#174)"): Loft issue ids have none.
+pub fn message_ticket_key(raw: &str, repo: Option<&str>) -> Result<Option<String>, String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let refuse = || Err(format!("Not sent: ticket {raw:?} isn't a ticket's issue. Name the issue itself (#N, owner/repo#N or its issue link), not its pull request: a PR's number isn't its ticket's."));
     let num = |s: &str| s.parse::<u64>().ok();
     let link = raw.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.");
     if let Some(path) = link.strip_prefix("github.com/") {
         let parts: Vec<&str> = path.split(['/', '#', '?']).collect();
-        if let [owner, name, "issues" | "pull", n, ..] = parts[..]
-            && let Some(n) = num(n)
-        {
-            return Some(format!("{owner}/{name}#{n}"));
-        }
+        return match parts[..] {
+            [owner, name, "issues", n, ..] if num(n).is_some() => Ok(Some(format!("{owner}/{name}#{n}"))),
+            _ => refuse(),
+        };
     }
     let (left, n) = raw.rsplit_once('#').unwrap_or(("", raw));
     match (left.trim(), num(n.trim())) {
-        ("", Some(n)) => Some(repo.map_or(format!("#{n}"), |r| format!("{r}#{n}"))),
-        (r, Some(n)) if r.contains('/') => Some(format!("{r}#{n}")),
-        _ => Some(raw.to_string()),
+        ("", Some(n)) => Ok(Some(repo.map_or(format!("#{n}"), |r| format!("{r}#{n}")))),
+        (r, Some(n)) if r.contains('/') && !r.contains(char::is_whitespace) => Ok(Some(format!("{r}#{n}"))),
+        _ if raw.contains(['#', '/']) => refuse(),
+        _ => Ok(Some(raw.to_string())),
     }
 }
 
@@ -1491,7 +1494,7 @@ pub(crate) mod tests {
                 "3. Send a verdict only to the agent that acts on it, not to everyone.",
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
-                "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`: the recipient's context may be cleared between tickets, never within one.",
+                "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }

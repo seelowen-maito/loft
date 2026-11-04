@@ -154,7 +154,7 @@ fn base_tools() -> Value {
                 "agent": { "type": "string", "description": "The recipient's id or name." },
                 "text": { "type": "string", "description": "The message." },
                 "kind": { "type": "string", "enum": ["needs_action", "fyi"], "description": "needs_action: the recipient must act now; it wakes them. fyi: they only need to know; they read it on their next run." },
-                "ticket": { "type": ["string", "integer"], "description": "The ticket this message hands over or is about: its issue number (12 or #12), owner/repo#12, its GitHub link, or a Loft issue id. When it isn't the ticket the recipient last worked on, Loft applies the recipient's Fresh context setting before it reads the message; messages about the same ticket keep its context. Leave it out when the message isn't about one ticket. An FYI ignores it." }
+                "ticket": { "type": ["string", "integer"], "description": "The ticket this message hands over or is about, as the issue, not its pull request: its issue number (12 or #12), owner/repo#12, its issue link, or a Loft issue id. A PR's number or link is refused. When it isn't the ticket the recipient last worked on, Loft applies the recipient's Fresh context setting before it reads the message; messages about the same ticket keep its context. Leave it out when the message isn't about one ticket. An FYI ignores it." }
             }, "required": ["agent", "text", "kind"] }
         },
         {
@@ -436,10 +436,11 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Value::String(t) => t.clone(),
                 _ => String::new(),
             };
-            let ticket = match ticket.trim() {
-                "" => None,
-                // A bare number is an issue on the recipient's project's repo.
-                t => agents::message_ticket_key(t, crate::repos::github_repo(state, &to.project).await.ok().as_deref()),
+            // A bare number is an issue on the recipient's project's repo.
+            let repo = if ticket.trim().is_empty() { None } else { crate::repos::github_repo(state, &to.project).await.ok() };
+            let ticket = match agents::message_ticket_key(&ticket, repo.as_deref()) {
+                Ok(t) => t,
+                Err(e) => return tool_error(e),
             };
             let busy = agents::is_running(state, &to.id);
             agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref());
@@ -918,9 +919,14 @@ mod tests {
 
     #[test]
     fn a_ticket_is_named_the_way_delivery_names_it() {
-        let key = |raw: &str, repo: Option<&str>| agents::message_ticket_key(raw, repo);
-        for raw in ["12", "#12", " #12 ", "o/r#12", "https://github.com/o/r/issues/12", "github.com/o/r/pull/12#issuecomment-1"] {
+        let key = |raw: &str, repo: Option<&str>| agents::message_ticket_key(raw, repo).unwrap();
+        for raw in ["12", "#12", " #12 ", "o/r#12", "https://github.com/o/r/issues/12", "github.com/o/r/issues/12#issuecomment-1"] {
             assert_eq!(key(raw, Some("o/r")).as_deref(), Some("o/r#12"), "{raw}");
+        }
+        // A PR's number isn't its ticket's: the issue is asked for instead.
+        for raw in ["https://github.com/o/r/pull/183", "github.com/o/r/pull/183/files", "PR #183 (#174)", "github.com/o/r"] {
+            let err = agents::message_ticket_key(raw, Some("o/r")).unwrap_err();
+            assert!(err.starts_with("Not sent") && err.contains("not its pull request"), "{raw}: {err}");
         }
         assert_eq!(key("x/y#12", Some("o/r")).as_deref(), Some("x/y#12"), "another repo stays");
         assert_eq!(key("#12", None).as_deref(), Some("#12"), "a project without a GitHub repo");
@@ -987,6 +993,14 @@ mod tests {
         assert_eq!(clears(), 3, "the Delivery wake");
         send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;
         assert_eq!(clears(), 3, "the message about the same ticket");
+
+        // Mid-review, a PR link instead of the ticket is refused before delivery: no boundary, no message.
+        let before = st.db.list_messages(&to.id, 400, None).unwrap().len();
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "PR #183 is ready", "kind": "needs_action", "ticket": "https://github.com/o/r/pull/183" })).await;
+        assert_eq!(r["isError"], json!(true), "{r}");
+        assert_eq!(st.db.list_messages(&to.id, 400, None).unwrap().len(), before, "not delivered");
+        send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;
+        assert_eq!(clears(), 3, "still the same ticket");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1116,11 +1116,11 @@ mod tests {
     #[test]
     fn ticket_keys_match_a_message_naming_the_ticket() {
         let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
-        assert_eq!(ticket_key(&d, Some(12)), crate::agents::message_ticket_key("#12", Some("o/r")).unwrap());
+        assert_eq!(ticket_key(&d, Some(12)), crate::agents::message_ticket_key("#12", Some("o/r")).unwrap().unwrap());
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
         d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into() });
-        assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap());
+        assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 }

@@ -169,7 +169,7 @@ Plan with your Planning tools: a grill when the user asks for one, a spec and ti
 
 ## Team
 If the team is missing a role, tell the user and suggest asking `loft` to set it up. Never create or delete agents.
-When you hand a ticket to an agent by message, name it in `ticket` (`mcp__loft__message_agent`), and keep naming the same ticket for its review rounds: Loft clears the agent's context between tickets as its Fresh context setting says, never within one.
+When you hand a ticket to an agent by message, name it in `ticket` (`mcp__loft__message_agent`) as the issue, not its pull request, and keep naming the same ticket for its review rounds: Loft clears the agent's context between tickets as its Fresh context setting says, never within one.
 
 ## Memory
 Decisions the user made, one entry each. Ticket order lives in GitHub's blocking links, not in memory."#,
@@ -1041,6 +1041,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         assert_eq!(roles[..5], [("dev", "dev"), ("lead", "lead"), ("reviewer", "code_reviewer"), ("security", "security"), ("tests", "qa")]);
         assert!(roles[5..].iter().all(|(_, r)| *r == "custom"), "{roles:?}");
         assert!(list_templates().contains("Default: role qa, every 12 hour(s)"), "{}", list_templates());
+        // A Lead that hands out tickets by message names them, so Fresh context applies between tickets (#251).
+        let lead = template("lead").unwrap();
+        assert!(lead.prompt.contains("When you hand a ticket to an agent by message, name it in `ticket`"), "{}", lead.prompt);
     }
 
     #[tokio::test]
