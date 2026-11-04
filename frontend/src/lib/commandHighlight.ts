@@ -1,8 +1,36 @@
-/** How many leading characters of the composer's `text` to colour as a command: the whole `/name` once it
- * exactly matches one of `names` (in any case), whether or not arguments follow, else 0. */
-export function commandSpan(text: string, names: string[]): number {
-  const word = /^\/\S*/.exec(text)?.[0];
-  return word && names.some((n) => n.toLowerCase() === word.toLowerCase()) ? word.length : 0;
+/** A `/word` in the composer's text: `[start, end)`, from its `/` to the next whitespace or the end. */
+export type CommandWord = { start: number; end: number; word: string };
+
+/** Every `/word` of `text` that starts a word: at the start of the text or right after whitespace. A `/`
+ * inside a word ("src/app", "a/b") starts none. */
+function slashWords(text: string): CommandWord[] {
+  const words: CommandWord[] = [];
+  for (const m of text.matchAll(/(?<=^|\s)\/\S*/g)) {
+    words.push({ start: m.index, end: m.index + m[0].length, word: m[0] });
+  }
+  return words;
+}
+
+/** The message's one command: its first `/word` that is exactly one of `names` (in any case), or null. Any
+ * later `/word` is plain text. */
+export function messageCommand(text: string, names: string[]): CommandWord | null {
+  const known = new Set(names.map((n) => n.toLowerCase()));
+  return slashWords(text).find((w) => known.has(w.word.toLowerCase())) ?? null;
+}
+
+/** The command being typed at `caret`: the `/word` that starts a word and holds the caret (anywhere after its
+ * `/`), unless another known command is already in the message. Null when there is none, so the menu stays
+ * closed. */
+export function commandAt(text: string, caret: number, names: string[]): CommandWord | null {
+  const at = slashWords(text).find((w) => caret > w.start && caret <= w.end);
+  if (!at) return null;
+  const command = messageCommand(text, names);
+  return command && command.start !== at.start ? null : at;
+}
+
+/** `text` with the `/word` `at` replaced by `name`, and where the caret goes: right after it. */
+export function completeCommand(text: string, at: CommandWord, name: string): { text: string; caret: number } {
+  return { text: text.slice(0, at.start) + name + text.slice(at.end), caret: at.start + name.length };
 }
 
 /** The `[start, end)` ranges of `text` that mention one of `agents` by name, by the backend's rules
@@ -31,11 +59,12 @@ export function mentionRanges(text: string, agents: string[]): [number, number][
   return ranges;
 }
 
-/** The composer's `text` cut into pieces, `accent` on a known command at its start and on each mention of
- * `agents`, for the overlay that colours them. */
+/** The composer's `text` cut into pieces, `accent` on its one known command (wherever it sits) and on each
+ * mention of `agents`, for the overlay that colours them. */
 export function highlightParts(text: string, commands: string[], agents: string[]): { text: string; accent: boolean }[] {
-  const command = commandSpan(text, commands);
-  const ranges = [...(command > 0 ? [[0, command] as [number, number]] : []), ...mentionRanges(text, agents)];
+  const command = messageCommand(text, commands);
+  const ranges = [...(command ? [[command.start, command.end] as [number, number]] : []), ...mentionRanges(text, agents)]
+    .sort((a, b) => a[0] - b[0]);
   const parts: { text: string; accent: boolean }[] = [];
   let at = 0;
   for (const [s, e] of ranges) {

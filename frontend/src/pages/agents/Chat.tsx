@@ -28,7 +28,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { highlightParts } from "../../lib/commandHighlight";
+import { commandAt, completeCommand, highlightParts, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -139,13 +139,37 @@ export function Chat({
   const fresh = visible.every((it) => it.t === "msg" && it.m.kind === "clear");
   const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
-  const slash = text.startsWith("/") && !/\s/.test(text.trim());
+  // The caret, so the / menu opens on the /word it's in, wherever that sits in the message.
+  const [caret, setCaret] = useState(0);
+  const typing = commandAt(text, caret, COMMANDS.map((c) => c.name));
+  // The /word is the whole message: picking runs it, as when / commands could only be typed alone.
+  const alone = !!typing && text.trim() === typing.word;
   const overlay = useRef<HTMLDivElement>(null);
   // The overlay follows the textarea's scroll, also when it appears on text that's already scrolled.
   useLayoutEffect(() => {
     if (overlay.current && composer.current) overlay.current.scrollTop = composer.current.scrollTop;
   });
-  const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
+  const matches = typing ? COMMANDS.filter((c) => c.name.startsWith(typing.word.toLowerCase())) : [];
+  // Puts `next` in the composer with the caret at `at`, once React has rendered it.
+  const pendingCaret = useRef<number | null>(null);
+  // Text set from code (a draft, a picked @mention) moves the caret without a select event: follow it too.
+  useLayoutEffect(() => {
+    const box = composer.current;
+    if (!box) return;
+    const at = pendingCaret.current;
+    if (at != null) {
+      pendingCaret.current = null;
+      box.setSelectionRange(at, at);
+    }
+    if (box.selectionEnd !== caret) setCaret(box.selectionEnd);
+  });
+  const replaceWord = (word: CommandWord, name: string) => {
+    const next = completeCommand(text, word, name);
+    pendingCaret.current = next.caret;
+    setText(next.text);
+  };
+  // Picked from the menu (Enter or a click): run it when it's the whole message, else complete it in place.
+  const pickCommand = (name: string) => (alone || !typing ? runCommand(name) : replaceWord(typing, name));
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
   // Only agents in the same project: the backend doesn't deliver to others.
@@ -501,7 +525,7 @@ export function Chat({
                   onMouseEnter={() => setMenuIndex(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    runCommand(c.name);
+                    pickCommand(c.name);
                   }}
                   className={cx("flex w-full items-baseline gap-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]")}
                 >
@@ -562,7 +586,11 @@ export function Chat({
                 <textarea
                   ref={composer}
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => {
+                    setText(e.target.value);
+                    setCaret(e.target.selectionEnd);
+                  }}
+                  onSelect={(e) => setCaret(e.currentTarget.selectionEnd)}
                   onScroll={(e) => overlay.current && (overlay.current.scrollTop = e.currentTarget.scrollTop)}
                   onPaste={(e) => {
                     const files = pastedImages(e);
@@ -578,17 +606,18 @@ export function Chat({
                       }
                       if (e.key === "Tab") {
                         e.preventDefault();
-                        setText(matches[menuIndex].name);
+                        if (typing) replaceWord(typing, matches[menuIndex].name);
                         return;
                       }
                       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
-                        runCommand(matches[menuIndex].name);
+                        pickCommand(matches[menuIndex].name);
                         return;
                       }
                     }
-                    if (e.key === "Escape" && slash) {
-                      setText("");
+                    if (e.key === "Escape" && typing) {
+                      // Drops the /word being typed; alone, that empties the composer as before.
+                      replaceWord(typing, "");
                       return;
                     }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
