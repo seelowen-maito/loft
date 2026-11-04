@@ -5,7 +5,7 @@ import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule, timeAgo } from "../lib/format";
-import { costChangeText, weekResetText } from "../lib/usage";
+import { costChange, exactDollars, wholeDollars } from "../lib/usage";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
 import { StatusPill } from "./agents/Status";
@@ -169,7 +169,6 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
 export function AgentActivity() {
   const [data, setData] = useState<AgentSummary[] | null>(null);
   const [period, setPeriod] = useState<AgentsSummary["period"] | null>(null);
-  const [allTime, setAllTime] = useState<AgentsSummary["all_time"] | null>(null);
   const [expanded, setExpanded] = useState(false);
   const perRow = useSyncExternalStore(onResize, () => cardsPerRow(window.innerWidth));
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -180,7 +179,6 @@ export function AgentActivity() {
       .then((r) => {
         setData(r.agents);
         setPeriod(r.period);
-        setAllTime(r.all_time);
       })
       .catch(() => setData((d) => d ?? []));
   }, []);
@@ -214,8 +212,7 @@ export function AgentActivity() {
     };
   }, [data]);
 
-  const change = period && costChangeText(period.cost_usd, period.previous.cost_usd);
-  const reset = period?.kind === "usage_week" ? weekResetText(period.resets_at) : null;
+  const change = period && costChange(period.cost_usd, period.previous.cost_usd);
 
   const ordered = useMemo(() => (data ? byActivity(data) : null), [data]);
   const hidden = ordered ? Math.max(0, ordered.length - perRow) : 0;
@@ -237,22 +234,17 @@ export function AgentActivity() {
                   <span className="text-fg-2">
                     {" "}
                     · {period.runs} runs ·{" "}
-                    <span title="API list-price equivalent">
-                      est. ${period.cost_usd.toFixed(2)} {period.kind === "usage_week" ? "this week" : "last 7 days"}
+                    <span title={`Estimated API list-price equivalent: ${exactDollars(period.cost_usd)}`}>
+                      {wholeDollars(period.cost_usd)} {period.kind === "usage_week" ? "this week" : "last 7 days"}
                     </span>
                     {change && (
-                      <span title={`${period.previous.runs} runs · est. $${period.previous.cost_usd.toFixed(2)} the period before`}>
-                        {" "}
-                        ({change})
+                      <span
+                        className={cx("ml-2 font-mono text-[12.5px]", change.tone === "good" ? "text-good" : change.tone === "warn" ? "text-warn" : "text-fg-3")}
+                        title={`${period.previous.runs} runs · est. ${exactDollars(period.previous.cost_usd)} the period before`}
+                      >
+                        {change.text}
                       </span>
                     )}
-                    {reset && <> · {reset}</>}
-                  </span>
-                )}
-                {allTime && (
-                  <span className="text-fg-3" title="Every run since Loft started counting, deleted agents and cleared chats included">
-                    {" "}
-                    · all time {allTime.runs} runs · ${allTime.cost_usd.toFixed(2)}
                   </span>
                 )}
               </>

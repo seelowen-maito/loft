@@ -23,18 +23,21 @@ function dayTime(t: Date, locale?: string): string {
   return `${day} ${time}`;
 }
 
-/** The home line's "resets Thu 04:00", or null without a (valid) reset time. */
-export function weekResetText(resetsAt: string | null | undefined, locale?: string): string | null {
-  const t = resetsAt ? new Date(resetsAt) : null;
-  if (!t || Number.isNaN(t.getTime())) return null;
-  return `resets ${dayTime(t, locale)}`;
+/** "$183": whole dollars with thousands separators, for the home line's cost. */
+export function wholeDollars(usd: number): string {
+  return `$${Math.round(usd).toLocaleString("en-US")}`;
 }
 
-/** "▲ 12% vs last" / "▼ 8% vs last": this period's cost against the previous one's.
- *  Null when the previous period cost nothing, so there's no percentage to give. */
-export function costChangeText(cost: number, previous: number): string | null {
+/** "$1,438.75": dollars and cents with thousands separators. */
+export function exactDollars(usd: number): string {
+  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** The home line's change tag, this period's cost against the previous one's: "▲12%" (up, warn),
+ *  "▼8%" (down, good) or "same" (muted). Null when the previous period cost nothing. */
+export function costChange(cost: number, previous: number): { text: string; tone: "good" | "warn" | "muted" } | null {
   if (!(previous > 0)) return null;
   const pct = Math.round(((cost - previous) / previous) * 100);
-  if (pct === 0) return "same as last";
-  return `${pct > 0 ? "▲" : "▼"} ${Math.abs(pct)}% vs last`;
+  if (pct === 0) return { text: "same", tone: "muted" };
+  return pct > 0 ? { text: `▲${pct}%`, tone: "warn" } : { text: `▼${-pct}%`, tone: "good" };
 }

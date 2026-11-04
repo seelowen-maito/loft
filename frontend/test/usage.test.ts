@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { costChangeText, resetText, weekResetText } from "../src/lib/usage.ts";
+import { costChange, exactDollars, resetText, wholeDollars } from "../src/lib/usage.ts";
 
 const NOW = new Date(2026, 9, 27, 12, 0).getTime(); // Tue 12:00 local
 
@@ -25,22 +25,25 @@ test("no or bad reset time says unknown", () => {
   assert.equal(resetText("nope", NOW), "Reset time unknown");
 });
 
-test("the home line's reset is the day and 24h time", () => {
-  assert.equal(weekResetText(new Date(2026, 9, 29, 4, 0).toISOString(), "en-GB"), "resets Thu 04:00");
-  assert.equal(weekResetText(new Date(2026, 9, 29, 16, 30).toISOString(), "en-US"), "resets Thu 16:30");
-  assert.equal(weekResetText(null), null);
-  assert.equal(weekResetText("nope"), null);
+test("the home line's cost is whole dollars, its tooltip the exact amount", () => {
+  assert.equal(wholeDollars(183.14), "$183");
+  assert.equal(wholeDollars(182.5), "$183");
+  assert.equal(wholeDollars(1438.75), "$1,439");
+  assert.equal(wholeDollars(0), "$0");
+  assert.equal(exactDollars(183.14), "$183.14");
+  assert.equal(exactDollars(1438.7), "$1,438.70");
 });
 
-test("the cost change against the previous period reads as an arrow and a percentage", () => {
-  assert.equal(costChangeText(84.1, 75.09), "▲ 12% vs last");
-  assert.equal(costChangeText(46, 50), "▼ 8% vs last");
-  assert.equal(costChangeText(0, 10), "▼ 100% vs last");
-  assert.equal(costChangeText(30, 10), "▲ 200% vs last");
-  assert.equal(costChangeText(10.02, 10), "same as last");
+test("the cost change is a short tag: down is good, up is warn, same is muted", () => {
+  assert.deepEqual(costChange(84.1, 75.09), { text: "▲12%", tone: "warn" });
+  assert.deepEqual(costChange(46, 50), { text: "▼8%", tone: "good" });
+  assert.deepEqual(costChange(183, 832), { text: "▼78%", tone: "good" });
+  assert.deepEqual(costChange(0, 10), { text: "▼100%", tone: "good" });
+  assert.deepEqual(costChange(30, 10), { text: "▲200%", tone: "warn" });
+  assert.deepEqual(costChange(10.02, 10), { text: "same", tone: "muted" });
 });
 
-test("no percentage when the previous period cost nothing", () => {
-  assert.equal(costChangeText(5, 0), null);
-  assert.equal(costChangeText(0, 0), null);
+test("no change tag when the previous period cost nothing", () => {
+  assert.equal(costChange(5, 0), null);
+  assert.equal(costChange(0, 0), null);
 });

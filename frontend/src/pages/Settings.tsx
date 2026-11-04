@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentsSummary, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
+import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
@@ -113,6 +114,22 @@ function GithubUsage() {
           )}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** The All-time spend: every run Loft has counted, which the home line no longer shows. */
+function Spend() {
+  const [all, setAll] = useState<AgentsSummary["all_time"] | null>(null);
+  useEffect(() => {
+    api.agentsSummary().then((r) => setAll(r.all_time)).catch(() => {});
+  }, []);
+  return (
+    <Section title="Spend">
+      <p className="text-[13px] text-fg" title="Every run since Loft started counting, deleted agents and cleared chats included">
+        {all ? `All time: ${all.runs.toLocaleString("en-US")} runs · est. ${exactDollars(all.cost_usd)}` : " "}
+      </p>
+      <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
     </Section>
   );
 }
@@ -257,6 +274,7 @@ export default function SettingsPage() {
         </Section>
 
         <GithubUsage />
+        <Spend />
 
         <Section title="Updates">
           <Toggle
