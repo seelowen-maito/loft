@@ -1066,6 +1066,44 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_published_spec_is_a_loft_issue_at_once_and_stays_after_a_poll_and_a_full_read() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-shows";
+        let a = planner_on(&st, "spec-shows", Some("git@github.com:octo/spec-shows.git"));
+        repo(&fake, slug, &["spec"], 60);
+        let made = json!({
+            "number": 60, "id": 6000, "title": "Planning in rounds", "state": "open", "body": "## Problem Statement\n\nIt hurts.",
+            "html_url": format!("https://github.com/{slug}/issues/60"), "updated_at": "2026-11-04T19:12:20Z",
+            "labels": [{ "name": "spec" }], "assignees": [{ "login": "octo-me" }], "user": { "login": "octo-me" },
+        });
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, made.clone());
+        publish(&st, &a, "Planning in rounds").await.unwrap();
+
+        let listed = || async {
+            let Json(v) = crate::tasks::list(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({})).unwrap())).await.unwrap();
+            v.as_array().unwrap().iter().filter(|t| t["github"]["number"] == 60).cloned().collect::<Vec<_>>()
+        };
+        let check = |v: Vec<Value>, when: &str| {
+            assert_eq!(v.len(), 1, "{when}: {v:?}");
+            assert_eq!((&v[0]["project"], &v[0]["labels"], &v[0]["state"], &v[0]["parent_id"]), (&json!("spec-shows"), &json!(["spec"]), &json!("open"), &Value::Null), "{when}");
+        };
+        check(listed().await, "right after publishing");
+        // GitHub now lists it, with sub-issues added since.
+        let mut later = made.clone();
+        later["updated_at"] = json!("2026-11-04T19:26:04Z");
+        later["sub_issues_summary"] = json!({ "total": 2, "completed": 0 });
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([later]));
+        fake.route("GET", &format!("/repos/{slug}/issues/60/sub_issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "spec-shows", false).await.unwrap();
+        crate::mirror::sync_project(&st, "spec-shows", false).await.unwrap();
+        check(listed().await, "after a poll");
+        crate::mirror::sync_project(&st, "spec-shows", true).await.unwrap();
+        let v = listed().await;
+        check(v.clone(), "after a full read");
+        assert_eq!(v[0]["github"]["sub_total"], 2);
+    }
+
+    #[tokio::test]
     async fn publishing_starts_the_spec_branch_and_opens_a_draft_spec_pr() {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "spec-branch", Some("git@github.com:octo/spec-branch.git"));

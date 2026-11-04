@@ -28,7 +28,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { commandAt, completeCommand, highlightParts, splitCommand, type CommandWord } from "../../lib/commandHighlight";
+import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -141,7 +141,14 @@ export function Chat({
 
   // The caret, so the / menu opens on the /word it's in, wherever that sits in the message.
   const [caret, setCaret] = useState(0);
-  const typing = commandAt(text, caret, COMMANDS.map((c) => c.name));
+  // The command last picked or completed from the menu: mid-message, only it runs, and only while it's still
+  // the same word at the same place. A known /word typed by hand there is plain text.
+  const [picked, setPicked] = useState<CommandWord | null>(null);
+  useEffect(() => {
+    if (picked && !stillPicked(text, picked)) setPicked(null);
+  }, [text, picked]);
+  useEffect(() => setPicked(null), [agent.id]);
+  const typing = commandAt(text, caret, COMMANDS.map((c) => c.name), picked);
   // The /word is the whole message: picking runs it, as when / commands could only be typed alone.
   const alone = !!typing && text.trim() === typing.word;
   const overlay = useRef<HTMLDivElement>(null);
@@ -167,6 +174,7 @@ export function Chat({
     const next = completeCommand(text, word, name);
     pendingCaret.current = next.caret;
     setText(next.text);
+    setPicked(name ? { start: word.start, end: word.start + name.length, word: name } : null);
   };
   // Picked from the menu (Enter or a click): run it when it's the whole message, else complete it in place.
   const pickCommand = (name: string) => (alone || !typing ? runCommand(name) : replaceWord(typing, name));
@@ -175,7 +183,7 @@ export function Chat({
   // Only agents in the same project: the backend doesn't deliver to others.
   const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
   const mention = useMention(agent.id, text, setText, mentionable);
-  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name));
+  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
@@ -304,7 +312,8 @@ export function Chat({
     setPickingTask(false);
   }, [agent.id]);
 
-  const send = async (t = text) => {
+  // `pick`: the command picked from the menu, which runs mid-message (see `picked`).
+  const send = async (t = text, pick = picked) => {
     const v = t.trim();
     if (!v && images.length === 0) return;
     if (uploading || failed) return;
@@ -322,9 +331,10 @@ export function Chat({
       }
       return;
     }
-    // The message's one command, wherever it sits: /compact and /grill take the rest as their instructions or
-    // topic, the others run and leave the rest in the composer.
-    const cmd = splitCommand(v, COMMANDS.map((c) => c.name));
+    // The message's one command, leading or picked wherever it sits: /compact and /grill take the rest as their
+    // instructions or topic, the others run and leave the rest in the composer. Cut from the untrimmed text, so
+    // the picked word's place still holds.
+    const cmd = splitCommand(t, COMMANDS.map((c) => c.name), pick);
     if (cmd?.command === "/compact") return compactContext(cmd.rest);
     if (cmd?.command === "/grill") return startGrill(cmd.rest);
     if (cmd) return runCommand(cmd.command, cmd.rest);
@@ -465,7 +475,7 @@ export function Chat({
               </p>
               <div className="mt-6 flex max-w-xl flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
-                  <button key={s} className="btn text-[12.5px] text-fg-2" onClick={() => send(s)}>
+                  <button key={s} className="btn text-[12.5px] text-fg-2" onClick={() => send(s, null)}>
                     {s}
                   </button>
                 ))}
@@ -615,8 +625,9 @@ export function Chat({
                       }
                       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
-                        // Typed in full mid-message: nothing left to complete, so Enter sends it.
-                        if (!alone && typing?.word.toLowerCase() === matches[menuIndex].name) send();
+                        // Mid-message, Enter sends only once the command is picked (and highlighted); typed by hand,
+                        // the first Enter picks it.
+                        if (!alone && typing && enterOnMenu(text, typing, matches[menuIndex].name, picked) === "send") send();
                         else pickCommand(matches[menuIndex].name);
                         return;
                       }
