@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer as createH2 } from "node:http2";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { issueToken, push, MAX_PAYLOAD_BYTES } from "../lib/relay.js";
+import { createKey, push, MAX_PAYLOAD_BYTES } from "../lib/relay.js";
 import { host } from "../lib/apns.js";
 
 const BUNDLE = "com.example.loft";
@@ -74,11 +74,8 @@ beforeEach(() => {
   production.answer({ status: 200 });
 });
 
-// Each install asks from its own IP, so the per-IP limit only bites where a test means it to.
-let ips = 0;
-const askToken = (ip = `10.0.${Math.floor(++ips / 250)}.${ips % 250}`, now) =>
-  issueToken(new Request("http://relay/api/token", { method: "POST", headers: { "x-forwarded-for": `${ip}, 76.76.21.21` } }), env, now);
-const newToken = async () => (await (await askToken()).json()).token;
+// What the operator's script does for each user.
+const newKey = () => createKey(env, "a test install");
 const payload = { aps: { alert: { title: "Web Dev needs your approval", body: "Bash" }, sound: "default", badge: 3 }, type: "permission" };
 const send = (token, body, raw, now) =>
   push(
@@ -91,18 +88,22 @@ const send = (token, body, raw, now) =>
     now,
   );
 
-test("a relay token is a secret: only its hash is stored", async () => {
-  const res = await askToken();
-  assert.equal(res.status, 201);
-  const { token } = await res.json();
-  assert.match(token, /^lrt_[A-Za-z0-9_-]{43}$/);
-  assert.ok(store.has(`relay-token:${createHash("sha256").update(token).digest("hex")}`));
-  assert.ok(![...store.keys(), ...store.values()].some((v) => v.includes(token)), "the token itself isn't stored");
-  assert.notEqual(await newToken(), token, "each install gets its own");
+test("a relay key is a secret: only its hash and label are stored", async () => {
+  const key = await createKey(env, "Sam (sam@example.com)", Date.UTC(2026, 10, 4));
+  assert.match(key, /^lrk_[A-Za-z0-9_-]{43}$/);
+  const stored = store.get(`relay-key:${createHash("sha256").update(key).digest("hex")}`);
+  assert.deepEqual(JSON.parse(stored), { label: "Sam (sam@example.com)", created: "2026-11-04T00:00:00.000Z" });
+  assert.ok(![...store.keys(), ...store.values()].some((v) => v.includes(key)), "the key itself isn't stored");
+  assert.notEqual(await newKey(), key, "each one is new");
+});
+
+test("there's no endpoint that hands out keys", async () => {
+  const { readdir } = await import("node:fs/promises");
+  assert.deepEqual(await readdir(new URL("../api/", import.meta.url)), ["push.js"]);
 });
 
 test("a push is forwarded to Apple's host for its environment, with the Loft topic and the payload unchanged", async () => {
-  const token = await newToken();
+  const token = await newKey();
   const res = await send(token, { priority: 5, collapse_id: "permission:abc" });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { apple_status: 200, reason: null, apns_id: "apns-1" });
@@ -126,17 +127,21 @@ test("a push is forwarded to Apple's host for its environment, with the Loft top
   assert.equal(production.seen.length, 1);
 });
 
-test("a missing or unknown relay token is refused, and nothing reaches Apple", async () => {
-  for (const token of [null, "lrt_not-issued", "Basic x"]) {
-    const res = await send(token);
-    assert.equal(res.status, 401, String(token));
-    assert.deepEqual(await res.json(), { error: "a valid relay token is required" });
+test("a missing, malformed or unknown relay key is refused, and nothing reaches Apple", async () => {
+  const commandsBefore = commands.length;
+  for (const key of [null, "Basic x", "lrk_short", `lrt_${"a".repeat(43)}`]) {
+    const res = await send(key);
+    assert.equal(res.status, 401, String(key));
+    assert.deepEqual(await res.json(), { error: "a valid relay key is required" });
   }
+  assert.equal(commands.length, commandsBefore, "a malformed key costs no store lookup");
+  const unknown = await send(`lrk_${"a".repeat(43)}`);
+  assert.equal(unknown.status, 401, "well formed but never created");
   assert.equal(production.seen.length, 0);
 });
 
 test("over 4 KB, another bundle id and a malformed request are refused before Apple", async () => {
-  const token = await newToken();
+  const token = await newKey();
   const big = { aps: { alert: { title: "x", body: "y".repeat(MAX_PAYLOAD_BYTES) } } };
   assert.equal((await send(token, { payload: big })).status, 413);
   const justUnder = { aps: { alert: { title: "x", body: "" } }, pad: "" };
@@ -168,7 +173,7 @@ test("over 4 KB, another bundle id and a malformed request are refused before Ap
 });
 
 test("Apple's answer about a gone or bad device token comes back to the caller", async () => {
-  const token = await newToken();
+  const token = await newKey();
   for (const [status, reason] of [[410, "Unregistered"], [400, "BadDeviceToken"], [400, "DeviceTokenNotForTopic"]]) {
     production.answer({ status, reason });
     const res = await send(token);
@@ -184,7 +189,7 @@ test("no payload or device token is written to the store or to the logs", async 
   methods.forEach((m) => (console[m] = (...a) => logged.push(a.map(String).join(" "))));
   try {
     commands.length = 0;
-    const token = await newToken();
+    const token = await newKey();
     await send(token);
     production.answer({ status: 410, reason: "Unregistered" });
     await send(token);
@@ -197,16 +202,15 @@ test("no payload or device token is written to the store or to the logs", async 
     assert.ok(!written.includes(secret), `the store saw ${secret}`);
     assert.ok(!logged.join("\n").includes(secret), `the logs have ${secret}`);
   }
-  // Only hashed tokens and counters keyed by hashes: no IP either.
+  // Only hashed keys and counters keyed by those hashes.
   assert.ok(
-    commands.every((c) => /^\["(SET|EXISTS)","relay-token:[0-9a-f]{64}"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"/.test(c)),
+    commands.every((c) => /^\["(SET|EXISTS)","relay-key:[0-9a-f]{64}"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"/.test(c)),
     commands.join("\n"),
   );
-  assert.ok(!written.includes("10.0."), "no IP is stored");
 });
 
 test("when Apple can't be reached the caller is told, without details", async () => {
-  const token = await newToken();
+  const token = await newKey();
   const res = await push(
     new Request("http://relay/api/push", {
       method: "POST",
@@ -222,30 +226,20 @@ test("when Apple can't be reached the caller is told, without details", async ()
 const HOUR = 3600_000;
 const T0 = Date.UTC(2026, 10, 4, 10, 0, 0);
 
-test("the 6th token from one IP within an hour is refused; other IPs aren't, and the next hour starts over", async () => {
-  for (let i = 0; i < 5; i++) assert.equal((await askToken("203.0.113.7", T0 + i * 60_000)).status, 201);
-  const sixth = await askToken("203.0.113.7", T0 + 30 * 60_000);
-  assert.equal(sixth.status, 429);
-  assert.deepEqual(await sixth.json(), { error: "too many requests: at most 5 per hour" });
-  assert.equal(sixth.headers.get("retry-after"), String(30 * 60));
-  assert.equal((await askToken("203.0.113.8", T0 + 30 * 60_000)).status, 201, "another IP");
-  assert.equal((await askToken("203.0.113.7", T0 + HOUR)).status, 201, "the next hour");
-});
-
-test("the 21st push in a minute from one token is refused; other tokens aren't, and the next minute starts over", async () => {
-  const [a, b] = [await newToken(), await newToken()];
+test("the 21st push in a minute from one key is refused; other keys aren't, and the next minute starts over", async () => {
+  const [a, b] = [await newKey(), await newKey()];
   for (let i = 0; i < 20; i++) assert.equal((await send(a, {}, undefined, T0 + i * 1000)).status, 200);
   const over = await send(a, {}, undefined, T0 + 30_000);
   assert.equal(over.status, 429);
   assert.deepEqual(await over.json(), { error: "too many requests: at most 20 per minute" });
   assert.equal(over.headers.get("retry-after"), "30");
   assert.equal(production.seen.length, 20, "the refused push never reached Apple");
-  assert.equal((await send(b, {}, undefined, T0 + 30_000)).status, 200, "another token");
+  assert.equal((await send(b, {}, undefined, T0 + 30_000)).status, 200, "another key");
   assert.equal((await send(a, {}, undefined, T0 + 60_000)).status, 200, "the next minute");
 });
 
-test("the 1,001st push in a day from one token is refused until the next day", async () => {
-  const token = await newToken();
+test("the 1,001st push in a day from one key is refused until the next day", async () => {
+  const token = await newKey();
   const day = Date.UTC(2026, 10, 5);
   // 20 a minute, so only the daily limit is reached.
   for (let i = 0; i < 1000; i++) {
@@ -255,20 +249,18 @@ test("the 1,001st push in a day from one token is refused until the next day", a
   const over = await send(token, {}, undefined, day + 51 * 60_000);
   assert.equal(over.status, 429);
   assert.deepEqual(await over.json(), { error: "too many requests: at most 1000 per day" });
-  assert.equal((await send(await newToken(), {}, undefined, day + 51 * 60_000)).status, 200, "another token");
+  assert.equal((await send(await newKey(), {}, undefined, day + 51 * 60_000)).status, 200, "another key");
   assert.equal((await send(token, {}, undefined, day + 24 * HOUR)).status, 200, "the next day");
 });
 
 test("a relay missing a setting refuses everything instead of guessing", async () => {
   for (const missing of ["LOFT_BUNDLE_ID", "APNS_KEY_P8", "KV_REST_API_URL"]) {
     const broken = { ...env, [missing]: "" };
-    const token = await issueToken(new Request("http://relay/api/token", { method: "POST" }), broken);
-    assert.equal(token.status, 500, missing);
     // Without LOFT_BUNDLE_ID a request that leaves bundle_id out would otherwise match.
     const res = await push(
       new Request("http://relay/api/push", {
         method: "POST",
-        headers: { authorization: "Bearer x" },
+        headers: { authorization: `Bearer lrk_${"a".repeat(43)}` },
         body: JSON.stringify({ device_token: DEVICE, environment: "production", payload }),
       }),
       broken,
@@ -286,7 +278,7 @@ test("Apple's hosts can only be replaced outside production", () => {
 });
 
 test("Apple not answering in time is a 504, and the next push still goes", async () => {
-  const token = await newToken();
+  const token = await newKey();
   production.answer({ hang: true });
   const started = Date.now();
   const res = await push(
@@ -307,7 +299,7 @@ test("Apple not answering in time is a 504, and the next push still goes", async
 });
 
 test("Apple closing the stream without an answer is a 502, never a 200", async () => {
-  const token = await newToken();
+  const token = await newKey();
   production.answer({ reset: true });
   const res = await send(token);
   assert.equal(res.status, 502);
@@ -315,7 +307,7 @@ test("Apple closing the stream without an answer is a 502, never a 200", async (
 });
 
 test("a key that can't be used is the relay's 500, not Apple's outage", async () => {
-  const token = await newToken();
+  const token = await newKey();
   const res = await push(
     new Request("http://relay/api/push", {
       method: "POST",
@@ -329,7 +321,7 @@ test("a key that can't be used is the relay's 500, not Apple's outage", async ()
 });
 
 test("an oversized request is refused from its length, before reading it", async () => {
-  const token = await newToken();
+  const token = await newKey();
   const res = await push(
     new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": "999999" }, body: "{}" }),
     env,

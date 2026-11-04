@@ -214,11 +214,11 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
-/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple) or `relay` (the Loft push relay). Never the key or the relay token. */
+/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
 export type PushStatus = {
-  path: "own_key" | "relay";
-  /** Whether the install has its relay token yet (it gets one on its first relay push). */
-  relay_token: boolean;
+  path: "own_key" | "relay" | "none";
+  /** Whether a relay key is stored. */
+  relay_key: boolean;
   configured: boolean;
   key_present: boolean;
   key_id: string;
@@ -510,7 +510,8 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean }) =>
+    req<PushStatus>("PUT", "/push", b),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),

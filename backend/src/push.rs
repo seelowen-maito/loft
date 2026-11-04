@@ -67,9 +67,8 @@ impl Pusher {
             let _ = state.db.mark_push_seen(&i.id);
         }
         let devices = state.db.list_devices().unwrap_or_default();
-        // With no key of its own the install pushes through the relay, so there's always a way out.
-        if !self.seeded || devices.is_empty() {
-            // What was already waiting at startup isn't news.
+        if !self.seeded || devices.is_empty() || apns::route(state) == apns::Route::Off {
+            // What was already waiting at startup, or while push was off, isn't news.
             self.seeded = true;
             return;
         }
@@ -335,7 +334,7 @@ mod tests {
         assert_eq!(got(&seen, &phone).len(), 1, "pruning never re-sends");
     }
 
-    /// A state with no key of its own: its pushes go through the (fake) relay.
+    /// A state with no key of its own but the test relay key: its pushes go through the (fake) relay.
     fn without_key() -> AppState {
         crate::apns::tests::fake_apns();
         let st = state();
@@ -351,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_key_items_go_through_the_relay_with_the_same_payload_and_rules() {
+    async fn with_a_relay_key_items_go_through_the_relay_with_the_same_payload_and_rules() {
         let seen = crate::apns::tests::fake_apns();
         let st = without_key();
         let dev = agent(&st, "Relay Dev");
@@ -376,34 +375,13 @@ mod tests {
         assert!(relayed_to(&picky).is_empty() && relayed_to(&asleep).is_empty(), "kinds and quiet hours still apply");
         assert!(got(&seen, &phone).is_empty(), "nothing went straight to Apple");
         let (auth, body) = &sent[0];
-        assert_eq!(auth, "Bearer lrt_fake-relay-token");
+        assert_eq!(*auth, format!("Bearer {}", crate::apns::tests::RELAY_KEY));
         let item = collect(&st).unwrap().iter().map(to_push).find(|i| i.id.ends_with("relayed-0")).unwrap();
         assert_eq!(body["payload"], item_push(&item, 7).payload(), "the payload is the one Apple would get");
         assert_eq!((&body["environment"], &body["bundle_id"], &body["priority"]), (&json!("production"), &json!("com.example.loft"), &json!(10)), "a permission is time-sensitive");
         assert_eq!(body["collapse_id"], json!(item.id));
         assert_eq!(sent[5].1["payload"]["type"], json!("summary"));
         assert!(!body.to_string().contains("ghp_"), "names and titles only, as before");
-    }
-
-    #[tokio::test]
-    async fn the_relay_token_is_fetched_once_and_kept_owner_only() {
-        let st = without_key();
-        let dev = agent(&st, "Token Dev");
-        let phone = format!("{}08", "cc".repeat(31));
-        device(&st, &phone, crate::apns::DEFAULT_KINDS, None);
-        for round in 0..3 {
-            // A new pusher each round, as after a restart: the token comes from its file.
-            let mut p = Pusher::default();
-            tick(&st, &mut p).await;
-            permission(&st, &format!("token-{round}"), &dev.id);
-            tick(&st, &mut p).await;
-        }
-        assert_eq!(relayed_to(&phone).len(), 3);
-        assert_eq!(crate::apns::tests::relayed().lock().unwrap().tokens, 1, "one token per install");
-        let file = crate::apns::key_dir().join("relay-token");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "lrt_fake-relay-token");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[tokio::test]

@@ -144,17 +144,17 @@ pub async fn test(State(state): State<AppState>, Path(token): Path<String>) -> A
     }
 }
 
-/// `GET /api/push`: which path pushes take (`own_key`, straight to Apple, or `relay`, the Loft push
-/// relay) and the key's ids. Never the key or the relay token.
+/// `GET /api/push`: which path pushes take (`own_key`, straight to Apple; `relay`, the Loft push relay;
+/// `none`, no push) and the key's ids. Never the key or the relay key, only whether each is there.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Value> {
     same_site_read(&headers)?;
     let s = state.settings.get().push;
     let key = apns::key_present();
-    let own = apns::own_key(&state);
+    let route = apns::route(&state);
     Ok(Json(json!({
-        "path": if own { "own_key" } else { "relay" },
-        "relay_token": apns::relay_token_present(),
-        "configured": own,
+        "path": route.name(),
+        "relay_key": apns::relay_key_present(),
+        "configured": route == apns::Route::OwnKey,
         "key_present": key,
         "key_id": s.key_id,
         "team_id": s.team_id,
@@ -173,9 +173,14 @@ pub struct Configure {
     /// Removes the stored key.
     #[serde(default)]
     remove_key: bool,
+    /// The relay key from the push portal. Stored owner-only like the `.p8`; never echoed back.
+    relay_key: Option<String>,
+    /// Removes the stored relay key.
+    #[serde(default)]
+    remove_relay_key: bool,
 }
 
-/// `PUT /api/push`: key id, team id, bundle id, and optionally the key itself.
+/// `PUT /api/push`: key id, team id, bundle id, and optionally the key itself or the relay key.
 pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b): Json<Configure>) -> ApiResult<Value> {
     let ids = |s: &str| s.len() == 10 && s.bytes().all(|c| c.is_ascii_alphanumeric());
     let mut s = state.settings.get();
@@ -202,6 +207,12 @@ pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b
     if b.remove_key {
         apns::remove_key().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    if let Some(k) = b.relay_key.filter(|k| !k.trim().is_empty()) {
+        apns::store_relay_key(&k).map_err(|e| bad(e.to_string()))?;
+    }
+    if b.remove_relay_key {
+        apns::remove_relay_key().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
     state.settings.save(s).map_err(|e| bad(e.to_string()))?;
     status(State(state), headers).await
 }
@@ -223,24 +234,22 @@ mod tests {
         let get = || async { status(State(st.clone()), HeaderMap::new()).await.unwrap().0 };
         let put = |p: Value| configure(State(st.clone()), HeaderMap::new(), Json(serde_json::from_value::<Configure>(p).unwrap()));
 
-        // No key ids: the Loft relay.
+        // The test install holds a relay key and no key ids: the Loft relay.
         let s = get().await;
-        assert_eq!((s["path"].clone(), s["configured"].clone()), (json!("relay"), json!(false)));
-        // The key and both ids: straight to Apple.
+        assert_eq!((s["path"].clone(), s["relay_key"].clone(), s["configured"].clone()), (json!("relay"), json!(true), json!(false)));
+        // Its own key and both ids win over the relay key.
         let Json(s) = put(json!({ "key_id": "ABC123DEFG", "team_id": "TEAM123456", "key_p8": crate::apns::tests::test_key_pem() })).await.unwrap();
         assert_eq!((s["path"].clone(), s["configured"].clone()), (json!("own_key"), json!(true)));
-        // Without its ids the key isn't used: back to the relay.
         let Json(s) = put(json!({ "key_id": "", "team_id": "" })).await.unwrap();
         assert_eq!(s["path"], json!("relay"));
 
-        // Once a relay push has happened the install has a token; the status says so but never shows it.
-        let phone = format!("{}0b", "ef".repeat(31));
-        let _ = register(State(st.clone()), reg(&phone)).await.unwrap();
-        let _ = test(State(st.clone()), Path(phone)).await.unwrap();
-        let s = get().await;
-        assert_eq!(s["relay_token"], json!(true));
+        // Pasting a relay key: one that isn't shaped like one is refused, a good one is kept and never shown.
+        let err = put(json!({ "relay_key": "not-a-key" })).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let Json(s) = put(json!({ "relay_key": crate::apns::tests::RELAY_KEY })).await.unwrap();
+        assert_eq!(s["relay_key"], json!(true));
         let text = s.to_string();
-        assert!(!text.contains("lrt_") && !text.contains("PRIVATE KEY"), "{text}");
+        assert!(!text.contains("lrk_") && !text.contains("PRIVATE KEY"), "{text}");
     }
 
     #[tokio::test]

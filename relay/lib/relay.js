@@ -1,5 +1,6 @@
-// The push relay (ADR 0002): issues relay tokens and forwards an install's pushes to Apple. It only forwards:
-// payloads and device tokens are never stored or logged, and only hashes of relay tokens are kept.
+// The push relay (ADR 0002): forwards the pushes of installs that hold a relay key to Apple. It only forwards:
+// payloads and device tokens are never stored or logged, and only hashes of relay keys are kept. Keys are made by
+// the operator (scripts/create-key.js); there's no endpoint that hands them out.
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
@@ -8,12 +9,15 @@ import { send } from "./apns.js";
 /** Apple's limit for an alert's payload. */
 export const MAX_PAYLOAD_BYTES = 4096;
 
-/** What one IP or one install can ask for: [requests, window in seconds]. */
-export const LIMITS = { tokensPerIp: [5, 3600], pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] };
+/** What one relay key can ask for: [requests, window in seconds]. */
+export const LIMITS = { pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] };
+
+/** A relay key: `lrk_` and 32 random bytes, base64url. */
+const KEY = /^lrk_[A-Za-z0-9_-]{43}$/;
 
 const json = (status, body, headers) => Response.json(body, { status, headers });
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
-const hashed = (token) => `relay-token:${sha256(token)}`;
+const hashed = (key) => `relay-key:${sha256(key)}`;
 
 /**
  * Counts one request against a fixed-window limit: null when it's within it, else a 429 saying when to try again.
@@ -24,26 +28,21 @@ async function overLimit(store, name, who, now) {
   const window = Math.floor(now / 1000 / seconds);
   if ((await store.hit(`limit:${name}:${who}:${window}`, seconds)) <= max) return null;
   const retry = (window + 1) * seconds - Math.floor(now / 1000);
-  return json(429, { error: `too many requests: at most ${max} per ${seconds === 60 ? "minute" : seconds === 3600 ? "hour" : "day"}` }, { "retry-after": String(retry) });
+  return json(429, { error: `too many requests: at most ${max} per ${seconds === 60 ? "minute" : "day"}` }, { "retry-after": String(retry) });
 }
 
 /** Settings the relay can't work without. Without LOFT_BUNDLE_ID, for one, the bundle id check would pass anything. */
 const REQUIRED = ["APNS_KEY_P8", "APNS_KEY_ID", "APNS_TEAM_ID", "LOFT_BUNDLE_ID", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
 const unconfigured = (env) => (REQUIRED.some((k) => !env[k]) ? json(500, { error: "the relay isn't configured" }) : null);
 
-/** The caller's IP: Vercel puts the client first in x-forwarded-for. */
-const clientIp = (request) => (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || "unknown";
-
-/** `POST /api/token`: a new relay token. Only its hash is stored. */
-export async function issueToken(request, env = process.env, now = Date.now()) {
-  const broken = unconfigured(env);
-  if (broken) return broken;
-  const store = makeKv(env);
-  const limited = await overLimit(store, "tokensPerIp", sha256(`ip:${clientIp(request)}`), now);
-  if (limited) return limited;
-  const token = `lrt_${randomBytes(32).toString("base64url")}`;
-  await store.set(hashed(token), new Date(now).toISOString());
-  return json(201, { token });
+/**
+ * A new relay key for `label` (who it's for), stored as its hash only. For the operator's script: the key is
+ * returned once and can't be read back.
+ */
+export async function createKey(env, label, now = Date.now()) {
+  const key = `lrk_${randomBytes(32).toString("base64url")}`;
+  await makeKv(env).set(hashed(key), JSON.stringify({ label, created: new Date(now).toISOString() }));
+  return key;
 }
 
 /** Why a push request's body can't be forwarded, as the answer to give, or null when it can. */
@@ -60,7 +59,7 @@ function invalid(b, env) {
 }
 
 /**
- * `POST /api/push`, with `Authorization: Bearer <relay token>` and `{device_token, environment, bundle_id, payload,
+ * `POST /api/push`, with `Authorization: Bearer <relay key>` and `{device_token, environment, bundle_id, payload,
  * priority?, collapse_id?}`. When Apple answered: 200 `{apple_status, reason, apns_id}` (a 410, or a 400 with
  * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`,
  * 429 with Retry-After over a limit. Every authorized request counts, forwarded or not.
@@ -69,9 +68,10 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const broken = unconfigured(env);
   if (broken) return broken;
   const store = makeKv(env);
-  const token = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  if (!token || !(await store.exists(hashed(token)))) return json(401, { error: "a valid relay token is required" });
-  const who = sha256(token);
+  const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
+  // Anything not shaped like a key is refused before it costs a store lookup.
+  if (!key || !KEY.test(key) || !(await store.exists(hashed(key)))) return json(401, { error: "a valid relay key is required" });
+  const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
   const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
