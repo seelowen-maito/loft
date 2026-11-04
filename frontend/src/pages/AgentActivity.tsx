@@ -34,7 +34,7 @@ function toolName(n: string) {
 
 /** Stacked daily runs: on request (bottom) + autonomous (top), 2px gap between segments. */
 function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; height?: number }) {
-  const [hover, setHover] = useState<number | null>(null);
+  const [hover, setHover] = useState<{ i: number; el: Element } | null>(null);
   const n = user.length;
   const max = Math.max(1, ...user.map((u, i) => u + auto[i]));
   const slot = 100 / n;
@@ -50,9 +50,9 @@ function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; 
           const hu = u * unit;
           const ha = a * unit;
           const gap = u && a ? 2 : 0;
-          const dim = hover !== null && hover !== i ? 0.4 : 1;
+          const dim = hover !== null && hover.i !== i ? 0.4 : 1;
           return (
-            <g key={i} onMouseEnter={() => setHover(i)} opacity={dim}>
+            <g key={i} onMouseEnter={(e) => setHover({ i, el: e.currentTarget.firstElementChild! })} opacity={dim}>
               <rect x={i * slot} y={0} width={slot} height={height} fill="transparent" />
               {u > 0 && <rect x={x} y={height - hu} width={bw} height={hu} rx={0.8} fill={USER} />}
               {a > 0 && <rect x={x} y={height - hu - gap - ha} width={bw} height={ha} rx={0.8} fill={AUTO} />}
@@ -61,11 +61,11 @@ function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; 
         })}
       </svg>
       {hover !== null && (
-        <Tip x={hover >= n - 4 ? `${((hover + 1) / n) * 100}%` : `${((hover + 0.5) / n) * 100}%`} y={0} align={hover >= n - 4 ? "end" : "center"}>
-          <span className="text-fg-3">{dayLabel(n - 1 - hover)} · </span>
-          <span className="text-fg">{user[hover]} on request</span>
+        <Tip anchor={hover.el}>
+          <span className="text-fg-3">{dayLabel(n - 1 - hover.i)} · </span>
+          <span className="text-fg">{user[hover.i]} on request</span>
           <span className="text-fg-3"> · </span>
-          <span className="text-fg">{auto[hover]} autonomous</span>
+          <span className="text-fg">{auto[hover.i]} autonomous</span>
         </Tip>
       )}
     </div>
