@@ -214,8 +214,18 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
-/** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
-export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
+/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple) or `relay` (the Loft push relay). Never the key or the relay token. */
+export type PushStatus = {
+  path: "own_key" | "relay";
+  /** Whether the install has its relay token yet (it gets one on its first relay push). */
+  relay_token: boolean;
+  configured: boolean;
+  key_present: boolean;
+  key_id: string;
+  team_id: string;
+  bundle_id: string;
+  devices: number;
+};
 
 export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 

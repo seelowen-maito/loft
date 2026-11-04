@@ -144,13 +144,17 @@ pub async fn test(State(state): State<AppState>, Path(token): Path<String>) -> A
     }
 }
 
-/// `GET /api/push`: whether push is set up. Never includes the key.
+/// `GET /api/push`: which path pushes take (`own_key`, straight to Apple, or `relay`, the Loft push
+/// relay) and the key's ids. Never the key or the relay token.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Value> {
     same_site_read(&headers)?;
     let s = state.settings.get().push;
     let key = apns::key_present();
+    let own = apns::own_key(&state);
     Ok(Json(json!({
-        "configured": key && !s.key_id.trim().is_empty() && !s.team_id.trim().is_empty(),
+        "path": if own { "own_key" } else { "relay" },
+        "relay_token": apns::relay_token_present(),
+        "configured": own,
         "key_present": key,
         "key_id": s.key_id,
         "team_id": s.team_id,
@@ -210,6 +214,33 @@ mod tests {
 
     fn reg(token: &str) -> Json<Register> {
         Json(serde_json::from_value(json!({ "token": token, "environment": "production", "bundle_id": "com.example.loft", "name": "Sam's iPhone" })).unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_status_says_which_path_pushes_take_and_never_the_secrets() {
+        crate::apns::tests::fake_apns();
+        let st = crate::tasks::tests::state();
+        let get = || async { status(State(st.clone()), HeaderMap::new()).await.unwrap().0 };
+        let put = |p: Value| configure(State(st.clone()), HeaderMap::new(), Json(serde_json::from_value::<Configure>(p).unwrap()));
+
+        // No key ids: the Loft relay.
+        let s = get().await;
+        assert_eq!((s["path"].clone(), s["configured"].clone()), (json!("relay"), json!(false)));
+        // The key and both ids: straight to Apple.
+        let Json(s) = put(json!({ "key_id": "ABC123DEFG", "team_id": "TEAM123456", "key_p8": crate::apns::tests::test_key_pem() })).await.unwrap();
+        assert_eq!((s["path"].clone(), s["configured"].clone()), (json!("own_key"), json!(true)));
+        // Without its ids the key isn't used: back to the relay.
+        let Json(s) = put(json!({ "key_id": "", "team_id": "" })).await.unwrap();
+        assert_eq!(s["path"], json!("relay"));
+
+        // Once a relay push has happened the install has a token; the status says so but never shows it.
+        let phone = format!("{}0b", "ef".repeat(31));
+        let _ = register(State(st.clone()), reg(&phone)).await.unwrap();
+        test(State(st.clone()), Path(phone)).await.unwrap();
+        let s = get().await;
+        assert_eq!(s["relay_token"], json!(true));
+        let text = s.to_string();
+        assert!(!text.contains("lrt_") && !text.contains("PRIVATE KEY"), "{text}");
     }
 
     #[tokio::test]

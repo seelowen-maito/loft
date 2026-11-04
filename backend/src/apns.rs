@@ -102,6 +102,11 @@ fn relay_token_path() -> PathBuf {
     key_dir().join("relay-token")
 }
 
+/// Whether this install has its relay token yet (it gets one on its first push through the relay).
+pub fn relay_token_present() -> bool {
+    relay_token_path().is_file()
+}
+
 /// Writes `text` to `name` in the key folder, owner-only.
 fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     let dir = key_dir();
