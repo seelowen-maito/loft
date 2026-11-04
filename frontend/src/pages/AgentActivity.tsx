@@ -240,7 +240,7 @@ export function AgentActivity() {
                     {change && (
                       <span
                         className={cx("ml-2 font-mono text-[12.5px]", change.tone === "good" ? "text-good" : change.tone === "warn" ? "text-warn" : "text-fg-3")}
-                        title={`${period.previous.runs} runs · est. ${exactDollars(period.previous.cost_usd)} the period before`}
+                        title={`${period.kind === "usage_week" ? "Last week by now" : "The 7 days before"}: ${period.previous.runs} runs · est. ${exactDollars(period.previous.cost_usd)}`}
                       >
                         {change.text}
                       </span>

@@ -385,8 +385,8 @@ export type AgentsSummary = {
     resets_at: string | null;
     runs: number;
     cost_usd: number;
-    /** The same span just before: the previous usage week, or the 7 days before the last 7. */
-    previous: { since: string; runs: number; cost_usd: number };
+    /** The span before, like with like: the previous usage week up to the same point in it, or the 7 days before the last 7. */
+    previous: { since: string; until: string; runs: number; cost_usd: number };
   };
   /** The All-time spend: every run since Loft started counting, deleted agents and cleared chats included. */
   all_time: { runs: number; cost_usd: number };
