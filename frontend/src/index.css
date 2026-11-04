@@ -146,6 +146,8 @@ body::after {
 /* markdown in chat */
 .prose-chat {
   @apply text-[14px] leading-relaxed text-fg;
+  /* long tokens, URLs and hashes break inside the column; pre keeps its own scroll */
+  overflow-wrap: anywhere;
 }
 .prose-chat p { @apply my-2 first:mt-0 last:mb-0; }
 .prose-chat a { @apply text-accent underline decoration-accent/30 underline-offset-2; }
