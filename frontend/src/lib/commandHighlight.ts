@@ -11,28 +11,38 @@ function slashWords(text: string): CommandWord[] {
   return words;
 }
 
-/** The message's one command: its first `/word` that is exactly one of `names` (in any case), or null. Any
- * later `/word` is plain text. */
-export function messageCommand(text: string, names: string[]): CommandWord | null {
+/** True when the `/word` `picked` from the menu is still in `text` as the same whole word at the same place. */
+export function stillPicked(text: string, picked: CommandWord | null | undefined): picked is CommandWord {
+  return !!picked && slashWords(text).some((w) => w.start === picked.start && w.word === picked.word);
+}
+
+/** The message's one command, the `/word` that runs when it's sent: its first word when that is exactly one of
+ * `names` (in any case), else the command `picked` (or completed) from the menu while it's still the same word
+ * at the same place. A known `/word` typed by hand mid-message ("what does /compact do") is plain text, and
+ * so is any `/word` after the command. Null when nothing runs. */
+export function messageCommand(text: string, names: string[], picked?: CommandWord | null): CommandWord | null {
   const known = new Set(names.map((n) => n.toLowerCase()));
-  return slashWords(text).find((w) => known.has(w.word.toLowerCase())) ?? null;
+  const words = slashWords(text);
+  const first = words[0];
+  if (first && !text.slice(0, first.start).trim() && known.has(first.word.toLowerCase())) return first;
+  return stillPicked(text, picked) && known.has(picked.word.toLowerCase()) ? picked : null;
 }
 
 /** The command being typed at `caret`: the `/word` that starts a word and holds the caret (anywhere after its
- * `/`), unless another known command is already in the message. Null when there is none, so the menu stays
- * closed. */
-export function commandAt(text: string, caret: number, names: string[]): CommandWord | null {
+ * `/`), unless another command that runs (see `messageCommand`) is already in the message. Null when there is
+ * none, so the menu stays closed. */
+export function commandAt(text: string, caret: number, names: string[], picked?: CommandWord | null): CommandWord | null {
   const at = slashWords(text).find((w) => caret > w.start && caret <= w.end);
   if (!at) return null;
-  const command = messageCommand(text, names);
+  const command = messageCommand(text, names, picked);
   return command && command.start !== at.start ? null : at;
 }
 
 /** A message cut into its one command (lowercased, as it runs) and the rest of its text, trimmed, with the
- * command taken out wherever it sat: "the login bug /grill" is `/grill` with "the login bug". A later `/word`
- * stays in the rest. Null when the message holds no known command. */
-export function splitCommand(text: string, names: string[]): { command: string; rest: string } | null {
-  const c = messageCommand(text, names);
+ * command taken out wherever it sat: "the login bug /grill", with `/grill` picked from the menu, is `/grill`
+ * with "the login bug". A later `/word` stays in the rest. Null when no command runs (see `messageCommand`). */
+export function splitCommand(text: string, names: string[], picked?: CommandWord | null): { command: string; rest: string } | null {
+  const c = messageCommand(text, names, picked);
   if (!c) return null;
   const before = text.slice(0, c.start), after = text.slice(c.end);
   const head = before.trimEnd(), tail = after.trimStart();
@@ -72,10 +82,15 @@ export function mentionRanges(text: string, agents: string[]): [number, number][
   return ranges;
 }
 
-/** The composer's `text` cut into pieces, `accent` on its one known command (wherever it sits) and on each
- * mention of `agents`, for the overlay that colours them. */
-export function highlightParts(text: string, commands: string[], agents: string[]): { text: string; accent: boolean }[] {
-  const command = messageCommand(text, commands);
+/** The composer's `text` cut into pieces, `accent` on its one command that runs (see `messageCommand`) and on
+ * each mention of `agents`, for the overlay that colours them. */
+export function highlightParts(
+  text: string,
+  commands: string[],
+  agents: string[],
+  picked?: CommandWord | null,
+): { text: string; accent: boolean }[] {
+  const command = messageCommand(text, commands, picked);
   const ranges = [...(command ? [[command.start, command.end] as [number, number]] : []), ...mentionRanges(text, agents)]
     .sort((a, b) => a[0] - b[0]);
   const parts: { text: string; accent: boolean }[] = [];
