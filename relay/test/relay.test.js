@@ -14,21 +14,22 @@ const P8 = privateKey.export({ type: "pkcs8", format: "pem" });
 // The store: Upstash's REST API, keeping every command it gets.
 const store = new Map();
 const commands = [];
+const run = ([cmd, key, value]) => {
+  commands.push(JSON.stringify([cmd, key, value]));
+  if (cmd === "SET") return (store.set(key, value), "OK");
+  if (cmd === "EXISTS") return store.has(key) ? 1 : 0;
+  if (cmd === "INCR") return (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
+  if (cmd === "EXPIRE") return 1;
+  return null;
+};
 const kvServer = createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
   req.on("end", () => {
-    const [cmd, key, value] = JSON.parse(body);
-    commands.push(body);
     if (req.headers.authorization !== "Bearer kv-secret") return res.writeHead(401).end();
-    const incr = () => (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
-    const result =
-      cmd === "SET" ? (store.set(key, value), "OK")
-      : cmd === "EXISTS" ? (store.has(key) ? 1 : 0)
-      : cmd === "INCR" ? incr()
-      : cmd === "EXPIRE" ? 1
-      : null;
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ result }));
+    const parsed = JSON.parse(body);
+    const out = req.url === "/pipeline" ? parsed.map((c) => ({ result: run(c) })) : { result: run(parsed) };
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
   });
 });
 
@@ -42,6 +43,7 @@ const fakeApple = () => {
     req.on("end", () => {
       seen.push({ path: req.headers[":path"], headers: req.headers, body });
       if (answer.hang) return;
+      if (answer.reset) return req.stream.close(0x2);
       res.writeHead(answer.status, { "apns-id": "apns-1" });
       res.end(answer.reason ? JSON.stringify({ reason: answer.reason }) : "");
     });
@@ -302,4 +304,35 @@ test("Apple not answering in time is a 504, and the next push still goes", async
   assert.ok(Date.now() - started < 2000);
   production.answer({ status: 200 });
   assert.equal((await send(token)).status, 200);
+});
+
+test("Apple closing the stream without an answer is a 502, never a 200", async () => {
+  const token = await newToken();
+  production.answer({ reset: true });
+  const res = await send(token);
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), { error: "couldn't reach Apple" });
+});
+
+test("a key that can't be used is the relay's 500, not Apple's outage", async () => {
+  const token = await newToken();
+  const res = await push(
+    new Request("http://relay/api/push", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload }),
+    }),
+    { ...env, APNS_KEY_P8: "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----", APNS_KEY_ID: "OTHERKEY01" },
+  );
+  assert.equal(res.status, 500);
+  assert.deepEqual(await res.json(), { error: "the relay's Apple key can't be used" });
+});
+
+test("an oversized request is refused from its length, before reading it", async () => {
+  const token = await newToken();
+  const res = await push(
+    new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": "999999" }, body: "{}" }),
+    env,
+  );
+  assert.equal(res.status, 413);
 });

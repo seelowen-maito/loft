@@ -5,23 +5,24 @@ export function kv(env) {
   const url = env.KV_REST_API_URL;
   const token = env.KV_REST_API_TOKEN;
   if (!url || !token) throw new Error("KV_REST_API_URL and KV_REST_API_TOKEN must be set");
-  const command = async (...args) => {
-    const res = await fetch(url, {
+  const call = async (path, body) => {
+    const res = await fetch(url + path, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify(args),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`store answered ${res.status}`);
-    return (await res.json()).result;
+    return res.json();
   };
+  const command = async (...args) => (await call("", args)).result;
   return {
     set: (key, value) => command("SET", key, value),
     exists: async (key) => (await command("EXISTS", key)) === 1,
-    /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. */
+    /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. One round trip, so a
+     *  counter never stays without its expiry. */
     hit: async (key, seconds) => {
-      const n = await command("INCR", key);
-      if (n === 1) await command("EXPIRE", key, seconds);
-      return n;
+      const [incr] = await call("/pipeline", [["INCR", key], ["EXPIRE", key, seconds, "NX"]]);
+      return incr.result;
     },
   };
 }

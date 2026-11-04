@@ -107,12 +107,12 @@ pub fn relay_token_present() -> bool {
     relay_token_path().is_file()
 }
 
-/// Writes `text` to `name` in the key folder, owner-only.
+/// Writes `text` to `path` in the key folder, owner-only, through a temporary `<name>.tmp` beside it.
 fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     let dir = key_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("secret")));
     std::fs::write(&tmp, text)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     std::fs::rename(&tmp, path)?;
@@ -331,7 +331,10 @@ async fn via_relay(state: &AppState, base: &str, device: &Device, push: &Push) -
     let status = res.status().as_u16();
     let v = res.json::<Value>().await.unwrap_or(Value::Null);
     match status {
-        200 => Ok((v["apple_status"].as_u64().unwrap_or(0) as u16, v["reason"].as_str().unwrap_or("").to_string())),
+        200 => match v["apple_status"].as_u64() {
+            Some(s) => Ok((s as u16, v["reason"].as_str().unwrap_or("").to_string())),
+            None => bail!("The push relay's answer had no status from Apple"),
+        },
         401 => bail!("The push relay doesn't accept this install's relay token"),
         429 => bail!("The push relay's limit for this install is reached; later pushes go through"),
         s => bail!("The push relay refused the push: {s} {}", v["error"].as_str().unwrap_or("")),

@@ -46,15 +46,16 @@ export async function issueToken(request, env = process.env, now = Date.now()) {
   return json(201, { token });
 }
 
-/** What's wrong with a push request's body, or null when it can be forwarded. */
+/** Why a push request's body can't be forwarded, as the answer to give, or null when it can. */
 function invalid(b, env) {
-  if (!b || typeof b !== "object") return "the body must be a JSON object";
-  if (typeof b.device_token !== "string" || !/^[0-9a-fA-F]{64}$/.test(b.device_token)) return "device_token must be the phone's APNs token: 64 hex characters";
-  if (b.environment !== "production" && b.environment !== "development") return 'environment must be "production" or "development"';
-  if (b.bundle_id !== env.LOFT_BUNDLE_ID) return "the relay only serves the Loft app's bundle id; use your own APNs key for another app";
-  if (!b.payload || typeof b.payload !== "object" || Array.isArray(b.payload)) return "payload must be a JSON object";
-  if (b.priority !== undefined && b.priority !== 5 && b.priority !== 10) return "priority must be 5 or 10";
-  if (b.collapse_id !== undefined && (typeof b.collapse_id !== "string" || !/^[\x20-\x7e]{1,64}$/.test(b.collapse_id))) return "collapse_id must be 1-64 printable ASCII characters";
+  const bad = (error) => json(400, { error });
+  if (!b || typeof b !== "object") return bad("the body must be a JSON object");
+  if (typeof b.device_token !== "string" || !/^[0-9a-fA-F]{64}$/.test(b.device_token)) return bad("device_token must be the phone's APNs token: 64 hex characters");
+  if (b.environment !== "production" && b.environment !== "development") return bad('environment must be "production" or "development"');
+  if (b.bundle_id !== env.LOFT_BUNDLE_ID) return json(403, { error: "the relay only serves the Loft app's bundle id; use your own APNs key for another app" });
+  if (!b.payload || typeof b.payload !== "object" || Array.isArray(b.payload)) return bad("payload must be a JSON object");
+  if (b.priority !== undefined && b.priority !== 5 && b.priority !== 10) return bad("priority must be 5 or 10");
+  if (b.collapse_id !== undefined && (typeof b.collapse_id !== "string" || !/^[\x20-\x7e]{1,64}$/.test(b.collapse_id))) return bad("collapse_id must be 1-64 printable ASCII characters");
   return null;
 }
 
@@ -73,23 +74,29 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const who = sha256(token);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
+  const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
+  // The whole request (payload plus a few small fields) can't be much over the payload's cap.
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
   const raw = await request.text();
-  if (Buffer.byteLength(raw) > MAX_PAYLOAD_BYTES * 2) return json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
+  if (Buffer.byteLength(raw) > MAX_PAYLOAD_BYTES * 2) return tooBig();
   let b;
   try {
     b = JSON.parse(raw);
   } catch {
     return json(400, { error: "the body must be JSON" });
   }
-  const why = invalid(b, env);
-  if (why) return json(why.includes("bundle id") ? 403 : 400, { error: why });
+  const refused = invalid(b, env);
+  if (refused) return refused;
   // The payload is forwarded exactly as it came.
   const body = JSON.stringify(b.payload);
-  if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) return json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
+  if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) return tooBig();
   let apple;
   try {
     apple = await send(env, { deviceToken: b.device_token, environment: b.environment, priority: b.priority ?? 10, collapseId: b.collapse_id, body }, appleTimeoutMs);
   } catch (e) {
+    // The kind of failure only: never the payload, the device token or the key.
+    console.error(`push relay: ${e.key ? "the APNs key can't be used" : e.timeout ? "Apple timed out" : "Apple unreachable"} (${e.code ?? e.name})`);
+    if (e.key) return json(500, { error: "the relay's Apple key can't be used" });
     return e.timeout ? json(504, { error: "Apple didn't answer in time" }) : json(502, { error: "couldn't reach Apple" });
   }
   // A stream that ended without a status never got Apple's answer.
