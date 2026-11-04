@@ -589,9 +589,14 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     start(state, agent_id, Some(prompt), "avatar", false);
 }
 
-/// `add_msg` for a run's output; quiet (grill) runs keep only errors.
+/// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
     if quiet && kind != "error" {
+        if kind == "run_end" {
+            if let Err(e) = state.db.add_unsaved_run_end(&meta) {
+                tracing::error!("all-time spend: {e}");
+            }
+        }
         return None;
     }
     add_msg(state, agent_id, rid, role, kind, content, meta)
@@ -1747,6 +1752,16 @@ esac
         let (runs, cost) = st.db.all_time_spend().unwrap();
         assert_eq!(runs, 7);
         assert!((cost - 0.020).abs() < 1e-9, "{cost}");
+
+        // A grill round saves no run end, yet it is a finished, paid run all the same.
+        st.db.update_agent(&a.id, |a| a.grill_briefed = true).unwrap(); // a later round: no planning brief in front
+        wake(&st, &a.id, format!("[Loft: grill] next round sid={s1} cost=0.005"), "grill");
+        until("the grill run", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 8).await;
+        assert_eq!(costs().len(), 7, "a quiet run's end stays out of the chat");
+        assert!((st.db.get_agent(&a.id).unwrap().unwrap().total_cost_usd - 0.023).abs() < 1e-9);
+        let (runs, cost) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs, 8);
+        assert!((cost - 0.023).abs() < 1e-9, "{cost}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -643,6 +643,12 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
 
 /// What a run added to its session, given the running total it reported and the one before it.
 /// A total that went down is a fresh session, so all of it is this run's.
+/// Add one run, and the cost its run end's `meta` holds, to the All-time spend.
+fn add_all_time(c: &Connection, meta: &Value) -> Result<()> {
+    c.execute("UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1", [meta["cost_usd"].as_f64().unwrap_or(0.0)])?;
+    Ok(())
+}
+
 pub fn run_cost(total: f64, prev: f64) -> f64 {
     if total >= prev { total - prev } else { total }
 }
@@ -1207,10 +1213,7 @@ impl Db {
         )?;
         let id = c.last_insert_rowid();
         if kind == "run_end" {
-            c.execute(
-                "UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1",
-                [meta["cost_usd"].as_f64().unwrap_or(0.0)],
-            )?;
+            add_all_time(&c, &meta)?;
         }
         Ok(Message {
             id,
@@ -1569,6 +1572,11 @@ impl Db {
 
 
     // ---- activity summary ---------------------------------------------
+
+    /// Count a run whose run end isn't saved (a quiet run's) in the All-time spend; saved run ends count themselves.
+    pub fn add_unsaved_run_end(&self, meta: &Value) -> Result<()> {
+        add_all_time(&self.0.lock().unwrap(), meta)
+    }
 
     /// The All-time spend: (runs, estimated cost in USD).
     pub fn all_time_spend(&self) -> Result<(i64, f64)> {
