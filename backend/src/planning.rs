@@ -3169,6 +3169,13 @@ pub(crate) mod tests {
         t44.parent_id = Some(t.id.clone());
         st.db.save_task(&t44).unwrap();
         assert!(start(t44.id).await.unwrap_err().1.starts_with("#44 is part of a spec"));
+        // Nor one whose spec Loft doesn't mirror: GitHub says it has a parent.
+        let mut t45 = gh_ticket(slug, 45, "open", "x");
+        t45["parent_issue_url"] = json!(format!("https://api.github.com/repos/{slug}/issues/99"));
+        fake.route("GET", &format!("/repos/{slug}/issues/45"), 200, t45.clone());
+        let (t45, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &t45).unwrap();
+        assert_eq!(t45.parent_id, None, "#99 isn't mirrored");
+        assert!(start(t45.id).await.unwrap_err().1.starts_with("#45 is part of a spec on GitHub"));
     }
 
     /// Runs git in `dir`, as a test author.

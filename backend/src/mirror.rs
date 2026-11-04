@@ -230,6 +230,9 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
             touched.push(i);
         }
     }
+    // The parent is in each issue's own JSON: every listed issue gets it, changed or not, so a ticket
+    // mirrored before its parent was set (or before Loft read it) catches up without a request.
+    parents_from_github(state, repo, open.iter().filter(|i| i.get("pull_request").is_none()));
     // Links and comments only for issues that are new or changed since the last read: an unchanged
     // issue costs no more requests, which keeps a full read (on every list open) cheap. After every
     // issue is in, so a link to one listed later still resolves.
@@ -245,6 +248,7 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
             Ok(i) if same_repo(&i, repo) => {
                 newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
                 apply(state, project, repo, &i, report);
+                parents_from_github(state, repo, [&i]);
             }
             Ok(i) => reconcile(state, t, &format!("moved to {}", i["html_url"].as_str().unwrap_or("another repo")), report).await,
             Err(e) if crate::github::is_gone(&e) => reconcile(state, t, "was deleted", report).await,
@@ -273,6 +277,7 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
         apply(state, project, repo, i, report);
     }
+    parents_from_github(state, repo, changed.iter().copied());
     for i in &changed {
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
@@ -404,6 +409,7 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
 pub(crate) fn bring_in(state: &AppState, project: &str, repo: &str, i: &Value) -> Option<(Task, bool)> {
     let mut report = Report::default();
     apply(state, project, repo, i, &mut report);
+    parents_from_github(state, repo, [i]);
     let n = i["number"].as_i64()?;
     let t = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n))?;
     Some((t, report.created > 0))
@@ -759,6 +765,40 @@ fn keep_link(state: &AppState, repo: &str, v: &Value) {
         t.github = Some(link(repo, v));
         if state.db.save_task(&t).is_ok() {
             crate::tasks::emit(state, &t);
+        }
+    }
+}
+
+/// The parent GitHub gives each issue (`parent_issue_url`) onto the Loft issue that mirrors it, so a
+/// spec's ticket knows its spec without waiting for the spec to be read again. Only when GitHub sends
+/// the field; a Loft-only parent is kept unless GitHub names one Loft mirrors.
+fn parents_from_github<'a>(state: &AppState, repo: &str, issues: impl IntoIterator<Item = &'a Value>) {
+    let mut all = linked(state, repo);
+    let prefix = format!("https://api.github.com/repos/{}/issues/", repo.to_lowercase());
+    for i in issues {
+        let (Some(n), Some(p)) = (i["number"].as_i64(), i.get("parent_issue_url")) else { continue };
+        let Some(k) = all.iter().position(|t| t.github.as_ref().is_some_and(|g| g.number == n)) else { continue };
+        let number = p.as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok()));
+        let parent = number.and_then(|p| all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == p))).map(|x| x.id.clone());
+        let mirrored_now = all[k].parent_id.as_deref().is_some_and(|id| all.iter().any(|x| x.id == id));
+        let want = match parent {
+            Some(id) if id != all[k].id => Some(id),
+            None if mirrored_now => None,
+            _ => continue,
+        };
+        if want == all[k].parent_id {
+            continue;
+        }
+        let t = &mut all[k];
+        t.parent_id = want;
+        t.updated_at = now();
+        if state.db.save_task(t).is_ok() {
+            crate::tasks::emit(state, t);
+            let what = match number {
+                Some(p) if t.parent_id.is_some() => format!("Made a sub-issue of #{p} on GitHub"),
+                _ => "No longer a sub-issue on GitHub".to_string(),
+            };
+            crate::tasks::log_status(state, t, FROM_GITHUB, &what);
         }
     }
 }
@@ -1191,6 +1231,43 @@ pub(crate) mod tests {
         sync_project(&st, "ln-in", false).await.unwrap();
         assert!(get(1).depends_on.is_empty());
         assert_eq!(get(3).parent_id, None);
+        assert!(writes(&fake, repo).is_empty(), "following GitHub writes nothing back");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_takes_its_parent_from_its_own_github_issue() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/ln-parent";
+        let at = "2026-10-02T00:00:00Z";
+        // Mirrored before it was made a sub-issue, and GitHub's spec (#1) has no sub-issue count to read.
+        let ids = three_mirrored(&st, &fake, "ln-parent", repo, gh(repo, 1, "One", "open", at)).await;
+        let get = |n: i64| st.db.get_task(&ids[&n]).unwrap().unwrap();
+        assert_eq!(get(3).parent_id, None);
+
+        // The next full read: #3 unchanged, but its own JSON names #1 as its parent. #2's parent isn't mirrored.
+        let mut three = gh(repo, 3, "Three", "open", at);
+        three["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/1"));
+        let mut two = gh(repo, 2, "Two", "open", at);
+        two["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/99"));
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 1, "One", "open", at), two, three.clone()]));
+        sync_project(&st, "ln-parent", true).await.unwrap();
+        assert_eq!(get(3).parent_id.as_deref(), Some(ids[&1].as_str()));
+        assert_eq!(get(2).parent_id, None);
+        assert!(fake.seen(&format!("/repos/{repo}/issues/1/sub_issues")).is_empty(), "no extra request");
+
+        // Taken off #1 on GitHub: the next change of #3 drops it. A list without the field changes nothing.
+        three["parent_issue_url"] = Value::Null;
+        three["updated_at"] = json!("2026-10-03T00:00:00Z");
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([three]));
+        sync_project(&st, "ln-parent", false).await.unwrap();
+        assert_eq!(get(3).parent_id, None);
+        let mut kept = get(2);
+        kept.parent_id = Some(ids[&1].clone());
+        st.db.save_task(&kept).unwrap();
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 2, "Two", "open", "2026-10-04T00:00:00Z")]));
+        sync_project(&st, "ln-parent", false).await.unwrap();
+        assert_eq!(get(2).parent_id.as_deref(), Some(ids[&1].as_str()));
         assert!(writes(&fake, repo).is_empty(), "following GitHub writes nothing back");
     }
 

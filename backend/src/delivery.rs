@@ -753,6 +753,9 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
         if !ticket || i["state"] != "open" {
             return Err(bad(format!("#{n} isn't an open ticket (an issue labelled `ready-for-agent`), so it has no Delivery.")));
         }
+        if i["parent_issue_url"].is_string() {
+            return Err(bad(format!("#{n} is part of a spec on GitHub: its tickets go through the spec's Delivery, not one of their own.")));
+        }
         let planner = if t.created_by != "user" { t.created_by.as_str() } else { "" };
         record_standalone(&state, &repo, n, i["title"].as_str().unwrap_or(&t.title), &t.project, planner);
     }
