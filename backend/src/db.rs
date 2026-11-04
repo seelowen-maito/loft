@@ -95,7 +95,8 @@ pub struct DeliveryTicket {
     #[serde(default)]
     pub blocked_by: Vec<i64>,
     /// "open", "started" (being built), "review" (submitted), "closing" (passed, its close failed and is
-    /// retried), "needs_human" (too many changes rounds) or "closed".
+    /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
+    /// never handed out, and done when it closes) or "closed".
     pub state: String,
     /// Changes-requested rounds so far.
     #[serde(default)]
@@ -109,6 +110,9 @@ pub struct DeliveryTicket {
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
+    /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
+    #[serde(default)]
+    pub skipped: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1254,6 +1258,7 @@ impl Db {
                     commits: vec![],
                     verdicts: Default::default(),
                     id: String::new(),
+                    skipped: String::new(),
                 })
                 .collect();
             let d = Delivery {

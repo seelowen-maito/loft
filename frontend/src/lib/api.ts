@@ -95,6 +95,19 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 
 /** A task on the shared list (`/api/tasks`). */
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
+/** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
+ *  outside it (`skipped` says why), so it never hands them out. */
+export type IssueDelivery = {
+  state: string;
+  started: boolean;
+  agent_id: string | null;
+  agent_name: string | null;
+  pr: number | null;
+  spec?: boolean;
+  current?: { number: number; title: string } | null;
+  tickets?: { number: number; title: string; state: string; skipped: string }[];
+};
+
 export type Task = {
   id: string;
   title: string;
@@ -549,12 +562,10 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
-  /** A standalone ticket's Delivery: whether it started, who has it and its PR; null when it has none. */
-  issueDelivery: (id: string) =>
-    req<{ state: string; started: boolean; agent_id: string | null; agent_name: string | null; pr: number | null } | null>("GET", `/issues/${id}/delivery`),
-  /** "Start delivery" on a standalone ticket: its branch, its draft PR and the team's Dev, once. */
-  startIssueDelivery: (id: string) =>
-    req<{ ok: boolean; duplicate: boolean; ticket: number; agent_id: string; agent_name: string; pr: number | null }>("POST", `/issues/${id}/start-delivery`),
+  /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
+  issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
+  /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
+  startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

@@ -3178,6 +3178,99 @@ pub(crate) mod tests {
         assert!(start(t45.id).await.unwrap_err().1.starts_with("#45 is part of a spec on GitHub"));
     }
 
+    /// Spec #40 on GitHub as `sub_issues` lists it and its Loft issue, with no Delivery yet.
+    fn spec_40_on(st: &AppState, fake: &Fake, project: &str, slug: &str, subs: Value) -> crate::db::Task {
+        let mut spec = gh_ticket(slug, 40, "open", "## Problem Statement\n\nIt hurts.");
+        (spec["title"], spec["labels"]) = (json!("Rounds"), json!([{ "name": "spec" }]));
+        fake.route("GET", &format!("/repos/{slug}/issues/40"), 200, spec.clone());
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, subs);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/issues/45/labels"), 200, json!([]));
+        crate::mirror::bring_in(st, project, slug, &spec).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_published_earlier_builds_it_from_github() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-page";
+        planner_on(&st, "spec-page", Some("git@github.com:octo/spec-page.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "spec-page", "dev");
+        let with = |n: i64, state: &str, labels: Value, blocked: i64| {
+            let mut x = gh_ticket(slug, n, state, "x");
+            x["labels"] = labels;
+            x["issue_dependencies_summary"] = json!({ "blocked_by": blocked });
+            x
+        };
+        let ready = json!([{ "name": "ready-for-agent" }]);
+        let subs = json!([
+            with(41, "closed", ready.clone(), 0),
+            with(42, "open", json!([{ "name": "ready-for-agent" }, { "name": "in-progress" }]), 0),
+            with(43, "open", ready.clone(), 1),
+            with(45, "open", ready.clone(), 2),
+        ]);
+        let spec = spec_40_on(&st, &fake, "spec-page", slug, subs);
+        fake.route("GET", &format!("/repos/{slug}/issues/43/dependencies/blocked_by"), 200, json!([{ "number": 42 }]));
+        // #99 isn't the spec's: the Delivery can't tell when it closes, so it doesn't hold #45 back.
+        fake.route("GET", &format!("/repos/{slug}/issues/45/dependencies/blocked_by"), 200, json!([{ "number": 41 }, { "number": 99 }]));
+        let start = |id: String| crate::delivery::start_from_issue(State(st.clone()), Path(id));
+
+        let v = start(spec.id.clone()).await.unwrap().0;
+        assert_eq!((&v["duplicate"], &v["ticket"], &v["agent_name"], &v["pr"]), (&json!(false), &json!(45), &json!("Builder"), &json!(500)));
+        assert_eq!(posts(&fake, slug, "git/refs")[0]["ref"], "refs/heads/spec/40-rounds");
+        assert_eq!((&posts(&fake, slug, "pulls")[0]["head"], &posts(&fake, slug, "pulls")[0]["body"]), (&json!("spec/40-rounds"), &json!("Closes #40")));
+        assert!(woken(&st, &dev)[0].contains("build ticket #45 \"Ticket 45\""));
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        let shape: Vec<(i64, &str, Vec<i64>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone())).collect();
+        assert_eq!(shape, vec![(41, "closed", vec![]), (42, "elsewhere", vec![]), (43, "open", vec![42]), (45, "started", vec![41])]);
+        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress" }));
+        assert_eq!(v["current"], json!({ "number": 45, "title": "Ticket 45" }));
+
+        // Again, or on another device: who has it, and nothing started twice.
+        assert_eq!(start(spec.id.clone()).await.unwrap().0["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), 1);
+        assert_eq!(posts(&fake, slug, "pulls").len(), 1);
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&shown["started"], &shown["agent_name"], &shown["current"]["number"]), (&json!(true), &json!("Builder"), &json!(45)));
+        // A ticket of it starts from the spec's page, not on its own.
+        let (t43, _) = crate::mirror::bring_in(&st, "spec-page", slug, &with(43, "open", ready, 1)).unwrap();
+        assert!(start(t43.id).await.unwrap_err().1.starts_with("#43 is a ticket of spec #40: start the spec's Delivery from the spec's page"));
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_reuses_its_spec_pr_and_skips_a_ticket_with_its_own_pr() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-reuse";
+        planner_on(&st, "spec-reuse", Some("git@github.com:octo/spec-reuse.git"));
+        let dev = busy(&st, "Builder", "spec-reuse", "dev");
+        let spec = spec_40_on(&st, &fake, "spec-reuse", slug, json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([
+            { "number": 77, "body": "Fixes: #42", "head": { "ref": "someone/work" } },
+            { "number": 600, "body": "Closes #40", "head": { "ref": "spec/40-old-title" } },
+        ]));
+
+        let v = crate::delivery::start_from_issue(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&v["ticket"], &v["pr"]), (&json!(41), &json!(600)));
+        assert_eq!(v["tickets"][1]["skipped"], "has its own open PR #77");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.branch, "spec/40-old-title");
+        assert!(posts(&fake, slug, "pulls").is_empty() && posts(&fake, slug, "git/refs").is_empty(), "the spec branch and PR are reused");
+        assert!(woken(&st, &dev)[0].contains("Work on the spec branch `spec/40-old-title`"));
+    }
+
+    #[test]
+    fn a_closing_keyword_names_the_issue_it_closes() {
+        use crate::delivery::closes_issue;
+        assert!(closes_issue("Closes #40", 40));
+        assert!(closes_issue("Some text.\n\nfixes: #40, and more", 40));
+        assert!(closes_issue("RESOLVED #40", 40));
+        assert!(!closes_issue("Closes #400", 40));
+        assert!(!closes_issue("Refs #40", 40));
+        assert!(!closes_issue("Part of #40", 40));
+    }
+
     /// Runs git in `dir`, as a test author.
     fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=Test", "-c", "user.email=test@example.com"]).args(args).output().unwrap();

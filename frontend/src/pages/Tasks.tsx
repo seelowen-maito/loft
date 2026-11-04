@@ -10,8 +10,8 @@ import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { filterIssues, SOURCES } from "../lib/issueFilter";
-import { isStandaloneTicket } from "../lib/standaloneTicket";
-import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
+import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
+import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
@@ -298,7 +298,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       <header className="space-y-2">
         {parent && (
           <Link to={{ pathname: `/tasks/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
-            Part of {parent.title} <ChevronRight className="size-3" />
+            {isSpec(parent) && parent.github ? `Part of spec #${parent.github.number}: ${parent.title}` : `Part of ${parent.title}`} <ChevronRight className="size-3" />
           </Link>
         )}
         <h1 className="text-[22px] font-medium leading-snug tracking-tight">{t.title}</h1>
@@ -341,6 +341,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
       {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
+      {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
       {t.state === "open" && !t.agent_id && !isSpec(t) && !isStandaloneTicket(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
       {t.state === "open" && !t.github && <PublishCard task={t} repo={repos[t.project]} onEdit={() => setEditAsked((n) => n + 1)} />}
       {t.github && <OwnedBy task={t} agent={agent} deps={deps} />}

@@ -1,6 +1,7 @@
 //! Deliveries: Loft running a spec's tickets from published to merged, one ticket at a time, with no
 //! agent coordinating it. The record (`db::Delivery`) is written when the spec is published and its
-//! tickets added as they are; "Start delivery" on the end-of-planning card starts the first one.
+//! tickets added as they are; "Start delivery" on the end-of-planning card, or on a spec's or a standalone
+//! ticket's issue page, starts the first one. A spec published earlier gets its record from GitHub there.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -92,7 +93,7 @@ pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into() });
+        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new() });
     });
 }
 
@@ -108,7 +109,7 @@ pub fn update(state: &AppState, repo: &str, spec: i64, f: impl FnOnce(&mut Deliv
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
     update(state, repo, spec, |d| {
         if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new() });
+            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new() });
         }
     });
 }
@@ -741,8 +742,11 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
         return Err(bad("This issue isn't on GitHub: its Delivery needs a GitHub repo."));
     };
     let (repo, n) = (g.repo.clone(), g.number);
+    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
+        return start_spec(&state, &t, &repo, n).await;
+    }
     if let Some(d) = of_ticket(&state, &repo, n).filter(|d| !d.standalone) {
-        return Err(bad(format!("#{n} is a ticket of spec #{}: start the spec's Delivery from its end-of-planning card.", d.spec)));
+        return Err(bad(format!("#{n} is a ticket of spec #{}: start the spec's Delivery from the spec's page.", d.spec)));
     }
     if t.parent_id.is_some() {
         return Err(bad(format!("#{n} is part of a spec: its tickets go through the spec's Delivery, not one of their own.")));
@@ -764,21 +768,127 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
     Ok(Json(json!({ "ok": true, "duplicate": s.already, "ticket": n, "agent_id": s.agent.id, "agent_name": s.agent.name, "pr": pr })))
 }
 
-/// `GET /api/issues/{id}/delivery`: the standalone Delivery of a ticket's Loft issue, for its page: whether
-/// it started, who has it and its PR. `null` when it has none.
-pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
-    let Some(d) = t.github.as_ref().and_then(|g| state.db.get_delivery(&g.repo, g.number).ok().flatten()).filter(|d| d.standalone) else {
-        return Ok(Json(Value::Null));
-    };
+/// Start delivery on spec #spec's Loft issue, for a spec published before this build or whose end-of-planning
+/// card is gone. The first time (and while it hasn't started) Loft builds the Delivery from GitHub: the
+/// spec's sub-issues are its tickets, with their blocking links; closed ones are done, and one labelled
+/// `in-progress` or with an open PR of its own is built elsewhere, so it's never handed out. Then the spec
+/// branch and draft spec PR, reused when there, and the first unblocked ticket on the team's Dev.
+async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64) -> ApiResult<Value> {
+    let planned = |d: &Delivery| d.state == "planned" && !d.local;
+    if state.db.get_delivery(repo, spec)?.is_none_or(|d| planned(&d)) {
+        let read = |path: String| async move { crate::github::get(state, &format!("/repos/{repo}{path}")).await.map_err(|e| bad(format!("Couldn't read spec #{spec} on {repo}: {e}"))) };
+        let i = read(format!("/issues/{spec}")).await?;
+        let is_spec = i["labels"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("spec")));
+        if !is_spec || i["state"] != "open" || i.get("pull_request").is_some() {
+            return Err(bad(format!("#{spec} isn't an open spec on GitHub (an issue labelled `spec`), so it has no Delivery.")));
+        }
+        let subs: Vec<Value> = read(format!("/issues/{spec}/sub_issues?per_page=100")).await?.as_array().cloned().unwrap_or_default();
+        let subs: Vec<Value> = subs.into_iter().filter(|x| x.get("pull_request").is_none() && x["number"].is_i64()).collect();
+        if !subs.iter().any(|x| x["state"] == "open") {
+            return Err(bad(format!("Spec #{spec} has no open sub-issue on GitHub, so there is no ticket to deliver.")));
+        }
+        let numbers: Vec<i64> = subs.iter().filter_map(|x| x["number"].as_i64()).collect();
+        let mut blockers = std::collections::HashMap::new();
+        for x in subs.iter().filter(|x| x["issue_dependencies_summary"]["blocked_by"].as_i64().or(x["issue_dependencies_summary"]["total_blocked_by"].as_i64()).unwrap_or(0) > 0) {
+            let n = x["number"].as_i64().unwrap_or_default();
+            let v = read(format!("/issues/{n}/dependencies/blocked_by?per_page=100")).await?;
+            // Only blockers among the spec's tickets: the Delivery can't tell when another issue closes.
+            let by: Vec<i64> = v.as_array().into_iter().flatten().filter_map(|b| b["number"].as_i64()).filter(|b| numbers.contains(b) && *b != n).collect();
+            blockers.insert(n, by);
+        }
+        let prs: Vec<Value> = read("/pulls?state=open&per_page=100".into()).await?.as_array().cloned().unwrap_or_default();
+        let closes = |p: &Value, n: i64| closes_issue(p["body"].as_str().unwrap_or(""), n);
+        let spec_pr = prs.iter().find(|p| closes(p, spec));
+        let own_pr = |n: i64| prs.iter().find(|p| closes(p, n) || p["head"]["ref"].as_str().is_some_and(|r| r.starts_with(&format!("ticket/{n}-")))).and_then(|p| p["number"].as_i64());
+
+        let title = i["title"].as_str().unwrap_or(&t.title).to_string();
+        let planner = if t.created_by != "user" { t.created_by.as_str() } else { "" };
+        let _held = state.publish_locks.of(repo).lock_owned().await;
+        let branch = spec_pr.and_then(|p| p["head"]["ref"].as_str()).map_or_else(|| crate::planning::spec_branch(spec, &title), String::from);
+        record_spec(state, repo, spec, &t.project, planner, &branch);
+        update(state, repo, spec, |d| {
+            if d.pr.is_none() {
+                d.pr = spec_pr.and_then(|p| p["number"].as_i64());
+            }
+            if d.state != "planned" {
+                return;
+            }
+            for x in &subs {
+                let n = x["number"].as_i64().unwrap_or_default();
+                let skipped = if x["state"] != "open" {
+                    None
+                } else if x["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "in-progress") {
+                    Some("is labelled in-progress".to_string())
+                } else {
+                    own_pr(n).map(|pr| format!("has its own open PR #{pr}"))
+                };
+                let state = match (&skipped, x["state"] == "open") {
+                    (_, false) => "closed",
+                    (Some(_), _) => "elsewhere",
+                    (None, _) => "open",
+                };
+                let blocked_by = blockers.remove(&n).unwrap_or_default();
+                let title = x["title"].as_str().unwrap_or_default().to_string();
+                match d.ticket_mut(n) {
+                    Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
+                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: skipped.unwrap_or_default() }),
+                }
+            }
+            // A ticket taken off the spec on GitHub isn't the Delivery's any more.
+            d.tickets.retain(|k| numbers.contains(&k.number));
+        });
+        if state.db.get_delivery(repo, spec)?.is_some_and(|d| d.pr.is_none()) {
+            crate::planning::branch_and_pr(state, repo, spec, &title, "spec", None).await.map_err(|e| bad(format!("The Delivery didn't start: {e}.")))?;
+        }
+    }
+    let s = start(state, repo, spec, "").await.map_err(bad)?;
+    let mut v = delivery_json(state, &state.db.get_delivery(repo, spec)?.ok_or_else(not_found)?);
+    v["ok"] = json!(true);
+    v["duplicate"] = json!(s.already);
+    v["ticket"] = json!(s.ticket);
+    Ok(Json(v))
+}
+
+/// Whether a PR body closes issue #n with a GitHub closing keyword: "Closes #n", "fixes: #n" and so on.
+pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
+    const KEYWORDS: &[&str] = &["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"];
+    let body = body.to_lowercase();
+    let at = format!("#{n}");
+    body.match_indices(&at).any(|(i, _)| {
+        let after = body[i + at.len()..].chars().next();
+        let before = body[..i].trim_end().trim_end_matches(':').trim_end();
+        let word = before.rsplit(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
+        !after.is_some_and(|c| c.is_ascii_digit()) && KEYWORDS.contains(&word)
+    })
+}
+
+/// What an issue page shows of its Delivery: whether it started, who has it, its PR and, for a spec, its tickets.
+fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let dev = state.db.get_agent(&d.dev).ok().flatten();
-    Ok(Json(json!({
+    let current = d.current.and_then(|n| d.ticket(n));
+    let mut v = json!({
         "state": d.state,
         "started": d.state != "planned",
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
         "agent_name": dev.as_ref().map(|a| a.name.clone()),
         "pr": d.pr,
-    })))
+    });
+    if !d.standalone {
+        v["spec"] = json!(true);
+        v["current"] = json!(current.map(|t| json!({ "number": t.number, "title": t.title })));
+        v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped })).collect::<Vec<_>>());
+    }
+    v
+}
+
+/// `GET /api/issues/{id}/delivery`: the Delivery of a standalone ticket's or a spec's Loft issue, for its
+/// page: whether it started, who has it and its PR, and a spec's tickets. `null` when it has none.
+pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let Some(d) = t.github.as_ref().and_then(|g| state.db.get_delivery(&g.repo, g.number).ok().flatten()).filter(|d| !d.local) else {
+        return Ok(Json(Value::Null));
+    };
+    Ok(Json(delivery_json(&state, &d)))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1123,7 +1233,7 @@ mod tests {
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
-        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into() });
+        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 }
