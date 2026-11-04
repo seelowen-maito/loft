@@ -120,7 +120,7 @@ export type Task = {
   /** Derived from status: done and cancelled are closed. Read-only. */
   state: "open" | "closed";
   /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
-  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number } | null;
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number; /** who opened it on GitHub */ author?: string } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -429,6 +429,8 @@ export type GithubBudget = {
 /** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
 export type MirrorSync = {
   connected: boolean;
+  /** The GitHub user of Loft's token; null when nothing is mirrored or it can't be read. */
+  login?: string | null;
   projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
   skipped: { project: string; reason: string }[];
 };

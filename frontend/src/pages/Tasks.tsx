@@ -9,7 +9,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
-import { filterIssues, SOURCES } from "../lib/issueFilter";
+import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
@@ -108,8 +108,8 @@ export default function TasksPage() {
   const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
   const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
   const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || t.created_by === "user"));
-  }, [tasks, filters.q, project, agentId, mine, source]);
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, project, agentId, mine, source, mirror?.login]);
 
   const groups = useMemo(
     () =>
@@ -284,7 +284,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
   );
 
   const agent = t.agent_id ? agentById.get(t.agent_id) : undefined;
-  const creator = t.created_by === "user" ? "you" : t.created_by === "github" ? "GitHub" : agentById.get(t.created_by)?.name ?? "an agent";
+  const creator = t.created_by === "user" ? "you" : t.created_by === "github" ? (t.github?.author ? `@${t.github.author} on GitHub` : "GitHub") : agentById.get(t.created_by)?.name ?? "an agent";
   const parent = t.parent_id ? tasks.find((x) => x.id === t.parent_id) : undefined;
   const subtasks = tasks.filter((x) => x.parent_id === t.id);
   const deps = t.depends_on.map((id) => tasks.find((x) => x.id === id)).filter((x): x is Task => !!x);

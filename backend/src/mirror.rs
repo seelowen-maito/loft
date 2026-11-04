@@ -141,6 +141,7 @@ pub struct SyncBody {
 
 /// `POST /api/issues/sync`: what changed on GitHub, now, for one project or all; what the list does on
 /// open and refresh. A change poll, so a quiet repo costs a free 304; a repo never read yet gets a full read.
+/// `login` is the GitHub user of Loft's token (null when nothing is mirrored or it can't be read).
 pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>>) -> Result<Json<Value>, ApiError> {
     let wanted = body.and_then(|b| b.0.project).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     let projects = projects(&state)?;
@@ -167,7 +168,11 @@ pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>
             None => skipped.push(json!({ "project": p, "reason": skip_reason(&state, p).await })),
         }
     }
-    Ok(Json(json!({ "connected": crate::github::token(&state).is_some(), "projects": out, "skipped": skipped })))
+    // Who Loft's token belongs to, so "Created by me" can keep the GitHub issues they opened; read
+    // (once per token) only when a project is mirrored.
+    let connected = crate::github::token(&state).is_some();
+    let login = if connected && !out.is_empty() { crate::planning::login(&state).await.ok() } else { None };
+    Ok(Json(json!({ "connected": connected, "login": login, "projects": out, "skipped": skipped })))
 }
 
 /// Syncs one project. None when there's nothing to mirror: no token, or no GitHub repo.
@@ -323,6 +328,7 @@ fn link(repo: &str, i: &Value) -> GithubLink {
         updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
         sub_total: i["sub_issues_summary"]["total"].as_i64().unwrap_or(0),
         sub_done: i["sub_issues_summary"]["completed"].as_i64().unwrap_or(0),
+        author: i["user"]["login"].as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -888,6 +894,7 @@ pub(crate) mod tests {
             "number": n, "id": n * 100, "title": title, "state": state, "body": format!("Body of {title}"),
             "html_url": format!("https://github.com/{repo}/issues/{n}"), "updated_at": updated,
             "labels": [{ "name": "bug", "color": "d73a4a" }], "assignees": [{ "login": "octo-dev" }, { "login": "someone" }],
+            "user": { "login": "octo-author" },
         })
     }
 
@@ -912,7 +919,7 @@ pub(crate) mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!((&t["title"], &t["description"], &t["labels"], &t["owner"]), (&json!("Retry cap"), &json!("Body of Retry cap"), &json!(["bug"]), &json!("octo-dev")));
         assert_eq!((&t["project"], &t["status"], &t["state"], &t["created_by"]), (&json!("mir-open"), &json!("inbox"), &json!("open"), &json!("github")));
-        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0 }));
+        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0, "author": "octo-author" }));
         let thread = st.db.list_task_comments(t["id"].as_str().unwrap(), 10, None).unwrap();
         assert_eq!(thread[0].text, "Mirrored from GitHub #1");
 
@@ -921,6 +928,28 @@ pub(crate) mod tests {
         assert_eq!((r.created, r.updated), (0, 0));
         assert_eq!(mirrored(&st, "octo/mir-open").len(), 1);
         assert!(fake.seen("/repos/octo/mir-open/").iter().all(|s| s.method == "GET"), "the mirror only reads");
+    }
+
+    #[tokio::test]
+    async fn issues_mirrored_before_authors_were_kept_get_theirs_on_the_next_read() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "mir-author", Some("https://github.com/octo/mir-author"));
+        fake.route("GET", "/repos/octo/mir-author/issues", 200, json!([gh("octo/mir-author", 1, "Retry cap", "open", "2026-10-02T00:00:00Z")]));
+        fake.route("GET", "/user", 200, json!({ "login": "octo-me" }));
+        sync_project(&st, "mir-author", true).await.unwrap();
+        // As saved before the author was kept: a link without one.
+        let mut t = st.db.list_tasks().unwrap().pop().unwrap();
+        t.github.as_mut().unwrap().author = String::new();
+        st.db.save_task(&t).unwrap();
+        assert_eq!(json!(st.db.get_task(&t.id).unwrap().unwrap())["github"]["author"], "");
+
+        // The list's next read of it fills it in (after an upgrade, the first read is a full one: every open issue).
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().github.unwrap().author, "octo-author");
+        assert_eq!(v["login"], "octo-me", "the list learns who Loft's token belongs to");
+        let _ = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!(fake.seen("/user").len(), 1, "the login is read once");
     }
 
     #[tokio::test]

@@ -410,6 +410,9 @@ pub struct GithubLink {
     /// GitHub's own count of its sub-issues (`sub_issues_summary`): all, and the closed ones. Zero when it has none.
     pub sub_total: i64,
     pub sub_done: i64,
+    /// The login of who opened the issue on GitHub (Loft's token's user for one Loft published).
+    /// Empty on a link saved before it was kept, until the issue is read again.
+    pub author: String,
 }
 
 impl Task {

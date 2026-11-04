@@ -20,3 +20,10 @@ export function filterIssues(tasks: Task[], query: string, source: Source): Task
       (source === "all" || (source === "github") === !!t.github),
   );
 }
+
+/** "Created by me": Loft issues the user created, and GitHub issues opened by `login`, the GitHub user of
+ * Loft's token (which includes what Loft published). Without the login, GitHub issues count by who made them in Loft. */
+export function createdByMe(t: Task, login: string | null | undefined): boolean {
+  if (t.github && login) return (t.github.author ?? "").toLowerCase() === login.toLowerCase();
+  return t.created_by === "user";
+}
