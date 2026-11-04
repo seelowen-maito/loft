@@ -759,7 +759,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     return (
       <div className="flex items-start gap-2 rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[13px] text-fg-2">
         <AlertCircle className="mt-0.5 size-4 shrink-0 text-bad" />
-        <pre className="whitespace-pre-wrap font-sans">{m.content}</pre>
+        <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] font-sans">{m.content}</pre>
       </div>
     );
   }
@@ -782,7 +782,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             <FyiMark m={m} agentName={agent.name} />
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
-          <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
@@ -810,7 +810,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           </div>
         )}
         {m.content && (
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          <div className="max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
         {m.meta?.mentions?.length > 0 && (
@@ -852,7 +852,7 @@ function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Me
         <div className={cx("mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3", !result && "animate-pulse-soft")}>
           {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.role === "lead"} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
-        <div className="whitespace-pre-wrap rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
+        <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
       </div>
     </div>
   );
@@ -867,7 +867,7 @@ function Thinking({ m }: { m: Message }) {
         <ChevronRight className={cx("size-3 transition", open && "rotate-90")} />
       </button>
       {open && (
-        <div className="mt-1.5 whitespace-pre-wrap border-l border-line pl-3 text-[13px] italic leading-relaxed text-fg-3">{m.content}</div>
+        <div className="mt-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] border-l border-line pl-3 text-[13px] italic leading-relaxed text-fg-3">{m.content}</div>
       )}
     </div>
   );
