@@ -98,6 +98,16 @@ _Avoid_: Feature PR, epic PR
 The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
 
+## Usage and spend
+
+**Usage week**:
+The 7-day window of the Claude account's plan usage, ending at its weekly reset (the "week" meter in the navbar). When Loft can't read the plan usage, it stands in with the last 7 days and says so.
+_Avoid_: Billing week, 7 days, week
+
+**All-time spend**:
+The runs and estimated cost of every agent run since Loft started counting, kept as a stored running total: it never goes down, even when an agent is deleted or its history is cleared.
+_Avoid_: Total cost, lifetime cost
+
 ## Threads
 
 **Thread**:

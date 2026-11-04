@@ -553,6 +553,12 @@ CREATE TABLE IF NOT EXISTS pending_fyis (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
+-- The All-time spend: one row, added to at every run end and never lowered.
+CREATE TABLE IF NOT EXISTS all_time_spend (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    runs INTEGER NOT NULL,
+    cost_usd REAL NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -637,6 +643,12 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
 
 /// What a run added to its session, given the running total it reported and the one before it.
 /// A total that went down is a fresh session, so all of it is this run's.
+/// Add one run, and the cost its run end's `meta` holds, to the All-time spend.
+fn add_all_time(c: &Connection, meta: &Value) -> Result<()> {
+    c.execute("UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1", [meta["cost_usd"].as_f64().unwrap_or(0.0)])?;
+    Ok(())
+}
+
 pub fn run_cost(total: f64, prev: f64) -> f64 {
     if total >= prev { total - prev } else { total }
 }
@@ -711,6 +723,12 @@ impl Db {
              COMMIT;",
         )?;
         per_run_costs(&conn)?;
+        // The All-time spend starts from the run history there is, once; from then on run ends add to it.
+        conn.execute(
+            "INSERT OR IGNORE INTO all_time_spend (id, runs, cost_usd)
+             SELECT 1, count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0.0) FROM messages WHERE kind = 'run_end'",
+            [],
+        )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
@@ -1193,8 +1211,12 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![agent_id, run_id, role, kind, content, meta.to_string(), created_at],
         )?;
+        let id = c.last_insert_rowid();
+        if kind == "run_end" {
+            add_all_time(&c, &meta)?;
+        }
         Ok(Message {
-            id: c.last_insert_rowid(),
+            id,
             agent_id: agent_id.into(),
             run_id: run_id.map(Into::into),
             role: role.into(),
@@ -1551,6 +1573,31 @@ impl Db {
 
     // ---- activity summary ---------------------------------------------
 
+    /// Count a run whose run end isn't saved (a quiet run's) in the All-time spend; saved run ends count themselves.
+    pub fn add_unsaved_run_end(&self, meta: &Value) -> Result<()> {
+        add_all_time(&self.0.lock().unwrap(), meta)
+    }
+
+    /// The All-time spend: (runs, estimated cost in USD).
+    pub fn all_time_spend(&self) -> Result<(i64, f64)> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT runs, cost_usd FROM all_time_spend WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?
+            .unwrap_or((0, 0.0)))
+    }
+
+    /// Runs and estimated cost in USD of every run that ended from `since` until before `until`
+    /// (RFC 3339; no `until` means up to now), all agents together.
+    pub fn spend_between(&self, since: &str, until: Option<&str>) -> Result<(i64, f64)> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages
+             WHERE kind = 'run_end' AND created_at >= ?1 AND (?2 IS NULL OR created_at < ?2)",
+            params![since, until],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
     /// Raw activity for one agent since `since` (RFC 3339), for the dashboard.
     pub fn agent_activity(&self, agent_id: &str, since: &str) -> Result<Value> {
         let c = self.0.lock().unwrap();
@@ -1878,5 +1925,47 @@ mod tests {
         assert_eq!(db.prune_push_seen().unwrap(), 1);
         assert_eq!(among(&["a", "b", "old"]), ["a", "b"]);
         assert_eq!(db.prune_push_seen().unwrap(), 0);
+    }
+
+    #[test]
+    fn all_time_spend_starts_from_history_once_and_never_goes_down() {
+        let path = std::env::temp_dir().join(format!("loft-all-time-{}.db", uuid::Uuid::new_v4()));
+        let end = |db: &Db, agent: &str, cost: Option<f64>| {
+            let meta = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c, "session_cost_usd": c }));
+            db.add_message(agent, None, "system", "run_end", "", meta).unwrap();
+        };
+        let near = |db: &Db, runs: i64, cost: f64| {
+            let (r, c) = db.all_time_spend().unwrap();
+            assert_eq!(r, runs);
+            assert!((c - cost).abs() < 1e-9, "{c} != {cost}");
+        };
+        {
+            let db = Db::open(&path).unwrap();
+            for id in ["a", "b"] {
+                db.save_agent(&agent(id)).unwrap();
+            }
+            end(&db, "a", Some(0.5));
+            end(&db, "a", None);
+            end(&db, "b", Some(1.25));
+            db.add_message("a", None, "assistant", "text", "hi", serde_json::json!({})).unwrap();
+        }
+        // A database from before the All-time spend existed: the history is all there is.
+        Connection::open(&path).unwrap().execute("DROP TABLE all_time_spend", []).unwrap();
+        let db = Db::open(&path).unwrap();
+        near(&db, 3, 1.75);
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        near(&db, 3, 1.75);
+
+        // A finished run adds one run and its cost.
+        end(&db, "b", Some(0.25));
+        near(&db, 4, 2.0);
+
+        // Clearing an agent's messages or deleting it leaves the total alone, also after a restart.
+        db.clear_messages("a").unwrap();
+        db.delete_agent("b").unwrap();
+        near(&db, 4, 2.0);
+        drop(db);
+        near(&Db::open(&path).unwrap(), 4, 2.0);
     }
 }

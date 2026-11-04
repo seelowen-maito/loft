@@ -1,35 +1,111 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commandSpan, highlightParts, mentionRanges } from "../src/lib/commandHighlight.ts";
+import { commandAt, completeCommand, highlightParts, mentionRanges, messageCommand, splitCommand } from "../src/lib/commandHighlight.ts";
 
-const NAMES = ["/clear", "/compact", "/grill", "/code"];
+const NAMES = ["/clear", "/compact", "/grill", "/code", "/resume"];
+const span = (text: string) => {
+  const c = messageCommand(text, NAMES);
+  return c ? text.slice(c.start, c.end) : null;
+};
 
-test("a command typed in full is coloured", () => {
-  assert.equal(commandSpan("/grill", NAMES), 6);
-  assert.equal(commandSpan("/GRILL", NAMES), 6, "commands run in any case");
+test("a command typed in full is the message's command", () => {
+  assert.equal(span("/grill"), "/grill");
+  assert.equal(span("/GRILL"), "/GRILL", "commands run in any case");
 });
 
-test("a partial command isn't, even when it names another one's start", () => {
-  assert.equal(commandSpan("/gri", NAMES), 0);
-  assert.equal(commandSpan("/co", NAMES), 0);
-  assert.equal(commandSpan("/", NAMES), 0);
+test("a partial or unknown command isn't", () => {
+  assert.equal(span("/gri"), null);
+  assert.equal(span("/co"), null);
+  assert.equal(span("/"), null);
+  assert.equal(span("/foo"), null);
+  assert.equal(span("/grills"), null);
 });
 
-test("an unknown command isn't", () => {
-  assert.equal(commandSpan("/foo", NAMES), 0);
-  assert.equal(commandSpan("/grills", NAMES), 0);
+test("a command is found wherever it starts a word, arguments or not", () => {
+  assert.equal(span("/grill some topic"), "/grill");
+  assert.equal(span("/compact\nkeep the plan"), "/compact");
+  assert.equal(span(" /grill"), "/grill");
+  assert.equal(span("try /grill"), "/grill");
+  assert.equal(span("keep notes\n/compact"), "/compact");
 });
 
-test("arguments after a command keep only the command coloured", () => {
-  assert.equal(commandSpan("/grill some topic", NAMES), 6);
-  assert.equal(commandSpan("/compact\nkeep the plan", NAMES), 8);
+test("a slash inside a word is no command", () => {
+  assert.equal(span("src/grill"), null);
+  assert.equal(span(""), null);
 });
 
-test("text not starting with a slash is never coloured", () => {
-  assert.equal(commandSpan("", NAMES), 0);
-  assert.equal(commandSpan(" /grill", NAMES), 0);
-  assert.equal(commandSpan("try /grill", NAMES), 0);
+test("only the first command counts: a later one is plain text", () => {
+  const text = "/compact then /grill";
+  assert.deepEqual(messageCommand(text, NAMES), { start: 0, end: 8, word: "/compact" });
+});
+
+/** The /word the menu opens on with the caret at the `|` of `marked`, or null. */
+const typed = (marked: string) => {
+  const caret = marked.indexOf("|");
+  return commandAt(marked.replace("|", ""), caret, NAMES)?.word ?? null;
+};
+
+test("the menu opens on a / at the start of the message, as before", () => {
+  assert.equal(typed("/|"), "/");
+  assert.equal(typed("/gr|"), "/gr");
+  assert.equal(typed("/grill|"), "/grill");
+  assert.equal(typed("/g|r"), "/gr", "the caret may sit anywhere after the /");
+  assert.equal(typed("|/gr"), null, "not before the /");
+});
+
+test("the menu opens on a / at the start of any word mid-message", () => {
+  assert.equal(typed("fix the login bug /gr|"), "/gr");
+  assert.equal(typed("fix the login bug\n/co|"), "/co");
+  assert.equal(typed("start /gr| and more after"), "/gr");
+  assert.equal(typed("start /gr and more after|"), null, "only on the word the caret is in");
+});
+
+test("a / inside a word doesn't open the menu", () => {
+  assert.equal(typed("src/app|"), null);
+  assert.equal(typed("a/b|"), null);
+  assert.equal(typed("see a/|"), null);
+});
+
+test("with a command already in the message, another /word doesn't open the menu", () => {
+  assert.equal(typed("/compact keep it short /gr|"), null);
+  assert.equal(typed("notes /compact and /|"), null);
+  assert.equal(typed("/gr| then /compact"), null, "wherever the command sits");
+  assert.equal(typed("/compact|"), "/compact", "the command itself still is");
+  assert.equal(typed("/foo then /gr|"), "/gr", "an unknown /word isn't a command");
+});
+
+test("completing replaces the /word in place and puts the caret after it", () => {
+  const text = "fix the login bug /gr and more";
+  const at = commandAt(text, 21, NAMES)!;
+  assert.deepEqual(completeCommand(text, at, "/grill"), { text: "fix the login bug /grill and more", caret: 24 });
+  assert.deepEqual(completeCommand("/cl", commandAt("/cl", 3, NAMES)!, "/clear"), { text: "/clear", caret: 6 });
+  assert.deepEqual(completeCommand("a /cl b", commandAt("a /cl b", 5, NAMES)!, ""), { text: "a  b", caret: 2 });
+});
+
+test("a message splits into its command and the rest, wherever the command sits", () => {
+  assert.deepEqual(splitCommand("the login bug /grill", NAMES), { command: "/grill", rest: "the login bug" });
+  assert.deepEqual(splitCommand("keep the API notes /compact", NAMES), { command: "/compact", rest: "keep the API notes" });
+  assert.deepEqual(splitCommand("/grill the login bug", NAMES), { command: "/grill", rest: "the login bug" });
+  assert.deepEqual(splitCommand("draft /CLEAR text", NAMES), { command: "/clear", rest: "draft text" }, "lowercased to run");
+  assert.deepEqual(splitCommand("/resume", NAMES), { command: "/resume", rest: "" });
+  assert.deepEqual(splitCommand("  /code  ", NAMES), { command: "/code", rest: "" });
+});
+
+test("the rest keeps its own line breaks", () => {
+  assert.deepEqual(splitCommand("first line\n/compact\nsecond line", NAMES), { command: "/compact", rest: "first line\nsecond line" });
+  assert.deepEqual(splitCommand("/compact\nkeep the plan", NAMES), { command: "/compact", rest: "keep the plan" });
+});
+
+test("a second /word stays in the rest as plain text", () => {
+  assert.deepEqual(splitCommand("/compact keep /grill notes", NAMES), { command: "/compact", rest: "keep /grill notes" });
+  assert.deepEqual(splitCommand("the bug /grill then /clear", NAMES), { command: "/grill", rest: "the bug then /clear" });
+});
+
+test("a message with no command doesn't split", () => {
+  assert.equal(splitCommand("fix src/grill please", NAMES), null);
+  assert.equal(splitCommand("try /gri", NAMES), null);
+  assert.equal(splitCommand("", NAMES), null);
 });
 
 const AGENTS = ["Loft Dev", "Loft Reviewer", "QA", "Web Developer", "Web Dev"];
@@ -66,4 +142,12 @@ test("a command and mentions colour together, and the parts rebuild the text", (
   assert.deepEqual(coloured("/nope @QA"), ["@QA"]);
   assert.deepEqual(highlightParts("plain text", NAMES, AGENTS), [{ text: "plain text", accent: false }]);
   assert.deepEqual(highlightParts("", NAMES, AGENTS), []);
+});
+
+test("a command mid-message is coloured, a second /word after it isn't", () => {
+  assert.deepEqual(coloured("ask @QA then /grill the plan"), ["@QA", "/grill"]);
+  assert.deepEqual(coloured("/compact keep it short /grill"), ["/compact"]);
+  assert.deepEqual(coloured("read src/grill"), []);
+  const text = "ask @QA then /grill the plan";
+  assert.equal(highlightParts(text, NAMES, AGENTS).map((p) => p.text).join(""), text);
 });
