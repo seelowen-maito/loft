@@ -832,7 +832,8 @@ pub struct SummaryQuery {
 /// Per-agent activity for the home page over the last `DAYS` days: daily runs
 /// (local days, split autonomous vs on request), totals, PR outcomes, and
 /// anything waiting on the user. With `?totals=true` the list comes as `agents`
-/// next to the home line's figures (`all_time`); without it, a bare list, as the iOS app reads it.
+/// next to the home line's figures (`period`, `all_time`); without it, a bare list, as the iOS app reads it.
+/// `period` counts the current Usage week, or the last 7 days when the plan usage can't be read.
 pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<SummaryQuery>) -> ApiResult<Value> {
     const DAYS: i64 = 14;
     let today = chrono::Local::now().date_naive();
@@ -877,8 +878,15 @@ pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<Summa
     if !q.totals.unwrap_or(false) {
         return Ok(Json(json!(out)));
     }
+    let now = Utc::now();
+    let (kind, since, resets_at) = match crate::usage::usage_week(&crate::usage::get(&state).await) {
+        Some((start, reset)) => ("usage_week", start, Some(reset)),
+        None => ("last_7_days", now - chrono::Duration::days(7), None),
+    };
+    let (runs, cost) = state.db.spend_since(&since.to_rfc3339())?;
+    let period = json!({ "kind": kind, "since": since.to_rfc3339(), "resets_at": resets_at.map(|r| r.to_rfc3339()), "runs": runs, "cost_usd": cost });
     let (runs, cost) = state.db.all_time_spend()?;
-    Ok(Json(json!({ "agents": out, "all_time": { "runs": runs, "cost_usd": cost } })))
+    Ok(Json(json!({ "agents": out, "period": period, "all_time": { "runs": runs, "cost_usd": cost } })))
 }
 
 // ---- editor -----------------------------------------------------------
@@ -945,6 +953,71 @@ pub(crate) mod tests {
     }
 
     use super::{apply_patch, is_plain_id};
+
+    /// Run ends of an agent at each time, costing $1, $2, $4, ... in order.
+    fn ended_runs_at(st: &crate::state::AppState, agent: &str, at: &[chrono::DateTime<chrono::Utc>]) {
+        for (i, t) in at.iter().enumerate() {
+            let m = st.db.add_message(agent, None, "system", "run_end", "", serde_json::json!({ "cost_usd": f64::from(1 << i) })).unwrap();
+            st.db.conn().execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", rusqlite::params![t.to_rfc3339(), m.id]).unwrap();
+        }
+    }
+
+    async fn summary(st: &crate::state::AppState) -> serde_json::Value {
+        use axum::extract::{Query, State};
+        super::agents_summary(State(st.clone()), Query(super::SummaryQuery { totals: Some(true) })).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn the_home_line_counts_the_usage_week() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "A");
+        let now = Utc::now();
+        let reset = now + Duration::days(2);
+        let start = reset - Duration::days(7);
+        // Before the week, its first second, inside it; and one 10 days ago, still in the 14-day charts.
+        ended_runs_at(&st, &a.id, &[start - Duration::seconds(1), start, now - Duration::hours(1), now - Duration::days(10)]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "five_hour", "percent": 10.0, "resets_at": (now + Duration::hours(3)).to_rfc3339() },
+            { "key": "seven_day", "percent": 40.0, "resets_at": reset.to_rfc3339() },
+        ], "error": null })).await;
+        let s = summary(&st).await;
+        let p = &s["period"];
+        assert_eq!(p["kind"], "usage_week");
+        assert_eq!(p["since"], start.to_rfc3339());
+        assert_eq!(p["resets_at"], reset.to_rfc3339());
+        assert_eq!(p["runs"], 2, "the run a second before the week starts isn't counted");
+        assert_eq!(p["cost_usd"], 6.0);
+        let card = &s["agents"][0];
+        assert_eq!(card["days"], 14);
+        assert_eq!(card["cost_usd"], 15.0, "the agent card still counts 14 days");
+    }
+
+    #[tokio::test]
+    async fn without_plan_usage_the_home_line_counts_the_last_7_days() {
+        use chrono::{Duration, Utc};
+        for usage in [
+            serde_json::json!({ "windows": [], "error": "no Claude Code login found; run `claude` and log in" }),
+            // Read, but no weekly reset to start the week from.
+            serde_json::json!({ "windows": [{ "key": "seven_day", "percent": 0.0, "resets_at": null }], "error": null }),
+        ] {
+            let st = crate::tasks::tests::state();
+            let a = crate::tasks::tests::agent(&st, "A");
+            let now = Utc::now();
+            ended_runs_at(&st, &a.id, &[now - Duration::days(7) - Duration::minutes(1), now - Duration::days(7) + Duration::minutes(1), now - Duration::days(1)]);
+            crate::usage::fake(&st, usage).await;
+            let s = summary(&st).await;
+            let p = &s["period"];
+            assert_eq!(p["kind"], "last_7_days");
+            assert!(p["resets_at"].is_null());
+            let since = chrono::DateTime::parse_from_rfc3339(p["since"].as_str().unwrap()).unwrap();
+            assert!((since.with_timezone(&Utc) - (now - Duration::days(7))).num_seconds().abs() < 5);
+            assert_eq!(p["runs"], 2, "the run just over 7 days ago isn't counted");
+            assert_eq!(p["cost_usd"], 6.0);
+            assert_eq!(s["agents"][0]["cost_usd"], 7.0, "the agent card still counts 14 days");
+            assert_eq!(s["all_time"]["runs"], 3);
+        }
+    }
 
     #[test]
     fn the_role_is_set_through_the_patch() {

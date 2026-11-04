@@ -378,6 +378,8 @@ export type AgentSummary = {
 /** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
 export type AgentsSummary = {
   agents: AgentSummary[];
+  /** Runs and estimated cost of the current Usage week (from the weekly reset minus 7 days), or of the last 7 days when the plan usage can't be read. */
+  period: { kind: "usage_week" | "last_7_days"; since: string; resets_at: string | null; runs: number; cost_usd: number };
   /** The All-time spend: every run since Loft started counting, deleted agents and cleared chats included. */
   all_time: { runs: number; cost_usd: number };
 };

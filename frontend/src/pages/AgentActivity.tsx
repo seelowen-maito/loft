@@ -167,6 +167,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
 
 export function AgentActivity() {
   const [data, setData] = useState<AgentSummary[] | null>(null);
+  const [period, setPeriod] = useState<AgentsSummary["period"] | null>(null);
   const [allTime, setAllTime] = useState<AgentsSummary["all_time"] | null>(null);
   const [expanded, setExpanded] = useState(false);
   const perRow = useSyncExternalStore(onResize, () => cardsPerRow(window.innerWidth));
@@ -177,6 +178,7 @@ export function AgentActivity() {
       .agentsSummary()
       .then((r) => {
         setData(r.agents);
+        setPeriod(r.period);
         setAllTime(r.all_time);
       })
       .catch(() => setData((d) => d ?? []));
@@ -208,8 +210,6 @@ export function AgentActivity() {
     return {
       working: d.filter((s) => s.agent.running).length,
       waiting: d.reduce((a, s) => a + s.pending_permissions, 0),
-      runs: d.reduce((a, s) => a + sum(s.daily_user) + sum(s.daily_auto), 0),
-      cost: d.reduce((a, s) => a + s.cost_usd, 0),
     };
   }, [data]);
 
@@ -229,10 +229,15 @@ export function AgentActivity() {
               <>
                 <span className={totals.working ? "text-accent" : "text-fg-2"}>{totals.working} working</span>
                 {totals.waiting > 0 && <span className="text-warn"> · {totals.waiting} waiting on you</span>}
-                <span className="text-fg-2">
-                  {" "}
-                  · {totals.runs} runs · <span title="API list-price equivalent">est. ${totals.cost.toFixed(2)} spent</span>
-                </span>
+                {period && (
+                  <span className="text-fg-2">
+                    {" "}
+                    · {period.runs} runs ·{" "}
+                    <span title="API list-price equivalent">
+                      est. ${period.cost_usd.toFixed(2)} {period.kind === "usage_week" ? "this week" : "last 7 days"}
+                    </span>
+                  </span>
+                )}
                 {allTime && (
                   <span className="text-fg-3" title="Every run since Loft started counting, deleted agents and cleared chats included">
                     {" "}
