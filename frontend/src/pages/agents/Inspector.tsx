@@ -91,7 +91,16 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-const FRESH_CONTEXT = [
+/** The Role field's hint, for the agent's settings and the New agent dialog. */
+export const roleHint = (project: string) =>
+  project.trim()
+    ? `What it does in ${project.trim()}'s team. One Lead per project, with the captain hat: making it Lead takes the role from any other.`
+    : "What it does in its project's team. Only an agent with a project can be Lead: set its project first.";
+
+export const FRESH_CONTEXT_HINT =
+  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
+
+export const FRESH_CONTEXT = [
   { value: "above_80k", label: "Above 80k (default)" },
   { value: "always", label: "Always" },
   { value: "off", label: "Off" },
@@ -197,7 +206,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Role" hint={draft.project.trim() ? `What it does in ${draft.project.trim()}'s team. One Lead per project, with the captain hat: making it Lead takes the role from any other.` : "What it does in its project's team. Only an agent with a project can be Lead: set its project first."}>
+      <Field label="Role" hint={roleHint(draft.project)}>
         <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
           {ROLES.map((r) => (
             <option key={r.value} value={r.value} disabled={r.value === "lead" && !draft.project.trim() && draft.role !== "lead"}>
@@ -209,7 +218,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
 
       {/* A Lead only follows it while it builds the tickets itself; one that coordinates is never cleared by Delivery. */}
       {(draft.role !== "lead" || (agent.role === "lead" && agent.fresh_context_applies !== false)) && (
-        <Field label="Fresh context for each Delivery ticket" hint="Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.">
+        <Field label="Fresh context for each Delivery ticket" hint={FRESH_CONTEXT_HINT}>
           <select className="input" value={draft.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
             {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
           </select>

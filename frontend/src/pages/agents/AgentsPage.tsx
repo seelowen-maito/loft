@@ -338,6 +338,7 @@ export default function AgentsPage() {
       {creating && (
         <NewAgentDialog
           projects={projects}
+          agents={agents ?? []}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);

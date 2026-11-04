@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-import { api, type Agent } from "../../lib/api";
+import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { INTERVALS, MODELS } from "./Inspector";
+import { FRESH_CONTEXT, FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
 import { ProjectSelect } from "./ProjectSelect";
 
 const TEMPLATES = [
@@ -10,6 +10,7 @@ const TEMPLATES = [
     label: "Repo janitor",
     name: "Moss",
     title: "Repo janitor",
+    role: "custom",
     personality: "Calm, tidy, slightly dry. Speaks in short, precise sentences. Loves a clean working tree.",
     prompt:
       "Keep an eye on my repositories. On each wake-up, check for uncommitted work, stale branches, and repos that are behind their remote. Report anything worth my attention in a short bulleted list. Never push or modify my repos directly.",
@@ -19,6 +20,7 @@ const TEMPLATES = [
     label: "Research scout",
     name: "Wren",
     title: "Research scout",
+    role: "custom",
     personality: "Curious and enthusiastic, but ruthless about signal over noise. Always cites sources.",
     prompt:
       "Track new developments relevant to the languages and frameworks used in my projects. Keep running notes in notes/ in your workspace, and remember what you've already reported so you never repeat yourself.",
@@ -28,17 +30,21 @@ const TEMPLATES = [
     label: "Pair programmer",
     name: "Bolt",
     title: "Pair programmer",
+    role: "dev",
     personality: "Direct, pragmatic senior engineer. Proposes a plan before big changes and explains trade-offs briefly.",
     prompt: "Help me with coding tasks on request. Clone repos into your workspace, make changes on a branch, run the tests, and summarize the diff.",
     interval_minutes: 0,
   },
 ];
 
-export function NewAgentDialog({ projects, onClose, onCreated }: { projects: string[]; onClose: () => void; onCreated: (a: Agent) => void }) {
-  const [form, setForm] = useState({ name: "", title: "", project: "", personality: "", prompt: "", model: "sonnet", interval_minutes: 0 });
+export function NewAgentDialog({ projects, agents, onClose, onCreated }: { projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
+  const [form, setForm] = useState({ name: "", title: "", project: "", role: "custom", fresh_context: "above_80k", personality: "", prompt: "", model: "sonnet", interval_minutes: 0 });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
+  const project = form.project.trim();
+  // As in the settings: a Lead whose team has a Dev only coordinates, so Delivery never clears its context.
+  const coordinates = form.role === "lead" && agents.some((a) => a.role === "dev" && a.project.trim() === project);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -91,14 +97,38 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
               <input autoFocus className="input" placeholder="e.g. Moss" value={form.name} onChange={(e) => set("name", e.target.value)} />
             </label>
             <label className="space-y-1.5">
-              <span className="eyebrow">Role</span>
+              <span className="eyebrow">Title</span>
               <input className="input" placeholder="e.g. Repo janitor" value={form.title} onChange={(e) => set("title", e.target.value)} />
             </label>
           </div>
-          <label className="block space-y-1.5">
-            <span className="eyebrow">Project</span>
-            <ProjectSelect value={form.project} projects={projects} onChange={(v) => set("project", v)} />
-          </label>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1.5">
+                <span className="eyebrow">Project</span>
+                {/* Only an agent with a project can be Lead: clearing the project drops it back to Custom. */}
+                <ProjectSelect value={form.project} projects={projects} onChange={(v) => setForm((f) => ({ ...f, project: v, role: !v.trim() && f.role === "lead" ? "custom" : f.role }))} />
+              </label>
+              <label className="space-y-1.5">
+                <span className="eyebrow">Role</span>
+                <select className="input" value={form.role} onChange={(e) => set("role", e.target.value)}>
+                  {ROLES.map((r) => (
+                    <option key={r.value} value={r.value} disabled={r.value === "lead" && !project}>
+                      {r.label}: {r.hint}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(form.project)}</p>
+          </div>
+          {!coordinates && (
+            <label className="flex items-center justify-between gap-3" title={FRESH_CONTEXT_HINT}>
+              <span className="eyebrow">Fresh context for each Delivery ticket</span>
+              <select className="input w-52" value={form.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
+                {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+            </label>
+          )}
           <label className="block space-y-1.5">
             <span className="eyebrow">Personality</span>
             <textarea className="input min-h-[64px] resize-none" placeholder="How should it sound and behave?" value={form.personality} onChange={(e) => set("personality", e.target.value)} />
