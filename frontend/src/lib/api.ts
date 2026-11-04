@@ -488,7 +488,7 @@ export const api = {
 
   agents: () => req<Agent[]>("GET", "/agents"),
   agentsSummary: () => req<AgentSummary[]>("GET", "/agents/summary"),
-  createAgent: (a: Partial<Agent>) => req<Agent>("POST", "/agents", a),
+  createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
