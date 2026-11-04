@@ -84,9 +84,13 @@ _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
 A hosted service that holds Loft's Apple push key and forwards a Loft install's pushes to Apple, so installs run by other people never hold the key. It only forwards: which alerts a phone wants, quiet hours and rate limits stay in the install.
 _Avoid_: Push server, push proxy, gateway
 
-**Relay token**:
-The secret an install gets the first time it uses the push relay. It is the install's identity there: there is no sign-in, and the phones paired to the install are registered under it.
-_Avoid_: Account, API key, login
+**Relay key**:
+The secret an install uses to push through the push relay. The user gets it by signing in to the push portal with Apple; it belongs to that Apple ID and can be revoked there. There are no anonymous keys: without one, the install does not push through the relay.
+_Avoid_: Relay token, account, login
+
+**Push portal**:
+A small web page on the relay's Vercel project where a user signs in with Apple to create, name and revoke relay keys. It stores only Apple's user id and hashed keys.
+_Avoid_: Dashboard, account page
 
 ## Threads
 
