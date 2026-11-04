@@ -78,6 +78,16 @@ _Avoid_: Task, story, sub-task
 The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
 
+## Push
+
+**Push relay**:
+A hosted service that holds Loft's Apple push key and forwards a Loft install's pushes to Apple, so installs run by other people never hold the key. It only forwards: which alerts a phone wants, quiet hours and rate limits stay in the install.
+_Avoid_: Push server, push proxy, gateway
+
+**Relay token**:
+The secret an install gets the first time it uses the push relay. It is the install's identity there: there is no sign-in, and the phones paired to the install are registered under it.
+_Avoid_: Account, API key, login
+
 ## Threads
 
 **Thread**:
