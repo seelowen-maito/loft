@@ -236,7 +236,7 @@ mod tests {
         // Once a relay push has happened the install has a token; the status says so but never shows it.
         let phone = format!("{}0b", "ef".repeat(31));
         let _ = register(State(st.clone()), reg(&phone)).await.unwrap();
-        test(State(st.clone()), Path(phone)).await.unwrap();
+        let _ = test(State(st.clone()), Path(phone)).await.unwrap();
         let s = get().await;
         assert_eq!(s["relay_token"], json!(true));
         let text = s.to_string();
