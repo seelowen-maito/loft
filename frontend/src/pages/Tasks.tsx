@@ -10,7 +10,8 @@ import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { filterIssues, SOURCES } from "../lib/issueFilter";
-import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, isStandaloneTicket, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
+import { isStandaloneTicket } from "../lib/standaloneTicket";
+import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */

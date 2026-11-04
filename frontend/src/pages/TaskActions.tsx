@@ -141,12 +141,6 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
   );
 }
 
-/** A standalone ticket on GitHub (open, `ready-for-agent`, under no spec): Loft runs it as a Delivery.
- *  A spec's ticket has a parent, or names its spec in the ticket template's `## Parent` section. */
-export function isStandaloneTicket(t: Task) {
-  return t.state === "open" && t.github?.state === "open" && t.labels.includes("ready-for-agent") && !t.parent_id && !/^## Parent\s+#\d+/m.test(t.description);
-}
-
 /** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);

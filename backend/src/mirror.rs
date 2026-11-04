@@ -770,35 +770,26 @@ fn keep_link(state: &AppState, repo: &str, v: &Value) {
 }
 
 /// The parent GitHub gives each issue (`parent_issue_url`) onto the Loft issue that mirrors it, so a
-/// spec's ticket knows its spec without waiting for the spec to be read again. Only when GitHub sends
-/// the field; a Loft-only parent is kept unless GitHub names one Loft mirrors.
+/// spec's ticket knows its spec without waiting for the spec to be read again. GitHub leaves the field
+/// out of an issue with no parent (it never sends null), so this only sets a parent: one taken off its
+/// spec is dropped when the spec's sub-issues are read again.
 fn parents_from_github<'a>(state: &AppState, repo: &str, issues: impl IntoIterator<Item = &'a Value>) {
     let mut all = linked(state, repo);
     let prefix = format!("https://api.github.com/repos/{}/issues/", repo.to_lowercase());
     for i in issues {
-        let (Some(n), Some(p)) = (i["number"].as_i64(), i.get("parent_issue_url")) else { continue };
+        let Some(n) = i["number"].as_i64() else { continue };
+        let Some(p) = i["parent_issue_url"].as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok())) else { continue };
         let Some(k) = all.iter().position(|t| t.github.as_ref().is_some_and(|g| g.number == n)) else { continue };
-        let number = p.as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok()));
-        let parent = number.and_then(|p| all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == p))).map(|x| x.id.clone());
-        let mirrored_now = all[k].parent_id.as_deref().is_some_and(|id| all.iter().any(|x| x.id == id));
-        let want = match parent {
-            Some(id) if id != all[k].id => Some(id),
-            None if mirrored_now => None,
-            _ => continue,
-        };
-        if want == all[k].parent_id {
+        let Some(parent) = all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == p)).map(|x| x.id.clone()) else { continue };
+        if parent == all[k].id || all[k].parent_id.as_deref() == Some(parent.as_str()) {
             continue;
         }
         let t = &mut all[k];
-        t.parent_id = want;
+        t.parent_id = Some(parent);
         t.updated_at = now();
         if state.db.save_task(t).is_ok() {
             crate::tasks::emit(state, t);
-            let what = match number {
-                Some(p) if t.parent_id.is_some() => format!("Made a sub-issue of #{p} on GitHub"),
-                _ => "No longer a sub-issue on GitHub".to_string(),
-            };
-            crate::tasks::log_status(state, t, FROM_GITHUB, &what);
+            crate::tasks::log_status(state, t, FROM_GITHUB, &format!("Made a sub-issue of #{p} on GitHub"));
         }
     }
 }
@@ -1250,18 +1241,13 @@ pub(crate) mod tests {
         three["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/1"));
         let mut two = gh(repo, 2, "Two", "open", at);
         two["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/99"));
-        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 1, "One", "open", at), two, three.clone()]));
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 1, "One", "open", at), two, three]));
         sync_project(&st, "ln-parent", true).await.unwrap();
         assert_eq!(get(3).parent_id.as_deref(), Some(ids[&1].as_str()));
         assert_eq!(get(2).parent_id, None);
         assert!(fake.seen(&format!("/repos/{repo}/issues/1/sub_issues")).is_empty(), "no extra request");
 
-        // Taken off #1 on GitHub: the next change of #3 drops it. A list without the field changes nothing.
-        three["parent_issue_url"] = Value::Null;
-        three["updated_at"] = json!("2026-10-03T00:00:00Z");
-        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([three]));
-        sync_project(&st, "ln-parent", false).await.unwrap();
-        assert_eq!(get(3).parent_id, None);
+        // GitHub leaves the field out of an issue with no parent: a list without it keeps the parent Loft has.
         let mut kept = get(2);
         kept.parent_id = Some(ids[&1].clone());
         st.db.save_task(&kept).unwrap();
