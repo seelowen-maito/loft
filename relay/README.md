@@ -14,7 +14,7 @@ Plain JavaScript Vercel functions with no dependencies and no build step. The st
 
 ```json
 {
-  "device_token": "<the phone's APNs token, hex>",
+  "device_token": "<the phone's APNs token, 64 hex characters>",
   "environment": "production",
   "bundle_id": "<LOFT_BUNDLE_ID>",
   "payload": { "aps": { "alert": { "title": "…", "body": "…" } } },
@@ -24,7 +24,7 @@ Plain JavaScript Vercel functions with no dependencies and no build step. The st
 ```
 
 - `environment` is `production` (TestFlight, App Store) or `development` (a debug build). It picks Apple's host.
-- `priority` is 10 (time-sensitive, the default) or 5. `collapse_id` is at most 64 bytes.
+- `priority` is 10 (time-sensitive, the default) or 5. `collapse_id` is 1-64 printable ASCII characters.
 - The payload is sent to Apple unchanged, with `apns-topic` set to the Loft bundle id.
 
 | Answer | Meaning |
@@ -35,6 +35,8 @@ Plain JavaScript Vercel functions with no dependencies and no build step. The st
 | `413` | The payload is over 4 KB. |
 | `400` | A malformed request. |
 | `502` | Apple couldn't be reached. |
+| `504` | Apple didn't answer within 10 seconds. |
+| `500` | The relay is missing one of its settings below; it refuses everything until they're set. |
 | `429` | Over a limit; `Retry-After` says in how many seconds to try again. |
 
 Every error body is `{"error": "…"}`.
@@ -58,7 +60,8 @@ token. Every authorized push request counts, whether or not it's forwarded.
 | `LOFT_BUNDLE_ID` | The only bundle id served. |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | Added when the KV (Upstash) store is connected to the project. |
 
-`APNS_HOST_PRODUCTION` and `APNS_HOST_DEVELOPMENT` replace Apple's hosts. They are for the tests only; leave them unset.
+`APNS_HOST_PRODUCTION` and `APNS_HOST_DEVELOPMENT` replace Apple's hosts for the tests. They're ignored when
+`VERCEL_ENV` is `production`.
 
 ## Deploy
 

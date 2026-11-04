@@ -4,6 +4,7 @@ import { createServer as createH2 } from "node:http2";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { issueToken, push, MAX_PAYLOAD_BYTES } from "../lib/relay.js";
+import { host } from "../lib/apns.js";
 
 const BUNDLE = "com.example.loft";
 const DEVICE = "a1".repeat(32);
@@ -40,6 +41,7 @@ const fakeApple = () => {
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       seen.push({ path: req.headers[":path"], headers: req.headers, body });
+      if (answer.hang) return;
       res.writeHead(answer.status, { "apns-id": "apns-1" });
       res.end(answer.reason ? JSON.stringify({ reason: answer.reason }) : "");
     });
@@ -147,6 +149,10 @@ test("over 4 KB, another bundle id and a malformed request are refused before Ap
   for (const bad of [
     { device_token: "../../x" },
     { device_token: "" },
+    { device_token: "a1".repeat(31) + "a" },
+    { device_token: "a1".repeat(33) },
+    { collapse_id: "line\nbreak" },
+    { collapse_id: "café" },
     { environment: "staging" },
     { payload: "text" },
     { payload: [1] },
@@ -249,4 +255,51 @@ test("the 1,001st push in a day from one token is refused until the next day", a
   assert.deepEqual(await over.json(), { error: "too many requests: at most 1000 per day" });
   assert.equal((await send(await newToken(), {}, undefined, day + 51 * 60_000)).status, 200, "another token");
   assert.equal((await send(token, {}, undefined, day + 24 * HOUR)).status, 200, "the next day");
+});
+
+test("a relay missing a setting refuses everything instead of guessing", async () => {
+  for (const missing of ["LOFT_BUNDLE_ID", "APNS_KEY_P8", "KV_REST_API_URL"]) {
+    const broken = { ...env, [missing]: "" };
+    const token = await issueToken(new Request("http://relay/api/token", { method: "POST" }), broken);
+    assert.equal(token.status, 500, missing);
+    // Without LOFT_BUNDLE_ID a request that leaves bundle_id out would otherwise match.
+    const res = await push(
+      new Request("http://relay/api/push", {
+        method: "POST",
+        headers: { authorization: "Bearer x" },
+        body: JSON.stringify({ device_token: DEVICE, environment: "production", payload }),
+      }),
+      broken,
+    );
+    assert.equal(res.status, 500, missing);
+    assert.deepEqual(await res.json(), { error: "the relay isn't configured" });
+  }
+  assert.equal(production.seen.length, 0);
+});
+
+test("Apple's hosts can only be replaced outside production", () => {
+  assert.equal(host(env, "production"), env.APNS_HOST_PRODUCTION);
+  assert.equal(host({ ...env, VERCEL_ENV: "production" }, "production"), "https://api.push.apple.com");
+  assert.equal(host({ ...env, VERCEL_ENV: "production" }, "development"), "https://api.sandbox.push.apple.com");
+});
+
+test("Apple not answering in time is a 504, and the next push still goes", async () => {
+  const token = await newToken();
+  production.answer({ hang: true });
+  const started = Date.now();
+  const res = await push(
+    new Request("http://relay/api/push", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload }),
+    }),
+    env,
+    Date.now(),
+    200,
+  );
+  assert.equal(res.status, 504);
+  assert.deepEqual(await res.json(), { error: "Apple didn't answer in time" });
+  assert.ok(Date.now() - started < 2000);
+  production.answer({ status: 200 });
+  assert.equal((await send(token)).status, 200);
 });

@@ -20,15 +20,25 @@ function providerToken(env, now = Date.now()) {
   return cached.jwt;
 }
 
-/** Apple's host for an environment. APNS_HOST_* override it (the tests' fake Apple server). */
+/** Apple's host for an environment. APNS_HOST_* override it for the tests' fake Apple, never in production. */
 export const host = (env, environment) =>
-  (environment === "development" ? env.APNS_HOST_DEVELOPMENT : env.APNS_HOST_PRODUCTION) || HOSTS[environment];
+  (env.VERCEL_ENV !== "production" && (environment === "development" ? env.APNS_HOST_DEVELOPMENT : env.APNS_HOST_PRODUCTION)) || HOSTS[environment];
 
-/** Sends `push` and resolves with Apple's answer: `{ status, reason, apnsId }`. */
-export function send(env, push) {
+/** How long Apple gets to answer one push. */
+export const APPLE_TIMEOUT_MS = 10_000;
+
+/** Sends `push` and resolves with Apple's answer: `{ status, reason, apnsId }`. Rejects when Apple can't be reached
+ *  or doesn't answer within `timeoutMs` (the error's `timeout` is then true). */
+export function send(env, push, timeoutMs = APPLE_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const session = connect(host(env, push.environment));
-    session.on("error", reject);
+    const fail = (e) => {
+      clearTimeout(timer);
+      session.destroy();
+      reject(e);
+    };
+    const timer = setTimeout(() => fail(Object.assign(new Error("Apple didn't answer in time"), { timeout: true })), timeoutMs);
+    session.on("error", fail);
     const headers = {
       ":method": "POST",
       ":path": `/3/device/${push.deviceToken}`,
@@ -50,6 +60,7 @@ export function send(env, push) {
     req.setEncoding("utf8");
     req.on("data", (d) => (body += d));
     req.on("end", () => {
+      clearTimeout(timer);
       session.close();
       let reason = null;
       try {
@@ -59,10 +70,7 @@ export function send(env, push) {
       }
       resolve({ status, reason, apnsId });
     });
-    req.on("error", (e) => {
-      session.close();
-      reject(e);
-    });
+    req.on("error", fail);
     req.end(push.body);
   });
 }
