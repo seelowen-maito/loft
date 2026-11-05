@@ -53,6 +53,8 @@ pub struct RunInfo {
     pub subagents: Vec<Subagent>,
     /// The run answers the user, so a Restart carries that over to the run it starts.
     pub for_user: bool,
+    /// Tool calls (ids) whose result hasn't come back yet.
+    pub tools_open: Vec<String>,
 }
 
 /// A running subagent, as clients show it above the composer.
@@ -94,8 +96,10 @@ pub struct Runtime {
     /// agents whose next run starts a Delivery ticket they haven't worked on: Loft first clears their
     /// context if their Fresh context setting says so
     pub fresh_before: std::collections::HashSet<String>,
-    /// agents whose run the user restarted; the stop notice says so
-    pub restarting: std::collections::HashSet<String>,
+    /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
+    pub restarting: HashMap<String, &'static str>,
+    /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
+    pub auto_restarts: HashMap<String, u32>,
     /// agent id -> chats it was @-mentioned in, waiting for the run that answers the mention
     pub mention_pending: HashMap<String, Vec<String>>,
     /// Ready PRs on GitHub that wait on the user (their own, or their review requested), from github_inbox

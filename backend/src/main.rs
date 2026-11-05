@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
+    tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
 
     let api = Router::new()
