@@ -847,12 +847,19 @@ fn blockers_first(ts: &[Ticket]) -> Result<Vec<usize>, String> {
 /// An issue on GitHub as publishing needs it: repo (`home` unless GitHub names another), number,
 /// database id (what links take), title key.
 fn issue_ref(i: &Value, home: &str) -> Option<(String, i64, i64, String)> {
-    Some((repo_of(i, home).to_string(), i["number"].as_i64()?, i["id"].as_i64()?, key(i["title"].as_str()?)))
+    Some((repo_of(i, home), i["number"].as_i64()?, i["id"].as_i64()?, key(i["title"].as_str()?)))
 }
 
-/// The repo of an issue GitHub listed: from its `repository_url`, else `home`, where it was listed.
-fn repo_of<'a>(i: &'a Value, home: &'a str) -> &'a str {
-    i["repository_url"].as_str().and_then(|u| u.strip_prefix("https://api.github.com/repos/")).unwrap_or(home)
+/// The repo of an issue GitHub listed: from its `repository_url`, else `home`, where it was listed. GitHub
+/// may spell it in another case than a git origin, so compare it with `same_repo`.
+fn repo_of(i: &Value, home: &str) -> String {
+    let prefix = format!("{}/repos/", crate::github::api_base().trim_end_matches('/'));
+    i["repository_url"].as_str().and_then(|u| u.strip_prefix(&prefix)).unwrap_or(home).to_string()
+}
+
+/// Two `owner/repo` slugs name the same repo: GitHub ignores case in them.
+fn same_repo(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 /// The database id of issue #n, which sub-issue and dependency links take instead of its number.
@@ -905,6 +912,18 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             github_home(state, &t.home).await.map_err(|why| format!("\"{}\" is for {}, which has no GitHub repo ({why}), so it can't join spec #{} on {slug}.", t.title, t.home.project, spec.unwrap_or(0)))?
         });
     }
+    // The Delivery only knows the tickets in the spec's repo, so one there can't wait on one elsewhere:
+    // it would start before its blocker landed.
+    for (i, t) in ts.iter().enumerate() {
+        if slugs[i] == slug
+            && let Some(&b) = t.blocked_by.iter().find(|&&b| slugs[b] != slug)
+        {
+            return Err(format!(
+                "\"{}\" is in {slug} but blocked by \"{}\" in {}: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.",
+                t.title, ts[b].title, slugs[b]
+            ));
+        }
+    }
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let login = login(state).await?;
     let mut labelled: Vec<&String> = vec![];
@@ -923,7 +942,7 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             .map_err(|e| format!("Couldn't check {slug} for an existing ticket: {e}"))?,
     };
     let listed: Vec<(String, i64, i64, String)> = listed.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).filter_map(|i| issue_ref(i, &slug)).collect();
-    let find = |repo: &str, n: i64| listed.iter().find(|l| l.0 == repo && l.1 == n);
+    let find = |repo: &str, n: i64| listed.iter().find(|l| same_repo(&l.0, repo) && l.1 == n);
     let branch = match spec {
         Some(s) => branch_section(state, &slug, s).await?,
         None => None,
@@ -946,7 +965,7 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
         let recorded = state.db.published_issue(repo, "ticket", &k).ok().flatten().filter(|n| spec.is_some() || find(repo, *n).is_some());
         let (n, mut id, new) = if let Some(n) = recorded {
             (n, find(repo, n).map(|l| l.2), false)
-        } else if let Some(l) = listed.iter().find(|l| l.0 == repo && l.3 == key(&t.title)) {
+        } else if let Some(l) = listed.iter().find(|l| same_repo(&l.0, repo) && l.3 == key(&t.title)) {
             state.db.record_published_issue(repo, "ticket", &k, l.1).map_err(|e| e.to_string())?;
             (l.1, Some(l.2), false)
         } else {
@@ -1005,7 +1024,7 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             if let Err(e) = crate::github::request(state, reqwest::Method::POST, &path, Some(json!({ "issue_id": bid }))).await {
                 // Linked before but never recorded: GitHub turns the second link down, which is fine.
                 let have = crate::github::get(state, &format!("{path}?per_page=100")).await.unwrap_or(Value::Null);
-                if !have.as_array().into_iter().flatten().any(|d| d["number"].as_i64() == Some(bn) && repo_of(d, repo) == brepo) {
+                if !have.as_array().into_iter().flatten().any(|d| d["number"].as_i64() == Some(bn) && same_repo(&repo_of(d, repo), &brepo)) {
                     return Err(format!("Couldn't mark {} as blocked by {}: {e}. {retry}", shown(repo, n), shown(&brepo, bn)));
                 }
             }
@@ -1964,8 +1983,9 @@ pub(crate) mod tests {
 
         // A retry finds both under the spec, the web one by its repo, and creates nothing twice.
         fake.route("GET", &format!("/repos/{api}/issues/40/sub_issues"), 200, json!([
-            { "number": 41, "id": 4100, "title": "Endpoint", "repository_url": format!("https://api.github.com/repos/{api}") },
-            { "number": 7, "id": 700, "title": "Screen", "repository_url": format!("https://api.github.com/repos/{web}") },
+            { "number": 41, "id": 4100, "title": "Endpoint", "repository_url": format!("{}/repos/{api}", crate::github::api_base()) },
+            // GitHub's own spelling of the repo can differ in case from the git origin.
+            { "number": 7, "id": 700, "title": "Screen", "repository_url": format!("{}/repos/octo/Cross-Web", crate::github::api_base()) },
         ]));
         let again = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": tickets })).await.unwrap().unwrap();
         assert!(again.contains("Nothing new was created") && again.matches(", already published").count() == 2, "{again}");
@@ -1975,6 +1995,13 @@ pub(crate) mod tests {
         crate::grill::mcp_call(&st, &lead, "grill_end", &json!({ "summary": "Split." })).unwrap().unwrap();
         let urls: Vec<String> = summary(&st, &lead).meta["grill"]["end_card"]["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect();
         assert_eq!(urls, ["https://github.com/octo/cross-api/issues/41", "https://github.com/octo/cross-web/issues/7"]);
+
+        // A ticket in the spec's repo can't wait on one elsewhere: the Delivery would start it too early.
+        let before = (posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len());
+        let flipped = json!([screen(&[]), ticket("Endpoint v2", &["Screen"])]);
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": flipped })).await.unwrap().unwrap_err();
+        assert_eq!(err, "\"Endpoint v2\" is in octo/cross-api but blocked by \"Screen\" in octo/cross-web: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.");
+        assert_eq!((posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len()), before, "nothing was created");
 
         // A ticket for a project without a GitHub repo can't join a spec on GitHub.
         planner_on(&st, "cross-local", None);
