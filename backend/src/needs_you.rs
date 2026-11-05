@@ -451,6 +451,31 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         }
     }
 
+    // Plans kept in Loft whose reviews all passed: Merge merges the spec branch into the project's own repo.
+    for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| d.local) {
+        let id = format!("merge:{}:{}", d.repo, d.spec);
+        let spec_task = tasks.iter().find(|t| t.id == d.spec_id);
+        items.push(Item {
+            kind: "delivery_merge",
+            urgency: 1,
+            agent: name(&d.dev),
+            task_id: spec_task.map(|t| t.id.clone()),
+            title: text(&format!("Merge \"{}\"", d.title), MAX_TITLE),
+            reason: text(&format!("Its reviews passed: merge `{}` into `{}`.", d.branch, d.base), MAX_REASON),
+            text: String::new(),
+            created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
+            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/tasks/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![
+                action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                dismiss(&id),
+            ],
+            push: ("Ready to merge".to_string(), d.title.clone()),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
     // Pull requests ready to merge: open, not a draft, mergeable, checks green. First the ones agents
     // opened here (they can be merged from the app), then the user's other ready PRs and review
     // requests found on GitHub (github_inbox).

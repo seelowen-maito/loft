@@ -25,8 +25,8 @@ struct Agent: Codable, Identifiable, Hashable {
     var prompt: String?
     /// The agent's sticker: a 100x100 SVG drawing (older servers don't send it).
     var avatar: Avatar?
-    /// Leads its project's team; it wears a captain hat (nil from older servers).
-    var lead: Bool? = nil
+    /// What it does in its team: lead, dev, code_reviewer, qa, security or custom (nil from older servers).
+    var role: String? = nil
     /// When Claude last produced anything in the current run; nil when not running (servers with `run_watchdog`).
     var lastOutputAt: Date? = nil
     /// Background tasks the agent is waiting on after it already replied (e.g. "Run the QA suite").
@@ -34,6 +34,13 @@ struct Agent: Codable, Identifiable, Hashable {
     var waitingSince: Date? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     var sessionId: String? = nil
+    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always" (nil from older servers).
+    var freshContext: String? = nil
+    /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
+    var freshContextApplies: Bool? = nil
+
+    /// Leads its project's team; it wears a captain hat.
+    var isLead: Bool { role == "lead" }
 }
 
 /// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
@@ -364,6 +371,9 @@ struct SendMessageResponse: Codable {
     var queued: Bool?
     var duplicate: Bool?
     var message: ChatMessage?
+    /// Start delivery on a plan whose project folder has no git: nothing started; ask before setting it up.
+    var needsGit: Bool? = nil
+    var dir: String? = nil
 }
 
 struct ExecuteResponse: Codable {

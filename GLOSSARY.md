@@ -17,8 +17,20 @@ A folder under the user's projects directory. Its git `origin`, once it has one,
 _Avoid_: Workspace (that is the agent's private folder)
 
 **Lead**:
-The one agent per team marked as lead: it plans with the user and hands ready tickets to the rest of the team. A team has at most one.
+The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
 _Avoid_: Orchestrator, manager, planner
+
+**Role**:
+What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake; a Custom agent has no step and follows only its own instructions. An agent has exactly one role.
+_Avoid_: Job, type, flag
+
+**Delivery**:
+Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers, closes it when they pass, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
+_Avoid_: Build, run, pipeline
+
+**Role brief**:
+The fixed instructions Loft writes for a role and sends with that role's wake in a Delivery. An agent's standing instructions add to it but can't change how the Delivery works.
+_Avoid_: Role prompt, template
 
 **Run**:
 One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
@@ -74,9 +86,27 @@ _Avoid_: PRD, plan, design doc
 An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
 
+**Spec branch**:
+The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the default branch. Every ticket of the spec is one or more commits on it.
+_Avoid_: Feature branch, shared branch
+
+**Spec PR**:
+The one pull request from a spec branch to the default branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
+_Avoid_: Feature PR, epic PR
+
 **Owner**:
 The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
+
+## Usage and spend
+
+**Usage week**:
+The 7-day window of the Claude account's plan usage, ending at its weekly reset (the "week" meter in the navbar). When Loft can't read the plan usage, it stands in with the last 7 days and says so.
+_Avoid_: Billing week, 7 days, week
+
+**All-time spend**:
+The runs and estimated cost of every agent run since Loft started counting, kept as a stored running total: it never goes down, even when an agent is deleted or its history is cleared.
+_Avoid_: Total cost, lifetime cost
 
 ## Push
 

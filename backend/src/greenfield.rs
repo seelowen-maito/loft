@@ -11,8 +11,12 @@ use crate::db::Agent;
 use crate::grill::Question;
 use crate::state::AppState;
 
-/// Obvious junk the first commit leaves out.
-const IGNORE: &[&str] = &[".DS_Store", ".remember/"];
+/// What the first commit leaves out: obvious junk, and files that usually hold secrets (env files, keys,
+/// certificates), which would otherwise stay in git history for good. A `!` rule keeps env templates and
+/// only works after the rule it undoes.
+const IGNORE: &[&str] = &[".DS_Store", ".remember/", ".env", ".env.*", "!.env.example", "!.env.sample", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*"];
+/// What those rules cover, for the tools' and the agent's text.
+const IGNORED: &str = "junk (`.DS_Store`, `.remember/`) and secret files (`.env`, `.env.*` but not `.env.example`, keys and certificates)";
 /// Files the preview lists by name; the rest are counted.
 const MAX_LISTED: usize = 100;
 const MAX_QUESTION: usize = 500;
@@ -21,7 +25,7 @@ const MAX_OWNERS: usize = 5;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "preview_new_repo",
-        "description": "For a project with no git repo or no GitHub remote yet: what publishing its folder as a new GitHub repo would hold (the files and total size of the first commit, after the `.gitignore` Loft adds for `.DS_Store` and `.remember/`), the owners the user can create it under, and the round question to ask. Writes nothing.",
+        "description": format!("For a project with no git repo or no GitHub remote yet: what publishing its folder as a new GitHub repo would hold (the files and total size of the first commit, after the `.gitignore` Loft adds for {IGNORED}), the owners the user can create it under, and the round question to ask. Writes nothing."),
         "inputSchema": { "type": "object", "properties": {} }
     }), json!({
         "name": "create_repo",
@@ -50,7 +54,9 @@ pub fn needs_repo(state: &AppState, a: &Agent) -> bool {
         return false;
     }
     let dir = project_dir(state, a);
-    dir.is_dir() && !std::process::Command::new("git").arg("-C").arg(&dir).args(["remote", "get-url", "origin"]).output().is_ok_and(|o| o.status.success())
+    // Blocking: the grill asks from sync code, and reading one config value is quick.
+    let origin = std::process::Command::new("git").arg("-C").arg(&dir).args(crate::repos::SAFE_GIT).args(["remote", "get-url", "origin"]).output();
+    dir.is_dir() && !origin.is_ok_and(|o| o.status.success())
 }
 
 fn project_dir(state: &AppState, a: &Agent) -> PathBuf {
@@ -84,7 +90,7 @@ async fn greenfield_dir(state: &AppState, a: &Agent) -> Result<(PathBuf, bool), 
 /// through a throwaway one.
 async fn files(dir: &Path, has_git: bool) -> Result<Vec<(String, u64)>, String> {
     let mut args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
-    let excludes: Vec<String> = IGNORE.iter().map(|i| format!("--exclude={i}")).collect();
+    let excludes = excludes();
     args.extend(excludes.iter().map(String::as_str));
     let scratch = std::env::temp_dir().join(format!("loft-new-repo-{}", uuid::Uuid::new_v4()));
     let out = if has_git {
@@ -110,16 +116,70 @@ async fn files(dir: &Path, has_git: bool) -> Result<Vec<(String, u64)>, String> 
     Ok(fs)
 }
 
-/// The project's `.gitignore` with the junk rules it lacks appended, or None when it has them all.
+/// `IGNORE` as `ls-files` flags. On the command line they beat every `.gitignore`, the user's `!` rules too.
+fn excludes() -> Vec<String> {
+    IGNORE.iter().map(|i| format!("--exclude={i}")).collect()
+}
+
+/// `git add -A`, then unstages what it added that `IGNORE` matches. For git a user's later `!` rule or a
+/// deeper `.gitignore` beats the rules Loft appends, but not for the first commit: it holds what the
+/// preview lists, and a secret file only gets in when git tracked it already.
+async fn add_all(dir: &Path) -> Result<(), String> {
+    let git = |a: Vec<String>| async move { crate::repos::git(dir, &a.iter().map(String::as_str).collect::<Vec<_>>()).await.map_err(|e| e.to_string()) };
+    let s = |x: &[&str]| x.iter().map(|a| a.to_string()).collect::<Vec<String>>();
+    let before = git(s(&["ls-files", "-z"])).await?;
+    let tracked: std::collections::HashSet<&str> = before.split('\0').collect();
+    git(s(&["add", "-A"])).await?;
+    let matched = git([s(&["ls-files", "-z", "--cached", "--ignored"]), excludes()].concat()).await?;
+    let added: Vec<String> = matched.split('\0').filter(|p| !p.is_empty() && !tracked.contains(p)).map(String::from).collect();
+    for chunk in added.chunks(100) {
+        git([s(&["--literal-pathspecs", "rm", "-q", "--cached", "--"]), chunk.to_vec()].concat()).await?;
+    }
+    Ok(())
+}
+
+/// The project's `.gitignore` with the rules it lacks appended, or None when it has them all. A `!` rule
+/// is appended again after its rule, even when the file has it already, so it still applies.
 fn gitignore_update(dir: &Path) -> Option<String> {
     let have = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
     let bare = |l: &str| l.trim().trim_matches('/').to_string();
-    let missing: Vec<&str> = IGNORE.iter().copied().filter(|i| !have.lines().any(|l| bare(l) == bare(i))).collect();
+    let mut rule_added = false;
+    let missing: Vec<&str> = IGNORE
+        .iter()
+        .copied()
+        .filter(|i| {
+            let negation = i.starts_with('!');
+            let add = !have.lines().any(|l| bare(l) == bare(i)) || negation && rule_added;
+            if !negation {
+                rule_added = add;
+            }
+            add
+        })
+        .collect();
     if missing.is_empty() {
         return None;
     }
     let sep = if have.is_empty() || have.ends_with('\n') { "" } else { "\n" };
     Some(format!("{have}{sep}{}\n", missing.join("\n")))
+}
+
+/// Sets up git in a project folder that has none, for a Delivery of a plan kept in Loft: the `.gitignore`
+/// the new-repo flow writes, `git init`, and a first commit of the folder as it is, as the user's git
+/// identity or, when git has none, as Loft.
+pub(crate) async fn init_folder(dir: &Path) -> Result<(), String> {
+    let git = |a: &[&str]| {
+        let a: Vec<String> = a.iter().map(|x| x.to_string()).collect();
+        async move { crate::repos::git(dir, &a.iter().map(String::as_str).collect::<Vec<_>>()).await.map_err(|e| format!("Couldn't set up git: {e}")) }
+    };
+    if let Some(ignore) = gitignore_update(dir) {
+        std::fs::write(dir.join(".gitignore"), ignore).map_err(|e| format!("Couldn't write the .gitignore: {e}"))?;
+    }
+    git(&["init", "-q"]).await?;
+    add_all(dir).await.map_err(|e| format!("Couldn't set up git: {e}"))?;
+    let anonymous = crate::repos::git(dir, &["config", "user.email"]).await.map(|e| e.trim().is_empty()).unwrap_or(true);
+    let who: &[&str] = if anonymous { &["-c", "user.name=Loft", "-c", "user.email=loft@localhost"] } else { &[] };
+    git(&[who, &["commit", "-q", "--allow-empty", "-m", "First commit"]].concat()).await?;
+    Ok(())
 }
 
 fn gitignore_after(dir: &Path) -> String {
@@ -159,7 +219,8 @@ async fn owners(state: &AppState, login: &str) -> Vec<String> {
     out
 }
 
-/// Files that usually hold secrets: env files, keys, certificates.
+/// Files that usually hold secrets: env files, keys, certificates. `IGNORE` leaves them out, so the first
+/// commit only has one the folder's git tracks already.
 fn secret_like(path: &str) -> bool {
     let f = path.rsplit('/').next().unwrap_or(path).to_lowercase();
     (f == ".env" || f.starts_with(".env.")) && !f.ends_with(".example") && !f.ends_with(".sample")
@@ -187,7 +248,7 @@ async fn preview(state: &AppState, me: &Agent) -> Result<String, String> {
     let secrets: Vec<String> = fs.iter().map(|(p, _)| p).filter(|p| secret_like(p)).take(3).map(|p| format!("`{p}`")).collect();
     let warn = if secrets.is_empty() { String::new() } else { format!("Careful: it includes {}, which may hold secrets. ", secrets.join(", ")) };
     let head = format!("Create the GitHub repo `{login}/{name}` and publish this folder? {warn}The first commit holds {n} file{s} ({total}): ");
-    let tail = ". Loft adds a `.gitignore` for `.DS_Store` and `.remember/`.";
+    let tail = ". Loft adds a `.gitignore` for junk and secret files like `.env` and keys.";
     let more = |shown: usize| if shown < n { format!(" and {} more", n - shown) } else { String::new() };
     let mut listed: Vec<String> = vec![];
     for (p, _) in &fs {
@@ -214,7 +275,7 @@ async fn preview(state: &AppState, me: &Agent) -> Result<String, String> {
         list.push(format!("- and {} more", n - MAX_LISTED));
     }
     Ok(format!(
-        "The project folder {} {state_line}. Owners the user can create the repo under: {} (their account first). Default name: {name}.\n\nThe first commit: {n} file{s}, {total} (the `.gitignore` Loft writes or updates for `.DS_Store` and `.remember/` included):\n{}\n\nAsk it in your first round, in the user's language, as this question (private recommended; owners as options):\n{question}\n\nAfter the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose. Never write into the project folder yourself.",
+        "The project folder {} {state_line}. Owners the user can create the repo under: {} (their account first). Default name: {name}.\n\nThe first commit: {n} file{s}, {total} (the `.gitignore` Loft writes or updates for {IGNORED} included):\n{}\n\nAsk it in your first round, in the user's language, as this question (private recommended; owners as options):\n{question}\n\nAfter the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose. Never write into the project folder yourself.",
         dir.display(),
         owners.join(", "),
         list.join("\n"),
@@ -316,6 +377,7 @@ async fn git_push(dir: &Path, token: &str) -> Result<(), String> {
     let out = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(crate::repos::SAFE_GIT)
         .args(["push", "-u", "origin", "HEAD"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_COUNT", "1")
@@ -384,7 +446,7 @@ async fn create(state: &AppState, me: &Agent, args: &Value) -> Result<String, St
     if !has_git {
         git(s(&["init", "-q"])).await?;
     }
-    git(s(&["add", "-A"])).await?;
+    add_all(&dir).await.map_err(|e| format!("Couldn't publish the folder: {e}"))?;
     let staged = crate::repos::git(&dir, &["diff", "--cached", "--quiet"]).await.is_err();
     let born = crate::repos::git(&dir, &["rev-parse", "-q", "--verify", "HEAD"]).await.is_ok();
     if staged || !born {
@@ -515,21 +577,21 @@ mod tests {
 
         let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
         assert!(p.contains("has no git repo yet. Owners the user can create the repo under: octo-me, acme, members-only, open-org (their account first). Default name: gf-new."), "{p}");
-        assert!(p.contains("The first commit: 3 files, 40 B ("), "{p}");
-        for f in ["- .gitignore (21 B)", "- README.md (6 B)", "- src/main.rs (13 B)"] {
+        assert!(p.contains("The first commit: 3 files, 123 B ("), "{p}");
+        for f in ["- .gitignore (104 B)", "- README.md (6 B)", "- src/main.rs (13 B)"] {
             assert!(p.contains(f), "missing {f}: {p}");
         }
         assert!(!p.contains("DS_Store (") && !p.contains("today.md"), "junk is left out: {p}");
-        assert!(p.contains(r#""text":"Create the GitHub repo `octo-me/gf-new` and publish this folder? The first commit holds 3 files (40 B): `.gitignore`, `README.md`, `src/main.rs`. Loft adds"#), "{p}");
+        assert!(p.contains(r#""text":"Create the GitHub repo `octo-me/gf-new` and publish this folder? The first commit holds 3 files (123 B): `.gitignore`, `README.md`, `src/main.rs`. Loft adds"#), "{p}");
         assert!(p.contains(r#""options":["Yes, private under octo-me","Yes, private under acme","Yes, private under members-only","Yes, private under open-org","No, not now"],"recommendation":"Yes, private under octo-me""#), "{p}");
         assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists(), "the preview writes nothing");
 
         let qid = ask(&st, &a, Some("yes"), true);
         let out = call(&st, &a, "create_repo", json!({ "question_id": qid })).await.unwrap();
-        assert_eq!(out, "Created the private GitHub repo octo-me/gf-new and pushed the project folder (3 files, 40 B): https://github.com/octo-me/gf-new. Clone it into your workspace for your docs branch; never work in the project folder itself.");
+        assert_eq!(out, "Created the private GitHub repo octo-me/gf-new and pushed the project folder (3 files, 123 B): https://github.com/octo-me/gf-new. Clone it into your workspace for your docs branch; never work in the project folder itself.");
         assert_eq!(creations(&fake, "/user/repos", "gf-new"), [json!({ "name": "gf-new", "private": true })]);
         assert_eq!(pushed(&r), [".gitignore", "README.md", "src/main.rs"]);
-        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), ".DS_Store\n.remember/\n");
+        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), ".DS_Store\n.remember/\n.env\n.env.*\n!.env.example\n!.env.sample\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\n");
         assert_eq!(git(&dir, &["remote", "get-url", "origin"]), r.to_str().unwrap());
         assert!(dir.join(".DS_Store").exists() && dir.join(".remember/today.md").exists(), "ignored files stay on disk");
         assert!(crate::grill::active(&st, &a.id).is_some(), "the grill goes on");
@@ -540,11 +602,20 @@ mod tests {
         let st = state();
         let fake = own_fake(&st);
         owners_on(&fake);
-        let (a, dir) = new_project(&st, "gf-org", &[("a.txt", "a"), (".gitignore", "target\n/.DS_Store")]);
+        let (a, dir) = new_project(&st, "gf-org", &[("a.txt", "a"), ("config/.env", "KEY=1"), (".gitignore", "target\n/.DS_Store\n!.env.example")]);
         git(&dir, &["init", "-q"]);
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-q", "-m", "mine"]);
-        for (p, body) in [("b.txt", "b"), ("target/out", "build"), (".remember/x", "x")] {
+        // The repo's own hooks would see the commit and the push, and the push's token.
+        let marker = dir.parent().unwrap().join("gf-org-hook-ran");
+        for hook in ["pre-commit", "pre-push"] {
+            let path = dir.join(".git/hooks").join(hook);
+            std::fs::write(&path, format!("#!/bin/sh\nenv >> {}\n", marker.display())).unwrap();
+            let mut perm = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+            std::fs::set_permissions(&path, perm).unwrap();
+        }
+        for (p, body) in [("b.txt", "b"), ("target/out", "build"), (".remember/x", "x"), ("deploy.key", "key"), (".env.example", "KEY=")] {
             std::fs::create_dir_all(dir.join(p).parent().unwrap()).unwrap();
             std::fs::write(dir.join(p), body).unwrap();
         }
@@ -552,7 +623,9 @@ mod tests {
         fake.route("POST", "/orgs/acme/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/acme/gf-org", "private": true }));
 
         let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
-        assert!(p.contains("is a git repo with no `origin` remote") && p.contains("The first commit: 3 files"), "{p}");
+        assert!(p.contains("is a git repo with no `origin` remote") && p.contains("The first commit: 5 files"), "{p}");
+        // A secret file git tracks already can't be left out, so the user is told before saying yes.
+        assert!(p.contains("publish this folder? Careful: it includes `config/.env`, which may hold secrets."), "{p}");
         let qid = ask(&st, &a, Some("Yes, private under acme"), true);
 
         let err = call(&st, &a, "create_repo", json!({ "question_id": qid, "owner": "locked" })).await.unwrap_err();
@@ -562,11 +635,13 @@ mod tests {
         assert!(err.starts_with("\"no spaces\" isn't a valid repo name"), "{err}");
 
         let out = call(&st, &a, "create_repo", json!({ "question_id": qid, "owner": "ACME" })).await.unwrap();
-        assert!(out.starts_with("Created the private GitHub repo acme/gf-org and pushed the project folder (3 files"), "{out}");
+        assert!(out.starts_with("Created the private GitHub repo acme/gf-org and pushed the project folder (5 files"), "{out}");
         assert_eq!(creations(&fake, "/orgs/acme/repos", "gf-org"), [json!({ "name": "gf-org", "private": true })]);
-        assert_eq!(pushed(&r), [".gitignore", "a.txt", "b.txt"]);
-        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "target\n/.DS_Store\n.remember/\n", "only the missing rule is added");
+        assert_eq!(pushed(&r), [".env.example", ".gitignore", "a.txt", "b.txt", "config/.env"]);
+        let rules = "target\n/.DS_Store\n!.env.example\n.remember/\n.env\n.env.*\n!.env.example\n!.env.sample\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\n";
+        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), rules, "only the missing rules are added, and the `!` rule again after its rule");
         assert_eq!(git(&r, &["log", "--format=%s", "HEAD"]), "Publish the project folder\nmine", "the user's history is kept");
+        assert!(!marker.exists(), "no hook of the repo ran, so none saw the token");
     }
 
     #[tokio::test]
@@ -629,7 +704,11 @@ mod tests {
         let st = state();
         let fake = own_fake(&st);
         owners_on(&fake);
-        let (a, dir) = new_project(&st, "gf-bind", &[("app.js", "1"), (".env", "KEY=1"), (".env.example", "KEY="), ("certs/server.pem", "pem")]);
+        let files = [("app.js", "1"), (".env", "KEY=1"), (".env.example", "KEY="), ("certs/server.pem", "pem"), (".env.local", "KEY=2"), ("sub/.env", "KEY=3")];
+        let (a, dir) = new_project(&st, "gf-bind", &files);
+        // The user's own rules would let secret files through: a `!` after Loft's rule, and a deeper `.gitignore`.
+        std::fs::write(dir.join(".gitignore"), ".env.*\n!.env.local\n").unwrap();
+        std::fs::write(dir.join("sub/.gitignore"), "!.env\n").unwrap();
         let r = remote(&st, "gf-bind");
         fake.route("POST", "/orgs/open-org/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/open-org/gf-bind", "private": false }));
         let create = |qid: &str, args: Value| {
@@ -639,9 +718,10 @@ mod tests {
             async move { call(&st, &a, "create_repo", args).await }
         };
 
-        // Secret-looking files are called out before the yes.
+        // Secret files are left out of the first commit; an env template isn't.
         let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
-        assert!(p.contains("publish this folder? Careful: it includes `.env`, `certs/server.pem`, which may hold secrets. The first commit holds"), "{p}");
+        assert!(p.contains("publish this folder? The first commit holds 4 files") && p.contains("- .env.example (4 B)"), "{p}");
+        assert!(!p.contains("Careful") && !p.contains("- .env (") && !p.contains("server.pem") && !p.contains(".env.local") && !p.contains("sub/.env"), "{p}");
 
         // A yes to another question isn't a yes to the repo.
         let other = ask_q(&st, &a, json!({ "text": "Use Postgres?", "speak": "Postgres?", "recommendation": "Yes" }), Some("yes"), true);
@@ -669,9 +749,10 @@ mod tests {
         // Only an answer the user wrote can ask for a public repo.
         let public = ask(&st, &a, Some("Yes, public under open-org"), true);
         let out = create(&public, json!({ "owner": "open-org", "private": false })).await.unwrap();
-        assert!(out.starts_with("Created the public GitHub repo open-org/gf-bind and pushed the project folder (5 files"), "{out}");
+        assert!(out.starts_with("Created the public GitHub repo open-org/gf-bind and pushed the project folder (4 files"), "{out}");
         assert_eq!(creations(&fake, "/orgs/open-org/repos", "gf-bind"), [json!({ "name": "gf-bind", "private": false })]);
-        assert_eq!(pushed(&r), [".env", ".env.example", ".gitignore", "app.js", "certs/server.pem"]);
+        assert_eq!(pushed(&r), [".env.example", ".gitignore", "app.js", "sub/.gitignore"], "the commit holds what the preview listed");
+        assert!(dir.join(".env").exists() && dir.join("certs/server.pem").exists() && dir.join(".env.local").exists(), "secret files stay on disk");
     }
 
     #[tokio::test]

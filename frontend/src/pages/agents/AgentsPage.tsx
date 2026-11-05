@@ -254,7 +254,7 @@ export default function AgentsPage() {
                       )}
                     >
                       <div className="relative">
-                        <Sticker avatar={a.avatar} lead={a.lead} size={40} />
+                        <Sticker avatar={a.avatar} lead={a.role === "lead"} size={40} />
                         <span className={cx("absolute -bottom-0.5 -right-0.5 size-3 rounded-full border-2 border-ink-950", s.dot)} />
                       </div>
                       <div className="min-w-0 flex-1">
@@ -266,7 +266,7 @@ export default function AgentsPage() {
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10.5px] text-fg-3">
                           {a.running || a.status === "waiting" ? (
-                            <span className={s.text}>{a.status_text || s.label}</span>
+                            <span className={s.text}>{s.label}</span>
                           ) : (
                             <>{a.title || "agent"} · {a.last_run_at ? timeAgo(a.last_run_at) : "never run"}</>
                           )}
@@ -338,6 +338,7 @@ export default function AgentsPage() {
       {creating && (
         <NewAgentDialog
           projects={projects}
+          agents={agents ?? []}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);

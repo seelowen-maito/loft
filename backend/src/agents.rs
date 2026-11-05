@@ -50,6 +50,7 @@ pub fn emit_agent(state: &AppState, a: &Agent) {
     let mut v = client_json(a);
     run_fields(state, &a.id, &mut v);
     v["unread_reply"] = json!(a.unread_reply());
+    v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     state.emit(Event::AgentUpdated { agent: v });
 }
 
@@ -347,7 +348,8 @@ These rules are Loft's and apply to every message you send another agent with `m
 2. Never send thanks, acknowledgements, re-confirmations or \"waiting\" notes.
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
-5. Don't reply to an FYI.";
+5. Don't reply to an FYI.
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -469,6 +471,104 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     msg
 }
 
+/// The Fresh context choices, the default first.
+pub const FRESH_CONTEXT: &[&str] = &["above_80k", "off", "always"];
+
+/// The context size the clients warn at (out of the smart zone): "above_80k" clears from here.
+pub const CONTEXT_WARN_AT: u64 = 80_000;
+
+/// What belongs to one Claude session: dropped together whenever the next run starts a fresh one.
+fn reset_session_fields(a: &mut Agent) {
+    a.session_id = None;
+    a.context_tokens = None;
+    a.grill_briefed = false;
+    a.memory_index = None;
+}
+
+/// Drop the Claude session so the next run starts with empty context, leaving `text` as the `clear` line in
+/// the chat. Long-term memory carries over, and the old session stays in `/resume`.
+pub fn clear_context(state: &AppState, agent_id: &str, text: &str, meta: Value) -> Option<Agent> {
+    let a = state.db.update_agent(agent_id, reset_session_fields).ok()??;
+    if let Ok(m) = state.db.add_message(agent_id, None, "system", "clear", text, meta) {
+        state.emit(crate::state::Event::Message { message: json!(m) });
+    }
+    emit_agent(state, &a);
+    Some(a)
+}
+
+/// The ticket boundary, shared by a Delivery wake and an agent's message naming a ticket: records that the
+/// agent now works on `ticket` (see `Agent::delivery_ticket`) and says whether its Fresh context setting
+/// applies before the run. Only on a ticket it hasn't worked on yet, so review rounds keep their context,
+/// and for a Lead only as the agent building the tickets (`builder`): otherwise it coordinates, and is
+/// never cleared.
+fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool) -> bool {
+    let Ok(Some(a)) = state.db.get_agent(agent_id) else { return false };
+    if a.delivery_ticket.as_deref() == Some(ticket) {
+        return false;
+    }
+    let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
+    builder || a.role != "lead"
+}
+
+/// A Delivery wake on `ticket`: at a ticket boundary, the Fresh context setting applies just before the
+/// run, behind a running one if needed.
+pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String) {
+    let fresh = ticket_boundary(state, agent_id, ticket, builder);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh);
+}
+
+/// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
+/// `owner/repo#N` for a GitHub issue given as `N`, `#N`, `owner/repo#N` or its link (a bare number is on
+/// `repo`, the recipient's project's repo, when it has one), and a Loft issue id as it is. None when blank.
+/// A pull request is refused, since its number isn't its ticket's, and so is anything else with a `#`
+/// (like "PR #183 (#174)"): Loft issue ids have none.
+pub fn message_ticket_key(raw: &str, repo: Option<&str>) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let refuse = || Err(format!("Not sent: ticket {raw:?} isn't a ticket's issue. Name the issue itself (#N, owner/repo#N or its issue link), not its pull request: a PR's number isn't its ticket's."));
+    let num = |s: &str| s.parse::<u64>().ok();
+    let link = raw.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.");
+    if let Some(path) = link.strip_prefix("github.com/") {
+        let parts: Vec<&str> = path.split(['/', '#', '?']).collect();
+        return match parts[..] {
+            [owner, name, "issues", n, ..] if num(n).is_some() => Ok(Some(format!("{owner}/{name}#{n}"))),
+            _ => refuse(),
+        };
+    }
+    let (left, n) = raw.rsplit_once('#').unwrap_or(("", raw));
+    match (left.trim(), num(n.trim())) {
+        ("", Some(n)) => Ok(Some(repo.map_or(format!("#{n}"), |r| format!("{r}#{n}")))),
+        (r, Some(n)) if r.contains('/') && !r.contains(char::is_whitespace) => Ok(Some(format!("{r}#{n}"))),
+        _ if raw.contains(['#', '/']) => refuse(),
+        _ => Ok(Some(raw.to_string())),
+    }
+}
+
+/// The start of a run: if its prompt starts a new ticket (`ticket_boundary`), apply the agent's Fresh
+/// context setting now, between runs.
+pub(crate) fn fresh_boundary(state: &AppState, agent_id: &str) {
+    if state.rt.lock().unwrap().fresh_before.remove(agent_id) {
+        fresh_if_due(state, agent_id);
+    }
+}
+
+/// At a ticket boundary: clear the agent's context if its setting says so. Off never, Always whenever it
+/// has a session, and Above 80k (the default) when its context is at the warning or above.
+fn fresh_if_due(state: &AppState, agent_id: &str) {
+    let Ok(Some(a)) = state.db.get_agent(agent_id) else { return };
+    let due = a.session_id.is_some()
+        && match a.fresh_context.as_str() {
+            "off" => false,
+            "always" => true,
+            _ => a.context_tokens.is_some_and(|n| n >= CONTEXT_WARN_AT),
+        };
+    if due {
+        clear_context(state, agent_id, "Context cleared for a new ticket. Long-term memory carries over.", json!({ "fresh_context": a.fresh_context }));
+    }
+}
+
 /// Run the agent with `prompt` (queued behind a running run) without recording a user message.
 /// `trigger` "grill" runs quietly (only errors reach the chat: the grill tools post what the user sees).
 pub fn wake(state: &AppState, agent_id: &str, prompt: String, trigger: &'static str) {
@@ -489,9 +589,14 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     start(state, agent_id, Some(prompt), "avatar", false);
 }
 
-/// `add_msg` for a run's output; quiet (grill) runs keep only errors.
+/// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
     if quiet && kind != "error" {
+        if kind == "run_end" {
+            if let Err(e) = state.db.add_unsaved_run_end(&meta) {
+                tracing::error!("all-time spend: {e}");
+            }
+        }
         return None;
     }
     add_msg(state, agent_id, rid, role, kind, content, meta)
@@ -506,12 +611,24 @@ pub fn compact(state: &AppState, agent_id: &str, instructions: &str) {
 
 /// Deliver a message from one agent to another. It shows in the recipient's chat
 /// under the sender's sticker, and the recipient is told how to answer.
+#[cfg(test)]
 pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     message_from_agent_with(state, from, to, text, json!({}));
 }
 
 /// `message_from_agent`, with extra `meta` on the stored message (e.g. which task it is about).
-pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value) {
+pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, meta: Value) {
+    message_on_ticket(state, from, to, text, meta, None);
+}
+
+/// `message_from_agent_with` about `ticket` (a `message_ticket_key`), if it names one: at a ticket boundary,
+/// the recipient's Fresh context setting applies before the run, as on a Delivery wake. A Lead builds the
+/// tickets itself when its team has no Dev.
+pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>) {
+    let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
+    if let Some(t) = ticket {
+        meta["ticket"] = json!(t);
+    }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     add_msg(state, &to.id, None, "user", "text", text, meta);
     let prompt = format!(
@@ -519,7 +636,7 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
         name = from.name,
         id = from.id,
     );
-    start(state, &to.id, Some(prompt), "agent", false);
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh);
 }
 
 /// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
@@ -555,6 +672,12 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
 
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
+    start_with(state, agent_id, text, trigger, for_user, false);
+}
+
+/// `start`; `fresh`: the prompt starts a new Delivery ticket, so the run that delivers it first applies
+/// the agent's Fresh context setting (`fresh_if_due`).
+fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -563,6 +686,9 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
     });
     let kill = {
         let mut rt = state.rt.lock().unwrap();
+        if fresh {
+            rt.fresh_before.insert(agent_id.to_string());
+        }
         if rt.running.contains_key(agent_id) {
             if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
@@ -588,6 +714,8 @@ fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'stat
         let mut trigger = trigger;
         let mut for_user = for_user;
         loop {
+            // Only between runs: a ticket boundary queued behind a run waits for it to end.
+            fresh_boundary(&state, &agent_id);
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
@@ -830,12 +958,7 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
             RunOutcome::StaleSession if resume => {
                 *delivered = false;
                 // The stored Claude session is gone; start fresh (memory survives).
-                if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| {
-                    a.session_id = None;
-                    a.context_tokens = None;
-                    a.grill_briefed = false;
-                    a.memory_index = None;
-                }) {
+                if let Ok(Some(a)) = state.db.update_agent(agent_id, reset_session_fields) {
                     emit_agent(state, &a);
                 }
                 resume = false;
@@ -1124,10 +1247,9 @@ async fn run_process(
                             run_msg(hide, state, agent_id, rid, "assistant", "tool_use", &summary, json!({
                                 "id": b["id"], "name": name, "input": b["input"], "subagent": sub,
                             }));
+                            // The command shows in its tool row only; the status line keeps the agent's own words.
                             if name.starts_with("mcp__loft__grill_") {
                                 set_status_text(state, agent_id, "Preparing the next question…");
-                            } else if name != "mcp__loft__set_status" {
-                                set_status_text(state, agent_id, &summary);
                             }
                         }
                         _ => {}
@@ -1409,6 +1531,7 @@ pub(crate) mod tests {
                 "3. Send a verdict only to the agent that acts on it, not to everyone.",
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
+                "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }
@@ -1545,6 +1668,14 @@ case "$prompt" in *bg-agent*)
     while [ ! -f go3 ]; do sleep 0.05; done;;
   esac;;
 esac
+case "$prompt" in *tool-status*)
+  echo '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"plan"},{"type":"tool_use","id":"u1","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}]}}'
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u2","name":"Read","input":{"file_path":"/x/config.toml"}}]}}'
+  while [ ! -f go2 ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u3","name":"mcp__loft__grill_round","input":{}}]}}'
+  while [ ! -f go3 ]; do sleep 0.05; done;;
+esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
@@ -1676,6 +1807,20 @@ esac
         assert_eq!(costs()[5..], [0.001, 0.002]);
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
         assert!((a.total_cost_usd - 0.020).abs() < 1e-9, "{}", a.total_cost_usd);
+        // Each finished run also adds itself and its cost to the All-time spend.
+        let (runs, cost) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs, 7);
+        assert!((cost - 0.020).abs() < 1e-9, "{cost}");
+
+        // A grill round saves no run end, yet it is a finished, paid run all the same.
+        st.db.update_agent(&a.id, |a| a.grill_briefed = true).unwrap(); // a later round: no planning brief in front
+        wake(&st, &a.id, format!("[Loft: grill] next round sid={s1} cost=0.005"), "grill");
+        until("the grill run", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 8).await;
+        assert_eq!(costs().len(), 7, "a quiet run's end stays out of the chat");
+        assert!((st.db.get_agent(&a.id).unwrap().unwrap().total_cost_usd - 0.023).abs() < 1e-9);
+        let (runs, cost) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs, 8);
+        assert!((cost - 0.023).abs() < 1e-9, "{cost}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1733,6 +1878,26 @@ esac
         let rt = st.rt.lock().unwrap();
         assert!(rt.queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.queued.get(&a.id));
         assert!(rt.grill_queued.get(&a.id).is_none_or(|q| q.is_empty()), "{:?}", rt.grill_queued.get(&a.id));
+    }
+
+    /// A ticket boundary waiting in the queue is dropped with the queue: the Session the user picked (or the
+    /// fresh one they asked for) isn't cleared by the next run.
+    #[tokio::test]
+    async fn clear_and_resume_drop_a_pending_ticket_boundary() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.db.update_agent(&a.id, |a| (a.fresh_context, a.session_id) = ("always".into(), Some("s-now".into()))).unwrap();
+        let pending = |st: &AppState| st.rt.lock().unwrap().fresh_before.contains(&a.id);
+        st.rt.lock().unwrap().fresh_before.insert(a.id.clone());
+        let (dir, past) = past_session();
+        let _ = crate::api::resume_from(&st, &a.id, dir, past.clone()).await.unwrap();
+        assert!(!pending(&st), "resume drops it");
+        fresh_boundary(&st, &a.id);
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id, Some(past), "the resumed Session stays");
+
+        st.rt.lock().unwrap().fresh_before.insert(a.id.clone());
+        let _ = crate::api::reset_session(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.unwrap();
+        assert!(!pending(&st), "Clear context drops it");
     }
 
     #[tokio::test]
@@ -1964,6 +2129,25 @@ esac
             std::fs::write(ws.join("go3"), "").unwrap();
             until("the run to end", 10, || !is_running(&st, &a.id)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_leaves_the_status_text_alone() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("tool-status".into()), "user");
+        let tool_rows = || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.kind == "tool_use").count();
+        until("the tool row", 10, || tool_rows() == 1).await;
+        assert_eq!(status_text(&st, &a.id), "Thinking…", "the command shows in its tool row only");
+        // The agent's own line (set_status) stays through the next tool call.
+        set_status_text(&st, &a.id, "Reading the config");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the second tool row", 10, || tool_rows() == 2).await;
+        assert_eq!(status_text(&st, &a.id), "Reading the config");
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("Loft's own state", 10, || status_text(&st, &a.id) == "Preparing the next question…").await;
+        std::fs::write(ws.join("go3"), "").unwrap();
+        until("the run to end", 10, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2282,5 +2466,97 @@ esac
         let _ = send(&st, &a.id, "ask").await.ok().unwrap();
         idle(&st, &a.id).await;
         assert!(asked(&st));
+    }
+
+    fn count(st: &AppState, id: &str, kind: &str) -> usize {
+        st.db.list_messages(id, 400, None).unwrap().iter().filter(|m| m.kind == kind).count()
+    }
+
+    fn set(st: &AppState, id: &str, f: impl FnOnce(&mut Agent)) {
+        st.db.update_agent(id, f).unwrap().unwrap();
+    }
+
+    /// A Delivery wake on `key`, run to its end.
+    async fn on_ticket(st: &AppState, id: &str, key: &str, builder: bool) {
+        let runs = count(st, id, "run_end");
+        wake_on_ticket(st, id, key, builder, format!("work on {key}"));
+        until("the ticket's run", 10, || !is_running(st, id) && count(st, id, "run_end") == runs + 1).await;
+    }
+
+    fn resumed(st: &AppState, id: &str) -> usize {
+        std::fs::read_to_string(workspace(st, id).join("resumed.log")).unwrap_or_default().lines().count()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_context_clears_before_a_new_delivery_ticket_as_set() {
+        let (st, a) = fake_claude_state();
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().fresh_context, "above_80k", "an agent saved before the setting");
+        st.db.add_memory(&a.id, "Deploys go through staging", "x", "").unwrap();
+        on_ticket(&st, &a.id, "o/r#1/2", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 0, "no session yet: nothing to clear");
+
+        // Above 80k: below the warning stays, above it clears, and never within the same ticket.
+        set(&st, &a.id, |a| a.context_tokens = Some(CONTEXT_WARN_AT - 1));
+        on_ticket(&st, &a.id, "o/r#1/3", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 0, "below 80k");
+        set(&st, &a.id, |a| a.context_tokens = Some(120_000));
+        on_ticket(&st, &a.id, "o/r#1/3", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 0, "a changes-requested round on the same ticket");
+        let before = resumed(&st, &a.id);
+        on_ticket(&st, &a.id, "o/r#1/4", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 1, "a new ticket above 80k");
+        assert_eq!(resumed(&st, &a.id), before, "the ticket's run started a new session");
+        let m = st.db.list_messages(&a.id, 400, None).unwrap().into_iter().find(|m| m.kind == "clear").unwrap();
+        assert_eq!(m.content, "Context cleared for a new ticket. Long-term memory carries over.");
+        assert_eq!(st.db.list_memories(&a.id).unwrap().len(), 1, "long-term memory carries over");
+
+        // Always: every new ticket, small context or not. Off: never.
+        set(&st, &a.id, |a| (a.fresh_context, a.context_tokens) = ("always".into(), Some(10)));
+        on_ticket(&st, &a.id, "o/r#1/4", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 1, "same ticket");
+        on_ticket(&st, &a.id, "o/r#1/final", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 2, "the final review is its own boundary");
+        set(&st, &a.id, |a| (a.fresh_context, a.context_tokens) = ("off".into(), Some(500_000)));
+        on_ticket(&st, &a.id, "o/r#2/5", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 2, "off");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lead_is_cleared_by_delivery_only_as_the_builder() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| (a.role, a.project, a.fresh_context) = ("lead".into(), "team".into(), "always".into()));
+        let lead = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!(crate::delivery::fresh_context_applies(&st, &lead), "no Dev: the Lead builds the tickets");
+        on_ticket(&st, &a.id, "o/r#1/2", true).await;
+        on_ticket(&st, &a.id, "o/r#1/3", false).await;
+        on_ticket(&st, &a.id, "o/r#1/final", false).await;
+        assert_eq!(count(&st, &a.id, "clear"), 0, "coordinating");
+        on_ticket(&st, &a.id, "o/r#1/4", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 1, "building a new ticket");
+
+        let dev = crate::tasks::tests::agent(&st, "Dev");
+        set(&st, &dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into()));
+        assert!(!crate::delivery::fresh_context_applies(&st, &lead), "a Lead that only coordinates");
+        assert!(crate::delivery::fresh_context_applies(&st, &st.db.get_agent(&dev.id).unwrap().unwrap()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ticket_queued_behind_a_run_clears_only_when_that_run_ends() {
+        let (st, a) = fake_claude_state();
+        on_ticket(&st, &a.id, "o/r#1/2", true).await;
+        set(&st, &a.id, |a| a.fresh_context = "always".into());
+        enqueue(&st, &a.id, Some("delegate".into()), "user");
+        until("the run to start", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
+        wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(count(&st, &a.id, "clear"), 0, "never during a run");
+        let ws = workspace(&st, &a.id);
+        std::fs::write(ws.join("go"), "").unwrap();
+        std::fs::write(ws.join("go2"), "").unwrap();
+        until("the queued ticket's run", 10, || !is_running(&st, &a.id) && count(&st, &a.id, "run_end") == 3).await;
+        let mut msgs = st.db.list_messages(&a.id, 400, None).unwrap();
+        msgs.sort_by_key(|m| m.id);
+        let kinds: Vec<&str> = msgs.iter().filter(|m| matches!(m.kind.as_str(), "run_end" | "clear")).map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, ["run_end", "run_end", "clear", "run_end"], "cleared between the run and the ticket's");
     }
 }

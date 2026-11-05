@@ -49,7 +49,7 @@ fn only_acknowledges(text: &str, to: &str) -> bool {
     true
 }
 
-fn tools(state: &AppState) -> Value {
+pub(crate) fn tools(state: &AppState) -> Value {
     let mut all = base_tools();
     // With the messaging rules off, every message wakes its recipient, so the kind is optional.
     if !state.settings.get().messaging_rules {
@@ -61,6 +61,7 @@ fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::setup::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::grill::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
     all
 }
@@ -145,7 +146,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, project, and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, project, role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -162,7 +163,8 @@ fn base_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "agent": { "type": "string", "description": "The recipient's id or name." },
                 "text": { "type": "string", "description": "The message." },
-                "kind": { "type": "string", "enum": ["needs_action", "fyi"], "description": "needs_action: the recipient must act now; it wakes them. fyi: they only need to know; they read it on their next run." }
+                "kind": { "type": "string", "enum": ["needs_action", "fyi"], "description": "needs_action: the recipient must act now; it wakes them. fyi: they only need to know; they read it on their next run." },
+                "ticket": { "type": ["string", "integer"], "description": "The ticket this message hands over or is about, as the issue, not its pull request: its issue number (12 or #12), owner/repo#12, its issue link, or a Loft issue id. A PR's number or link is refused. When it isn't the ticket the recipient last worked on, Loft applies the recipient's Fresh context setting before it reads the message; messages about the same ticket keep its context. Leave it out when the message isn't about one ticket. An FYI ignores it." }
             }, "required": ["agent", "text", "kind"] }
         },
         {
@@ -208,7 +210,10 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
-                None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                None => match crate::delivery::mcp_call(state, &me, name, &args).await {
+                    None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                    r => r,
+                },
                 r => r,
             },
             r => r,
@@ -370,12 +375,13 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
+                        let role = if a.role.is_empty() { String::new() } else { format!(" · role {}", crate::planning::role_label(&a.role)) };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{project} · {}", a.name, title, a.id, doing)
+                        format!("- {}{} · id {}{project}{role} · {}", a.name, title, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -445,8 +451,19 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 agents::fyi_from_agent(state, &from, &to, body.trim());
                 return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));
             }
+            let ticket = match &args["ticket"] {
+                Value::Number(n) => n.to_string(),
+                Value::String(t) => t.clone(),
+                _ => String::new(),
+            };
+            // A bare number is an issue on the recipient's project's repo.
+            let repo = if ticket.trim().is_empty() { None } else { crate::repos::github_repo(state, &to.project).await.ok() };
+            let ticket = match agents::message_ticket_key(&ticket, repo.as_deref()) {
+                Ok(t) => t,
+                Err(e) => return tool_error(e),
+            };
             let busy = agents::is_running(state, &to.id);
-            agents::message_from_agent(state, &from, &to, body.trim());
+            agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref());
             text(if busy {
                 format!("Delivered. {} is busy and will read it when its current run ends.", to.name)
             } else {
@@ -545,6 +562,22 @@ mod tests {
         assert!(!said(&r).1);
         let m = &st.db.list_memories(&a.id).unwrap()[0];
         assert_eq!((m.title.as_str(), m.content.as_str()), ("Deploys go through staging", "Every deploy goes to staging first."));
+    }
+
+    #[tokio::test]
+    async fn list_agents_shows_each_agents_role() {
+        let st = crate::tasks::tests::state();
+        let me = crate::tasks::tests::agent(&st, "Worker");
+        let mut rev = crate::tasks::tests::agent(&st, "Checker");
+        rev.role = "code_reviewer".into();
+        st.db.save_agent(&rev).unwrap();
+        crate::tasks::tests::agent(&st, "Plain");
+        let r = call_tool(&st, &me.id, "list_agents", json!({})).await;
+        let (t, err) = said(&r);
+        assert!(!err, "{t}");
+        let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
+        assert!(line("Checker").contains(" · role Code reviewer · "), "{t}");
+        assert!(line("Plain").contains(" · role Custom · "), "{t}");
     }
 
     #[tokio::test]
@@ -902,5 +935,112 @@ mod tests {
         assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
         until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         assert!(prompts(&st, &to)[0].contains("Thanks!"));
+    }
+
+    #[test]
+    fn a_ticket_is_named_the_way_delivery_names_it() {
+        let key = |raw: &str, repo: Option<&str>| agents::message_ticket_key(raw, repo).unwrap();
+        for raw in ["12", "#12", " #12 ", "o/r#12", "https://github.com/o/r/issues/12", "github.com/o/r/issues/12#issuecomment-1"] {
+            assert_eq!(key(raw, Some("o/r")).as_deref(), Some("o/r#12"), "{raw}");
+        }
+        // A PR's number isn't its ticket's: the issue is asked for instead.
+        for raw in ["https://github.com/o/r/pull/183", "github.com/o/r/pull/183/files", "PR #183 (#174)", "github.com/o/r"] {
+            let err = agents::message_ticket_key(raw, Some("o/r")).unwrap_err();
+            assert!(err.starts_with("Not sent") && err.contains("not its pull request"), "{raw}: {err}");
+        }
+        assert_eq!(key("x/y#12", Some("o/r")).as_deref(), Some("x/y#12"), "another repo stays");
+        assert_eq!(key("#12", None).as_deref(), Some("#12"), "a project without a GitHub repo");
+        assert_eq!(key("4f9c-loft-issue", Some("o/r")).as_deref(), Some("4f9c-loft-issue"), "a Loft issue id");
+        assert_eq!(key("  ", Some("o/r")), None);
+    }
+
+    /// Messages naming tickets: Fresh context applies between tickets only, as on a Delivery wake (#251).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_about_a_new_ticket_clears_as_set() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let clears = || st.db.list_messages(&to.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
+        let send = |args: Value| {
+            let (st, from, to) = (st.clone(), from.clone(), to.clone());
+            async move {
+                let n = prompts(&st, &to).len();
+                let fyi = args["kind"] == "fyi";
+                let mut args = args;
+                args["agent"] = json!(to.id);
+                args["text"] = json!(format!("message {n}"));
+                message(&st, &from, args).await;
+                if !fyi {
+                    until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
+                }
+            }
+        };
+        let set = |f: fn(&mut Agent)| st.db.update_agent(&to.id, f).unwrap().unwrap();
+        set(|a| a.fresh_context = "always".into());
+        send(json!({ "kind": "needs_action", "ticket": 12 })).await;
+        assert_eq!(clears(), 0, "no session yet");
+        let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().find(|m| m.role == "user").unwrap();
+        assert_eq!(m.meta["ticket"], json!("#12"));
+
+        send(json!({ "kind": "needs_action", "ticket": "#12" })).await;
+        assert_eq!(clears(), 0, "a review round on the same ticket");
+        send(json!({ "kind": "needs_action" })).await;
+        send(json!({ "kind": "fyi", "ticket": "#13" })).await;
+        assert_eq!(clears(), 0, "no ticket, and an FYI, change nothing");
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("#12"));
+
+        send(json!({ "kind": "needs_action", "ticket": "#13" })).await;
+        assert_eq!(clears(), 1, "Always: a new ticket");
+        let msgs = st.db.list_messages(&to.id, 400, None).unwrap();
+        let clear = msgs.iter().find(|m| m.kind == "clear").unwrap();
+        assert_eq!(clear.content, "Context cleared for a new ticket. Long-term memory carries over.");
+
+        // Above 80k: only past the warning. Off: never.
+        set(|a| (a.fresh_context, a.context_tokens) = ("above_80k".into(), Some(10)));
+        send(json!({ "kind": "needs_action", "ticket": "#14" })).await;
+        assert_eq!(clears(), 1, "below 80k");
+        set(|a| a.context_tokens = Some(500_000));
+        send(json!({ "kind": "needs_action", "ticket": "#15" })).await;
+        assert_eq!(clears(), 2, "above 80k");
+        set(|a| (a.fresh_context, a.context_tokens) = ("off".into(), Some(500_000)));
+        send(json!({ "kind": "needs_action", "ticket": "#16" })).await;
+        assert_eq!(clears(), 2, "off");
+
+        // A Delivery wake, then a message about the same ticket: one boundary, not two.
+        set(|a| a.fresh_context = "always".into());
+        let runs = prompts(&st, &to).len();
+        agents::wake_on_ticket(&st, &to.id, "o/r#20", true, "build #20".into());
+        until("the Delivery run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > runs).await;
+        assert_eq!(clears(), 3, "the Delivery wake");
+        send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;
+        assert_eq!(clears(), 3, "the message about the same ticket");
+
+        // Mid-review, a PR link instead of the ticket is refused before delivery: no boundary, no message.
+        let before = st.db.list_messages(&to.id, 400, None).unwrap().len();
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "PR #183 is ready", "kind": "needs_action", "ticket": "https://github.com/o/r/pull/183" })).await;
+        assert_eq!(r["isError"], json!(true), "{r}");
+        assert_eq!(st.db.list_messages(&to.id, 400, None).unwrap().len(), before, "not delivered");
+        send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;
+        assert_eq!(clears(), 3, "still the same ticket");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_coordinating_lead_is_never_cleared_by_a_ticket_message() {
+        let (st, lead) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Reviewer");
+        st.db.update_agent(&lead.id, |a| (a.role, a.project, a.fresh_context, a.session_id) = ("lead".into(), "team".into(), "always".into(), Some("s0".into()))).unwrap();
+        let dev = crate::tasks::tests::agent(&st, "Dev");
+        st.db.update_agent(&dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into())).unwrap();
+        let clears = || st.db.list_messages(&lead.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
+        for (i, t) in ["#1", "#2"].into_iter().enumerate() {
+            message(&st, &from, json!({ "agent": lead.id, "text": format!("#{i} passed"), "kind": "needs_action", "ticket": t })).await;
+            until("the run", 10, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > i).await;
+        }
+        assert_eq!(clears(), 0, "it coordinates");
+
+        // Without a Dev it builds the tickets itself, and follows its setting.
+        st.db.update_agent(&dev.id, |d| d.role = "qa".into()).unwrap();
+        message(&st, &from, json!({ "agent": lead.id, "text": "build #3", "kind": "needs_action", "ticket": "#3" })).await;
+        until("the run", 10, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > 2).await;
+        assert_eq!(clears(), 1, "it builds");
     }
 }

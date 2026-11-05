@@ -9,7 +9,8 @@ final class DecodingTests: XCTestCase {
      "disallowed_tools":[],"mcp_servers":{},"permission_mode":"auto","subagent_model":"","max_subagents":null,
      "avatar":{"svg":"<svg/>"},"status":"running","status_text":"Thinking…","session_id":"abc","context_tokens":12000,
      "last_run_at":"2026-10-21T13:01:02.123456+00:00","next_run_at":null,"total_cost_usd":1.5,
-     "created_at":"2026-10-01T09:00:00+00:00","running":true,"workspace":"/tmp/x"}
+     "created_at":"2026-10-01T09:00:00+00:00","running":true,"workspace":"/tmp/x",
+     "fresh_context":"above_80k","fresh_context_applies":false}
     """
 
     func testAgent() throws {
@@ -22,6 +23,8 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(a.sessionId, "abc")
         XCTAssertNotNil(a.lastRunAt)
         XCTAssertNil(a.nextRunAt)
+        XCTAssertEqual(a.freshContext, "above_80k")
+        XCTAssertEqual(a.freshContextApplies, false)
     }
 
     /// `/pull-requests`: the verdict labels come with the PR; an older server sends none.

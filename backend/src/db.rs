@@ -13,6 +13,108 @@ use crate::avatar::Avatar;
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
+/// A Delivery: Loft running a spec's tickets from published to merged. One per spec, keyed by its repo
+/// and spec number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Delivery {
+    /// `owner/repo` on GitHub.
+    pub repo: String,
+    pub spec: i64,
+    /// The Loft project whose team runs it; empty for one migrated from before Deliveries.
+    #[serde(default)]
+    pub project: String,
+    /// The agent that published the spec: it builds the tickets when the team has no Dev.
+    #[serde(default)]
+    pub planner: String,
+    /// The spec branch; empty for one migrated from before Deliveries, until a GitHub read fills it in.
+    #[serde(default)]
+    pub branch: String,
+    /// The draft spec PR, once it's open.
+    #[serde(default)]
+    pub pr: Option<i64>,
+    /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
+    /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
+    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready; a plan kept in Loft
+    /// waits for Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready,
+    /// merged or closed).
+    pub state: String,
+    /// The ready-for-review call failed: the mirror retries it on its next poll.
+    #[serde(default)]
+    pub ready_retry: bool,
+    /// Its tickets, blockers first.
+    #[serde(default)]
+    pub tickets: Vec<DeliveryTicket>,
+    /// The ticket being built now: one at a time.
+    #[serde(default)]
+    pub current: Option<i64>,
+    /// The agent building the current ticket: the team's Dev, or the planner without one.
+    #[serde(default)]
+    pub dev: String,
+    /// Changes rounds of the final Code Review of the whole spec PR.
+    #[serde(default)]
+    pub final_rounds: u32,
+    /// Made from a spec PR recorded before Deliveries: its tickets' states weren't recorded, so GitHub
+    /// says whether they're closed.
+    #[serde(default)]
+    pub migrated: bool,
+    /// A standalone ticket's Delivery: `spec` is the ticket's number, its one ticket. Its own branch and
+    /// PR, and the ticket closes when the PR merges, not when it passes review.
+    #[serde(default)]
+    pub standalone: bool,
+    /// A plan kept in Loft issues: `repo` is `loft:<project>`, `spec` a number Loft gives it in the project,
+    /// `spec_id` the spec's Loft issue, and the spec branch lives in the project's own git repo.
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
+    pub spec_id: String,
+    /// For a plan kept in Loft: the branch the spec branch started from and merges into.
+    #[serde(default)]
+    pub base: String,
+    /// For a plan kept in Loft: the spec's title, to name it.
+    #[serde(default)]
+    pub title: String,
+    pub created_at: String,
+}
+
+impl Delivery {
+    /// Ticket #n of the record.
+    pub fn ticket(&self, n: i64) -> Option<&DeliveryTicket> {
+        self.tickets.iter().find(|t| t.number == n)
+    }
+
+    pub fn ticket_mut(&mut self, n: i64) -> Option<&mut DeliveryTicket> {
+        self.tickets.iter_mut().find(|t| t.number == n)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryTicket {
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub blocked_by: Vec<i64>,
+    /// "open", "started" (being built), "review" (submitted), "closing" (passed, its close failed and is
+    /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
+    /// never handed out, and done when it closes) or "closed".
+    pub state: String,
+    /// Changes-requested rounds so far.
+    #[serde(default)]
+    pub rounds: u32,
+    /// The commits last submitted, oldest first.
+    #[serde(default)]
+    pub commits: Vec<String>,
+    /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
+    #[serde(default)]
+    pub verdicts: std::collections::BTreeMap<String, String>,
+    /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
+    #[serde(default)]
+    pub id: String,
+    /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
+    #[serde(default)]
+    pub skipped: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
@@ -49,13 +151,21 @@ pub struct Agent {
     /// run of that Session, so saving a memory doesn't break the prompt cache. Clear and Compact drop it.
     #[serde(default)]
     pub memory_index: Option<String>,
-    /// Leads its team (the agents sharing its project): at most one per project.
-    #[serde(default)]
-    pub lead: bool,
-    /// Its part in the team check at the end of planning: "dev", "reviewer" or "" (neither). Set from
-    /// the template it came from; agents saved before roles existed get one inferred once at startup.
+    /// What it does in its team: "lead", "dev", "code_reviewer", "qa", "security" or "custom"
+    /// (`planning::ROLES`). A team (the agents sharing a project) has at most one Lead. Set from the
+    /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
+    /// Fresh context for each Delivery ticket: "off", "above_80k" (cleared before a new ticket when its
+    /// context is at the context warning or above) or "always". A Lead follows it only as the agent
+    /// building the tickets.
+    #[serde(default = "default_fresh_context")]
+    pub fresh_context: String,
+    /// The ticket it last worked on (`<repo>#<ticket>`, a Loft issue id in a plan kept in Loft, or
+    /// `<repo>#<spec>/final` for the spec PR's final review), from a Delivery wake or an agent's message
+    /// naming it: one about another ticket is a ticket boundary, where Fresh context applies.
+    #[serde(default)]
+    pub delivery_ticket: Option<String>,
     pub avatar: Avatar,
     pub status: String,
     pub status_text: String,
@@ -82,6 +192,10 @@ pub struct Agent {
     /// The user's read mark: they have seen its chat up to here, in any client.
     #[serde(default)]
     pub read_at: Option<String>,
+}
+
+pub fn default_fresh_context() -> String {
+    "above_80k".into()
 }
 
 impl Agent {
@@ -307,6 +421,9 @@ pub struct GithubLink {
     /// GitHub's own count of its sub-issues (`sub_issues_summary`): all, and the closed ones. Zero when it has none.
     pub sub_total: i64,
     pub sub_done: i64,
+    /// The login of who opened the issue on GitHub (Loft's token's user for one Loft published).
+    /// Empty on a link saved before it was kept, until the issue is read again.
+    pub author: String,
 }
 
 impl Task {
@@ -346,6 +463,9 @@ impl Serialize for Task {
         m.end()
     }
 }
+
+/// How many days of run ends the run ledger keeps: enough for the previous Usage week.
+pub const RUN_LEDGER_DAYS: i64 = 15;
 
 pub fn now() -> String {
     Utc::now().to_rfc3339()
@@ -436,6 +556,13 @@ CREATE TABLE IF NOT EXISTS published_issues (
     created_at TEXT NOT NULL,
     PRIMARY KEY(slug, kind, key)
 );
+CREATE TABLE IF NOT EXISTS deliveries (
+    repo TEXT NOT NULL,
+    spec INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY(repo, spec)
+);
 CREATE TABLE IF NOT EXISTS pending_fyis (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
@@ -443,6 +570,12 @@ CREATE TABLE IF NOT EXISTS pending_fyis (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
+-- The All-time spend: one row, added to at every run end and never lowered.
+CREATE TABLE IF NOT EXISTS all_time_spend (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    runs INTEGER NOT NULL,
+    cost_usd REAL NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -525,6 +658,15 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Count a run that ended at `ended_at`, and the cost its run end's `meta` holds: one more run in the
+/// All-time spend, and a row in the run ledger the Usage week figures read.
+fn count_run_end(c: &Connection, meta: &Value, ended_at: &str) -> Result<()> {
+    let cost = meta["cost_usd"].as_f64().unwrap_or(0.0);
+    c.execute("UPDATE all_time_spend SET runs = runs + 1, cost_usd = cost_usd + ?1", [cost])?;
+    c.execute("INSERT INTO run_ledger (ended_at, cost_usd) VALUES (?1, ?2)", params![ended_at, cost])?;
+    Ok(())
+}
+
 /// What a run added to its session, given the running total it reported and the one before it.
 /// A total that went down is a fresh session, so all of it is this run's.
 pub fn run_cost(total: f64, prev: f64) -> f64 {
@@ -601,21 +743,47 @@ impl Db {
              COMMIT;",
         )?;
         per_run_costs(&conn)?;
+        // The All-time spend starts from the run history there is, once; from then on run ends add to it.
+        conn.execute(
+            "INSERT OR IGNORE INTO all_time_spend (id, runs, cost_usd)
+             SELECT 1, count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0.0) FROM messages WHERE kind = 'run_end'",
+            [],
+        )?;
+        // The run ledger: one row per run end, kept apart from the chats so clearing one or deleting an agent
+        // doesn't change the period figures. It starts from the run ends there are, once, and keeps
+        // RUN_LEDGER_DAYS of them (the All-time spend has its own total).
+        let has_ledger: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'run_ledger'", [], |r| r.get(0))?;
+        if !has_ledger {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE run_ledger (ended_at TEXT NOT NULL, cost_usd REAL NOT NULL);
+                 CREATE INDEX run_ledger_ended ON run_ledger(ended_at);
+                 INSERT INTO run_ledger (ended_at, cost_usd)
+                     SELECT created_at, COALESCE(json_extract(meta, '$.cost_usd'), 0.0) FROM messages WHERE kind = 'run_end' ORDER BY id;
+                 COMMIT;",
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM run_ledger WHERE ended_at < ?1",
+            [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
+        )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
-        // Agents saved before roles existed get one from their name and title, once; the user can change it.
-        let unroled: Vec<String> = {
+        // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
+        // from their old role, name and title. The user can change it.
+        let unroled: Vec<(Value, &str)> = {
             let mut st = conn.prepare("SELECT data FROM agents")?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter().filter(|d| serde_json::from_str::<Value>(d).is_ok_and(|v| v.get("role").is_none())).collect()
+            rows.into_iter().filter_map(|d| serde_json::from_str::<Value>(&d).ok()).filter_map(|v| crate::planning::migrated_role(&v).map(|r| (v, r))).collect()
         };
         // Anything left "running" from a previous backend process is stale.
         let db = Db(Arc::new(Mutex::new(conn)));
-        for d in unroled {
-            if let Ok(mut a) = serde_json::from_str::<Agent>(&d) {
-                a.role = crate::planning::infer_role(&a.name, &a.title).into();
+        for (v, role) in unroled {
+            if let Ok(mut a) = serde_json::from_value::<Agent>(v) {
+                a.role = role.into();
                 db.save_agent(&a)?;
             }
         }
+        db.deliveries_from_spec_prs()?;
         for mut a in db.list_agents()? {
             if a.status != "idle" {
                 a.status = "idle".into();
@@ -643,6 +811,28 @@ impl Db {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    /// The first agent (in list order) with `role` in `project`, decoding only that one row. `project` is
+    /// compared trimmed; an empty one matches nobody.
+    pub fn agent_with_role(&self, project: &str, role: &str) -> Result<Option<Agent>> {
+        let project = project.trim();
+        if project.is_empty() {
+            return Ok(None);
+        }
+        let c = self.0.lock().unwrap();
+        let data: Option<String> = c
+            .query_row(
+                "SELECT data FROM agents WHERE json_extract(data, '$.role') = ?1 AND trim(json_extract(data, '$.project')) = ?2
+                 ORDER BY position, created_at LIMIT 1",
+                [role, project],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match data {
+            Some(d) => Some(serde_json::from_str(&d)?),
+            None => None,
+        })
     }
 
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
@@ -814,6 +1004,19 @@ impl Db {
             "INSERT OR REPLACE INTO published_issues (slug, kind, key, number, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![slug, kind, key, number, now()],
         )?;
+        Ok(())
+    }
+
+    /// When Loft recorded this kind and key on `slug`, if it did.
+    pub fn published_issue_at(&self, slug: &str, kind: &str, key: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT created_at FROM published_issues WHERE slug = ?1 AND kind = ?2 AND key = ?3", params![slug, kind, key], |r| r.get(0)).optional()?)
+    }
+
+    /// Drops every record of this kind on `slug` that points at issue `number`, whatever its key.
+    pub fn forget_published_issues_of(&self, slug: &str, kind: &str, number: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM published_issues WHERE slug = ?1 AND kind = ?2 AND number = ?3", params![slug, kind, number])?;
         Ok(())
     }
 
@@ -1046,8 +1249,12 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![agent_id, run_id, role, kind, content, meta.to_string(), created_at],
         )?;
+        let id = c.last_insert_rowid();
+        if kind == "run_end" {
+            count_run_end(&c, &meta, &created_at)?;
+        }
         Ok(Message {
-            id: c.last_insert_rowid(),
+            id,
             agent_id: agent_id.into(),
             run_id: run_id.map(Into::into),
             role: role.into(),
@@ -1079,6 +1286,117 @@ impl Db {
             message_from_row,
         )
         .optional()?)
+    }
+
+    /// Spec PRs recorded before Deliveries become Delivery records, once: the PR from `spec_pr`, the state
+    /// from `spec_pr_settled` and `spec_pr_retry`, and the tickets and their blockers from the sub-issue and
+    /// blocker links. The branch wasn't recorded, so it's read from GitHub when it's first needed.
+    fn deliveries_from_spec_prs(&self) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let rows = |kind: &str| -> Result<Vec<(String, String, i64)>> {
+            let mut q = c.prepare("SELECT slug, key, number FROM published_issues WHERE kind = ?1 ORDER BY slug, number")?;
+            let r = q.query_map([kind], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(r)
+        };
+        let (prs, settled, retry, subs, blocks) = (rows("spec_pr")?, rows("spec_pr_settled")?, rows("spec_pr_retry")?, rows("sub_issue")?, rows("blocked_by")?);
+        if prs.is_empty() {
+            return Ok(());
+        }
+        let tx = c.unchecked_transaction()?;
+        for (repo, spec, pr) in prs {
+            let Ok(spec) = spec.parse::<i64>() else { continue };
+            let has = |list: &[(String, String, i64)]| list.iter().any(|(r, _, p)| *r == repo && *p == pr);
+            let tickets = subs
+                .iter()
+                .filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(s, _)| s == spec.to_string()))
+                .map(|(_, _, n)| DeliveryTicket {
+                    number: *n,
+                    title: String::new(),
+                    blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
+                    state: "open".into(),
+                    rounds: 0,
+                    commits: vec![],
+                    verdicts: Default::default(),
+                    id: String::new(),
+                    skipped: String::new(),
+                })
+                .collect();
+            let d = Delivery {
+                repo: repo.clone(),
+                spec,
+                project: String::new(),
+                planner: String::new(),
+                branch: String::new(),
+                pr: Some(pr),
+                state: if has(&settled) { "settled" } else { "planned" }.into(),
+                ready_retry: has(&retry),
+                tickets,
+                current: None,
+                dev: String::new(),
+                final_rounds: 0,
+                migrated: true,
+                standalone: false,
+                local: false,
+                spec_id: String::new(),
+                base: String::new(),
+                title: String::new(),
+                created_at: now(),
+            };
+            tx.execute("INSERT OR IGNORE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)", params![d.repo, d.spec, d.state, serde_json::to_string(&d)?])?;
+        }
+        tx.execute("DELETE FROM published_issues WHERE kind IN ('spec_pr', 'spec_pr_settled', 'spec_pr_retry')", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_delivery(&self, repo: &str, spec: i64) -> Result<Option<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let d: Option<String> = c.query_row("SELECT data FROM deliveries WHERE repo = ?1 AND spec = ?2", params![repo, spec], |r| r.get(0)).optional()?;
+        Ok(d.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn save_delivery(&self, d: &Delivery) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)",
+            params![d.repo, d.spec, d.state, serde_json::to_string(d)?],
+        )?;
+        Ok(())
+    }
+
+    /// The Deliveries on `repo`, oldest spec first; only the ones not settled yet with `unsettled`.
+    pub fn deliveries(&self, repo: &str, unsettled: bool) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND (?2 = 0 OR state NOT IN ('ready', 'settled', 'merged')) ORDER BY spec")?;
+        let rows = q.query_map(params![repo, unsettled], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// The repo's Deliveries in `state`, picked by the state column so the others aren't decoded.
+    pub fn deliveries_in(&self, repo: &str, state: &str) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE repo = ?1 AND state = ?2 ORDER BY spec")?;
+        let rows = q.query_map(params![repo, state], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// Every Delivery in `state`, on any repo.
+    pub fn deliveries_in_state(&self, state: &str) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries WHERE state = ?1 ORDER BY repo, spec")?;
+        let rows = q.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// Records on an end-of-planning card that its Delivery started: who got which ticket.
+    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, started: &Value) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.delivery.started', json(?3))
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.delivery') = 'object'",
+            params![agent_id, id, started.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Marks an end-of-planning card's team setup as sent, once: false when the card has no setup or
@@ -1293,6 +1611,32 @@ impl Db {
 
     // ---- activity summary ---------------------------------------------
 
+    /// Count a run whose run end isn't saved (a quiet run's) in the All-time spend and the run ledger;
+    /// saved run ends count themselves.
+    pub fn add_unsaved_run_end(&self, meta: &Value) -> Result<()> {
+        count_run_end(&self.0.lock().unwrap(), meta, &now())
+    }
+
+    /// The All-time spend: (runs, estimated cost in USD).
+    pub fn all_time_spend(&self) -> Result<(i64, f64)> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT runs, cost_usd FROM all_time_spend WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?
+            .unwrap_or((0, 0.0)))
+    }
+
+    /// Runs and estimated cost in USD of every run that ended from `since` until before `until`
+    /// (RFC 3339; no `until` means up to now), all agents together, from the run ledger
+    /// (so only the last `RUN_LEDGER_DAYS` days).
+    pub fn spend_between(&self, since: &str, until: Option<&str>) -> Result<(i64, f64)> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(
+            "SELECT count(*), COALESCE(sum(cost_usd), 0) FROM run_ledger WHERE ended_at >= ?1 AND (?2 IS NULL OR ended_at < ?2)",
+            params![since, until],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
     /// Raw activity for one agent since `since` (RFC 3339), for the dashboard.
     pub fn agent_activity(&self, agent_id: &str, since: &str) -> Result<Value> {
         let c = self.0.lock().unwrap();
@@ -1467,6 +1811,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_with_role_finds_the_first_in_list_order_within_the_trimmed_project() {
+        let path = std::env::temp_dir().join(format!("loft-roles-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let with = |id: &str, project: &str, role: &str| {
+            let mut a = agent(id);
+            a.project = project.into();
+            a.role = role.into();
+            db.save_agent(&a).unwrap();
+        };
+        with("other", "web", "dev");
+        with("lead", "loft", "lead");
+        with("dev1", " loft ", "dev");
+        with("dev2", "loft", "dev");
+        let found = |project: &str, role: &str| db.agent_with_role(project, role).unwrap().map(|a| a.id);
+        assert_eq!(found("loft", "dev").as_deref(), Some("dev1"), "padded project matches; list order picks the first");
+        db.reorder_agents(&["dev2", "other", "lead", "dev1"].map(String::from)).unwrap();
+        assert_eq!(found("loft", "dev").as_deref(), Some("dev2"), "list order, not the order they were saved in");
+        assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
+        assert_eq!(found("loft", "qa"), None);
+        assert_eq!(found("", "dev"), None, "no project, no team");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn restored_fyis_go_back_ahead_of_newer_ones_and_leave_with_their_agent() {
         let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
         let db = Db::open(&path).unwrap();
@@ -1596,5 +1964,94 @@ mod tests {
         assert_eq!(db.prune_push_seen().unwrap(), 1);
         assert_eq!(among(&["a", "b", "old"]), ["a", "b"]);
         assert_eq!(db.prune_push_seen().unwrap(), 0);
+    }
+
+    #[test]
+    fn all_time_spend_starts_from_history_once_and_never_goes_down() {
+        let path = std::env::temp_dir().join(format!("loft-all-time-{}.db", uuid::Uuid::new_v4()));
+        let end = |db: &Db, agent: &str, cost: Option<f64>| {
+            let meta = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c, "session_cost_usd": c }));
+            db.add_message(agent, None, "system", "run_end", "", meta).unwrap();
+        };
+        let near = |db: &Db, runs: i64, cost: f64| {
+            let (r, c) = db.all_time_spend().unwrap();
+            assert_eq!(r, runs);
+            assert!((c - cost).abs() < 1e-9, "{c} != {cost}");
+        };
+        {
+            let db = Db::open(&path).unwrap();
+            for id in ["a", "b"] {
+                db.save_agent(&agent(id)).unwrap();
+            }
+            end(&db, "a", Some(0.5));
+            end(&db, "a", None);
+            end(&db, "b", Some(1.25));
+            db.add_message("a", None, "assistant", "text", "hi", serde_json::json!({})).unwrap();
+        }
+        // A database from before the All-time spend existed: the history is all there is.
+        Connection::open(&path).unwrap().execute("DROP TABLE all_time_spend", []).unwrap();
+        let db = Db::open(&path).unwrap();
+        near(&db, 3, 1.75);
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        near(&db, 3, 1.75);
+
+        // A finished run adds one run and its cost.
+        end(&db, "b", Some(0.25));
+        near(&db, 4, 2.0);
+
+        // Clearing an agent's messages or deleting it leaves the total alone, also after a restart.
+        db.clear_messages("a").unwrap();
+        db.delete_agent("b").unwrap();
+        near(&db, 4, 2.0);
+        drop(db);
+        near(&Db::open(&path).unwrap(), 4, 2.0);
+    }
+
+    #[test]
+    fn the_run_ledger_starts_from_the_run_ends_there_are_once() {
+        use chrono::Duration;
+        let path = std::env::temp_dir().join(format!("loft-ledger-{}.db", uuid::Uuid::new_v4()));
+        let now = Utc::now();
+        let ago = |d: i64| (now - Duration::days(d)).to_rfc3339();
+        // What the period figures read before the ledger, straight from the run ends.
+        let from_messages = |c: &Connection, since: &str| -> (i64, f64) {
+            c.query_row(
+                "SELECT count(*), COALESCE(sum(json_extract(meta, '$.cost_usd')), 0) FROM messages WHERE kind = 'run_end' AND created_at >= ?1",
+                [since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        {
+            let db = Db::open(&path).unwrap();
+            db.save_agent(&agent("a")).unwrap();
+            // Today, 3 and 10 days ago, a stopped run 2 days ago, and one past what the ledger keeps.
+            for (d, meta) in [
+                (0, serde_json::json!({ "cost_usd": 0.5, "session_cost_usd": 0.5 })),
+                (3, serde_json::json!({ "cost_usd": 1.0, "session_cost_usd": 1.0 })),
+                (10, serde_json::json!({ "cost_usd": 2.0, "session_cost_usd": 2.0 })),
+                (2, serde_json::json!({ "stopped": true })),
+                (RUN_LEDGER_DAYS + 1, serde_json::json!({ "cost_usd": 4.0, "session_cost_usd": 4.0 })),
+            ] {
+                let m = db.add_message("a", None, "system", "run_end", "", meta).unwrap();
+                db.conn().execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", params![ago(d), m.id]).unwrap();
+            }
+        }
+        // A database from before the ledger existed.
+        Connection::open(&path).unwrap().execute("DROP TABLE run_ledger", []).unwrap();
+        let db = Db::open(&path).unwrap();
+        for since in [ago(7), ago(14)] {
+            let before = from_messages(&db.conn(), &since);
+            assert_eq!(db.spend_between(&since, None).unwrap(), before, "since {since}");
+        }
+        assert_eq!(db.spend_between(&ago(7), None).unwrap(), (3, 1.5));
+        let rows = |db: &Db| db.conn().query_row("SELECT count(*) FROM run_ledger", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows(&db), 4, "the run end past what the ledger keeps is pruned");
+        drop(db);
+        // Opened again, the ledger isn't filled a second time.
+        let db = Db::open(&path).unwrap();
+        assert_eq!(rows(&db), 4);
+        assert_eq!(db.spend_between(&ago(14), None).unwrap(), (4, 3.5));
     }
 }

@@ -78,7 +78,7 @@ export function useMention(agentId: string, text: string, setText: Dispatch<SetS
           >
             {"agent" in p ? (
               <>
-                <Sticker avatar={p.agent.avatar} lead={p.agent.lead} size={20} />
+                <Sticker avatar={p.agent.avatar} lead={p.agent.role === "lead"} size={20} />
                 <span className="text-[13px]">{p.agent.name}</span>
                 <span className="truncate text-[12px] text-fg-3">{p.agent.title}</span>
               </>
@@ -137,7 +137,7 @@ export function MentionMenu({ groups, index, marks, onHover, onPick }: {
                 }}
                 className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", n === index && "bg-white/[0.06]")}
               >
-                <Sticker avatar={a.avatar} lead={a.lead} size={20} />
+                <Sticker avatar={a.avatar} lead={a.role === "lead"} size={20} />
                 <span className="text-[13px]">{a.name}</span>
                 {marks[a.id] && <span className="rounded-full border border-line px-1.5 text-[10.5px] text-fg-2">{marks[a.id]}</span>}
                 <span className="truncate text-[12px] text-fg-3">{a.title}</span>
