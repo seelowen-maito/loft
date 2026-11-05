@@ -185,6 +185,33 @@ final class LoftStore {
     /// connection is left as it was; a relaunch starts from it again.
     private(set) var isDemo = false
 
+    /// The address that opens the demo instead of a server (App Review types it in). Matched on the text alone,
+    /// before any request: case, spaces, a trailing slash and the https:// prefix don't matter.
+    static let demoAddress = "demo-loft-dev.get-loft.com"
+
+    nonisolated static func isDemoAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["https://", "http://"] where s.hasPrefix(prefix) { s.removeFirst(prefix.count) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s == demoAddress
+    }
+
+    /// Connects to what was typed on the connect screen: the demo for the demo address (no request at all), the
+    /// server otherwise, saved for next time. False when it isn't an address.
+    @discardableResult
+    func connect(address: String) -> Bool {
+        if Self.isDemoAddress(address) {
+            enterDemo()
+            return true
+        }
+        guard let url = LiveLoftAPI.normalize(address) else { return false }
+        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
+        UserDefaults.standard.removeObject(forKey: "serverURL-override")
+        configure(LiveLoftAPI(baseURL: url))
+        activate()
+        return true
+    }
+
     func enterDemo() {
         deactivate()
         isDemo = true

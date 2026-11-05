@@ -43,6 +43,17 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
     }
 
+    /// What the sample issues are about (spec #144: the demo's issues open with a description).
+    static let descriptions: [String: String] = [
+        "t1": "Add a Settings screen that shows the server version and the last sync time, with a button to copy diagnostics.\n\nDone when the web and iOS both show it and QA has run the flow.",
+        "t2": "Expose `GET /api/settings/diagnostics` with the version, last sync and agent counts.",
+        "t3": "Build the iOS Settings screen against the new endpoints, with Dynamic Type and VoiceOver labels.",
+        "t4": "Run the settings flow end to end on the web and on iPhone once the backend and iOS work are in.",
+        "t5": "Read the current settings code and note what changes.",
+        "t6": "The loft.dev domain expires next month: renew it for two years.",
+        "t7": "The docs link checker reports broken links in the setup guide; fix them and rerun the checker.",
+    ]
+
     /// The agent answers each message half a second later, with no live event (like one missed in a reconnect).
     private let replies: Bool
     /// The demo's answers come from `demoReply` instead of one fixed line.
@@ -64,7 +75,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
-            HBTask(id: id, title: title, description: "", kind: agent == nil ? "todo" : "work", status: status, priority: priority,
+            HBTask(id: id, title: title, description: Self.descriptions[id] ?? "", kind: agent == nil ? "todo" : "work", status: status, priority: priority,
                    project: "loft", agentId: agent, parentId: parent, dependsOn: [], dueAt: nil, createdBy: by, note: note,
                    summary: status == "done" ? "Finished and pushed." : "", error: error, createdAt: ago(minutes), updatedAt: ago(minutes / 2),
                    startedAt: status == "inbox" ? nil : ago(minutes), completedAt: status == "done" ? ago(1) : nil)
@@ -578,6 +589,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }
+        // A comment waiting for GitHub: Approve (edited or not) or Keep in Loft shows in its issue's thread, as on the server.
+        let parts = path.split(separator: "/").map(String.init)
+        // "/api/issues/t1/comments/77/approve" → api, issues, t1, comments, 77, approve
+        if parts.count == 6, parts[1] == "issues" || parts[1] == "tasks", parts[3] == "comments", let cid = Int64(parts[4]) {
+            switch parts[5] {
+            case "approve": try await approveComment(taskId: parts[2], commentId: cid, text: body?["text"]?.stringValue)
+            case "keep": try await keepComment(taskId: parts[2], commentId: cid)
+            default: break
+            }
+        }
     }
 
     func registerDevice(_ d: DeviceRegistration) async throws { try check() }
@@ -654,7 +675,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     func pullRequests() async throws -> [PullRequest] {
         try check()
-        return [PullRequest(id: "pr1", agentId: "be", slug: "x/loft", number: 214, url: "https://github.com/x/loft/pull/214",
+        return [PullRequest(id: "pr1", agentId: "be", slug: "octo/loft", number: 214, url: "https://github.com/octo/loft/pull/214",
                             title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
