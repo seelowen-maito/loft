@@ -2422,7 +2422,8 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_run_keeps_answering_the_user() {
         let (st, a) = fake_claude_state();
-        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        // Running as far as Restart can tell: the run has registered whether it answers the user.
+        let running = |st: &AppState, id: &str| st.rt.lock().unwrap().runs.contains_key(id);
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
         until("the run to start", 10, || running(&st, &a.id)).await;
         restart(&st, &a.id).await;
