@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loft for iOS</title>
-<meta name="description" content="A native iOS app for loft: agent status, approvals, tasks and chat, with push notifications. Build it yourself from the repo with Xcode.">
+<meta name="description" content="A native iOS app for loft: agent status, approvals, tasks and chat, with push notifications. Join the beta on TestFlight, or build it yourself from the repo with Xcode.">
 <meta property="og:title" content="loft in your pocket">
 <meta property="og:description" content="A native iOS app for the loft running on your Mac.">
 <meta name="theme-color" content="#000000">
@@ -54,7 +54,8 @@
       <div class="copytext">
         <span class="exp"><i></i>Experimental</span>
         <h2 style="margin-top:18px">loft in your <span class="serif">pocket.</span></h2>
-        <p>A native iOS app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's not on the App Store yet, so you build it yourself from the repo with Xcode.</p>
+        <p>A native iOS app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's in beta on TestFlight. It needs loft running on your Mac, and Tailscale on your iPhone to reach it.</p>
+        <div class="cta" style="justify-content:flex-start"><a class="btn-primary btn lg" href="https://testflight.apple.com/join/w2rCtJYD">Join the beta on TestFlight</a><a class="btn lg" href="#setup">Or build it yourself</a></div>
         <ul>
           <li>Every agent's status, and a chat with each of them</li>
           <li>Approve or deny permission requests in one tap</li>
@@ -102,7 +103,7 @@
       <div class="center">
         <div class="eyebrow">Set up the iOS app</div>
         <h2>Build it, sign it, <span class="serif">get pinged.</span></h2>
-        <p class="sub">About half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
+        <p class="sub">Rather not? <a href="https://testflight.apple.com/join/w2rCtJYD">Join the beta on TestFlight</a> and skip to <a href="#connect">connecting it</a>. Building takes about half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
       </div>
       <ol>
         <li class="card g-step">
@@ -139,7 +140,7 @@ LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// you
             <p>Free Apple ID: personal teams can't sign push, so remove <b>Push Notifications</b> and <b>Time Sensitive Notifications</b> under <b>Signing &amp; Capabilities</b> before you build.</p>
           </div>
         </li>
-        <li class="card g-step">
+        <li class="card g-step" id="connect">
           <div class="n">03</div>
           <div>
             <h4>Let the phone reach loft</h4>

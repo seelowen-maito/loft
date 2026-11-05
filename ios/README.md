@@ -2,6 +2,8 @@
 
 A native SwiftUI client for Loft. It shows what your agents are doing, lets you talk to them, and lets you track their work as tasks from your iPhone. Loft itself keeps running on the Mac. The app is only a remote control: closing it or losing signal doesn't stop any agent.
 
+**Get it:** [join the beta on TestFlight](https://testflight.apple.com/join/w2rCtJYD). It needs Loft running on your Mac and Tailscale on the iPhone (see [Setup](#setup)). You can also build it yourself from this folder (see [Running it](#running-it)).
+
 ## How it fits Loft
 
 What was already there, and what the app uses:
