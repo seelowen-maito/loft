@@ -266,6 +266,11 @@ export default function AgentsPage() {
                           <span className="truncate text-[13.5px]">{a.name}</span>
                           {showsUnreadDot(a, selectedId) && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label="Unread reply" title="Unread reply" />}
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
+                          {!!a.project_problems?.length && (
+                            <span className="shrink-0 rounded-full border border-warn/60 px-1.5 font-mono text-[10px] text-warn" title={a.project_problems.map((f) => `${f.project}: ${f.problem}`).join("\n")}>
+                              pick projects
+                            </span>
+                          )}
                           {(a.running || listedContext(a) != null) && (
                             <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] tabular-nums text-fg-3">
                               {listedContext(a) != null && (
@@ -281,7 +286,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{s.label}</span>
                           ) : (
-                            <>{[a.title || "agent", shownProjects(a), a.project_problems?.length ? "pick this agent's projects" : "", a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
+                            <>{[a.title || "agent", shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>
