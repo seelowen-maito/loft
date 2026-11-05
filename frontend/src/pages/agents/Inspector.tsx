@@ -167,6 +167,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
 
       <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
         <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
+        {agent.project_problems?.length ? (
+          <div className="mt-2 space-y-1 text-[12px] text-warn">
+            <div>Pick this agent's projects: each must be one repo.</div>
+            {agent.project_problems.map((f) => <div key={f.project}>{f.project}: {f.problem}</div>)}
+          </div>
+        ) : null}
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">

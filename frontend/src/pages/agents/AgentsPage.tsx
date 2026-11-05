@@ -271,7 +271,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{s.label}</span>
                           ) : (
-                            <>{[a.title || "agent", shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
+                            <>{[a.title || "agent", shownProjects(a), a.project_problems?.length ? "pick this agent's projects" : "", a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>

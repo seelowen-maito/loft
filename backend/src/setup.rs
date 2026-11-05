@@ -795,6 +795,7 @@ mod tests {
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
         st.db.save_agent(&me).unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("work/api")).unwrap();
         let out = create_agent(&st, &me, &json!({
             "template": "security", "project": "work/api", "prompt": "An Axum API behind Cloudflare.",
             // Not fields an agent can set: ignored.
@@ -811,6 +812,7 @@ mod tests {
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
 
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         // Same name in the same project: refused. In another project: fine.
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "work/api" })).await.is_err());
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "site" })).await.is_ok());
@@ -948,6 +950,7 @@ mod tests {
         st.settings.save(set).unwrap();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
@@ -1051,6 +1054,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let st = state();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
         let out = create_agent(&st, &me, &json!({ "template": "lead", "project": "homebase" })).await.unwrap();
         assert!(out.contains("It is the project's Lead."), "{out}");
         let first = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Lead").unwrap();
@@ -1069,9 +1073,11 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
         let role = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap().role;
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
         let out = create_agent(&st, &me, &json!({ "template": "dev", "name": "Boss", "project": "homebase", "role": "lead" })).await.unwrap();
         assert!(out.contains("It is the project's Lead."), "{out}");
         assert_eq!(role("Boss"), "lead");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("garden")).unwrap();
         create_agent(&st, &me, &json!({ "template": "lead", "name": "Helper", "project": "garden", "role": "qa" })).await.unwrap();
         assert_eq!(role("Helper"), "qa");
         // Without `role`, the template's, and Custom without a template.
@@ -1089,6 +1095,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let st = crate::planning::tests::state();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("lead-std")).unwrap();
         create_agent(&st, &me, &json!({ "template": "lead", "project": "lead-std" })).await.unwrap();
         let lead = st.db.list_agents().unwrap().into_iter().find(|a| a.project == "lead-std").unwrap();
         let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
