@@ -108,7 +108,7 @@ struct ComposerView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let q = MentionQuery.query(in: text) {
-                MentionPicker(agents: MentionQuery.matches(q, in: store.agents, excluding: recipient)) { a in
+                MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
                     text = MentionQuery.insert(a, into: text)
                 }
             }
@@ -654,11 +654,12 @@ struct AutoSendBar: View {
 
 /// The agents to mention while "@…" is typed: sticker and name. Picking one puts its exact name in the message.
 struct MentionPicker: View {
-    let agents: [Agent]
+    let sections: [(title: String, agents: [Agent])]
     let pick: (Agent) -> Void
 
     var body: some View {
-        if agents.isEmpty {
+        let rows = sections.reduce(0) { $0 + $1.agents.count + 1 }
+        if sections.isEmpty {
             Text("No agent by that name").font(.footnote).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
@@ -668,24 +669,30 @@ struct MentionPicker: View {
                 // Every match, scrolling past about five rows so the chat above stays in view.
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(agents) { a in
-                            Button { pick(a) } label: {
-                                HStack(spacing: 10) {
-                                    AgentAvatar(name: a.name, id: a.id, size: 28)
-                                    Text(a.name).font(.subheadline).foregroundStyle(.primary)
-                                    Spacer()
+                        ForEach(sections, id: \.title) { section in
+                            Text(section.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.top, 6)
+                                .accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("mentionSection-\(section.title)")
+                            ForEach(section.agents) { a in
+                                Button { pick(a) } label: {
+                                    HStack(spacing: 10) {
+                                        AgentAvatar(name: a.name, id: a.id, size: 28)
+                                        Text(a.name).font(.subheadline).foregroundStyle(.primary)
+                                        Spacer()
+                                    }
+                                    .frame(minHeight: 44)
+                                    .contentShape(Rectangle())
                                 }
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Mention \(a.name)")
+                                .accessibilityIdentifier("mention-\(a.name)")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Mention \(a.name)")
-                            .accessibilityIdentifier("mention-\(a.name)")
                         }
                     }
                 }
                 .frame(maxHeight: 44 * 5.5)
-                .fixedSize(horizontal: false, vertical: agents.count <= 5)
+                .fixedSize(horizontal: false, vertical: rows <= 6)
                 .scrollBounceBehavior(.basedOnSize)
                 .accessibilityIdentifier("mentionList")
             }

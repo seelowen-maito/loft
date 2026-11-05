@@ -169,7 +169,9 @@ final class LoftUITests: XCTestCase {
         let qa = app.buttons["mention-QA Agent"]
         XCTAssertTrue(qa.appears(timeout: 5), "the agents show without typing")
         XCTAssertFalse(app.buttons["mention-Orchestrator"].exists, "not this chat's own agent")
-        XCTAssertFalse(app.buttons["mention-Docs Agent"].exists, "another project: the backend would not deliver it")
+        XCTAssertTrue(any("mentionSection-Loft", app).exists, "this chat's team first, under its group")
+        XCTAssertTrue(any("mentionSection-Other agents", app).exists)
+        XCTAssertTrue(app.buttons["mention-Docs Agent"].exists, "another team: the backend delivers it too")
         qa.tap()
         XCTAssertEqual(composerValue(app), "@QA Agent ")
         XCTAssertFalse(qa.exists, "the list goes once one is picked")
@@ -185,6 +187,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(mic.appears(timeout: 5))
         mic.press(forDuration: 0.8)
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+    }
+
+    /// The agent screen shows the agent's group and its projects, main first.
+    func testAgentDetailsShowGroupAndProjects() {
+        let app = launch()
+        openOrchestratorChat(app)
+        app.buttons["Conversation options"].tap()
+        app.buttons["Agent details"].tap()
+        let projects = text(containing: "loft (main), website", app)
+        XCTAssertTrue(app.staticTexts["Orchestrator"].appears(timeout: 5))
+        for _ in 0..<6 where !projects.exists { app.swipeUp(velocity: .fast) }
+        XCTAssertTrue(projects.exists)
+        XCTAssertTrue(app.staticTexts["Group, Loft"].exists)
     }
 
     /// Agent messages in the fixture chat: the FYI one carries the mark (and says so to VoiceOver), the needs-action one doesn't.

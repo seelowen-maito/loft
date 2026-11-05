@@ -128,7 +128,12 @@ struct AgentDetailView: View {
                 LabeledContent("Agent ID") {
                     Text(agent.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                 }
-                if let p = agent.project, !p.isEmpty { LabeledContent("Project", value: p) }
+                if let g = agent.group, !g.trimmingCharacters(in: .whitespaces).isEmpty { LabeledContent("Group", value: g) }
+                if agent.allProjects.count > 1 {
+                    LabeledContent("Projects", value: agent.allProjects.enumerated().map { $0.offset == 0 ? "\($0.element) (main)" : $0.element }.joined(separator: ", "))
+                } else if let p = agent.allProjects.first {
+                    LabeledContent("Project", value: p)
+                }
                 if let m = agent.model, !m.isEmpty { LabeledContent("Model", value: [m, agent.effort ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")) }
                 if let mode = agent.permissionMode { LabeledContent("Permissions", value: Self.describe(mode: mode)) }
                 LabeledContent("Schedule", value: (agent.intervalMinutes ?? 0) > 0 ? "Every \(Self.describe(minutes: agent.intervalMinutes!))" : "Only when messaged")
