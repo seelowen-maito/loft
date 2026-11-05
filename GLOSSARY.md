@@ -9,7 +9,7 @@ A long-lived Claude Code worker with its own name, instructions, memory and work
 _Avoid_: Bot, assistant
 
 **Group**:
-A named set of projects and the agents that work on them, such as Dineout or Loft. It is a label that can point at a folder; Loft then suggests the git repos inside that folder as the group's projects. The folder itself is never a project.
+A label that keeps agents together, such as Dineout or Loft. It owns no projects, folder or main project, and is never a repo or a place to publish: projects belong to each agent.
 _Avoid_: Workspace, organisation
 
 **Team**:
