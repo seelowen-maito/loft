@@ -132,6 +132,16 @@ pub fn route(state: &AppState) -> Route {
 /// project can receive relay keys and push text under its name; LOFT_RELAY_URL sets it meanwhile.
 const RELAY_URL: &str = "";
 
+/// The push portal, where a user signs in and gets a relay key (spec #265). Empty until it's live, so
+/// Settings shows no dead link; LOFT_PORTAL_URL sets it meanwhile.
+const PORTAL_URL: &str = "";
+
+pub fn portal_url() -> Option<String> {
+    let url = std::env::var("LOFT_PORTAL_URL").unwrap_or_else(|_| PORTAL_URL.into());
+    let url = url.trim();
+    (url.starts_with("https://") || (cfg!(test) && url.starts_with("http://"))).then(|| url.to_string())
+}
+
 fn relay_url() -> Option<String> {
     let url = std::env::var("LOFT_RELAY_URL").unwrap_or_else(|_| if cfg!(test) { "http://127.0.0.1:9".into() } else { RELAY_URL.into() });
     (!url.trim().is_empty()).then_some(url)

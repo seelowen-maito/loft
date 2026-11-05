@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BellRing, KeyRound, Smartphone, Trash2 } from "lucide-react";
+import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
 import { api, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
 
@@ -100,13 +100,23 @@ export function PushSettings() {
             <button type="button" className="btn" disabled={busy} onClick={() => change({ remove_relay_key: true }, "Relay key removed.")}>
               Remove relay key
             </button>
+            {status.portal_url && (
+              <a className="text-[12px] text-fg-3 underline hover:text-fg" href={status.portal_url} target="_blank" rel="noreferrer">
+                Manage keys
+              </a>
+            )}
           </div>
         ) : (
           <>
             <p className="text-[12px] text-fg-3">
               Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
-              and are never stored. Paste the relay key you were given.
+              and are never stored. {status.portal_url ? "Sign in on the Loft portal, then paste the relay key it gives you." : "Paste the relay key you were given."}
             </p>
+            {status.portal_url && (
+              <a className="btn w-fit" href={status.portal_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="size-3.5" /> Open the Loft portal to sign in
+              </a>
+            )}
             <div className="flex gap-2">
               <input
                 className="input font-mono"

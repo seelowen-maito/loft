@@ -20,7 +20,9 @@ paths: which phones, which kinds, quiet hours, the rate limit and the payload.
 ## The Loft relay
 
 The relay is login-only. A relay key comes from the operator for now (`relay/scripts/create-key.js`) and later from
-the push portal (Sign in with Apple). It's pasted in Settings → Push notifications → Loft relay and kept owner-only in
+the push portal (Sign in with Apple). When the portal's address is known (`PORTAL_URL` in `backend/src/apns.rs`, empty until it's live, or
+`LOFT_PORTAL_URL`, https only), Settings shows "Open the Loft portal to sign in" and, with a key stored, "Manage keys";
+without it, only the text. The key is pasted in Settings → Push notifications → Loft relay and kept owner-only in
 the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
 phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
 answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its

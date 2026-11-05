@@ -219,6 +219,8 @@ export type PushStatus = {
   path: "own_key" | "relay" | "none";
   /** Whether a relay key is stored. */
   relay_key: boolean;
+  /** The push portal, where the user signs in for a relay key; null until it's live. */
+  portal_url: string | null;
   configured: boolean;
   key_present: boolean;
   key_id: string;

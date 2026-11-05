@@ -154,6 +154,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(Json(json!({
         "path": route.name(),
         "relay_key": apns::relay_key_present(),
+        "portal_url": apns::portal_url(),
         "configured": route == apns::Route::OwnKey,
         "key_present": key,
         "key_id": s.key_id,
@@ -250,6 +251,21 @@ mod tests {
         assert_eq!(s["relay_key"], json!(true));
         let text = s.to_string();
         assert!(!text.contains("lrk_") && !text.contains("PRIVATE KEY"), "{text}");
+        // No portal yet: no link to show.
+        assert_eq!(s["portal_url"], Value::Null);
+    }
+
+    #[test]
+    fn the_portal_link_is_only_given_when_it_is_an_https_url() {
+        // Set and cleared in one test, so no other test sees it.
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", " https://loft-push-relay.vercel.app/account ") };
+        assert_eq!(crate::apns::portal_url().as_deref(), Some("https://loft-push-relay.vercel.app/account"));
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", "javascript:alert(1)") };
+        assert_eq!(crate::apns::portal_url(), None);
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", "") };
+        assert_eq!(crate::apns::portal_url(), None);
+        unsafe { std::env::remove_var("LOFT_PORTAL_URL") };
+        assert_eq!(crate::apns::portal_url(), None, "empty by default");
     }
 
     #[tokio::test]
