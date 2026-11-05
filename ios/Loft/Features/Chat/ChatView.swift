@@ -794,7 +794,7 @@ private struct MessageBubble: View {
                         .font(.body)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .foregroundStyle(isUser ? .white : .primary)
+                        .foregroundStyle(isUser ? Theme.onAccent : .primary)
                         .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
                                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     HStack(spacing: 6) {
@@ -853,7 +853,7 @@ struct ReadAloudBar: View {
                 Button { speaker.interrupt(.stop) } label: {
                     Label("Stop", systemImage: "stop.fill").frame(minWidth: 72, minHeight: 36)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityHint("Stops reading")
                 .accessibilityIdentifier("readAloudStop")
             }
@@ -937,7 +937,7 @@ private struct RouteSuggestionBar: View {
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("Send", action: send)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityIdentifier("routeSend")
             Button(action: dismiss) { Image(systemName: "xmark") }
                 .buttonStyle(.bordered)
@@ -1022,7 +1022,7 @@ private struct PendingBubble: View {
                 Text(message.text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.onAccent)
                     .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 if let failure = message.failure {
                     Label("Not sent: \(failure)", systemImage: "exclamationmark.circle")
@@ -1038,7 +1038,7 @@ private struct PendingBubble: View {
                         Button { Task { await store.retry(message) } } label: {
                             Label("Retry", systemImage: "arrow.clockwise").padding(.vertical, 6)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .disabled(!store.canWrite)
                         .accessibilityIdentifier("retrySend")
                     }

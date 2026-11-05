@@ -46,7 +46,7 @@ struct TalkConfirmBar: View {
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("talkEdit")
                 Button { apply(.sendTapped) } label: { sendLabel }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .disabled(!store.canWrite)
                     .accessibilityIdentifier("talkSend")
             }
@@ -90,9 +90,9 @@ struct TalkConfirmBar: View {
             if case .counting(let since) = state, askAfterPause {
                 TimelineView(.periodic(from: since, by: 0.25)) { ctx in
                     Circle().trim(from: 0, to: TalkConfirm.progress(since: since, now: ctx.date))
-                        .stroke(.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .stroke(Theme.onAccent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .background(Circle().stroke(.white.opacity(0.3), lineWidth: 2.5))
+                        .background(Circle().stroke(Theme.onAccent.opacity(0.3), lineWidth: 2.5))
                         .frame(width: 14, height: 14)
                 }
                 .accessibilityHidden(true)

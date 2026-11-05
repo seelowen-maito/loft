@@ -72,7 +72,7 @@ struct ConversationsView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         Button("Choose agent") { choosing = true }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.accent)
                             .disabled(store.agents.isEmpty)
                     }
                     .padding(.vertical, 6)
