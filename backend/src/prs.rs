@@ -193,15 +193,16 @@ async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
 
 /// A checker's verdict on a PR: sets the label for `kind` (tests, qa or security) and removes its opposite in one
 /// call, after creating the label if the repo doesn't have it. `sha` is the head commit the checker tested.
-/// Only an agent with the reviewer role in the project of the agent that opened the PR may.
+/// Only a QA, Security or Code reviewer agent in the team of the agent that opened the PR may.
 pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str) -> Result<String, String> {
     let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
     let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
     let known = state.db.list_pull_requests(None).map_err(|e| e.to_string())?.into_iter().find(|p| p.slug == slug && p.number == number);
     let pr = known.ok_or("Loft doesn't track that pull request: its opener shares it with share_pull_request first.")?;
     let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
-    if me.role != "reviewer" || opener.is_none_or(|o| o.project.trim() != me.project.trim()) {
-        return Err("Only a reviewer agent of the project that opened this pull request can set its verdict.".into());
+    let checker = matches!(me.role.as_str(), "qa" | "security" | "code_reviewer");
+    if !checker || opener.is_none_or(|o| me.team().is_empty() || o.team() != me.team()) {
+        return Err("Only a QA, Security or Code reviewer agent of the team that opened this pull request can set its verdict.".into());
     }
     // Read it fresh (a 304 when unchanged): a verdict is about the head commit it was tested on.
     let pr = refresh(state, &pr.id).await.map_err(|e| e.to_string())?;
@@ -695,7 +696,7 @@ mod tests {
         st.db.save_agent(&dev).unwrap();
         let mut qa = crate::tasks::tests::agent(st, &format!("Tester {project}"));
         qa.project = project.into();
-        qa.role = "reviewer".into();
+        qa.role = "qa".into();
         st.db.save_agent(&qa).unwrap();
         (dev, qa)
     }
@@ -777,7 +778,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_reviewer_of_the_prs_project_can_set_a_verdict_and_only_for_its_head() {
+    async fn only_a_checker_of_the_prs_team_can_set_a_verdict_and_only_for_its_head() {
         let st = state_with_token();
         let fake = own_fake(&st);
         let slug = "octo/pr-auth";
@@ -791,8 +792,22 @@ mod tests {
 
         for who in [&dev, &other_qa] {
             let err = set_verdict(&st, who, url, "tests", true, "ccc3333").await.unwrap_err();
-            assert!(err.starts_with("Only a reviewer agent of the project"), "{err}");
+            assert!(err.starts_with("Only a QA, Security or Code reviewer agent of the team"), "{err}");
         }
+        // Every checker role of the team's group may, wherever its project is; the old "reviewer" role may not.
+        let mut sec = qa.clone();
+        (sec.role, sec.group, sec.project) = ("security".into(), "Grp".into(), "other-repo".into());
+        let mut opener = dev.clone();
+        (opener.group, opener.project) = ("Grp".into(), "pr-auth".into());
+        st.db.save_agent(&opener).unwrap();
+        let mut qa = qa;
+        qa.group = "Grp".into();
+        st.db.save_agent(&qa).unwrap();
+        let mut old = sec.clone();
+        old.role = "reviewer".into();
+        assert!(set_verdict(&st, &old, url, "tests", true, "zzz9999").await.unwrap_err().starts_with("Only a QA"));
+        let err = set_verdict(&st, &sec, url, "tests", true, "zzz9999").await.unwrap_err();
+        assert!(err.contains("Its head is now"), "{err}");
         let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999").await.unwrap_err();
         assert!(err.contains("Its head is now ccc3333"), "{err}");
         assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333").await.unwrap_err().contains("kind must be"));
