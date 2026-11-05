@@ -8,12 +8,13 @@ export const teamOf = (a: Teamed) => a.group?.trim() || a.project?.trim() || "";
 /** The projects an agent works in, main first. A server without groups only sends `project`. */
 export const projectsOf = (a: Teamed) => (a.projects?.length ? a.projects : [a.project?.trim() ?? ""].filter(Boolean));
 
-/** The header badge: its group, main project and "+N" for the others; `all` lists every project, main first. */
-export function teamBadge(a: Teamed): { text: string; all: string[] } {
+/** The header badge: its group, main project and "+N" for the others; `compact` is the short form for a phone; `all` lists every project, main first. */
+export function teamBadge(a: Teamed): { text: string; compact: string; all: string[] } {
   const all = projectsOf(a);
   const main = all[0] && all[0] !== a.group?.trim() ? all[0] : "";
   const more = all.length > 1 ? `+${all.length - 1}` : "";
-  return { text: [a.group?.trim(), main, more].filter(Boolean).join(" · "), all };
+  const text = [a.group?.trim(), main, more].filter(Boolean).join(" · ");
+  return { text, compact: more || text, all };
 }
 
 /** Agents grouped by team, named teams A–Z, then those without one. */

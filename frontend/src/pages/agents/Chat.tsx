@@ -393,15 +393,16 @@ export function Chat({
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
+            <h2 className="min-w-[7ch] truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
             {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
             {teamOf(agent) && (
               <HoverTip
                 left
                 className="min-w-0 shrink rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3"
-                tip={teamBadge(agent).all.map((p) => <span key={p} className="text-fg-2">{p}</span>)}
+                tip={teamBadge(agent).all.map((p, i) => <span key={p} className="text-fg-2">{p}{i === 0 && <span className="text-accent"> · main</span>}</span>)}
               >
-                <span className="truncate">{teamBadge(agent).text}</span>
+                <span className="truncate max-sm:hidden">{teamBadge(agent).text}</span>
+                <span className="sm:hidden">{teamBadge(agent).compact}</span>
               </HoverTip>
             )}
           </div>

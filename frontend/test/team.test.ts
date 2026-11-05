@@ -49,8 +49,9 @@ test("a project outside the agent's warns, but only when it has projects", () =>
 
 test("the header badge is the group, the main project and +N; the tip lists them all", () => {
   const web = a("Web", "acme", "api", ["api", "web", "docs", "infra", "site", "ios"]);
-  assert.deepEqual(teamBadge(web), { text: "acme · api · +5", all: ["api", "web", "docs", "infra", "site", "ios"] });
+  assert.deepEqual(teamBadge(web), { text: "acme · api · +5", compact: "+5", all: ["api", "web", "docs", "infra", "site", "ios"] });
   assert.equal(teamBadge(a("One", "acme", "api", ["api"])).text, "acme · api");
   assert.equal(teamBadge(a("Same", "api", "api", ["api"])).text, "api", "a group named after its only project says it once");
+  assert.equal(teamBadge(a("One", "acme", "api", ["api"])).compact, "acme · api", "without others the compact badge is the full one");
   assert.equal(teamBadge(a("Old", undefined, "api")).text, "api · +0".replace(" · +0", ""));
 });
