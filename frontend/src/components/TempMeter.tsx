@@ -3,6 +3,7 @@ import { MemoryStick, Thermometer } from "lucide-react";
 import { api, type SystemReading } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
+import { HoverTip } from "./HoverTip";
 
 const tone = (l: SystemReading["level"]) => (l === "hot" ? "text-bad" : l === "warm" ? "text-warn" : "text-fg-3");
 const memTone = (l: SystemReading["mem_level"]) => (l === "critical" ? "text-bad" : l === "high" ? "text-warn" : "text-fg-3");
@@ -21,22 +22,34 @@ export function TempMeter({ live }: { live: boolean }) {
   return (
     <>
       {used != null && total != null && (
-        <span
-          className={cx("flex items-center gap-1 font-mono text-[11px] tabular-nums", memTone(r.mem_level))}
-          title={`Memory used ${(used / 2 ** 30).toFixed(1)} of ${gb(total)} GB, sampled every 30 s`}
+        <HoverTip
+          className={cx("font-mono text-[11px] tabular-nums", memTone(r.mem_level))}
+          tip={
+            <>
+              <span className="text-fg-2">
+                Memory used {(used / 2 ** 30).toFixed(1)} of {gb(total)} GB
+              </span>
+              <span className="text-fg-3">Sampled every 30 s</span>
+            </>
+          }
         >
           <MemoryStick className="size-3.5" />
           RAM {Math.round((used / total) * 100)}%
-        </span>
+        </HoverTip>
       )}
       {r.cpu_temp_c != null && (
-        <span
-          className={cx("flex items-center gap-1 font-mono text-[11px] tabular-nums", tone(r.level))}
-          title={`CPU ${r.cpu_temp_c.toFixed(1)} °C (hottest die sensor), sampled every 30 s`}
+        <HoverTip
+          className={cx("font-mono text-[11px] tabular-nums", tone(r.level))}
+          tip={
+            <>
+              <span className="text-fg-2">CPU {r.cpu_temp_c.toFixed(1)} °C (hottest die sensor)</span>
+              <span className="text-fg-3">Sampled every 30 s</span>
+            </>
+          }
         >
           <Thermometer className="size-3.5" />
           {Math.round(r.cpu_temp_c)}°
-        </span>
+        </HoverTip>
       )}
     </>
   );
