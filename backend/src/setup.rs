@@ -624,7 +624,11 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     if all.len() >= MAX_AGENTS {
         return Err(format!("Loft already has {} agents. Ask the user to delete some before creating more.", all.len()));
     }
-    // The project's folder, for the instructions; a project that isn't a folder is just a tag.
+    // Refused before the user is asked to approve an agent that can't be saved anyway.
+    if !project.is_empty() && let Some(why) = crate::repos::project_problem(state, &project) {
+        return Err(why);
+    }
+    // The project's folder, for the instructions.
     let path = if project.is_empty() { String::new() } else { state.settings.boot().projects_dir.join(&project).display().to_string() };
 
     let custom = s("prompt");
@@ -813,6 +817,11 @@ mod tests {
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
 
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
+        // A project that isn't one: refused before anyone is asked.
+        let err = create_agent(&st, &agent(&st, "Dev"), &json!({ "template": "docs", "project": "nowhere" })).await.unwrap_err();
+        assert!(err.ends_with("nowhere doesn't exist"), "{err}");
+        assert!(st.db.list_permissions(None).unwrap().is_empty(), "no permission card");
+
         // Same name in the same project: refused. In another project: fine.
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "work/api" })).await.is_err());
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "site" })).await.is_ok());
@@ -840,6 +849,7 @@ mod tests {
     async fn other_agents_need_the_users_approval() {
         let st = state();
         let me = agent(&st, "Dev");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         let st2 = st.clone();
         let call = tokio::spawn(async move { create_agent(&st2, &me, &json!({ "template": "docs", "project": "site" })).await });
         // A permission card waits for the user; deny it.
