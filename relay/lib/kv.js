@@ -17,6 +17,9 @@ export function kv(env) {
   const command = async (...args) => (await call("", args)).result;
   return {
     set: (key, value) => command("SET", key, value),
+    /** Sets `key` only when it isn't there yet. */
+    setIfMissing: (key, value) => command("SET", key, value, "NX"),
+    sadd: (key, member) => command("SADD", key, member),
     exists: async (key) => (await command("EXISTS", key)) === 1,
     /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. One round trip, so a
      *  counter never stays without its expiry. */

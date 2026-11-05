@@ -97,9 +97,9 @@ test("a relay key is a secret: only its hash and label are stored", async () => 
   assert.notEqual(await newKey(), key, "each one is new");
 });
 
-test("there's no endpoint that hands out keys", async () => {
+test("the only endpoint that hands out keys is the portal's, behind Sign in with Apple", async () => {
   const { readdir } = await import("node:fs/promises");
-  assert.deepEqual(await readdir(new URL("../api/", import.meta.url)), ["push.js"]);
+  assert.deepEqual((await readdir(new URL("../api/", import.meta.url))).sort(), ["auth-callback.js", "auth-start.js", "keys.js", "portal.js", "push.js"]);
 });
 
 test("a push is forwarded to Apple's host for its environment, with the Loft topic and the payload unchanged", async () => {
