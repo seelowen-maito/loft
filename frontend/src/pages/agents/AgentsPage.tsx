@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
-import { cx, timeAgo } from "../../lib/format";
+import { cx, fmtNum, timeAgo } from "../../lib/format";
+import { contextWarns, listedContext } from "../../lib/context";
 import { groupByTeam, projectsOf, teamOf } from "../../lib/team";
 import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
 import { Sticker } from "../../components/Sticker";
@@ -265,7 +266,16 @@ export default function AgentsPage() {
                           <span className="truncate text-[13.5px]">{a.name}</span>
                           {showsUnreadDot(a, selectedId) && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label="Unread reply" title="Unread reply" />}
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
-                          {a.running && <RunTimer startedAt={a.last_run_at} className="ml-auto shrink-0 font-mono text-[10.5px] text-fg-3" />}
+                          {(a.running || listedContext(a) != null) && (
+                            <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] tabular-nums text-fg-3">
+                              {listedContext(a) != null && (
+                                <span className={cx(contextWarns(listedContext(a)!) && "text-warn")} title={`${listedContext(a)!.toLocaleString()} tokens in context as of the last reply`}>
+                                  {fmtNum(listedContext(a)!)}
+                                </span>
+                              )}
+                              {a.running && <RunTimer startedAt={a.last_run_at} />}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10.5px] text-fg-3">
                           {a.running || a.status === "waiting" ? (
@@ -358,7 +368,8 @@ export default function AgentsPage() {
 /** Its projects for the roster row, unless it only has the one its group is named after. */
 function shownProjects(a: Agent): string {
   const ps = projectsOf(a);
-  return ps.length === 1 && ps[0] === teamOf(a) ? "" : ps.join(", ");
+  if (ps.length === 1 && ps[0] === teamOf(a)) return "";
+  return ps.length > 2 ? `${ps[0]} +${ps.length - 1}` : ps.join(", ");
 }
 
 /** `as` with agent `id` moved into `targetId`'s slot; unchanged across groups. */

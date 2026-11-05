@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupByTeam, outsideWarning, projectChoices, projectsOf, teamOf, withProject } from "../src/lib/team.ts";
+import { groupByTeam, teamBadge, outsideWarning, projectChoices, projectsOf, teamOf, withProject } from "../src/lib/team.ts";
 
 const a = (name: string, group: string | undefined, project: string, projects?: string[]) => ({ name, group, project, projects });
 
@@ -45,4 +45,13 @@ test("a project outside the agent's warns, but only when it has projects", () =>
   assert.equal(outsideWarning(web, ""), null);
   assert.equal(outsideWarning(a("Loose", "", "", []), "api"), null);
   assert.match(outsideWarning(web, "api") ?? "", /^Web doesn't work in api \(its projects: b2c, b2b\)/);
+});
+
+test("the header badge is the group, the main project and +N; the tip lists them all", () => {
+  const web = a("Web", "acme", "api", ["api", "web", "docs", "infra", "site", "ios"]);
+  assert.deepEqual(teamBadge(web), { text: "acme · api · +5", compact: "+5", all: ["api", "web", "docs", "infra", "site", "ios"] });
+  assert.equal(teamBadge(a("One", "acme", "api", ["api"])).text, "acme · api");
+  assert.equal(teamBadge(a("Same", "api", "api", ["api"])).text, "api", "a group named after its only project says it once");
+  assert.equal(teamBadge(a("One", "acme", "api", ["api"])).compact, "", "without others a phone shows no badge");
+  assert.equal(teamBadge(a("Old", undefined, "api")).text, "api · +0".replace(" · +0", ""));
 });
