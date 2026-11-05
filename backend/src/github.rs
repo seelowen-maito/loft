@@ -136,7 +136,7 @@ pub fn token(state: &AppState) -> Option<String> {
 }
 
 /// The REST/GraphQL API root; tests point it at a local fake with LOFT_GITHUB_API_URL.
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     std::env::var("LOFT_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into())
 }
 

@@ -96,6 +96,9 @@ pub struct IssueLink {
     /// The Loft issue, for a plan saved in Loft instead of on GitHub.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
+    /// The GitHub repo of a ticket filed in another repo than its spec's; empty in the plan's own repo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,7 +184,7 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
         }
     }
     for t in tickets {
-        if !p.tickets.iter().any(|o| o.number == t.number) {
+        if !p.tickets.iter().any(|o| o.number == t.number && o.repo == t.repo) {
             p.tickets.push(t);
         }
     }
@@ -197,14 +200,17 @@ fn which_project(a: &Agent) -> String {
         return String::new();
     }
     let list = a.projects.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
-    format!(" You work in several projects ({list}): unless the user already said which one this is about, the first round asks it, with the most likely one as the recommendation. Read that project's documents, and pass it as `project` to publish_spec and publish_tickets.")
+    format!(" You work in several projects ({list}): unless the user already said which one this is about, the first round asks it, with the most likely one as the recommendation. Read that project's documents, and pass it as `project` to publish_spec and publish_tickets; a ticket for another of your projects names it as its own `project`.")
 }
 
 /// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
-    let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
+    let url = |i: &IssueLink| match (p.repo.as_str(), i.repo.as_str()) {
+        ("", _) => format!("/tasks/{}", i.id),
+        (repo, "") | (_, repo) => format!("https://github.com/{repo}/issues/{}", i.number),
+    };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
     // A spec's Delivery, or a single standalone ticket's.
     let has = |n: i64| matches!(state.db.get_delivery(&p.repo, n), Ok(Some(_)));
@@ -1186,6 +1192,9 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
   ## Out of Scope
   - <What this spec doesn't cover.>
 
+  ## Repos
+  - <Each project this touches, and what changes there.>
+
   ## Further Notes
   - <Anything else: the glossary terms and ADRs it relies on.>
   ```
@@ -1198,13 +1207,16 @@ Once the spec is published, split it into tickets the team can pick up.
 - Vertical slices: each ticket is a thin tracer bullet through every layer it touches (data, API, UI, tests), verifiable on its own. Never one ticket per layer; prefer several thin slices to one thick one.
 - Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
 - Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
-- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
+- Repos: each ticket goes to one repo, one of your projects; propose it from what the slice touches. A slice that spans repos (an API plus a UI) becomes one ticket per repo, the UI one blocked by the API one, or names the primary repo it's mostly in.
+- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, its repo, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
 - Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
 
   ```md
   ## Parent
 
   #<spec number>
+
+  Repo: <project>
 
   ## What to build
 
@@ -1215,7 +1227,7 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it and, when it isn't the spec's repo, its `project`. A ticket in another repo is created there, still a sub-issue of the spec and linked to its blockers across repos. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
 /// The grill instructions in full.
 pub fn brief() -> String {
@@ -1888,7 +1900,7 @@ pub(crate) mod tests {
         assert!(wake.contains("about 92k tokens") && wake.contains("suggesting they type `/compact`"), "{wake}");
 
         // Once the tickets are published, the spec is written: no point compacting for it.
-        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into(), id: String::new() }), vec![IssueLink { number: 5, title: "Plans".into(), id: String::new() }]);
+        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into(), id: String::new(), repo: String::new() }), vec![IssueLink { number: 5, title: "Plans".into(), id: String::new(), repo: String::new() }]);
         round(&st, &o, &["Annual too?"]).unwrap();
         assert!(!send(&st, &o).unwrap().contains("/compact"));
     }
