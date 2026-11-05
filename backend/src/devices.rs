@@ -144,13 +144,18 @@ pub async fn test(State(state): State<AppState>, Path(token): Path<String>) -> A
     }
 }
 
-/// `GET /api/push`: whether push is set up. Never includes the key.
+/// `GET /api/push`: which path pushes take (`own_key`, straight to Apple; `relay`, the Loft push relay;
+/// `none`, no push) and the key's ids. Never the key or the relay key, only whether each is there.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Value> {
     same_site_read(&headers)?;
     let s = state.settings.get().push;
     let key = apns::key_present();
+    let route = apns::route(&state);
     Ok(Json(json!({
-        "configured": key && !s.key_id.trim().is_empty() && !s.team_id.trim().is_empty(),
+        "path": route.name(),
+        "relay_key": apns::relay_key_present(),
+        "portal_url": apns::portal_url(),
+        "configured": route == apns::Route::OwnKey,
         "key_present": key,
         "key_id": s.key_id,
         "team_id": s.team_id,
@@ -169,9 +174,14 @@ pub struct Configure {
     /// Removes the stored key.
     #[serde(default)]
     remove_key: bool,
+    /// The relay key from the push portal. Stored owner-only like the `.p8`; never echoed back.
+    relay_key: Option<String>,
+    /// Removes the stored relay key.
+    #[serde(default)]
+    remove_relay_key: bool,
 }
 
-/// `PUT /api/push`: key id, team id, bundle id, and optionally the key itself.
+/// `PUT /api/push`: key id, team id, bundle id, and optionally the key itself or the relay key.
 pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b): Json<Configure>) -> ApiResult<Value> {
     let ids = |s: &str| s.len() == 10 && s.bytes().all(|c| c.is_ascii_alphanumeric());
     let mut s = state.settings.get();
@@ -198,6 +208,12 @@ pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b
     if b.remove_key {
         apns::remove_key().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    if let Some(k) = b.relay_key.filter(|k| !k.trim().is_empty()) {
+        apns::store_relay_key(&k).map_err(|e| bad(e.to_string()))?;
+    }
+    if b.remove_relay_key {
+        apns::remove_relay_key().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
     state.settings.save(s).map_err(|e| bad(e.to_string()))?;
     status(State(state), headers).await
 }
@@ -210,6 +226,46 @@ mod tests {
 
     fn reg(token: &str) -> Json<Register> {
         Json(serde_json::from_value(json!({ "token": token, "environment": "production", "bundle_id": "com.example.loft", "name": "Sam's iPhone" })).unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_status_says_which_path_pushes_take_and_never_the_secrets() {
+        crate::apns::tests::fake_apns();
+        let st = crate::tasks::tests::state();
+        let get = || async { status(State(st.clone()), HeaderMap::new()).await.unwrap().0 };
+        let put = |p: Value| configure(State(st.clone()), HeaderMap::new(), Json(serde_json::from_value::<Configure>(p).unwrap()));
+
+        // The test install holds a relay key and no key ids: the Loft relay.
+        let s = get().await;
+        assert_eq!((s["path"].clone(), s["relay_key"].clone(), s["configured"].clone()), (json!("relay"), json!(true), json!(false)));
+        // Its own key and both ids win over the relay key.
+        let Json(s) = put(json!({ "key_id": "ABC123DEFG", "team_id": "TEAM123456", "key_p8": crate::apns::tests::test_key_pem() })).await.unwrap();
+        assert_eq!((s["path"].clone(), s["configured"].clone()), (json!("own_key"), json!(true)));
+        let Json(s) = put(json!({ "key_id": "", "team_id": "" })).await.unwrap();
+        assert_eq!(s["path"], json!("relay"));
+
+        // Pasting a relay key: one that isn't shaped like one is refused, a good one is kept and never shown.
+        let err = put(json!({ "relay_key": "not-a-key" })).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let Json(s) = put(json!({ "relay_key": crate::apns::tests::RELAY_KEY })).await.unwrap();
+        assert_eq!(s["relay_key"], json!(true));
+        let text = s.to_string();
+        assert!(!text.contains("lrk_") && !text.contains("PRIVATE KEY"), "{text}");
+        // No portal yet: no link to show.
+        assert_eq!(s["portal_url"], Value::Null);
+    }
+
+    #[test]
+    fn the_portal_link_is_only_given_when_it_is_an_https_url() {
+        // Set and cleared in one test, so no other test sees it.
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", " https://loft-push-relay.vercel.app/account ") };
+        assert_eq!(crate::apns::portal_url().as_deref(), Some("https://loft-push-relay.vercel.app/account"));
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", "javascript:alert(1)") };
+        assert_eq!(crate::apns::portal_url(), None);
+        unsafe { std::env::set_var("LOFT_PORTAL_URL", "") };
+        assert_eq!(crate::apns::portal_url(), None);
+        unsafe { std::env::remove_var("LOFT_PORTAL_URL") };
+        assert_eq!(crate::apns::portal_url(), None, "empty by default");
     }
 
     #[tokio::test]
@@ -237,8 +293,11 @@ mod tests {
         let _ = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission"] })).unwrap())).await.unwrap();
         let _ = register(State(st.clone()), reg(&gone)).await.unwrap();
 
-        // Not set up yet: the test push says so.
-        assert!(test(State(st.clone()), Path(good.clone())).await.is_err());
+        // No key yet: the test push goes through the relay, not to Apple.
+        assert!(test(State(st.clone()), Path(good.clone())).await.is_ok());
+        let relayed = crate::apns::tests::relayed();
+        assert!(relayed.lock().unwrap().pushes.iter().any(|(_, b)| b["device_token"] == good && b["payload"]["type"] == "test"));
+        assert!(!seen.lock().unwrap().iter().any(|(t, ..)| *t == good));
 
         // Configure: a bad key is refused, a real P-256 .p8 is stored owner-only and never echoed.
         let cfg = |key: Option<String>| Json(serde_json::from_value::<Configure>(json!({ "key_id": "abc123defg", "team_id": "TEAM123456", "key_p8": key })).unwrap());
