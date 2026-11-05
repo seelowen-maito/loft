@@ -399,7 +399,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti:<port> | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents run on this Mac and a pattern can match them. To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -719,7 +719,26 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
 }
 
-fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
+/// Where an agent's system prompt is written for claude to read. Not on claude's command line: every
+/// agent's prompt holds phrases like `vite --host`, so a `pkill -f` with one of them in any agent's
+/// command would match, and stop, every agent at once.
+fn system_prompt_file(state: &AppState, agent_id: &str) -> PathBuf {
+    state.cfg.storage_dir.join(".system-prompts").join(format!("{agent_id}.md"))
+}
+
+/// Writes the agent's system prompt owner-only and returns its path.
+fn write_system_prompt(state: &AppState, a: &Agent) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = system_prompt_file(state, &a.id);
+    let dir = path.parent().unwrap();
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(&path, system_prompt(state, a))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(path)
+}
+
+fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::path::Path) -> Command {
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -739,7 +758,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
-        .args(["--append-system-prompt", &system_prompt(state, a)])
+        .arg("--append-system-prompt-file")
+        .arg(prompt_file)
         .args(["--system-prompt-snapshot", "off"])
         .args(["--mcp-config", &mcp_config])
         .arg("--strict-mcp-config")
@@ -885,7 +905,8 @@ async fn run_process(
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
-    let mut cmd = build_command(state, &agent, resume);
+    let prompt_file = write_system_prompt(state, &agent)?;
+    let mut cmd = build_command(state, &agent, resume, &prompt_file);
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
     }
@@ -930,6 +951,7 @@ async fn run_process(
         let line = tokio::select! {
             l = lines.next_line() => l?,
             _ = kill.notified() => {
+                tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
                 killed = true;
                 None
@@ -951,11 +973,13 @@ async fn run_process(
                         _ => rt.queued.entry(agent_id.to_string()).or_default().insert(0, note),
                     }
                 }
+                tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
+                tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
                 terminate(&mut child).await;
                 None
             }
@@ -1220,6 +1244,7 @@ async fn run_process(
     let status = match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
         Ok(s) => s?,
         Err(_) => {
+            tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
             terminate(&mut child).await;
             child.wait().await?
         }
@@ -1231,7 +1256,15 @@ async fn run_process(
         }
         if !killed {
             let tail: String = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            let text = format!("claude exited ({status}) without a result.\n{tail}");
+            // Loft logs every stop of its own above; a signal it didn't send came from another process.
+            use std::os::unix::process::ExitStatusExt;
+            let outside = if matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)) || matches!(status.code(), Some(143 | 137)) {
+                " It was stopped by a signal from outside Loft, for example a `pkill` or `kill` in some agent's command."
+            } else {
+                ""
+            };
+            tracing::warn!("agent {agent_id}: run {run_id}: claude exited ({status}) without a result{outside}");
+            let text = format!("claude exited ({status}) without a result.{outside}\n{tail}");
             run_msg(quiet, state, agent_id, rid, "system", "error", &text, json!({}));
             run_error = Some(text);
         }
@@ -1452,7 +1485,8 @@ case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
 esac;;
 esac
 while [ $# -gt 0 ]; do
-  [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
+  [ "$1" = --append-system-prompt-file ] && { cat "$2"; printf '\n---\n'; } >> system.log
+  printf '%s\n' "$1" >> argv.log
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
@@ -1558,6 +1592,24 @@ esac
         log.split("\n---\n")
             .filter_map(|p| Some(p.split_once("# Long-term memory")?.1.split_once("# Loft tools")?.0.to_string()))
             .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_system_prompt_is_read_from_a_file_not_claude_s_command_line() {
+        let (st, a) = fake_claude_state();
+        run(&st, &a.id, "hello", 1).await;
+        // A `pkill -f "vite --host"` (or any phrase of the prompt) in some agent's command must not match claude.
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.contains("--append-system-prompt-file"), "{argv}");
+        for phrase in ["vite --host", "# Identity", "Standing instructions"] {
+            assert!(!argv.contains(phrase), "{phrase:?} is on claude's command line");
+        }
+        // Claude still gets the whole prompt, from an owner-only file.
+        let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
+        assert!(system.contains("# Identity") && system.contains("vite --host"), "{system}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(system_prompt_file(&st, &a.id)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(system.contains("never with `pkill -f` or `killall`"), "agents are told to stop processes by PID");
     }
 
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
