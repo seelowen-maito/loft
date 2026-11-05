@@ -460,7 +460,7 @@ fn team_lines(a: &Agent) -> String {
         let rest = rest.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
         s += &format!("- Your main project is `{main}`: the issues you create go there unless you pass another `project`.");
         if !rest.is_empty() {
-            s += &format!(" You also work in {rest}. You can only create issues in your own projects.");
+            s += &format!(" You also work in {rest}. You can only create issues in your own projects; when you plan (grill, spec, tickets), say which one with `project`.");
         }
         s += "\n";
     }
@@ -1503,7 +1503,7 @@ pub(crate) mod tests {
         (a.group, a.project, a.projects) = ("Acme".into(), "b2c".into(), vec!["b2c".into(), "b2b".into(), "apps".into()]);
         let p = system_prompt(&st, &a);
         assert!(p.contains("- You belong to the group **Acme**."), "{p}");
-        assert!(p.contains("- Your main project is `b2c`: the issues you create go there unless you pass another `project`. You also work in `b2b`, `apps`."), "{p}");
+        assert!(p.contains("- Your main project is `b2c`: the issues you create go there unless you pass another `project`. You also work in `b2b`, `apps`. You can only create issues in your own projects; when you plan (grill, spec, tickets), say which one with `project`."), "{p}");
         (a.group, a.project, a.projects) = (String::new(), String::new(), vec![]);
         let p = system_prompt(&st, &a);
         assert!(!p.contains("You belong to the group") && !p.contains("Your main project"));

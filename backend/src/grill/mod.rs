@@ -190,6 +190,16 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 
 /// The end-of-planning card for a grill that published something: links to the spec and tickets, the
 /// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// For an agent with several projects: the first round asks which one the grill is about (unless the user said),
+/// and the spec and tickets go there.
+fn which_project(a: &Agent) -> String {
+    if a.projects.len() < 2 {
+        return String::new();
+    }
+    let list = a.projects.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    format!(" You work in several projects ({list}): unless the user already said which one this is about, the first round asks it, with the most likely one as the recommendation. Read that project's documents, and pass it as `project` to publish_spec and publish_tickets.")
+}
+
 /// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
@@ -538,8 +548,9 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         } else {
             ""
         };
+        let which = which_project(agent);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1225,6 +1236,17 @@ pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_lead_with_several_projects_is_told_to_ask_which_one_first() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Lead");
+        a.projects = vec!["web".into()];
+        assert_eq!(which_project(&a), "", "one project: nothing to ask");
+        a.projects = vec!["web".into(), "api".into()];
+        let w = which_project(&a);
+        assert!(w.contains("(`web`, `api`)") && w.contains("the first round asks it") && w.contains("pass it as `project` to publish_spec and publish_tickets"), "{w}");
+    }
     use crate::tasks::tests::{agent, state};
 
     fn q(text: &str) -> Value {
