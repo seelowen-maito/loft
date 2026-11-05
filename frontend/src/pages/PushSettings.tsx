@@ -18,6 +18,8 @@ export function PushSettings() {
   const [teamId, setTeamId] = useState("");
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [relayKey, setRelayKey] = useState("");
+  const [relayAddr, setRelayAddr] = useState("");
+  const [portalAddr, setPortalAddr] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -27,6 +29,8 @@ export function PushSettings() {
       setStatus(s);
       setKeyId(s.key_id);
       setTeamId(s.team_id);
+      setRelayAddr(s.relay_address);
+      setPortalAddr(s.portal_address);
     });
     api.devices().then(setDevices);
   };
@@ -68,6 +72,8 @@ export function PushSettings() {
       setKeyId(s.key_id);
       setTeamId(s.team_id);
       setRelayKey("");
+      setRelayAddr(s.relay_address);
+      setPortalAddr(s.portal_address);
       setMsg({ ok: true, text: `${done} ${WHERE[s.path]}` });
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
@@ -84,6 +90,7 @@ export function PushSettings() {
   if (!status) return null;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
   const off = status.path === "none";
+  const addrChanged = relayAddr.trim() !== status.relay_address || portalAddr.trim() !== status.portal_address;
   return (
     <section className="panel space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
@@ -96,7 +103,9 @@ export function PushSettings() {
         <span className="eyebrow">Loft relay</span>
         {status.relay_key ? (
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[11.5px] text-fg-3">A relay key is stored on this Mac (owner-only, never shown).</span>
+            <span className="font-mono text-[11.5px] text-fg-3">
+              A relay key is stored on this Mac (owner-only, never shown).{!status.relay_url && " The relay isn't set up: add its address below."}
+            </span>
             <button type="button" className="btn" disabled={busy} onClick={() => change({ remove_relay_key: true }, "Relay key removed.")}>
               Remove relay key
             </button>
@@ -133,6 +142,35 @@ export function PushSettings() {
             </div>
           </>
         )}
+      </div>
+
+      <div className="space-y-1.5">
+        <p className="text-[12px] text-fg-3">
+          Where the relay and its portal are: your relay key and the alerts' text go to this address, so only use one you trust. https only.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block space-y-1.5">
+            <span className="eyebrow">Relay address</span>
+            <input
+              className="input font-mono"
+              placeholder={status.relay_url && !status.relay_address ? `${status.relay_url} (from LOFT_RELAY_URL)` : "https://…"}
+              value={relayAddr}
+              onChange={(e) => setRelayAddr(e.target.value)}
+            />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="eyebrow">Portal address</span>
+            <input
+              className="input font-mono"
+              placeholder={status.portal_url && !status.portal_address ? `${status.portal_url} (from LOFT_PORTAL_URL)` : "https://…"}
+              value={portalAddr}
+              onChange={(e) => setPortalAddr(e.target.value)}
+            />
+          </label>
+        </div>
+        <button type="button" className="btn" disabled={!addrChanged || busy} onClick={() => change({ relay_url: relayAddr, portal_url: portalAddr }, "Addresses saved.")}>
+          Save addresses
+        </button>
       </div>
 
       <div className="space-y-1.5 border-t border-line pt-4">

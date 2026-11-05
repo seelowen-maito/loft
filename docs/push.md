@@ -11,17 +11,22 @@ service, by one of two paths (ADR 0002):
 | Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
 | Apps | Any bundle id (your own build) | The official Loft app only |
 
-Your own key wins when both are set. A relay key only counts in a build that knows the relay's address (`RELAY_URL`,
-empty until the operator's relay is deployed, or `LOFT_RELAY_URL`). With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+Your own key wins when both are set. A relay key only counts when Loft knows the relay's address: Settings → Push
+notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (empty until the operator's relay is
+deployed). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
 late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
 off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
 paths: which phones, which kinds, quiet hours, the rate limit and the payload.
 
 ## The Loft relay
 
+The relay's and portal's addresses are push settings: https only, no user name or password in them, and set only
+through `PUT /api/push` (Settings), never through the general settings or an agent tool. A saved address wins over
+`LOFT_RELAY_URL` / `LOFT_PORTAL_URL`, which stay as a fallback for scripted installs.
+
 The relay is login-only. A relay key comes from the operator for now (`relay/scripts/create-key.js`) and later from
-the push portal (Sign in with Apple). When the portal's address is known (`PORTAL_URL` in `backend/src/apns.rs`, empty until it's live, or
-`LOFT_PORTAL_URL`, https only), Settings shows "Open the Loft portal to sign in" and, with a key stored, "Manage keys";
+the push portal (Sign in with Apple). When the portal's address is known (Settings → Portal address, else `LOFT_PORTAL_URL`, else `PORTAL_URL`
+in `backend/src/apns.rs`, empty until it's live), Settings shows "Open the Loft portal to sign in" and, with a key stored, "Manage keys";
 without it, only the text. The key is pasted in Settings → Push notifications → Loft relay and kept owner-only in
 the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
 phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
@@ -70,8 +75,8 @@ uses the right host per device. The same auth key works for both.
 | `PATCH /api/devices/{token}` | `{kinds?, quiet_hours? (null clears), name?}` |
 | `DELETE /api/devices/{token}` | Stop pushing to this phone. |
 | `POST /api/devices/{token}/test` | Sends a test push. 410 if Apple says the token is gone (the device is then removed). |
-| `GET /api/push` | `{path: "own_key"\|"relay"\|"none", relay_key (whether one is stored), configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay key. |
-| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?}` |
+| `GET /api/push` | `{path: "own_key"\|"relay"\|"none", relay_key (whether one is stored), relay_url and portal_url (in use), relay_address and portal_address (saved), configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay key. |
+| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?, relay_url?, portal_url?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
 `grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
