@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cx } from "../lib/format";
 
 /** A navbar readout with a tooltip: shown at once on mouse hover, toggled by a tap on touch, closed by a tap elsewhere. */
-export function HoverTip({ tip, className, children }: { tip: ReactNode; className?: string; children: ReactNode }) {
+export function HoverTip({ tip, className, left, children }: { tip: ReactNode; className?: string; left?: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const pointer = useRef("mouse");
   const root = useRef<HTMLButtonElement>(null);
@@ -29,7 +29,7 @@ export function HoverTip({ tip, className, children }: { tip: ReactNode; classNa
       {open && (
         <span
           role="tooltip"
-          className="pointer-events-none absolute right-0 top-full z-30 mt-2 flex flex-col items-start whitespace-nowrap rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 text-left font-mono text-[11px] shadow-xl backdrop-blur"
+          className={cx("pointer-events-none absolute top-full", left ? "left-0" : "right-0", "z-30 mt-2 flex flex-col items-start whitespace-nowrap rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 text-left font-mono text-[11px] shadow-xl backdrop-blur")}
         >
           {tip}
         </span>

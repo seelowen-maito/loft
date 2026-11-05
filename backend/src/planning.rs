@@ -43,19 +43,20 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
-            "project": { "type": "string", "description": "When you work in several projects: the one this is for (its repo gets it). Required then; leave it out when you have one." },
+            "project": { "type": "string", "description": "When you work in several projects: the one this is for (its repo gets it). Defaults to your starred main project." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
             "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
-        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Under a spec with a spec PR, Loft adds a \"## Branch\" section to each ticket naming the spec branch and the spec PR. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
+        "description": "Publish tickets as GitHub issues, each on its project's repo (the spec's unless the ticket names another), only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Under a spec with a spec PR, Loft adds a \"## Branch\" section to each ticket naming the spec branch and the spec PR. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
         "inputSchema": { "type": "object", "properties": {
             "spec": { "type": ["integer", "string"], "description": "The spec from publish_spec: its GitHub issue number, or its Loft issue id when the plan is kept in Loft. Leave it out only for a single standalone ticket." },
-            "project": { "type": "string", "description": "When you work in several projects: the spec's project. Required then; leave it out when you have one." },
+            "project": { "type": "string", "description": "When you work in several projects: the spec's project. Defaults to your starred main project." },
             "tickets": { "type": "array", "description": "The tickets, in any order.", "items": { "type": "object", "properties": {
                 "title": { "type": "string", "description": "What the slice delivers, in a few words." },
                 "body": { "type": "string", "description": "The ticket in Markdown, following the ticket template." },
+                "project": { "type": "string", "description": "The project whose repo gets this ticket, one of yours: its Repo line. Defaults to the spec's project. On GitHub it stays a sub-issue of the spec and keeps its blockers across repos." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Titles of the tickets in this list that must land before this one." }
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
@@ -91,13 +92,15 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "publish_spec" && name != "publish_tickets" {
         return None;
     }
-    // Everything below plans for one project: `me` as if that were its only one.
+    // Everything below plans for one project: `me` as if that were its only one. A ticket can name
+    // another of the agent's projects, checked against `all` (the agent as it is).
+    let all = me;
     let me = &match for_project(me, args) {
         Ok(a) => a,
         Err(e) => return Some(Err(e)),
     };
     let out = if name == "publish_tickets" {
-        publish_tickets(state, me, args).await
+        publish_tickets(state, all, me, args).await
     } else {
         let docs = args["docs_branch"].as_str().map(str::trim).filter(|d| !d.is_empty());
         publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await.map(|(msg, slug, spec)| {
@@ -105,15 +108,27 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
             msg
         })
     };
-    // Even a failure can leave issues published, so clients hear about it either way.
-    state.emit(crate::state::Event::Issues { project: me.project.trim().to_string() });
-    // What was published shows up as Loft issues without waiting for the next poll.
-    crate::mirror::spawn_sync(state, &me.project);
+    // Even a failure can leave issues published, so clients hear about it either way, in every project
+    // a ticket went to.
+    let mut projects = vec![me.project.trim().to_string()];
+    for t in args["tickets"].as_array().into_iter().flatten() {
+        if t["project"].as_str().is_some_and(|p| !p.trim().is_empty())
+            && let Ok(a) = for_project(all, t)
+            && !projects.contains(&a.project)
+        {
+            projects.push(a.project);
+        }
+    }
+    for p in projects {
+        state.emit(crate::state::Event::Issues { project: p.clone() });
+        // What was published shows up as Loft issues without waiting for the next poll.
+        crate::mirror::spawn_sync(state, &p);
+    }
     Some(out)
 }
 
-/// The agent as if `project` were its only project, for planning: the argument, which must be one of its
-/// projects, or its only project. With several and none named, the error lists them.
+/// The agent as if `project` were its only project, for planning: the `project` in `args`, which must be
+/// one of its projects, or else its starred main project (the first of its projects), never its group.
 pub(crate) fn for_project(me: &Agent, args: &Value) -> Result<Agent, String> {
     let own: Vec<String> = if me.projects.is_empty() { Some(me.project.trim().to_string()).filter(|p| !p.is_empty()).into_iter().collect() } else { me.projects.clone() };
     let list = || own.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
@@ -121,8 +136,7 @@ pub(crate) fn for_project(me: &Agent, args: &Value) -> Result<Agent, String> {
         Some(p) if own.iter().any(|o| o == p) => p.to_string(),
         Some(p) if own.is_empty() => return Err(format!("You have no projects, so you can't plan for {p}.")),
         Some(p) => return Err(format!("You don't work in {p}. Pass `project` as one of your projects: {}.", list())),
-        None if own.len() > 1 => return Err(format!("You work in several projects: pass `project` as the one this plan is for: {}.", list())),
-        None => return Ok(me.clone()),
+        None => own.first().cloned().unwrap_or_default(),
     };
     let mut a = me.clone();
     a.project = project;
@@ -273,7 +287,7 @@ mod in_loft {
             }
         };
         crate::delivery::record_local_spec(state, &project, &t.id, &t.title, &me.id);
-        Ok((msg, String::new(), IssueLink { number: 0, title: t.title.clone(), id: t.id.clone() }))
+        Ok((msg, String::new(), IssueLink { number: 0, title: t.title.clone(), id: t.id.clone(), repo: String::new() }))
     }
 
     /// The tickets as Loft issues labelled `ready-for-agent`: subtasks of the spec, blockers first,
@@ -288,14 +302,12 @@ mod in_loft {
             None => None,
         };
         let _held = state.publish_locks.of(&format!("loft:{project}")).lock_owned().await;
-        let siblings: Vec<Task> = in_project(state, me)
-            .into_iter()
-            .filter(|t| t.labels.iter().any(|l| l == "ready-for-agent"))
-            .filter(|t| match &spec {
-                Some(s) => t.parent_id.as_deref() == Some(&s.id),
-                None => t.parent_id.is_none() && t.state() == "open",
-            })
-            .collect();
+        // A spec's tickets are under it in whichever project they went to.
+        let siblings: Vec<Task> = match &spec {
+            Some(s) => state.db.list_tasks().unwrap_or_default().into_iter().filter(|t| t.parent_id.as_deref() == Some(&s.id) && t.github.is_none() && t.status != "cancelled").collect(),
+            None => in_project(state, me).into_iter().filter(|t| t.parent_id.is_none() && t.state() == "open").collect(),
+        };
+        let siblings: Vec<Task> = siblings.into_iter().filter(|t| t.labels.iter().any(|l| l == "ready-for-agent")).collect();
         let mut ids: Vec<Option<String>> = vec![None; ts.len()];
         let mut lines = vec![];
         let mut fresh = 0;
@@ -306,7 +318,7 @@ mod in_loft {
                 Some(s) => (s.clone(), false),
                 None => {
                     let made = make(state, me, json!({
-                        "title": t.title, "description": t.body, "labels": ["ready-for-agent"], "project": project, "status": "ready",
+                        "title": t.title, "description": t.body, "labels": ["ready-for-agent"], "project": t.home.project.trim(), "status": "ready",
                         "parent_id": spec.as_ref().map(|s| s.id.clone()), "depends_on": blockers,
                     }))?;
                     fresh += 1;
@@ -316,8 +328,8 @@ mod in_loft {
             if let Some(s) = &spec {
                 crate::delivery::record_local_ticket(state, &project, &s.id, &made.id, &t.title, &blockers);
             }
-            let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone() });
-            crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone() }]);
+            let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone(), repo: String::new() });
+            crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone(), repo: String::new() }]);
             let by: Vec<String> = t.blocked_by.iter().map(|&b| format!("\"{}\"", ts[b].title)).collect();
             let by = if by.is_empty() { String::new() } else { format!(", blocked by {}", by.join(", ")) };
             let was = if new { "" } else { ", already saved" };
@@ -411,7 +423,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str, doc
             format!("The spec is published, but {e}. Call publish_spec again with the same title{same} to retry only the spec branch and PR.")
         }
     };
-    Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new() }))
+    Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new(), repo: String::new() }))
 }
 
 /// The spec's issue on `slug`: the reply and its number, published now or found already there.
@@ -770,9 +782,12 @@ struct Ticket {
     body: String,
     /// Positions in the list of the tickets that block this one.
     blocked_by: Vec<usize>,
+    /// The planner as if the ticket's project were its only one: the `project` the ticket names, one of
+    /// the planner's own (`all`), else the spec's (`me`).
+    home: Agent,
 }
 
-fn tickets_in(args: &Value) -> Result<Vec<Ticket>, String> {
+fn tickets_in(all: &Agent, me: &Agent, args: &Value) -> Result<Vec<Ticket>, String> {
     let raw = args["tickets"].as_array().ok_or("tickets is required")?;
     if raw.is_empty() {
         return Err("tickets is empty".into());
@@ -795,6 +810,10 @@ fn tickets_in(args: &Value) -> Result<Vec<Ticket>, String> {
         if keys[..i].contains(&keys[i]) {
             return Err(format!("two tickets are titled \"{title}\": every ticket needs its own title"));
         }
+        let home = match t["project"].as_str().map(str::trim) {
+            Some(p) if !p.is_empty() => for_project(all, t).map_err(|e| format!("\"{title}\": {e}"))?,
+            _ => me.clone(),
+        };
         let mut blocked_by = vec![];
         for b in t["blocked_by"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             match keys.iter().position(|k| *k == key(b)) {
@@ -804,7 +823,7 @@ fn tickets_in(args: &Value) -> Result<Vec<Ticket>, String> {
                 None => return Err(format!("\"{title}\" is blocked by \"{b}\", which isn't one of these tickets")),
             }
         }
-        out.push(Ticket { title, body, blocked_by });
+        out.push(Ticket { title, body, blocked_by, home });
     }
     Ok(out)
 }
@@ -825,9 +844,22 @@ fn blockers_first(ts: &[Ticket]) -> Result<Vec<usize>, String> {
     Ok(order)
 }
 
-/// An issue on GitHub as publishing needs it: number, database id (what links take), title key.
-fn issue_ref(i: &Value) -> Option<(i64, i64, String)> {
-    Some((i["number"].as_i64()?, i["id"].as_i64()?, key(i["title"].as_str()?)))
+/// An issue on GitHub as publishing needs it: repo (`home` unless GitHub names another), number,
+/// database id (what links take), title key.
+fn issue_ref(i: &Value, home: &str) -> Option<(String, i64, i64, String)> {
+    Some((repo_of(i, home), i["number"].as_i64()?, i["id"].as_i64()?, key(i["title"].as_str()?)))
+}
+
+/// The repo of an issue GitHub listed: from its `repository_url`, else `home`, where it was listed. GitHub
+/// may spell it in another case than a git origin, so compare it with `same_repo`.
+fn repo_of(i: &Value, home: &str) -> String {
+    let prefix = format!("{}/repos/", crate::github::api_base().trim_end_matches('/'));
+    i["repository_url"].as_str().and_then(|u| u.strip_prefix(&prefix)).unwrap_or(home).to_string()
+}
+
+/// Two `owner/repo` slugs name the same repo: GitHub ignores case in them.
+fn same_repo(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 /// The database id of issue #n, which sub-issue and dependency links take instead of its number.
@@ -839,14 +871,23 @@ async fn issue_id(state: &AppState, slug: &str, n: i64, known: Option<i64>) -> R
     v["id"].as_i64().ok_or_else(|| format!("GitHub didn't return the id of #{n} on {slug}."))
 }
 
-/// Publishes the tickets, noting each one on the running grill as soon as it's on GitHub, so the
-/// end-of-planning card lists it even if a later step fails and the grill ends without a retry.
-async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
-    let ts = tickets_in(args)?;
+/// Issue #n of `repo` as seen from `home`: `n` there, `owner/repo#n` from another repo. What the
+/// records of a publish are keyed by, so a plan in one repo keeps the keys it always had.
+fn seen_from(home: &str, repo: &str, n: i64) -> String {
+    if repo == home { n.to_string() } else { format!("{repo}#{n}") }
+}
+
+/// Publishes the tickets, each in its own project's repo, noting each one on the running grill as soon
+/// as it's on GitHub, so the end-of-planning card lists it even if a later step fails and the grill ends
+/// without a retry.
+async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value) -> Result<String, String> {
+    let ts = tickets_in(all, me, args)?;
     let given = !args["spec"].is_null();
     if !given && ts.len() > 1 {
         return Err("Several tickets belong to a spec: publish it with `publish_spec` first and pass it as `spec`. Only a single ticket goes without one.".into());
     }
+    // A standalone ticket goes to its own project.
+    let me = if given { me } else { &ts[0].home };
     let order = blockers_first(&ts)?;
     let slug = match github_home(state, me).await {
         Ok(slug) => slug,
@@ -862,101 +903,137 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     if given && spec.is_none() {
         return Err(format!("This project's plan goes to GitHub ({slug}): pass the spec's GitHub issue number as `spec`."));
     }
+    // Each ticket's repo. A plan on GitHub keeps all its tickets there.
+    let mut slugs = vec![];
+    for t in &ts {
+        slugs.push(if t.home.project == me.project {
+            slug.clone()
+        } else {
+            github_home(state, &t.home).await.map_err(|why| format!("\"{}\" is for {}, which has no GitHub repo ({why}), so it can't join spec #{} on {slug}.", t.title, t.home.project, spec.unwrap_or(0)))?
+        });
+    }
+    // The Delivery only knows the tickets in the spec's repo, so one there can't wait on one elsewhere:
+    // it would start before its blocker landed.
+    for (i, t) in ts.iter().enumerate() {
+        if slugs[i] == slug
+            && let Some(&b) = t.blocked_by.iter().find(|&&b| slugs[b] != slug)
+        {
+            return Err(format!(
+                "\"{}\" is in {slug} but blocked by \"{}\" in {}: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.",
+                t.title, ts[b].title, slugs[b]
+            ));
+        }
+    }
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let login = login(state).await?;
-    ensure_labels(state, &slug).await?;
-    // What GitHub already has: the spec's sub-issues, or the open tickets for a standalone one.
-    // A ticket created before but never recorded (the reply was lost) is adopted, not published twice.
+    let mut labelled: Vec<&String> = vec![];
+    for s in std::iter::once(&slug).chain(&slugs) {
+        if !labelled.contains(&s) {
+            ensure_labels(state, s).await?;
+            labelled.push(s);
+        }
+    }
+    // What GitHub already has: the spec's sub-issues (from any repo), or the open tickets for a standalone
+    // one. A ticket created before but never recorded (the reply was lost) is adopted, not published twice.
     let listed = match spec {
         Some(s) => crate::github::get(state, &format!("/repos/{slug}/issues/{s}/sub_issues?per_page=100")).await.map_err(|e| format!("Couldn't read spec #{s} on {slug}: {e}"))?,
         None => crate::github::get(state, &format!("/repos/{slug}/issues?labels=ready-for-agent&state=open&per_page=100"))
             .await
             .map_err(|e| format!("Couldn't check {slug} for an existing ticket: {e}"))?,
     };
-    let listed: Vec<(i64, i64, String)> = listed.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).filter_map(issue_ref).collect();
+    let listed: Vec<(String, i64, i64, String)> = listed.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).filter_map(|i| issue_ref(i, &slug)).collect();
+    let find = |repo: &str, n: i64| listed.iter().find(|l| same_repo(&l.0, repo) && l.1 == n);
     let branch = match spec {
         Some(s) => branch_section(state, &slug, s).await?,
         None => None,
     };
     let scope = spec.map_or("standalone".to_string(), |s| format!("#{s}"));
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
-    let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
+    let shown = |repo: &str, n: i64| if repo == slug { format!("#{n}") } else { format!("{repo}#{n}") };
+    // Each published ticket: its repo, number and, once known, database id.
+    let mut made: Vec<Option<(String, i64, Option<i64>)>> = vec![None; ts.len()];
     // GitHub's answer for each ticket created now, to bring it in without reading it again.
-    let mut created: HashMap<i64, Value> = HashMap::new();
+    let mut created: HashMap<(String, i64), Value> = HashMap::new();
     let mut lines = vec![];
     let mut fresh = 0;
     for &i in &order {
-        let t = &ts[i];
-        let k = format!("{scope}/{}", key(&t.title));
+        let (t, repo) = (&ts[i], slugs[i].as_str());
+        // Recorded on the ticket's repo; one in another repo than the spec's names the spec's repo too.
+        let k = if repo == slug { format!("{scope}/{}", key(&t.title)) } else { format!("{slug}{scope}/{}", key(&t.title)) };
         // A standalone ticket counts as published only while it's still open: once closed, the same
         // request is new work. The database id is only read from GitHub when a link still needs it.
-        let recorded = state.db.published_issue(&slug, "ticket", &k).ok().flatten().filter(|n| spec.is_some() || listed.iter().any(|l| l.0 == *n));
+        let recorded = state.db.published_issue(repo, "ticket", &k).ok().flatten().filter(|n| spec.is_some() || find(repo, *n).is_some());
         let (n, mut id, new) = if let Some(n) = recorded {
-            (n, listed.iter().find(|l| l.0 == n).map(|l| l.1), false)
-        } else if let Some(l) = listed.iter().find(|l| l.2 == key(&t.title)) {
-            state.db.record_published_issue(&slug, "ticket", &k, l.0).map_err(|e| e.to_string())?;
-            (l.0, Some(l.1), false)
+            (n, find(repo, n).map(|l| l.2), false)
+        } else if let Some(l) = listed.iter().find(|l| same_repo(&l.0, repo) && l.3 == key(&t.title)) {
+            state.db.record_published_issue(repo, "ticket", &k, l.1).map_err(|e| e.to_string())?;
+            (l.1, Some(l.2), false)
         } else {
-            let v = crate::github::request(
-                state,
-                reqwest::Method::POST,
-                &format!("/repos/{slug}/issues"),
-                Some(json!({ "title": t.title, "body": branch.as_deref().map_or(t.body.clone(), |b| with_branch(&t.body, b)), "labels": ["ready-for-agent"], "assignees": [login] })),
-            )
-            .await
-            .map_err(|e| format!("GitHub rejected the ticket \"{}\" on {slug}: {e}. {retry}", t.title))?;
+            // The spec branch is in the spec's repo: only tickets there go on it.
+            let body = match branch.as_deref() {
+                Some(b) if repo == slug => with_branch(&t.body, b),
+                _ => t.body.clone(),
+            };
+            let v = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/issues"), Some(json!({ "title": t.title, "body": body, "labels": ["ready-for-agent"], "assignees": [login] })))
+                .await
+                .map_err(|e| format!("GitHub rejected the ticket \"{}\" on {repo}: {e}. {retry}", t.title))?;
             let (Some(n), Some(id)) = (v["number"].as_i64(), v["id"].as_i64()) else {
                 return Err(format!("GitHub created the ticket \"{}\" but didn't return its number. {retry}", t.title));
             };
-            state.db.record_published_issue(&slug, "ticket", &k, n).map_err(|e| e.to_string())?;
+            state.db.record_published_issue(repo, "ticket", &k, n).map_err(|e| e.to_string())?;
             fresh += 1;
-            created.insert(n, v);
+            created.insert((repo.to_string(), n), v);
             (n, Some(id), true)
         };
-        let spec_link = spec.map(|number| IssueLink { number, title: String::new(), id: String::new() });
-        crate::grill::record_published(state, &me.id, &slug, spec_link, vec![IssueLink { number: n, title: t.title.clone(), id: String::new() }]);
+        let spec_link = spec.map(|number| IssueLink { number, title: String::new(), id: String::new(), repo: String::new() });
+        let other = if repo == slug { String::new() } else { repo.to_string() };
+        crate::grill::record_published(state, &me.id, &slug, spec_link, vec![IssueLink { number: n, title: t.title.clone(), id: String::new(), repo: other }]);
         if let Some(s) = spec {
-            let lk = format!("{s}/{n}");
+            let lk = format!("{s}/{}", seen_from(&slug, repo, n));
             if !matches!(state.db.published_issue(&slug, "sub_issue", &lk), Ok(Some(_))) {
-                if !listed.iter().any(|l| l.0 == n) {
-                    let id = *id.insert(issue_id(state, &slug, n, id).await.map_err(|e| format!("{e} {retry}"))?);
+                if find(repo, n).is_none() {
+                    let id = *id.insert(issue_id(state, repo, n, id).await.map_err(|e| format!("{e} {retry}"))?);
                     crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues/{s}/sub_issues"), Some(json!({ "sub_issue_id": id })))
                         .await
-                        .map_err(|e| format!("Couldn't make #{n} a sub-issue of spec #{s}: {e}. {retry}"))?;
+                        .map_err(|e| format!("Couldn't make {} a sub-issue of spec #{s}: {e}. {retry}", shown(repo, n)))?;
                 }
                 state.db.record_published_issue(&slug, "sub_issue", &lk, n).map_err(|e| e.to_string())?;
             }
         }
-        let mut blockers = vec![];
-        let blocker_numbers: Vec<i64> = t.blocked_by.iter().map(|&b| made[b].expect("blockers are published first").0).collect();
+        // The Delivery builds the tickets in the spec's repo; one in another repo is published and linked only.
         match spec {
-            Some(s) => crate::delivery::record_ticket(state, &slug, s, n, &t.title, blocker_numbers),
+            Some(s) if repo == slug => {
+                let blocker_numbers = t.blocked_by.iter().filter_map(|&b| made[b].as_ref().filter(|m| m.0 == slug).map(|m| m.1)).collect();
+                crate::delivery::record_ticket(state, &slug, s, n, &t.title, blocker_numbers)
+            }
+            Some(_) => {}
             None => crate::delivery::record_standalone(state, &slug, n, &t.title, me.project.trim(), &me.id),
         }
+        let mut blockers = vec![];
         for &b in &t.blocked_by {
             // Blockers go first, so every one of them is on GitHub by now.
-            let (bn, bid) = made[b].expect("blockers are published first");
-            blockers.push(format!("#{bn}"));
-            let dk = format!("{n}/{bn}");
-            if matches!(state.db.published_issue(&slug, "blocked_by", &dk), Ok(Some(_))) {
+            let (brepo, bn, bid) = made[b].clone().expect("blockers are published first");
+            blockers.push(shown(&brepo, bn));
+            let dk = format!("{n}/{}", seen_from(repo, &brepo, bn));
+            if matches!(state.db.published_issue(repo, "blocked_by", &dk), Ok(Some(_))) {
                 continue;
             }
-            let bid = issue_id(state, &slug, bn, bid).await.map_err(|e| format!("{e} {retry}"))?;
-            made[b] = Some((bn, Some(bid)));
-            let path = format!("/repos/{slug}/issues/{n}/dependencies/blocked_by");
+            let bid = issue_id(state, &brepo, bn, bid).await.map_err(|e| format!("{e} {retry}"))?;
+            made[b] = Some((brepo.clone(), bn, Some(bid)));
+            let path = format!("/repos/{repo}/issues/{n}/dependencies/blocked_by");
             if let Err(e) = crate::github::request(state, reqwest::Method::POST, &path, Some(json!({ "issue_id": bid }))).await {
                 // Linked before but never recorded: GitHub turns the second link down, which is fine.
                 let have = crate::github::get(state, &format!("{path}?per_page=100")).await.unwrap_or(Value::Null);
-                if !have.as_array().into_iter().flatten().any(|d| d["number"].as_i64() == Some(bn)) {
-                    return Err(format!("Couldn't mark #{n} as blocked by #{bn}: {e}. {retry}"));
+                if !have.as_array().into_iter().flatten().any(|d| d["number"].as_i64() == Some(bn) && same_repo(&repo_of(d, repo), &brepo)) {
+                    return Err(format!("Couldn't mark {} as blocked by {}: {e}. {retry}", shown(repo, n), shown(&brepo, bn)));
                 }
             }
-            state.db.record_published_issue(&slug, "blocked_by", &dk, bn).map_err(|e| e.to_string())?;
+            state.db.record_published_issue(repo, "blocked_by", &dk, bn).map_err(|e| e.to_string())?;
         }
-        made[i] = Some((n, id));
+        made[i] = Some((repo.to_string(), n, id));
         let by = if blockers.is_empty() { String::new() } else { format!(", blocked by {}", blockers.join(", ")) };
         let was = if new { "" } else { ", already published" };
-        lines.push(format!("- #{n} {}{by}{was}: https://github.com/{slug}/issues/{n}", t.title));
+        lines.push(format!("- {} {}{by}{was}: https://github.com/{repo}/issues/{n}", shown(repo, n), t.title));
     }
     loft_issues_for(state, me, &slug, spec, &ts, &order, &made, &created).await;
     let head = match (spec, ts.len()) {
@@ -968,27 +1045,26 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
     Ok(msg)
 }
 
-/// The published tickets as Loft issues right away, as in a project without a repo: linked to their
-/// GitHub issues, ready and unassigned, under the spec's Loft issue, depending on their blockers'. A
-/// ticket that already has its Loft issue (a retry) is left as it is.
+/// The published tickets as Loft issues right away, as in a project without a repo: each in its own
+/// project, linked to its GitHub issue, ready and unassigned, under the spec's Loft issue, depending on its
+/// blockers'. A ticket that already has its Loft issue (a retry) is left as it is.
 #[allow(clippy::too_many_arguments)]
-async fn loft_issues_for(state: &AppState, me: &Agent, slug: &str, spec: Option<i64>, ts: &[Ticket], order: &[usize], made: &[Option<(i64, Option<i64>)>], created: &HashMap<i64, Value>) {
-    let project = me.project.trim();
-    let bring = |n: i64| async move {
-        let i = match created.get(&n) {
+async fn loft_issues_for(state: &AppState, me: &Agent, slug: &str, spec: Option<i64>, ts: &[Ticket], order: &[usize], made: &[Option<(String, i64, Option<i64>)>], created: &HashMap<(String, i64), Value>) {
+    let bring = |project: String, repo: String, n: i64| async move {
+        let i = match created.get(&(repo.clone(), n)) {
             Some(i) => i.clone(),
-            None => crate::github::get(state, &format!("/repos/{slug}/issues/{n}")).await.ok()?,
+            None => crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await.ok()?,
         };
-        crate::mirror::bring_in(state, project, slug, &i)
+        crate::mirror::bring_in(state, project.trim(), &repo, &i)
     };
     let parent = match spec {
-        Some(s) => bring(s).await.map(|(t, _)| t.id),
+        Some(s) => bring(me.project.clone(), slug.to_string(), s).await.map(|(t, _)| t.id),
         None => None,
     };
     let mut ids: HashMap<usize, String> = HashMap::new();
     for &i in order {
-        let Some((n, _)) = made[i] else { continue };
-        let Some((mut t, new)) = bring(n).await else { continue };
+        let Some((repo, n, _)) = made[i].clone() else { continue };
+        let Some((mut t, new)) = bring(ts[i].home.project.clone(), repo, n).await else { continue };
         ids.insert(i, t.id.clone());
         if !new {
             continue;
@@ -1841,13 +1917,31 @@ pub(crate) mod tests {
         assert!(spec.contains("Loft issue"), "{spec}");
         assert_eq!(st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Api spec").unwrap().project, "multi-api");
 
-        // Several projects and none named, or one outside its list: refused, listing its projects, and nothing is made.
+        // A spec's tickets each go to the project they name, the spec's by default, all under the spec.
+        let spec_id = st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Api spec").unwrap().id;
+        let both = json!([ticket("Endpoint", &[]), { "project": "multi-web", "title": "Screen", "body": "## What to build\n\nScreen.", "blocked_by": ["Endpoint"] }]);
+        let out = mcp_call(&st, &lead, "publish_tickets", &json!({ "project": "multi-api", "spec": spec_id, "tickets": both })).await.unwrap().unwrap();
+        assert!(out.starts_with("Saved 2 tickets as Loft issues under the spec \"Api spec\""), "{out}");
+        let by = |title: &str| st.db.list_tasks().unwrap().into_iter().find(|t| t.title == title).unwrap();
+        let (endpoint, screen) = (by("Endpoint"), by("Screen"));
+        assert_eq!((endpoint.project.as_str(), screen.project.as_str()), ("multi-api", "multi-web"));
+        assert_eq!((endpoint.parent_id.as_deref(), screen.parent_id.as_deref()), (Some(spec_id.as_str()), Some(spec_id.as_str())));
+        assert_eq!(screen.depends_on, std::slice::from_ref(&endpoint.id));
+        let again = mcp_call(&st, &lead, "publish_tickets", &json!({ "project": "multi-api", "spec": spec_id, "tickets": both })).await.unwrap().unwrap();
+        assert!(again.contains("Nothing new was created"), "{again}");
+
+        // A plan or a ticket in a project outside its list: refused, listing its projects, and nothing is made.
         let before = st.db.list_tasks().unwrap().len();
-        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": one("Where?") })).await.unwrap().unwrap_err();
-        assert_eq!(err, "You work in several projects: pass `project` as the one this plan is for: `multi-web`, `multi-api`.");
         let err = mcp_call(&st, &lead, "publish_spec", &json!({ "project": "elsewhere", "title": "No", "body": "x" })).await.unwrap().unwrap_err();
         assert_eq!(err, "You don't work in elsewhere. Pass `project` as one of your projects: `multi-web`, `multi-api`.");
+        let outside = json!([{ "project": "elsewhere", "title": "Lost", "body": "x" }]);
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": outside })).await.unwrap().unwrap_err();
+        assert_eq!(err, "\"Lost\": You don't work in elsewhere. Pass `project` as one of your projects: `multi-web`, `multi-api`.");
         assert_eq!(st.db.list_tasks().unwrap().len(), before);
+
+        // None named: the starred main project (the first), never the group.
+        mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": one("Where?") })).await.unwrap().unwrap();
+        assert_eq!(by("Where?").project, "multi-web");
 
         // create_issue follows the same list: an issue in each of its projects, none outside.
         let find = |k: &str| Err::<Agent, _>(k.to_string());
@@ -1860,6 +1954,60 @@ pub(crate) mod tests {
         let solo = planner_on(&st, "multi-solo", None);
         assert!(mcp_call(&st, &solo, "publish_tickets", &json!({ "tickets": one("Solo ticket") })).await.unwrap().is_ok());
         assert!(fake.seen("/").is_empty(), "no GitHub request at all");
+    }
+
+    #[tokio::test]
+    async fn a_spec_files_each_ticket_in_its_own_repo_as_sub_issues_with_cross_repo_blockers() {
+        let (fake, st) = (fake_github(), state());
+        let (api, web) = ("octo/cross-api", "octo/cross-web");
+        let mut lead = planner_on(&st, "cross-api", Some("git@github.com:octo/cross-api.git"));
+        planner_on(&st, "cross-web", Some("git@github.com:octo/cross-web.git"));
+        (lead.role, lead.group, lead.projects) = ("lead".into(), "Acme".into(), vec!["cross-api".into(), "cross-web".into()]);
+        st.db.save_agent(&lead).unwrap();
+        crate::grill::tests::round(&st, &lead, &["Turn this into a spec and tickets?"]).unwrap();
+        crate::grill::tests::send(&st, &lead).unwrap();
+        tickets_repo(&fake, api, 40, &[41]);
+        tickets_repo(&fake, web, 0, &[7]);
+        let screen = |blocked_by: &[&str]| json!({ "project": "cross-web", "title": "Screen", "body": "## What to build\n\nScreen.", "blocked_by": blocked_by });
+        let tickets = json!([screen(&["Endpoint"]), ticket("Endpoint", &[])]);
+
+        let out = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": tickets })).await.unwrap().unwrap();
+        assert_eq!(out, "Published 2 tickets as sub-issues of spec #40, blockers first, labelled `ready-for-agent` and assigned to octo-me:\n\
+            - #41 Endpoint: https://github.com/octo/cross-api/issues/41\n\
+            - octo/cross-web#7 Screen, blocked by #41: https://github.com/octo/cross-web/issues/7");
+        // Each ticket in its own repo, both sub-issues of the spec, the web one blocked by the api one.
+        assert_eq!(posts(&fake, api, "issues").iter().map(|i| i["title"].as_str().unwrap()).collect::<Vec<_>>(), ["Endpoint"]);
+        assert_eq!(posts(&fake, web, "issues").iter().map(|i| i["title"].as_str().unwrap()).collect::<Vec<_>>(), ["Screen"]);
+        assert_eq!(posts(&fake, api, "issues/40/sub_issues"), [json!({ "sub_issue_id": 4100 }), json!({ "sub_issue_id": 700 })]);
+        assert_eq!(posts(&fake, web, "issues/7/dependencies/blocked_by"), [json!({ "issue_id": 4100 })]);
+
+        // A retry finds both under the spec, the web one by its repo, and creates nothing twice.
+        fake.route("GET", &format!("/repos/{api}/issues/40/sub_issues"), 200, json!([
+            { "number": 41, "id": 4100, "title": "Endpoint", "repository_url": format!("{}/repos/{api}", crate::github::api_base()) },
+            // GitHub's own spelling of the repo can differ in case from the git origin.
+            { "number": 7, "id": 700, "title": "Screen", "repository_url": format!("{}/repos/octo/Cross-Web", crate::github::api_base()) },
+        ]));
+        let again = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": tickets })).await.unwrap().unwrap();
+        assert!(again.contains("Nothing new was created") && again.matches(", already published").count() == 2, "{again}");
+        assert_eq!((posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len(), posts(&fake, api, "issues/40/sub_issues").len()), (1, 1, 2));
+
+        // The end-of-planning card links the web ticket to its own repo.
+        crate::grill::mcp_call(&st, &lead, "grill_end", &json!({ "summary": "Split." })).unwrap().unwrap();
+        let urls: Vec<String> = summary(&st, &lead).meta["grill"]["end_card"]["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect();
+        assert_eq!(urls, ["https://github.com/octo/cross-api/issues/41", "https://github.com/octo/cross-web/issues/7"]);
+
+        // A ticket in the spec's repo can't wait on one elsewhere: the Delivery would start it too early.
+        let before = (posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len());
+        let flipped = json!([screen(&[]), ticket("Endpoint v2", &["Screen"])]);
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": flipped })).await.unwrap().unwrap_err();
+        assert_eq!(err, "\"Endpoint v2\" is in octo/cross-api but blocked by \"Screen\" in octo/cross-web: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.");
+        assert_eq!((posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len()), before, "nothing was created");
+
+        // A ticket for a project without a GitHub repo can't join a spec on GitHub.
+        planner_on(&st, "cross-local", None);
+        lead.projects.push("cross-local".into());
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": [{ "project": "cross-local", "title": "Offline", "body": "x" }] })).await.unwrap().unwrap_err();
+        assert!(err.starts_with("\"Offline\" is for cross-local, which has no GitHub repo"), "{err}");
     }
 
     #[tokio::test]
@@ -2254,6 +2402,8 @@ pub(crate) mod tests {
         let a = crate::tasks::tests::agent(&st, "guide");
         let g = mcp_call(&st, &a, "planning_guide", &json!({})).await.unwrap().unwrap();
         assert!(g.contains("## Problem Statement") && g.contains("## Acceptance criteria") && !g.contains("# Planning: grilling"), "{g}");
+        // Each ticket names its repo, the breakdown shows it, and the spec lists the repos it touches.
+        assert!(g.contains("Repo: <project>") && g.contains("its repo, what it delivers") && g.contains("## Repos") && g.contains("one ticket per repo"), "{g}");
     }
 
     /// The summary message `grill_end` just posted.
