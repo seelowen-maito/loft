@@ -1,9 +1,36 @@
 # Push notifications (APNs)
 
 Alerts reach the iPhone app when it's closed. The backend sends them through Apple's Push Notification
-service with token-based auth (an APNs auth key, `.p8`).
+service, by one of two paths (ADR 0002):
 
-## Setting it up (by hand, once)
+| | **Your own key** | **The Loft relay** |
+|---|---|---|
+| When | A `.p8` key, key id and team id in Settings | A relay key in Settings, and no key of your own |
+| Setup | The steps below (an Apple developer account) | Paste the relay key you were given ("Sign in to get push") |
+| Path | Loft → Apple | Loft → push relay → Apple |
+| Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
+| Apps | Any bundle id (your own build) | The official Loft app only |
+
+Your own key wins when both are set. A relay key only counts in a build that knows the relay's address (`RELAY_URL`,
+empty until the operator's relay is deployed, or `LOFT_RELAY_URL`). With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
+off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
+paths: which phones, which kinds, quiet hours, the rate limit and the payload.
+
+## The Loft relay
+
+The relay is login-only. A relay key comes from the operator for now (`relay/scripts/create-key.js`) and later from
+the push portal (Sign in with Apple). When the portal's address is known (`PORTAL_URL` in `backend/src/apns.rs`, empty until it's live, or
+`LOFT_PORTAL_URL`, https only), Settings shows "Open the Loft portal to sign in" and, with a key stored, "Manage keys";
+without it, only the text. The key is pasted in Settings → Push notifications → Loft relay and kept owner-only in
+the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
+phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
+answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its
+limits are 20 a minute and 1,000 a day per key), the push is logged and dropped, and the next one is tried. A revoked
+key gets `401`: pushes stop until a new key is pasted. The relay itself, its API, deploying it, and making and
+revoking keys are in [`relay/README.md`](../relay/README.md).
+
+## Setting up your own key (by hand, once)
 
 1. **App id:** developer.apple.com → Certificates, IDs & Profiles → Identifiers → your app id (`LOFT_BUNDLE_ID`) → tick **Push Notifications** → Save. (The app project adds the matching *Push Notifications* capability and the `aps-environment` entitlement.)
 2. **Auth key:** same portal → **Keys** → **+** → name it "Loft push", tick **Apple Push Notifications service (APNs)** → Continue → Register.
@@ -14,7 +41,8 @@ service with token-based auth (an APNs auth key, `.p8`).
 
 ## Where the key lives
 
-`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. That's outside the repo
+`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. The relay key, when
+one is set, is `relay-key` in the same folder, with the same modes. That's outside the repo
 and outside Loft's data folder (`.loft/`), so the backup plan (#79) only includes it encrypted.
 
 - It's checked to be a P-256 private key before it's stored.
@@ -42,8 +70,8 @@ uses the right host per device. The same auth key works for both.
 | `PATCH /api/devices/{token}` | `{kinds?, quiet_hours? (null clears), name?}` |
 | `DELETE /api/devices/{token}` | Stop pushing to this phone. |
 | `POST /api/devices/{token}/test` | Sends a test push. 410 if Apple says the token is gone (the device is then removed). |
-| `GET /api/push` | `{configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key. |
-| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?}` |
+| `GET /api/push` | `{path: "own_key"\|"relay"\|"none", relay_key (whether one is stored), configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay key. |
+| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
 `grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.

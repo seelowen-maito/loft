@@ -586,7 +586,7 @@ struct SubmitPromptBar: View {
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("submitPromptNo")
                 Button(action: yes) { Text("Yes, send").multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).frame(maxWidth: ax ? .infinity : nil) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .accessibilityIdentifier("submitPromptYes")
             }
         }
@@ -629,7 +629,7 @@ struct AutoSendBar: View {
                     .accessibilityHint("Doesn't send; keeps the message so you can edit it")
                     .accessibilityIdentifier("autoSendUndo")
                 Button(action: sendNow) { Text("Send now").fixedSize().frame(maxWidth: ax ? .infinity : nil) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .accessibilityIdentifier("autoSendNow")
             }
             .controlSize(.regular)

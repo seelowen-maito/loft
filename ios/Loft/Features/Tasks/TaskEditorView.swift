@@ -105,7 +105,7 @@ struct TaskEditorView: View {
                 ToolbarItemGroup(placement: .bottomBar) {
                     if let agent = store.agent(agentId) {
                         Button { save(run: true) } label: { Label("Save & run with \(agent.name)", systemImage: "play.fill").labelStyle(.titleAndIcon) }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.accent)
                             .disabled(!valid || saving || !store.canWrite)
                     } else if let o = store.orchestrator {
                         Button { save(run: true, delegate: true) } label: { Label("Save & ask \(o.name) to plan", systemImage: "sparkles").labelStyle(.titleAndIcon) }

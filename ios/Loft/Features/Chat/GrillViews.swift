@@ -77,7 +77,7 @@ struct GrillRoundCard: View {
                 Button { command(.send) } label: {
                     Label("Send round", systemImage: "paperplane.fill").frame(minHeight: 32)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .disabled(!store.canWrite)
                 .accessibilityIdentifier("grillSend")
                 if s.state == .paused {
@@ -448,7 +448,7 @@ struct GrillSuggestionBar: View {
         Button(action: yes) {
             Text("Yes").frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.accent)
         .accessibilityIdentifier("grillSuggestionYes")
     }
 }
@@ -493,7 +493,7 @@ struct EndCardView: View {
                         .accessibilityIdentifier("endCardStarted")
                 } else {
                     Button { start(initGit: false) } label: { Label("Start delivery", systemImage: "play.fill") }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .font(.footnote)
                     .disabled(starting)
                     .accessibilityIdentifier("endCardStart")
@@ -508,7 +508,7 @@ struct EndCardView: View {
             HStack(spacing: 8) {
                 if card.delivery == nil {
                     Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .accessibilityIdentifier("endCardClear")
                 } else {
                     Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }

@@ -1,15 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import { BellRing, KeyRound, Smartphone, Trash2 } from "lucide-react";
+import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
 import { api, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
 
-/** Settings → Push notifications: the APNs key and ids, the phones registered, and a test push. */
+/** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
+const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Push is off" };
+const WHERE: Record<PushStatus["path"], string> = {
+  own_key: "Pushes go straight to Apple with your own key.",
+  relay: "Pushes go through the Loft relay with your relay key.",
+  none: "Nothing is pushed yet: sign in to get push (paste your relay key), or add your own APNs key.",
+};
+
 export function PushSettings() {
   const [status, setStatus] = useState<PushStatus | null>(null);
   const [devices, setDevices] = useState<PushDevice[]>([]);
   const [keyId, setKeyId] = useState("");
   const [teamId, setTeamId] = useState("");
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
+  const [relayKey, setRelayKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -31,7 +39,7 @@ export function PushSettings() {
       const s = await api.configurePush({ key_id: keyId, team_id: teamId, key_p8: file?.text });
       setStatus(s);
       setFile(null);
-      setMsg({ ok: true, text: s.configured ? "Saved. Push is set up." : "Saved." });
+      setMsg({ ok: true, text: s.path === "own_key" ? "Saved. Pushes go straight to Apple with your key." : "Saved." });
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
     } finally {
@@ -50,6 +58,24 @@ export function PushSettings() {
     }
   };
 
+  /** Sends a change to the push settings and says where pushes go now. */
+  const change = async (body: Parameters<typeof api.configurePush>[0], done: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const s = await api.configurePush(body);
+      setStatus(s);
+      setKeyId(s.key_id);
+      setTeamId(s.team_id);
+      setRelayKey("");
+      setMsg({ ok: true, text: `${done} ${WHERE[s.path]}` });
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async (d: PushDevice) => {
     await api.removeDevice(d.token).catch(() => {});
     load();
@@ -57,16 +83,65 @@ export function PushSettings() {
 
   if (!status) return null;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
+  const off = status.path === "none";
   return (
     <section className="panel space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-[15px] font-medium tracking-tight">Push notifications</h2>
-        <span className={cx("chip text-[10.5px]", status.configured ? "text-good" : "text-fg-3")}>{status.configured ? "set up" : "not set up"}</span>
+        <span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>
       </div>
-      <p className="text-[12.5px] text-fg-2">
-        Alerts reach the iPhone app even when it's closed. Needs an APNs auth key from the Apple Developer portal (Keys → +, tick “Apple Push
-        Notifications service”). Apple lets you download the <span className="font-mono">.p8</span> file once: keep a copy in your password manager.
-      </p>
+      <p className="text-[12.5px] text-fg-2">Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</p>
+
+      <div className="space-y-1.5">
+        <span className="eyebrow">Loft relay</span>
+        {status.relay_key ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[11.5px] text-fg-3">A relay key is stored on this Mac (owner-only, never shown).</span>
+            <button type="button" className="btn" disabled={busy} onClick={() => change({ remove_relay_key: true }, "Relay key removed.")}>
+              Remove relay key
+            </button>
+            {status.portal_url && (
+              <a className="text-[12px] text-fg-3 underline hover:text-fg" href={status.portal_url} target="_blank" rel="noreferrer">
+                Manage keys
+              </a>
+            )}
+          </div>
+        ) : (
+          <>
+            <p className="text-[12px] text-fg-3">
+              Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
+              and are never stored. {status.portal_url ? "Sign in on the Loft portal, then paste the relay key it gives you." : "Paste the relay key you were given."}
+            </p>
+            {status.portal_url && (
+              <a className="btn w-fit" href={status.portal_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="size-3.5" /> Open the Loft portal to sign in
+              </a>
+            )}
+            <div className="flex gap-2">
+              <input
+                className="input font-mono"
+                type="password"
+                autoComplete="off"
+                placeholder="lrk_…"
+                value={relayKey}
+                onChange={(e) => setRelayKey(e.target.value.trim())}
+                aria-label="Relay key"
+              />
+              <button type="button" className="btn-primary shrink-0" disabled={!relayKey || busy} onClick={() => change({ relay_key: relayKey }, "Relay key saved.")}>
+                Save relay key
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="space-y-1.5 border-t border-line pt-4">
+        <span className="eyebrow">Your own key</span>
+        <p className="text-[12px] text-fg-3">
+          Sends straight to Apple, without the relay. Apple Developer portal → Keys → +, tick “Apple Push Notifications service”. Apple lets you download
+          the <span className="font-mono">.p8</span> file once: keep a copy in your password manager.
+        </p>
+      </div>
 
       <div className="space-y-1.5">
         <span className="eyebrow">Auth key (.p8)</span>
@@ -105,6 +180,11 @@ export function PushSettings() {
       </div>
       <div className="flex items-center gap-3">
         <button type="button" className="btn-primary" disabled={!changed || busy} onClick={save}>Save</button>
+        {status.key_present && (
+          <button type="button" className="btn" disabled={busy} onClick={() => change({ key_id: "", team_id: "", remove_key: true }, "Key removed.")}>
+            Remove key
+          </button>
+        )}
         {msg && <span className={cx("text-[12px]", msg.ok ? "text-good" : "text-bad")}>{msg.text}</span>}
       </div>
 
@@ -122,7 +202,7 @@ export function PushSettings() {
                   {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {timeAgo(d.last_seen_at)} · {d.kinds.length} kinds
                 </div>
               </div>
-              <button type="button" className="btn shrink-0" disabled={!status.configured} onClick={() => test(d)} title={status.configured ? undefined : "Add the key, key id and team id first"}>
+              <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
                 <BellRing className="size-3.5" /> Send test push
               </button>
               <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => remove(d)} aria-label="Remove this phone" title="Remove this phone">

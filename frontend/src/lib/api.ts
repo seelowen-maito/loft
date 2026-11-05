@@ -245,8 +245,20 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
-/** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
-export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
+/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
+export type PushStatus = {
+  path: "own_key" | "relay" | "none";
+  /** Whether a relay key is stored. */
+  relay_key: boolean;
+  /** The push portal, where the user signs in for a relay key; null until it's live. */
+  portal_url: string | null;
+  configured: boolean;
+  key_present: boolean;
+  key_id: string;
+  team_id: string;
+  bundle_id: string;
+  devices: number;
+};
 
 export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 
@@ -355,6 +367,8 @@ export type PullRequest = {
   error: string | null;
   checked_at: string | null;
   created_at: string;
+  /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
+  labels?: string[];
 };
 
 export type AgentSummary = {
@@ -558,7 +572,8 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean }) =>
+    req<PushStatus>("PUT", "/push", b),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
