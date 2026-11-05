@@ -91,16 +91,6 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "publish_spec" && name != "publish_tickets" {
         return None;
     }
-    // With no project named, a group's plan goes to the group's main project, when the agent works there.
-    let named = args["project"].as_str().is_some_and(|p| !p.trim().is_empty());
-    let mut args = args.clone();
-    if !named
-        && let Some(main) = crate::groups::main_project(state, &me.group)
-        && (me.project == main || me.projects.contains(&main))
-    {
-        args["project"] = json!(main);
-    }
-    let args = &args;
     // Everything below plans for one project: `me` as if that were its only one.
     let me = &match for_project(me, args) {
         Ok(a) => a,
@@ -1851,12 +1841,10 @@ pub(crate) mod tests {
         assert!(spec.contains("Loft issue"), "{spec}");
         assert_eq!(st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Api spec").unwrap().project, "multi-api");
 
-        // None named: its group's main project, made from its own main project.
-        mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": one("Where?") })).await.unwrap().unwrap();
-        assert_eq!(st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Where?").unwrap().project, "multi-web");
-
-        // One outside its list: refused, listing its projects, and nothing is made.
+        // Several projects and none named, or one outside its list: refused, listing its projects, and nothing is made.
         let before = st.db.list_tasks().unwrap().len();
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": one("Where?") })).await.unwrap().unwrap_err();
+        assert_eq!(err, "You work in several projects: pass `project` as the one this plan is for: `multi-web`, `multi-api`.");
         let err = mcp_call(&st, &lead, "publish_spec", &json!({ "project": "elsewhere", "title": "No", "body": "x" })).await.unwrap().unwrap_err();
         assert_eq!(err, "You don't work in elsewhere. Pass `project` as one of your projects: `multi-web`, `multi-api`.");
         assert_eq!(st.db.list_tasks().unwrap().len(), before);
@@ -1872,25 +1860,6 @@ pub(crate) mod tests {
         let solo = planner_on(&st, "multi-solo", None);
         assert!(mcp_call(&st, &solo, "publish_tickets", &json!({ "tickets": one("Solo ticket") })).await.unwrap().is_ok());
         assert!(fake.seen("/").is_empty(), "no GitHub request at all");
-    }
-
-    #[tokio::test]
-    async fn a_groups_spec_goes_to_the_groups_main_project() {
-        let st = state();
-        let fake = own_fake(&st);
-        let mut lead = planner_on(&st, "home-web", None);
-        planner_on(&st, "home-api", None);
-        (lead.role, lead.group, lead.projects) = ("lead".into(), "Home".into(), vec!["home-web".into(), "home-api".into()]);
-        st.db.save_agent(&lead).unwrap();
-        crate::db::Db::save_group(&st.db, &crate::db::Group { name: "Home".into(), projects: vec!["home-web".into(), "home-api".into()], main_project: "home-api".into(), ..Default::default() }).unwrap();
-
-        mcp_call(&st, &lead, "publish_spec", &json!({ "title": "Group spec", "body": "## Problem Statement\n\nIt hurts." })).await.unwrap().unwrap();
-        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Group spec").unwrap();
-        assert_eq!(spec.project, "home-api", "the group's main project, not the agent's");
-        // A project named still wins.
-        mcp_call(&st, &lead, "publish_spec", &json!({ "project": "home-web", "title": "Web spec", "body": "x" })).await.unwrap().unwrap();
-        assert_eq!(st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Web spec").unwrap().project, "home-web");
-        assert!(fake.seen("/").is_empty());
     }
 
     #[tokio::test]

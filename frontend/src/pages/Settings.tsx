@@ -5,7 +5,6 @@ import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
-import { GroupSettings } from "./GroupSettings";
 import { cx } from "../lib/format";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
@@ -294,8 +293,6 @@ export default function SettingsPage() {
             hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
           />
         </Section>
-
-        <GroupSettings />
 
         <Section title="GitHub issues">
           <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
