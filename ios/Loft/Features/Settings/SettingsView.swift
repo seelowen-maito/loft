@@ -123,7 +123,7 @@ struct SettingsView: View {
             } header: {
                 Text("Orchestrator")
             } footer: {
-                Text("The agent the Chat tab opens first and that “Plan & delegate” hands tasks to. Its own permissions apply.")
+                Text("The agent the Chat tab opens first and that “Plan & delegate” hands issues to. Its own permissions apply.")
             }
 
             Section {
@@ -152,7 +152,7 @@ struct SettingsView: View {
                     if let e = push.lastError { Text(e).font(.footnote).foregroundStyle(Theme.failure) }
                 }
                 Toggle("Approval requests", isOn: $notifyApprovals)
-                Toggle("Task done, failed or blocked", isOn: $notifyTaskOutcomes)
+                Toggle("Issue done, failed or blocked", isOn: $notifyTaskOutcomes)
                 Toggle("Agent run failures", isOn: $notifyFailures)
             } header: {
                 Text("Notifications")
@@ -351,7 +351,7 @@ struct SettingsView: View {
             "server version \(store.info?.version ?? "?") · features \(store.info?.features?.joined(separator: ",") ?? "none")",
             "connection \(store.connection.label)",
             "last sync \(store.lastSync.map { JSONCoding.formatDate($0) } ?? "never")",
-            "agents \(store.agents.count) · tasks \(store.tasks.count) · pending approvals \(store.pendingApprovals().count) · unsent \(store.pending.count)",
+            "agents \(store.agents.count) · issues \(store.tasks.count) · pending approvals \(store.pendingApprovals().count) · unsent \(store.pending.count)",
         ]
         if case .reconnecting(let attempt, let e) = store.connection {
             lines.append("last error (attempt \(attempt)): \(e.diagnostic)")

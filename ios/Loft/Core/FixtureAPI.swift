@@ -139,9 +139,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         msgs = [
             "orch": [
                 m(1, "orch", "user", "text", "Implement a new settings screen, add the backend endpoints, and test the whole flow.", 41),
-                m(2, "orch", "assistant", "text", "On it. I'll split this into backend, iOS and QA subtasks.", 40),
-                m(3, "orch", "assistant", "tool_use", "Creating task: Implement backend endpoints", 39, meta: ["name": "mcp__loft__create_task"]),
-                m(4, "orch", "assistant", "tool_use", "Creating task: Build the iOS settings screen", 39, meta: ["name": "mcp__loft__create_task"]),
+                m(2, "orch", "assistant", "text", "On it. I'll split this into backend, iOS and QA sub-issues.", 40),
+                m(3, "orch", "assistant", "tool_use", "Creating issue: Implement backend endpoints", 39, meta: ["name": "mcp__loft__create_task"]),
+                m(4, "orch", "assistant", "tool_use", "Creating issue: Build the iOS settings screen", 39, meta: ["name": "mcp__loft__create_task"]),
                 m(5, "orch", "assistant", "text", "Delegated: **Backend Agent** has the endpoints, **iOS Agent** the screen, and **QA Agent** tests once both land.", 38),
                 m(9, "orch", "system", "notice", "Plan: Implement settings functionality", 38, meta: ["plan_task_id": "t1"]),
                 // An @-mention and the mentioned agent's reply, copied into this chat (#92).
@@ -398,7 +398,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             if let g = meta?["grill"] { tags["grill"] = g }
             // An attached task, as the backend stores it (#116): `task_id`, and first in `task_refs`.
             if let t = meta?["task_id"]?.stringValue {
-                guard taskList.contains(where: { $0.id == t }) else { throw APIError.server(status: 400, message: "The attached task doesn't exist.") }
+                guard taskList.contains(where: { $0.id == t }) else { throw APIError.server(status: 400, message: "The attached issue doesn't exist.") }
                 tags["task_id"] = .string(t)
                 tags["task_refs"] = .array([.string(t)])
             }
@@ -813,13 +813,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             ActivityItem(id: "a1", type: "approval.required", at: now.addingTimeInterval(-240), agentId: "ios", taskId: nil, messageId: 9,
                          summary: "iOS Agent asked for approval: Bash", severity: "attention"),
             ActivityItem(id: "a2", type: "task.created", at: now.addingTimeInterval(-1800), agentId: "be", taskId: "t2", messageId: nil,
-                         summary: "Orchestrator created subtask “Implement backend endpoints”", severity: "info"),
+                         summary: "Orchestrator created sub-issue “Implement backend endpoints”", severity: "info"),
             ActivityItem(id: "a3", type: "agent.failed", at: now.addingTimeInterval(-1900), agentId: "docs", taskId: nil, messageId: 8,
                          summary: "Docs Agent failed: link checker crashed", severity: "error"),
             ActivityItem(id: "a4", type: "task.completed", at: now.addingTimeInterval(-2000), agentId: "be", taskId: "t5", messageId: nil,
-                         summary: "Backend Agent finished task “Inspect existing architecture”", severity: "success"),
+                         summary: "Backend Agent finished issue “Inspect existing architecture”", severity: "success"),
             ActivityItem(id: "a5", type: "task.blocked", at: now.addingTimeInterval(-2100), agentId: "qa", taskId: "t4", messageId: nil,
-                         summary: "QA Agent is blocked on task “Test the integrated flow”", severity: "attention"),
+                         summary: "QA Agent is blocked on issue “Test the integrated flow”", severity: "attention"),
             ActivityItem(id: "a6", type: "agent.completed", at: now.addingTimeInterval(-2200), agentId: "orch", taskId: nil, messageId: nil,
                          summary: "Orchestrator finished", severity: "info"),
         ].filter { before == nil || $0.at < before! }

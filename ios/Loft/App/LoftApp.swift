@@ -174,7 +174,7 @@ struct RootView: View {
                     NavigationStack(path: $router.tasksPath) {
                         TaskListView().withRoutes()
                     }
-                    .tabItem { Label("Tasks", systemImage: "checklist") }
+                    .tabItem { Label("Issues", systemImage: "checklist") }
                     .tag(Router.Tab.tasks)
 
                     NavigationStack(path: $router.chatPath) {
@@ -232,7 +232,7 @@ private struct CreateMenu: ViewModifier {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { router.composer = .newTask(agentId: nil, parentId: nil) } label: {
-                        Label("New task", systemImage: "checklist")
+                        Label("New issue", systemImage: "checklist")
                     }
                     .disabled(!store.supportsTasks)
                     if let o = store.orchestrator {

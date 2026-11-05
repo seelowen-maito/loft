@@ -64,7 +64,7 @@ struct ConnectView: View {
                     Label("Reached Loft \(info.version ?? "")\(info.host.map { " on \($0)" } ?? "")", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(Theme.working)
                     if !info.supports(.tasks) {
-                        Label("This server is older and doesn't support tasks or the activity feed. Update Loft on the Mac for the full app.", systemImage: "info.circle")
+                        Label("This server is older and doesn't support issues or the activity feed. Update Loft on the Mac for the full app.", systemImage: "info.circle")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
