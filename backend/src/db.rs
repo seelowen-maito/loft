@@ -205,6 +205,20 @@ pub fn default_fresh_context() -> String {
     "above_80k".into()
 }
 
+/// A group's stored settings: the projects its agents work in, its main project (where its specs live)
+/// and, optionally, a folder inside the projects folder whose git repos Loft suggests as projects.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// One of `projects`; "" when it has none.
+    #[serde(default)]
+    pub main_project: String,
+}
+
 impl Agent {
     /// Its team's name: its group, else its main project. Empty: it has no team.
     pub fn team(&self) -> &str {
@@ -590,6 +604,11 @@ CREATE TABLE IF NOT EXISTS pending_fyis (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pending_fyis_agent ON pending_fyis(agent_id, id);
+-- A group's settings, by its name: `Group` as JSON.
+CREATE TABLE IF NOT EXISTS groups (
+    name TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 -- The All-time spend: one row, added to at every run end and never lowered.
 CREATE TABLE IF NOT EXISTS all_time_spend (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -826,6 +845,38 @@ impl Db {
             }
         }
         Ok(db)
+    }
+
+    // ---- groups -------------------------------------------------------
+
+    /// Every group, by name.
+    pub fn list_groups(&self) -> Result<Vec<Group>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM groups ORDER BY name")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_group(&self, name: &str) -> Result<Option<Group>> {
+        let c = self.0.lock().unwrap();
+        let d: Option<String> = c.query_row("SELECT data FROM groups WHERE name = ?1", [name], |r| r.get(0)).optional()?;
+        Ok(d.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn save_group(&self, g: &Group) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO groups (name, data) VALUES (?1, ?2)", params![g.name, serde_json::to_string(g)?])?;
+        Ok(())
+    }
+
+    /// Saves `g` unless a group with its name is already there. True when it was saved.
+    pub fn add_group(&self, g: &Group) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("INSERT OR IGNORE INTO groups (name, data) VALUES (?1, ?2)", params![g.name, serde_json::to_string(g)?])? == 1)
     }
 
     // ---- agents -------------------------------------------------------

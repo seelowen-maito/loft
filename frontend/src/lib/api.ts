@@ -494,6 +494,9 @@ export type SystemReading = {
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
+/** A group's settings: its projects, its main project (where its specs go) and an optional folder, inside the projects folder, whose git repos not in `projects` are `suggestions`. */
+export type Group = { name: string; folder: string; projects: string[]; main_project: string; suggestions: string[] };
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
@@ -538,6 +541,8 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
+  groups: () => req<Group[]>("GET", "/groups"),
+  saveGroup: (name: string, b: { folder?: string; projects?: string[]; main_project?: string }) => req<Group>("PUT", `/groups/${encodeURIComponent(name)}`, b),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
