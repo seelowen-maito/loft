@@ -170,7 +170,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         {agent.project_problems?.length ? (
           <div className="mt-2 space-y-1 text-[12px] text-warn">
             <div>Pick this agent's projects: each must be one repo.</div>
-            {agent.project_problems.map((f) => <div key={f.project}>{f.project}: {f.problem}</div>)}
+            {agent.project_problems.map((f) => <div key={f.project}>{f.problem}</div>)}
           </div>
         ) : null}
       </Field>
@@ -279,12 +279,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         </div>
       </Field>
 
-      <div className="sticky bottom-0 -mx-5 flex items-center gap-2 border-t border-line bg-ink-900/95 px-5 py-3 backdrop-blur">
+      <div className="sticky bottom-0 -mx-5 flex flex-wrap items-center gap-2 border-t border-line bg-ink-900/95 px-5 py-3 backdrop-blur">
         <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
           <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
         </button>
         {dirty && <button className="btn-ghost" onClick={() => setDraft(initial)}>Discard</button>}
-        {err && <span className="text-[12px] text-bad">{err}</span>}
+        {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 

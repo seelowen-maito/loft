@@ -819,7 +819,7 @@ mod tests {
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         // A project that isn't one: refused before anyone is asked.
         let err = create_agent(&st, &agent(&st, "Dev"), &json!({ "template": "docs", "project": "nowhere" })).await.unwrap_err();
-        assert!(err.ends_with("nowhere doesn't exist"), "{err}");
+        assert_eq!(err, "There's no folder nowhere in the projects folder");
         assert!(st.db.list_permissions(None).unwrap().is_empty(), "no permission card");
 
         // Same name in the same project: refused. In another project: fine.

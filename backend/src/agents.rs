@@ -51,6 +51,8 @@ pub fn emit_agent(state: &AppState, a: &Agent) {
     run_fields(state, &a.id, &mut v);
     v["unread_reply"] = json!(a.unread_reply());
     v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
+    // The settings panel takes the saved agent from this event: a fixed project clears its flag.
+    v["project_problems"] = crate::repos::project_problems(state, a);
     state.emit(Event::AgentUpdated { agent: v });
 }
 

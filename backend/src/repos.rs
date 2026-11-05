@@ -198,11 +198,17 @@ pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf
 /// so a missing folder and a folder holding several repos are out. None when it is fine.
 pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
     let Some(dir) = project_dir(state, project).filter(|d| d.is_dir()) else {
-        return Some(format!("The project folder {} doesn't exist", state.settings.boot().projects_dir.join(project.trim()).display()));
+        return Some(format!("There's no folder {} in the projects folder", project.trim()));
     };
     let holds_repos = !dir.join(".git").exists()
         && std::fs::read_dir(&dir).is_ok_and(|rd| rd.flatten().any(|e| e.path().is_dir() && e.path().join(".git").exists()));
-    holds_repos.then(|| format!("The project folder {} holds several repos: pick one of them", dir.display()))
+    holds_repos.then(|| format!("{} holds several repos: pick one of them", project.trim()))
+}
+
+/// An agent's projects that `project_problem` refuses, each with why, for clients to flag.
+pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
+    let problems: Vec<serde_json::Value> = a.projects.iter().filter_map(|p| project_problem(state, p).map(|why| serde_json::json!({ "project": p, "problem": why }))).collect();
+    serde_json::json!(problems)
 }
 
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
