@@ -125,7 +125,7 @@ fn route_for(own_key: bool, relay_key: bool) -> Route {
 
 /// A relay key only routes through the relay when this build knows where the relay is.
 pub fn route(state: &AppState) -> Route {
-    route_for(own_key(state), relay_key_present() && relay_url().is_some())
+    route_for(own_key(state), relay_key_present() && relay_url(state).is_some())
 }
 
 /// The hosted push relay. Empty until the operator's Vercel project exists (#259), so no one else's
@@ -136,15 +136,39 @@ const RELAY_URL: &str = "";
 /// Settings shows no dead link; LOFT_PORTAL_URL sets it meanwhile.
 const PORTAL_URL: &str = "";
 
-pub fn portal_url() -> Option<String> {
-    let url = std::env::var("LOFT_PORTAL_URL").unwrap_or_else(|_| PORTAL_URL.into());
-    let url = url.trim();
-    (url.starts_with("https://") || (cfg!(test) && url.starts_with("http://"))).then(|| url.to_string())
+/// A relay or portal address as typed in Settings: https, with a host and no user name or password; ""
+/// clears it. Tests may also use plain http on this Mac, for their fake relay.
+pub fn check_address(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let url = reqwest::Url::parse(raw).map_err(|_| format!("{raw} isn't a web address: it starts with https://"))?;
+    let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost"));
+    if !(url.scheme() == "https" || (cfg!(test) && url.scheme() == "http" && local)) {
+        return Err("The address must start with https://".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("The address can't hold a user name or password".into());
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("The address needs a host, like https://loft-push-relay.vercel.app".into());
+    }
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
-fn relay_url() -> Option<String> {
-    let url = std::env::var("LOFT_RELAY_URL").unwrap_or_else(|_| if cfg!(test) { "http://127.0.0.1:9".into() } else { RELAY_URL.into() });
-    (!url.trim().is_empty()).then_some(url)
+/// The address saved in Settings, else the environment variable `var`, else `fallback`; checked like a typed one.
+fn address(saved: &str, var: &str, fallback: &str) -> Option<String> {
+    let raw = if saved.trim().is_empty() { std::env::var(var).unwrap_or_else(|_| fallback.into()) } else { saved.to_string() };
+    check_address(&raw).ok().filter(|u| !u.is_empty())
+}
+
+pub fn portal_url(state: &AppState) -> Option<String> {
+    address(&state.settings.get().push.portal_url, "LOFT_PORTAL_URL", PORTAL_URL)
+}
+
+pub fn relay_url(state: &AppState) -> Option<String> {
+    address(&state.settings.get().push.relay_url, "LOFT_RELAY_URL", if cfg!(test) { "http://127.0.0.1:9" } else { RELAY_URL })
 }
 
 fn relay_key_path() -> PathBuf {
@@ -302,7 +326,7 @@ fn collapse(id: &str) -> String {
 pub async fn send(state: &AppState, device: &Device, push: &Push) -> Result<Outcome> {
     let (status, reason) = match route(state) {
         Route::OwnKey => direct(state, device, push).await?,
-        Route::Relay => via_relay(state, &relay_url().unwrap_or_default(), device, push).await?,
+        Route::Relay => via_relay(state, &relay_url(state).unwrap_or_default(), device, push).await?,
         Route::Off => bail!("Push is off: sign in to get push (paste your relay key), or add your own APNs key in Settings"),
     };
     if status == 200 {

@@ -256,6 +256,11 @@ export type PushStatus = {
   relay_key: boolean;
   /** The push portal, where the user signs in for a relay key; null until it's live. */
   portal_url: string | null;
+  /** The relay address in use (saved, else LOFT_RELAY_URL); null when there is none. */
+  relay_url: string | null;
+  /** The addresses saved in Settings ("" when none: the environment's, if any, is used). */
+  relay_address: string;
+  portal_address: string;
   configured: boolean;
   key_present: boolean;
   key_id: string;
@@ -576,7 +581,7 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean }) =>
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string; portal_url?: string }) =>
     req<PushStatus>("PUT", "/push", b),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
