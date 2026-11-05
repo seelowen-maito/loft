@@ -378,7 +378,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
       {(subtasks.length > 0 || deps.length > 0 || blocking.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
-          {subtasks.length > 0 && <TaskLinks title="Subtasks" tasks={subtasks} />}
+          {subtasks.length > 0 && <TaskLinks title="Sub-issues" tasks={subtasks} />}
           {deps.length > 0 && <TaskLinks title="Blocked by" tasks={deps} />}
           {blocking.length > 0 && <TaskLinks title="Blocking" tasks={blocking} />}
         </div>

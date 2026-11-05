@@ -37,7 +37,7 @@ The fixed instructions Loft writes for a role and sends with that role's wake in
 _Avoid_: Role prompt, template
 
 **Run**:
-One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
+One stretch of an agent working, from what woke it (a message, an issue, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
 **Session**:
@@ -61,7 +61,7 @@ A message one agent sends another through Loft, as opposed to a message from the
 _Avoid_: Ping, DM, hand-off
 
 **Draft**:
-A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached task. Each agent keeps its own until it is sent or the agent's context is cleared.
+A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached issue. Each agent keeps its own until it is sent or the agent's context is cleared.
 _Avoid_: Unsent message, pending message
 
 **Issue**:
