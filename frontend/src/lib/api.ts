@@ -324,6 +324,8 @@ export type PullRequest = {
   error: string | null;
   checked_at: string | null;
   created_at: string;
+  /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
+  labels?: string[];
 };
 
 export type AgentSummary = {
