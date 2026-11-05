@@ -30,7 +30,8 @@ import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { projectsOf, teamOf } from "../../lib/team";
+import { teamBadge, teamOf } from "../../lib/team";
+import { HoverTip } from "../../components/HoverTip";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -395,9 +396,13 @@ export function Chat({
             <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
             {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
             {teamOf(agent) && (
-              <span className="shrink-0 truncate rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3" title="Group · projects, main first">
-                {[agent.group?.trim(), projectsOf(agent).join(", ")].filter(Boolean).filter((x, i, xs) => xs.indexOf(x) === i).join(" · ")}
-              </span>
+              <HoverTip
+                left
+                className="min-w-0 shrink rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3"
+                tip={teamBadge(agent).all.map((p) => <span key={p} className="text-fg-2">{p}</span>)}
+              >
+                <span className="truncate">{teamBadge(agent).text}</span>
+              </HoverTip>
             )}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">

@@ -358,7 +358,8 @@ export default function AgentsPage() {
 /** Its projects for the roster row, unless it only has the one its group is named after. */
 function shownProjects(a: Agent): string {
   const ps = projectsOf(a);
-  return ps.length === 1 && ps[0] === teamOf(a) ? "" : ps.join(", ");
+  if (ps.length === 1 && ps[0] === teamOf(a)) return "";
+  return ps.length > 2 ? `${ps[0]} +${ps.length - 1}` : ps.join(", ");
 }
 
 /** `as` with agent `id` moved into `targetId`'s slot; unchanged across groups. */
