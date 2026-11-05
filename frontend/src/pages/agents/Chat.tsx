@@ -398,10 +398,10 @@ export function Chat({
             {teamOf(agent) && (
               <HoverTip
                 left
-                className="min-w-0 shrink rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3"
+                className={cx("shrink-0 whitespace-nowrap rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3", !teamBadge(agent).compact && "max-sm:hidden")}
                 tip={teamBadge(agent).all.map((p, i) => <span key={p} className="text-fg-2">{p}{i === 0 && <span className="text-accent"> · main</span>}</span>)}
               >
-                <span className="truncate max-sm:hidden">{teamBadge(agent).text}</span>
+                <span className="max-sm:hidden">{teamBadge(agent).text}</span>
                 <span className="sm:hidden">{teamBadge(agent).compact}</span>
               </HoverTip>
             )}
@@ -421,12 +421,12 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <button className="btn" onClick={() => api.stop(agent.id)}>
-              <Square className="size-3 fill-current" /> Stop
+            <button className="btn" title="Stop" onClick={() => api.stop(agent.id)}>
+              <Square className="size-3 fill-current" /> <span className="max-sm:hidden">Stop</span>
             </button>
           ) : (
-            <button className="btn" onClick={() => api.run(agent.id)} title="Run an autonomous check-in now">
-              <Play className="size-3 fill-current" /> Wake
+            <button className="btn" onClick={() => api.run(agent.id)} title="Wake: run an autonomous check-in now">
+              <Play className="size-3 fill-current" /> <span className="max-sm:hidden">Wake</span>
             </button>
           )}
           <button

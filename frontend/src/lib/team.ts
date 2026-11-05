@@ -14,7 +14,7 @@ export function teamBadge(a: Teamed): { text: string; compact: string; all: stri
   const main = all[0] && all[0] !== a.group?.trim() ? all[0] : "";
   const more = all.length > 1 ? `+${all.length - 1}` : "";
   const text = [a.group?.trim(), main, more].filter(Boolean).join(" · ");
-  return { text, compact: more || text, all };
+  return { text, compact: more, all };
 }
 
 /** Agents grouped by team, named teams A–Z, then those without one. */
