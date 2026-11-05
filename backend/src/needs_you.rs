@@ -496,7 +496,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             kind: "pr_ready",
             urgency: 1,
             title: text(&format!("{}#{}: {}", p.slug, p.number, p.title), MAX_TITLE),
-            reason: text(&format!("Ready to merge{}.", if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
+            reason: text(&format!("{}Ready to merge{}.", if p.ready_sha == p.head_sha && !p.head_sha.is_empty() { "Loft marked it ready: its verdicts are in. " } else { "" }, if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
             text: text(&format!("{} → {} · +{} −{} in {} files", p.head_ref, p.base_ref, p.additions, p.deletions, p.changed_files), MAX_TEXT),
             agent: who,
             task_id: None,

@@ -530,7 +530,11 @@ final class LoftStore {
         for tick in 0..<(60 * 60 * 2) { // checked every half second
             guard keepWaiting() else { return nil }
             let a = agent(agentId)
-            let running = a?.running == true || a?.status == "running"
+            // A run that started after the message and has ended is over, whatever the agent's status says: its
+            // update can be missed (a reconnect, the app in the background), and the reply was then never read.
+            let after = conversation(agentId).filter { $0.id > id }
+            let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
+            let running = !runEnded && (a?.running == true || a?.status == "running")
             sawRun = sawRun || running
             let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
             // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.

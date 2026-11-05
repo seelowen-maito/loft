@@ -123,6 +123,16 @@ fn base_tools() -> Value {
             }, "required": ["url"] }
         },
         {
+            "name": "set_pr_verdict",
+            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
+            "inputSchema": { "type": "object", "properties": {
+                "pr": { "type": "string", "description": "https://github.com/<owner>/<repo>/pull/<number>" },
+                "kind": { "type": "string", "enum": ["tests", "qa", "security"] },
+                "verdict": { "type": "string", "enum": ["pass", "fail"] },
+                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." }
+            }, "required": ["pr", "kind", "verdict", "sha"] }
+        },
+        {
             "name": "get_avatar",
             "description": "Return your current sticker avatar as SVG.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -324,6 +334,16 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Err(e) => tool_error(format!("Couldn't read that pull request: {e}")),
             }
         }
+        "set_pr_verdict" => match state.db.get_agent(agent_id) {
+            Ok(Some(me)) => match s("verdict").as_str() {
+                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {
+                    Ok(t) => text(t),
+                    Err(e) => tool_error(e),
+                },
+                _ => tool_error("verdict must be pass or fail"),
+            },
+            _ => tool_error("agent not found"),
+        },
         "get_avatar" => match state.db.get_agent(agent_id) {
             Ok(Some(a)) => text(a.avatar.svg),
             _ => tool_error("agent not found"),

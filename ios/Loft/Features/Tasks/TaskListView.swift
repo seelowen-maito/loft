@@ -108,7 +108,7 @@ struct TaskListView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(filter == f ? Theme.accent : Theme.card, in: Capsule())
-                        .foregroundStyle(filter == f ? .white : .primary)
+                        .foregroundStyle(filter == f ? Theme.onAccent : .primary)
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(filter == f ? .isSelected : [])

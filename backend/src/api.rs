@@ -836,7 +836,7 @@ fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBu
 
 #[derive(Deserialize)]
 pub struct PrQuery {
-    agent_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 pub async fn list_pull_requests(State(state): State<AppState>, Query(q): Query<PrQuery>) -> ApiResult<Value> {

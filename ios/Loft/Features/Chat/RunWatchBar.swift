@@ -47,7 +47,7 @@ struct RunWatchBar: View {
                     Text("Restart").lineLimit(1).fixedSize()
                 }
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.accent)
             .disabled(restarting || !store.canWrite)
             .accessibilityHint("Stops this run. Queued messages are kept.")
             .accessibilityIdentifier("runRestart")

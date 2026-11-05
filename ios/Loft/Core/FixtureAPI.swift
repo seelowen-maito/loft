@@ -418,9 +418,21 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                 : self.scripted ? Self.demoReply(to: text, from: self.agentList.first { $0.id == agentId }?.name ?? "The agent")
                                 : "Done. I ran it and everything passed.",
                             meta: nil, createdAt: Date())
-                        self.msgs[agentId, default: []].append(reply)
-                        // The demo's chat shows it at once, as a live server would.
-                        if self.scripted { self.push(type: "message", ["message": reply]) }
+                        if self.scripted {
+                            // As the server: the reply inside a run that starts and ends, so the demo's Talk reads it
+                            // aloud even though its Lead stays "working". The chat shows it at once, as a live server would.
+                            self.nextId += 1
+                            let start = ChatMessage(id: self.nextId, agentId: agentId, runId: "demo", role: "system", kind: "run_start", content: "", meta: nil, createdAt: Date())
+                            self.msgs[agentId, default: []].append(start)
+                            self.nextId += 1
+                            let r = ChatMessage(id: self.nextId, agentId: agentId, runId: "demo", role: reply.role, kind: reply.kind, content: reply.content, meta: nil, createdAt: Date())
+                            self.msgs[agentId, default: []].append(r)
+                            self.push(type: "message", ["message": r])
+                            self.nextId += 1
+                            self.msgs[agentId, default: []].append(ChatMessage(id: self.nextId, agentId: agentId, runId: "demo", role: "system", kind: "run_end", content: "", meta: nil, createdAt: Date()))
+                        } else {
+                            self.msgs[agentId, default: []].append(reply)
+                        }
                     }
                 }
             }

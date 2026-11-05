@@ -261,6 +261,8 @@ struct PullRequest: Codable, Identifiable, Hashable {
     var state: String
     var draft: Bool?
     var createdAt: Date?
+    /// Label names; the verdicts are tests:green, qa:passed, security:passed and their failures.
+    var labels: [String]?
 }
 
 struct ServerInfo: Codable, Hashable {
