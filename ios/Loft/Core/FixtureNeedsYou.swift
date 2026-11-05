@@ -71,13 +71,13 @@ enum FixtureNeedsYou {
       "text": ""
      },
      "kind": "answer",
-     "label": "Reply on the task",
+     "label": "Reply on the issue",
      "method": "POST",
      "path": "/api/tasks/9768b326-df66-4876-803e-41f8a4317202/comments"
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "9768b326-df66-4876-803e-41f8a4317202"
@@ -100,7 +100,7 @@ enum FixtureNeedsYou {
    "id": "task:9768b326-df66-4876-803e-41f8a4317202:blocked",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/9768b326-df66-4876-803e-41f8a4317202"
     }
    ],
@@ -227,7 +227,7 @@ enum FixtureNeedsYou {
       "text": ""
      },
      "kind": "answer",
-     "label": "Reply on the task",
+     "label": "Reply on the issue",
      "method": "POST",
      "path": "/api/tasks/dbc521e2-042c-4485-a15d-956c162919ed/comments"
     },
@@ -244,7 +244,7 @@ enum FixtureNeedsYou {
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "dbc521e2-042c-4485-a15d-956c162919ed"
@@ -267,7 +267,7 @@ enum FixtureNeedsYou {
    "id": "task:dbc521e2-042c-4485-a15d-956c162919ed:failed",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/dbc521e2-042c-4485-a15d-956c162919ed"
     }
    ],
@@ -293,7 +293,7 @@ enum FixtureNeedsYou {
      "kind": "open",
      "label": "Open on GitHub",
      "target": {
-      "url": "https://github.com/o/r/pull/7"
+      "url": "https://github.com/octo/loft/pull/214"
      }
     },
     {
@@ -314,13 +314,13 @@ enum FixtureNeedsYou {
    "links": [
     {
      "label": "Pull request",
-     "url": "https://github.com/o/r/pull/7"
+     "url": "https://github.com/octo/loft/pull/214"
     }
    ],
    "reason": "Ready to merge, 3 checks passed.",
    "task_id": null,
-   "text": "→  · +0 −0 in 0 files",
-   "title": "o/r#7: Fix it",
+   "text": "settings-endpoints → main · +412 −38 in 9 files",
+   "title": "loft#214: Settings endpoints",
    "type": "pr_ready",
    "urgency": 1
   },
@@ -328,13 +328,13 @@ enum FixtureNeedsYou {
    "actions": [
     {"body": {}, "kind": "deny", "label": "Cancel issue", "method": "POST", "path": "/api/issues/t2/cancel"},
     {"body": {}, "kind": "approve", "label": "Keep working (reopens #43)", "method": "POST", "path": "/api/issues/t2/keep-working"},
-    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t2"}}
+    {"kind": "open", "label": "Open issue", "target": {"screen": "task", "task_id": "t2"}}
    ],
    "age_seconds": 300,
    "agent": {"id": "be", "name": "Backend Agent"},
    "created_at": "2026-10-23T14:32:36.763574+00:00",
    "id": "closed_on_github:t2:2026-10-23T14:32:00Z",
-   "links": [{"label": "Task", "path": "/tasks/t2"}],
+   "links": [{"label": "Issue", "path": "/tasks/t2"}],
    "project": "loft",
    "reason": "#43 was closed on GitHub while it's being worked on.",
    "task_id": "t2",
@@ -348,13 +348,13 @@ enum FixtureNeedsYou {
     {"body": {}, "kind": "approve", "label": "Approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
     {"body": {"text": "Backend is done: 4 endpoints with tests. iOS screen next."}, "kind": "answer", "label": "Edit and approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
     {"body": {}, "kind": "deny", "label": "Keep in Loft", "method": "POST", "path": "/api/issues/t1/comments/77/keep"},
-    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t1"}}
+    {"kind": "open", "label": "Open issue", "target": {"screen": "task", "task_id": "t1"}}
    ],
    "age_seconds": 120,
    "agent": {"id": "be", "name": "Backend Agent"},
    "created_at": "2026-10-23T14:35:36.763574+00:00",
    "id": "comment:77",
-   "links": [{"label": "Task", "path": "/tasks/t1"}],
+   "links": [{"label": "Issue", "path": "/tasks/t1"}],
    "project": "loft",
    "reason": "Not on GitHub yet: approve to post it on octo/loft#42.",
    "task_id": "t1",
@@ -378,7 +378,7 @@ enum FixtureNeedsYou {
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "c835a7f2-343c-414d-8165-cf09eb16575b"
@@ -401,7 +401,7 @@ enum FixtureNeedsYou {
    "id": "done:c835a7f2-343c-414d-8165-cf09eb16575b:2026-10-23T14:37:36.763574+00:00",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/c835a7f2-343c-414d-8165-cf09eb16575b"
     }
    ],

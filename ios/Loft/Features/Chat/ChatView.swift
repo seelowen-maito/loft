@@ -38,7 +38,7 @@ struct ChatView: View {
     @State private var quickAckTask: Task<String?, Never>?
     /// "Send to <agent>?" for a message to the Orchestrator that looks meant for one agent.
     @State private var routeSuggestion: RouteSuggestion?
-    /// A task picked in "Attach a task", sent with the next message (`meta.task_id`).
+    /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
@@ -200,12 +200,12 @@ struct ChatView: View {
                         Spacer(minLength: 0)
                         Button { attached = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
                             .foregroundStyle(.secondary)
-                            .accessibilityLabel("Remove the attached task")
+                            .accessibilityLabel("Remove the attached issue")
                     }
                     .padding(.horizontal, Theme.gutter)
                     .background(.bar)
                     .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Attached task: \(t.title)")
+                    .accessibilityLabel("Attached issue: \(t.title)")
                     .accessibilityIdentifier("attachedTask")
                 }
                 if let t = talkText, !t.isEmpty {
@@ -271,7 +271,7 @@ struct ChatView: View {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
                     if let t = store.currentTask(for: agent.id) {
-                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current task", systemImage: "checklist") }
+                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current issue", systemImage: "checklist") }
                     }
                     // Interviews start when the agent asks; there's no mode to switch on. While one runs it can be paused or ended here.
                     if let s = grill {

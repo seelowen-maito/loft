@@ -83,7 +83,7 @@ struct OverviewView: View {
                     HStack {
                         if store.supportsTasks {
                             Button { router.composer = .newTask(agentId: nil, parentId: nil) } label: {
-                                Label("New task", systemImage: "checklist")
+                                Label("New issue", systemImage: "checklist")
                             }
                             .buttonStyle(.accent)
                         }
@@ -754,7 +754,7 @@ struct ActivityListView: View {
         }
         .overlay {
             if store.activity.isEmpty {
-                EmptyState(symbol: "clock", title: "No activity", message: "Runs, approvals and task updates show up here.")
+                EmptyState(symbol: "clock", title: "No activity", message: "Runs, approvals and issue updates show up here.")
             }
         }
         .refreshable { try? await store.refresh() }

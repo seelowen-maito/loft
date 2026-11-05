@@ -23,7 +23,7 @@ struct TaskMessageRow: View {
         if let open = text.firstIndex(of: "“"), let close = text[open...].firstIndex(of: "”") {
             return String(text[text.index(after: open)..<close])
         }
-        return text.split(separator: "\n").first.map(String.init) ?? "Task"
+        return text.split(separator: "\n").first.map(String.init) ?? "Issue"
     }
 
     /// What came after "is now <status>: " in a report.
@@ -46,7 +46,7 @@ struct TaskMessageRow: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "list.clipboard").foregroundStyle(Theme.accent)
-                    (Text("Task: ").foregroundStyle(.secondary) + Text(title).fontWeight(.semibold))
+                    (Text("Issue: ").foregroundStyle(.secondary) + Text(title).fontWeight(.semibold))
                         .multilineTextAlignment(.leading)
                     Spacer(minLength: 4)
                     if !details.isEmpty {
@@ -61,7 +61,7 @@ struct TaskMessageRow: View {
             }
             .buttonStyle(.plain)
             .disabled(details.isEmpty)
-            .accessibilityLabel("Task: \(title)")
+            .accessibilityLabel("Issue: \(title)")
             .accessibilityHint(details.isEmpty ? "" : expanded ? "Hides the description" : "Shows the description")
 
             if expanded {
@@ -120,7 +120,7 @@ struct TaskMessageRow: View {
             Spacer(minLength: 0)
             if let t = task {
                 NavigationLink(value: TaskRoute(id: t.id)) {
-                    Text("Open task").fontWeight(.semibold).foregroundStyle(Theme.accent)
+                    Text("Open issue").fontWeight(.semibold).foregroundStyle(Theme.accent)
                 }
                 .accessibilityIdentifier("openTask")
             }
