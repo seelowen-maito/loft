@@ -182,6 +182,9 @@ pub async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) ->
     Ok(Json(agent_json(&state, &a)))
 }
 
+/// The most projects one agent can work in.
+const MAX_PROJECTS: usize = 20;
+
 pub const DEFAULT_TOOLS: &[&str] = &[
     "Read", "Glob", "Grep", "Edit", "Write", "TodoWrite",
     "Bash(git *)", "Bash(ls *)", "Bash(cat *)", "Bash(mkdir *)", "WebSearch",
@@ -197,7 +200,37 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         a.name = v.trim().into();
     }
     if let Some(v) = str_field("title") { a.title = v; }
-    if let Some(v) = str_field("project") { a.project = crate::repos::project_name(&v).map_err(bad)?; }
+    if let Some(v) = str_field("group") {
+        let g = v.trim();
+        if g.chars().count() > 100 || g.chars().any(char::is_control) {
+            return Err(bad("group must be at most 100 characters, with no control characters"));
+        }
+        a.group = g.into();
+    }
+    if let Some(v) = p.get("projects") {
+        let raw: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| bad("projects must be a list of strings"))?;
+        let mut ps: Vec<String> = vec![];
+        for r in raw {
+            let n = crate::repos::project_name(&r).map_err(bad)?;
+            if !n.is_empty() && !ps.contains(&n) {
+                ps.push(n);
+            }
+        }
+        if ps.len() > MAX_PROJECTS {
+            return Err(bad(format!("an agent can have at most {MAX_PROJECTS} projects")));
+        }
+        a.project = ps.first().cloned().unwrap_or_default();
+        a.projects = ps;
+    } else if let Some(v) = str_field("project") {
+        // A client that knows one project sets the main one; the others stay.
+        a.project = crate::repos::project_name(&v).map_err(bad)?;
+        a.projects.retain(|p| *p != a.project);
+        if a.project.is_empty() {
+            a.projects.clear();
+        } else {
+            a.projects.insert(0, a.project.clone());
+        }
+    }
     if let Some(v) = str_field("personality") { a.personality = v; }
     if let Some(v) = str_field("prompt") { a.prompt = v; }
     if let Some(v) = str_field("model") { a.model = v; }
@@ -264,22 +297,22 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
     if a.role == "lead" {
-        if a.project.trim().is_empty() {
-            return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
+        if a.team().is_empty() {
+            return Err(bad("Only an agent with a group or a project can be Lead: a Lead leads the agents that share its group."));
         }
     }
     Ok(())
 }
 
-/// Makes `a` its project's only Lead: any other Lead in the project becomes Custom. Returns the agent
-/// the role moved from.
+/// Makes `a` its group's only Lead (its team: `Agent::team`): any other Lead in the group becomes Custom.
+/// Returns the agent the role moved from.
 fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     if a.role != "lead" {
         return Ok(None);
     }
     let mut moved = None;
     for mut o in state.db.list_agents()? {
-        if o.role == "lead" && o.id != a.id && o.project.trim() == a.project.trim() {
+        if o.role == "lead" && o.id != a.id && o.team() == a.team() {
             o.role = "custom".into();
             state.db.save_agent(&o)?;
             emit_agent(state, &o);
@@ -311,6 +344,8 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         name: "New agent".into(),
         title: String::new(),
         project: String::new(),
+        group: String::new(),
+        projects: vec![],
         personality: String::new(),
         prompt: String::new(),
         model: "sonnet".into(),
@@ -346,6 +381,10 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_by,
     };
     apply_patch(&mut a, p)?;
+    // A client that doesn't know groups puts it in its project's group, as the migration did.
+    if p.get("group").is_none() {
+        a.group = a.project.clone();
+    }
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),
@@ -469,8 +508,9 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    // Only agents in the same project: another project's "Dev" isn't this one's.
-    let all: Vec<_> = state.db.list_agents()?.into_iter().filter(|a| a.project.trim() == agent.project.trim()).collect();
+    // Any agent, its own group's first: where two share a name, the "Dev" of this group wins.
+    let mut all = state.db.list_agents()?;
+    all.sort_by_key(|a| a.team() != agent.team());
     let (mentioned, leading) = crate::mentions::parse(&text, &all, &id);
     if !mentioned.is_empty() {
         meta["mentions"] = crate::mentions::meta(&mentioned);
@@ -1143,7 +1183,7 @@ pub(crate) mod tests {
         // No project, no Lead: neither setting it nor clearing the Lead's project.
         let err = patch(&st, &ids[3], lead.clone()).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.1.starts_with("Only an agent with a project can be Lead"), "{}", err.1);
+        assert!(err.1.starts_with("Only an agent with a group or a project can be Lead"), "{}", err.1);
         assert_eq!(get(3).role, "custom");
         assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
         patch(&st, &ids[1], serde_json::json!({ "role": "dev", "project": "" })).await.unwrap();
@@ -1153,6 +1193,69 @@ pub(crate) mod tests {
         let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "imole" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Other to Dev.");
         assert_eq!(get(2).role, "custom");
+    }
+
+    #[tokio::test]
+    async fn one_lead_per_group_across_its_projects() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut ids = vec![];
+        for (name, group, project) in [("Api Dev", "Acme", "api"), ("Web Dev", "Acme", "b2c"), ("Ida", "", "b2c")] {
+            let mut a = agent(&st, name);
+            (a.group, a.project) = (group.into(), project.into());
+            st.db.save_agent(&a).unwrap();
+            ids.push(a.id);
+        }
+        patch(&st, &ids[0], serde_json::json!({ "role": "lead" })).await.unwrap();
+        // Same group, another project: the mark moves. No group: its project is its team.
+        let v = patch(&st, &ids[1], serde_json::json!({ "role": "lead" })).await.unwrap();
+        assert_eq!(v["notice"], "Lead moved from Api Dev to Web Dev.");
+        let v = patch(&st, &ids[2], serde_json::json!({ "role": "lead" })).await.unwrap();
+        assert_eq!(v.get("notice"), None);
+        // A group alone is enough to lead.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "", "group": "Imole" })).await.unwrap();
+        assert_eq!((v["role"].clone(), v["group"].clone(), v["projects"].clone()), ("lead".into(), "Imole".into(), serde_json::json!([])));
+    }
+
+    #[test]
+    fn group_and_projects_are_validated_and_the_main_project_follows_them() {
+        let st = crate::tasks::tests::state();
+        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Web", "group": " Acme ", "projects": ["b2c", " b2b ", "b2c", "", "work/notes"] }), None).unwrap();
+        assert_eq!((a.group.as_str(), a.project.as_str()), ("Acme", "b2c"));
+        assert_eq!(a.projects, ["b2c", "b2b", "work/notes"], "trimmed, each once, main first");
+        let (old, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Old", "project": "api" }), None).unwrap();
+        assert_eq!((old.group.as_str(), old.projects.as_slice()), ("api", &["api".to_string()][..]), "a client without groups");
+
+        // The star moves the main project to the front.
+        apply_patch(&mut a, &serde_json::json!({ "projects": ["b2b", "b2c"] })).unwrap();
+        assert_eq!((a.project.as_str(), a.projects.as_slice()), ("b2b", &["b2b".to_string(), "b2c".into()][..]));
+
+        // A client that only knows `project` changes the main one and keeps the rest.
+        apply_patch(&mut a, &serde_json::json!({ "project": "b2c" })).unwrap();
+        assert_eq!(a.projects, ["b2c", "b2b"]);
+        apply_patch(&mut a, &serde_json::json!({ "project": "apps" })).unwrap();
+        assert_eq!(a.projects, ["apps", "b2c", "b2b"]);
+
+        // Paths, long lists and odd groups are refused, and change nothing.
+        let before = (a.group.clone(), a.projects.clone());
+        for bad in [
+            serde_json::json!({ "projects": ["../etc"] }),
+            serde_json::json!({ "projects": ["/Users/x"] }),
+            serde_json::json!({ "projects": ["~/dev"] }),
+            serde_json::json!({ "projects": ["api", "a/../../b"] }),
+            serde_json::json!({ "projects": "api" }),
+            serde_json::json!({ "projects": (0..21).map(|i| format!("p{i}")).collect::<Vec<_>>() }),
+            serde_json::json!({ "project": "../x" }),
+            serde_json::json!({ "group": "x".repeat(101) }),
+            serde_json::json!({ "group": "Dine\nout" }),
+        ] {
+            let mut b = a.clone();
+            assert!(apply_patch(&mut b, &bad).is_err(), "accepted {bad}");
+        }
+        assert_eq!((a.group.clone(), a.projects.clone()), before);
+
+        apply_patch(&mut a, &serde_json::json!({ "projects": [] })).unwrap();
+        assert_eq!((a.project.as_str(), a.projects.len()), ("", 0));
     }
 
     #[test]
@@ -1177,7 +1280,7 @@ mod ls_tests {
         std::fs::create_dir_all(projects.join("imole/brand_docs")).unwrap();
         std::fs::write(projects.join("imole/proposta.md"), "").unwrap();
         std::fs::write(root.join("secret.txt"), "").unwrap();
-        let base = projects.join("work/isa");
+        let base = projects.join("work/notes");
         std::fs::create_dir_all(base.join("docs")).unwrap();
         let names = |p: &str| ls(&base, &[&ws, &projects], p).map(|(_, v)| v.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>());
         assert_eq!(names("").unwrap(), vec!["docs"], "starts at the project's folder");

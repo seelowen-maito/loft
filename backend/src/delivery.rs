@@ -152,9 +152,9 @@ fn ticket_key(d: &Delivery, n: Option<i64>) -> String {
 }
 
 /// Whether the Fresh context setting applies to `a`: to every agent but a Lead that only coordinates. A
-/// Lead builds the tickets when its team has no Dev (`builder`).
+/// Lead builds the tickets when its team (its group) has no Dev (`builder`).
 pub fn fresh_context_applies(state: &AppState, a: &crate::db::Agent) -> bool {
-    a.role != "lead" || state.db.agent_with_role(&a.project, "dev").ok().flatten().is_none()
+    a.role != "lead" || !state.db.list_agents().unwrap_or_default().iter().any(|o| o.role == "dev" && !a.team().is_empty() && o.team() == a.team())
 }
 
 /// What a Delivery delivers: "spec #40", "ticket #7" for a standalone ticket, or `spec "Title"` for a
@@ -258,7 +258,7 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
 fn builder(state: &AppState, d: &Delivery, fallback: &str) -> Option<crate::db::Agent> {
     let all = state.db.list_agents().ok()?;
     let project = d.project.trim();
-    let dev = all.iter().find(|a| !project.is_empty() && a.project.trim() == project && a.role == "dev");
+    let dev = all.iter().find(|a| !project.is_empty() && a.role == "dev" && (a.project.trim() == project || a.has_project(project)));
     let planner = || all.iter().find(|a| a.id == d.planner).or_else(|| all.iter().find(|a| a.id == fallback));
     dev.or_else(planner).cloned()
 }
@@ -374,7 +374,7 @@ async fn start_next(state: &AppState, repo: &str, spec: i64) -> String {
 /// The roles that review each ticket, in the order they are woken.
 const TICKET_REVIEWERS: &[&str] = &["qa", "security"];
 
-/// The team's agent with `role` in the Delivery's project, if it has one.
+/// The agent with `role` that works in the Delivery's project (its main project or one of its projects), if any.
 fn with_role(state: &AppState, d: &Delivery, role: &str) -> Option<crate::db::Agent> {
     state.db.agent_with_role(&d.project, role).ok()?
 }

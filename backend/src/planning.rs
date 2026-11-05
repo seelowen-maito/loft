@@ -43,6 +43,7 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
+            "project": { "type": "string", "description": "When you work in several projects: the one this is for (its repo gets it). Required then; leave it out when you have one." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
             "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
         }, "required": ["title", "body"] }
@@ -51,6 +52,7 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Under a spec with a spec PR, Loft adds a \"## Branch\" section to each ticket naming the spec branch and the spec PR. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
         "inputSchema": { "type": "object", "properties": {
             "spec": { "type": ["integer", "string"], "description": "The spec from publish_spec: its GitHub issue number, or its Loft issue id when the plan is kept in Loft. Leave it out only for a single standalone ticket." },
+            "project": { "type": "string", "description": "When you work in several projects: the spec's project. Required then; leave it out when you have one." },
             "tickets": { "type": "array", "description": "The tickets, in any order.", "items": { "type": "object", "properties": {
                 "title": { "type": "string", "description": "What the slice delivers, in a few words." },
                 "body": { "type": "string", "description": "The ticket in Markdown, following the ticket template." },
@@ -89,6 +91,11 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "publish_spec" && name != "publish_tickets" {
         return None;
     }
+    // Everything below plans for one project: `me` as if that were its only one.
+    let me = &match for_project(me, args) {
+        Ok(a) => a,
+        Err(e) => return Some(Err(e)),
+    };
     let out = if name == "publish_tickets" {
         publish_tickets(state, me, args).await
     } else {
@@ -103,6 +110,23 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     // What was published shows up as Loft issues without waiting for the next poll.
     crate::mirror::spawn_sync(state, &me.project);
     Some(out)
+}
+
+/// The agent as if `project` were its only project, for planning: the argument, which must be one of its
+/// projects, or its only project. With several and none named, the error lists them.
+pub(crate) fn for_project(me: &Agent, args: &Value) -> Result<Agent, String> {
+    let own: Vec<String> = if me.projects.is_empty() { Some(me.project.trim().to_string()).filter(|p| !p.is_empty()).into_iter().collect() } else { me.projects.clone() };
+    let list = || own.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    let project = match args["project"].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) if own.iter().any(|o| o == p) => p.to_string(),
+        Some(p) if own.is_empty() => return Err(format!("You have no projects, so you can't plan for {p}.")),
+        Some(p) => return Err(format!("You don't work in {p}. Pass `project` as one of your projects: {}.", list())),
+        None if own.len() > 1 => return Err(format!("You work in several projects: pass `project` as the one this plan is for: {}.", list())),
+        None => return Ok(me.clone()),
+    };
+    let mut a = me.clone();
+    a.project = project;
+    Ok(a)
 }
 
 /// `POST /api/agents/{id}/messages/{mid}/team-setup`: the end-of-planning card's "Set up the team with
@@ -123,10 +147,10 @@ pub async fn send_team_setup(State(state): State<AppState>, Path((id, mid)): Pat
     Ok(Json(json!({ "ok": true, "message": m })))
 }
 
-/// The team check: the roles no agent in `project` fills, going by their stored roles.
-pub fn missing_roles(state: &AppState, project: &str) -> Vec<&'static str> {
-    let project = project.trim();
-    let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !project.is_empty() && a.project.trim() == project).map(|a| a.role).collect();
+/// The team check: the roles no agent of `team` (a group, else a main project) fills, going by their stored roles.
+pub fn missing_roles(state: &AppState, team: &str) -> Vec<&'static str> {
+    let name = team.trim();
+    let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !name.is_empty() && a.team() == name).map(|a| a.role).collect();
     TEAM_ROLES.iter().copied().filter(|r| !team.iter().any(|t| t == r)).collect()
 }
 
@@ -1794,6 +1818,48 @@ pub(crate) mod tests {
         let specs: Vec<_> = st.db.list_tasks().unwrap().into_iter().filter(|t| t.labels == ["spec"]).collect();
         assert_eq!(specs.len(), 5, "one per project, the project-less one included");
         assert!(specs.iter().all(|t| t.github.is_none() && t.title == "X" && t.description == "## Problem Statement\n\nIt hurts." && t.status == "inbox"));
+    }
+
+    #[tokio::test]
+    async fn a_lead_with_two_projects_files_each_plan_in_the_project_it_names() {
+        let st = state();
+        let fake = own_fake(&st);
+        // Two projects with git and no GitHub origin: plans become Loft issues in the project they're for.
+        let mut lead = planner_on(&st, "multi-web", None);
+        planner_on(&st, "multi-api", None);
+        (lead.role, lead.group, lead.projects) = ("lead".into(), "Acme".into(), vec!["multi-web".into(), "multi-api".into()]);
+        st.db.save_agent(&lead).unwrap();
+        let one = |title: &str| json!([ticket(title, &[])]);
+
+        for project in ["multi-web", "multi-api"] {
+            let out = mcp_call(&st, &lead, "publish_tickets", &json!({ "project": project, "tickets": one(&format!("Ticket for {project}")) })).await.unwrap().unwrap();
+            assert!(out.starts_with("Saved a standalone ticket as a Loft issue"), "{out}");
+            let t = st.db.list_tasks().unwrap().into_iter().find(|t| t.title == format!("Ticket for {project}")).unwrap();
+            assert_eq!(t.project, project);
+        }
+        let spec = mcp_call(&st, &lead, "publish_spec", &json!({ "project": "multi-api", "title": "Api spec", "body": "## Problem Statement\n\nIt hurts." })).await.unwrap().unwrap();
+        assert!(spec.contains("Loft issue"), "{spec}");
+        assert_eq!(st.db.list_tasks().unwrap().into_iter().find(|t| t.title == "Api spec").unwrap().project, "multi-api");
+
+        // Several projects and none named, or one outside its list: refused, listing its projects, and nothing is made.
+        let before = st.db.list_tasks().unwrap().len();
+        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "tickets": one("Where?") })).await.unwrap().unwrap_err();
+        assert_eq!(err, "You work in several projects: pass `project` as the one this plan is for: `multi-web`, `multi-api`.");
+        let err = mcp_call(&st, &lead, "publish_spec", &json!({ "project": "elsewhere", "title": "No", "body": "x" })).await.unwrap().unwrap_err();
+        assert_eq!(err, "You don't work in elsewhere. Pass `project` as one of your projects: `multi-web`, `multi-api`.");
+        assert_eq!(st.db.list_tasks().unwrap().len(), before);
+
+        // create_issue follows the same list: an issue in each of its projects, none outside.
+        let find = |k: &str| Err::<Agent, _>(k.to_string());
+        for project in ["multi-web", "multi-api"] {
+            assert!(crate::tasks::mcp_call(&st, &lead, "create_issue", &json!({ "title": format!("Issue in {project}"), "project": project }), find).unwrap().is_ok());
+        }
+        assert!(crate::tasks::mcp_call(&st, &lead, "create_issue", &json!({ "title": "Outside", "project": "elsewhere" }), find).unwrap().is_err());
+
+        // An agent with one project needs no `project`, as before.
+        let solo = planner_on(&st, "multi-solo", None);
+        assert!(mcp_call(&st, &solo, "publish_tickets", &json!({ "tickets": one("Solo ticket") })).await.unwrap().is_ok());
+        assert!(fake.seen("/").is_empty(), "no GitHub request at all");
     }
 
     #[tokio::test]
@@ -3704,6 +3770,17 @@ pub(crate) mod tests {
         st.db.save_agent(&dev).unwrap();
         assert!(missing_roles(&st, "team-a").is_empty(), "a full team");
         assert_eq!(missing_roles(&st, " "), all, "no project, no team");
+        // A group is one team across its projects; its agents leave their projects' teams.
+        let mut b = add("Web", "", "qa", "team-b");
+        b.group = "Acme".into();
+        st.db.save_agent(&b).unwrap();
+        for (name, role) in [("Api", "dev"), ("Rev", "code_reviewer"), ("Sec", "security")] {
+            let mut c = add(name, "", role, "team-c");
+            c.group = "Acme".into();
+            st.db.save_agent(&c).unwrap();
+        }
+        assert!(missing_roles(&st, "Acme").is_empty());
+        assert_eq!(missing_roles(&st, "team-b"), ["code_reviewer", "qa", "security"], "Web is in Acme now: team-b keeps only Builder, a Dev");
     }
 
     #[test]

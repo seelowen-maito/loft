@@ -21,6 +21,14 @@ test("an empty group is left out, and a project-less issue still lists everyone"
   assert.deepEqual(names("w", "").map((g) => g[0]), ["Other agents"]);
 });
 
+test("an issue's project lists every agent working in it first, whatever its main project", () => {
+  const web = { id: "web", name: "Web", project: "b2c", projects: ["b2c", "b2b"] } as never;
+  assert.deepEqual(mentionGroups([...team, web], "b2b", "").map((g) => [g.title, g.agents.map((x) => x.name)]), [
+    ["b2b", ["Web"]],
+    ["Other agents", ["Loft Dev", "Loft Dev 2", "Loft QA", "Web Dev", "Planner"]],
+  ]);
+});
+
 test("the @ query is read at the end of the text, at the start of a word only", () => {
   assert.equal(atQuery("ask @Lo"), "Lo");
   assert.equal(atQuery("@"), "");

@@ -1060,7 +1060,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         assert!(out.contains("It is the project's Lead now (moved from Lead)."), "{out}");
         assert_eq!(st.db.get_agent(&first.id).unwrap().unwrap().role, "custom");
         let err = create_agent(&st, &me, &json!({ "template": "lead", "name": "Loner" })).await.unwrap_err();
-        assert!(err.starts_with("Only an agent with a project can be Lead"), "{err}");
+        assert!(err.starts_with("Only an agent with a group or a project can be Lead"), "{err}");
     }
 
     #[tokio::test]
