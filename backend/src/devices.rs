@@ -317,7 +317,7 @@ mod tests {
         // makes the test push fail; clearing it goes back to the environment's relay, with no restart.
         let phone = format!("{}0c", "ef".repeat(31));
         let _ = register(State(st.clone()), reg(&phone)).await.unwrap();
-        put(json!({ "relay_url": "http://127.0.0.1:9" })).await.unwrap();
+        let _ = put(json!({ "relay_url": "http://127.0.0.1:9" })).await.unwrap();
         let err = test(State(st.clone()), Path(phone.clone())).await.unwrap_err();
         assert!(err.1.contains("The push relay is unreachable"), "{}", err.1);
         let Json(s) = put(json!({ "relay_url": "" })).await.unwrap();
@@ -325,7 +325,7 @@ mod tests {
         assert!(test(State(st.clone()), Path(phone)).await.is_ok(), "the environment's relay again");
 
         // The general settings can't change them, even when a client sends the push section.
-        put(json!({ "portal_url": "https://portal.example.com" })).await.unwrap();
+        let _ = put(json!({ "portal_url": "https://portal.example.com" })).await.unwrap();
         let mut general = serde_json::to_value(st.settings.get()).unwrap();
         general["push"]["relay_url"] = json!("https://evil.example.com");
         general["push"]["portal_url"] = json!("https://evil.example.com");
