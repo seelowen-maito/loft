@@ -56,7 +56,9 @@ their created and last-used dates (`relay-key-used:<hash>`, set on each authoriz
 deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked.
 From one address (the first `x-forwarded-for` entry, stored only as a hash), at most 5 sign-ins (`/auth/start` and
 Delete my account), 5 returns from Apple (`/auth/callback`) and 5 key creations (`/keys` and Allow on `/connect`) are
-taken per hour: the 6th gets `429` with `Retry-After` until the next hour.
+taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These limits, and `/api/pair`'s, trust
+`x-forwarded-for`: Vercel sets it. Hosting the relay anywhere else, put it behind a proxy that overwrites that header
+with the caller's address, or anyone can set it and skip the limits. Requests without it all share one count.
 **Delete my account** (`/account/delete`) asks the user to sign in with Apple once more: only the account's own Apple
 ID confirms it. Then the account, its keys and their last-used dates are deleted, and the token Apple just gave is
 revoked (`/auth/revoke`), which ends Sign in with Apple for the portal. No Apple token is ever stored. If Apple
