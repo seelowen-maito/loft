@@ -137,6 +137,8 @@ pub struct AppState {
     pub publish_known: Arc<crate::planning::Known>,
     /// Where mirroring each GitHub repo stands.
     pub mirror: Arc<crate::mirror::Mirror>,
+    /// What `@` file search last listed under each base.
+    pub listings: Arc<crate::file_search::Listings>,
 }
 
 impl AppState {

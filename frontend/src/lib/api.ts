@@ -651,6 +651,9 @@ export const api = {
    *  projects folder. `dir` is where it landed, relative to the projects folder. */
   ls: (id: string, path: string) =>
     req<{ dir: string; entries: { name: string; dir: boolean }[] }>("GET", `/agents/${id}/ls?path=${encodeURIComponent(path)}`),
+  /** Up to 20 files and folders under the agent's `@` base whose path fuzzy-matches `q`, best first, with paths
+   *  relative to the base. In a git repo, only what git tracks or doesn't ignore. */
+  findFiles: (id: string, q: string) => req<{ path: string; dir: boolean }[]>("GET", `/agents/${id}/find?q=${encodeURIComponent(q)}`),
   permissions: (agentId?: string) => req<PermissionRequest[]>("GET", `/permissions${agentId ? `?agent_id=${agentId}` : ""}`),
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),

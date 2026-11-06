@@ -471,7 +471,8 @@ struct EndCardView: View {
     /// The final summary the card is on.
     let message: ChatMessage
     let card: EndCard
-    var clearWith: (String) -> Void
+    var clearWith: (String) async -> Void
+    @State private var clearing = false
     @State private var sendingSetup = false
     @State private var setupError: String?
     @State private var starting = false
@@ -500,7 +501,7 @@ struct EndCardView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("endCardStarted")
                 } else {
-                    Button { start(initGit: false) } label: { Label("Start delivery", systemImage: "play.fill") }
+                    Button { start(initGit: false) } label: { pending(starting, starting ? "Starting delivery…" : "Start delivery", symbol: "play.fill") }
                     .buttonStyle(.accent)
                     .font(.footnote)
                     .disabled(starting)
@@ -515,13 +516,9 @@ struct EndCardView: View {
             }
             HStack(spacing: 8) {
                 if card.delivery == nil {
-                    Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
-                        .buttonStyle(.accent)
-                        .accessibilityIdentifier("endCardClear")
+                    clearButton.buttonStyle(.accent)
                 } else {
-                    Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("endCardClear")
+                    clearButton.buttonStyle(.bordered)
                 }
                 if let setup = card.setup {
                     let sent = setup.sentAt != nil
@@ -534,7 +531,7 @@ struct EndCardView: View {
                             sendingSetup = false
                         }
                     } label: {
-                        Label(sent ? "Sent to loft" : "Set up the team with loft", systemImage: sent ? "checkmark" : "person.2")
+                        pending(sendingSetup, sent ? "Sent to loft" : "Set up the team with loft", symbol: sent ? "checkmark" : "person.2")
                     }
                     .buttonStyle(.bordered)
                     .disabled(sent || sendingSetup)
@@ -561,6 +558,28 @@ struct EndCardView: View {
             Button("Not now", role: .cancel) { declinedGit = true }
         } message: {
             Text("\(askGitDir ?? "") has no git yet. Loft runs git init, adds a .gitignore for .DS_Store and .remember/, and commits the folder as it is. Then the Delivery starts.")
+        }
+    }
+
+    /// Clear context, disabled while the session reset runs so it resets once.
+    private var clearButton: some View {
+        Button {
+            clearing = true
+            Task {
+                await clearWith(card.nextMessage)
+                clearing = false
+            }
+        } label: { pending(clearing, "Clear context", symbol: "eraser") }
+        .disabled(clearing)
+        .accessibilityIdentifier("endCardClear")
+    }
+
+    /// A button's label, with a spinner in place of its icon while the request it sent runs.
+    private func pending(_ busy: Bool, _ title: String, symbol: String) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            if busy { ProgressView().controlSize(.mini) } else { Image(systemName: symbol) }
         }
     }
 

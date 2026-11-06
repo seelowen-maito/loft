@@ -1,0 +1,31 @@
+# Keeps develop up to date with main after every push to main.
+name: Sync develop
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-develop
+  cancel-in-progress: false
+
+jobs:
+  sync-develop:
+    runs-on: ubuntu-latest
+    steps:
+      # Only the built-in GITHUB_TOKEN, no stored secrets: git pushes over
+      # HTTPS with it, and a rejected push (a ruleset on develop, or commits
+      # that change .github/workflows/) opens the sync PR instead.
+      # Pushes made with the token don't trigger other workflows, so there's
+      # no loop with release-pr.yml.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/scripts/sync-develop.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
