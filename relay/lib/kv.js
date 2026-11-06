@@ -19,6 +19,11 @@ export function kv(env) {
     set: (key, value) => command("SET", key, value),
     /** Sets `key` only when it isn't there yet. */
     setIfMissing: (key, value) => command("SET", key, value, "NX"),
+    get: (key) => command("GET", key),
+    /** Reads and deletes `key` in one step, so two callers never both get the value. */
+    getdel: (key) => command("GETDEL", key),
+    /** Sets `key`; it is gone after `seconds`. */
+    setEx: (key, value, seconds) => command("SET", key, value, "EX", seconds),
     sadd: (key, member) => command("SADD", key, member),
     exists: async (key) => (await command("EXISTS", key)) === 1,
     /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. One round trip, so a

@@ -24,10 +24,12 @@ The relay's and portal's addresses are push settings: https only, no user name o
 through `PUT /api/push` (Settings), never through the general settings or an agent tool. A saved address wins over
 `LOFT_RELAY_URL` / `LOFT_PORTAL_URL`, which stay as a fallback for scripted installs.
 
-The relay is login-only. A relay key comes from the operator for now (`relay/scripts/create-key.js`) and later from
-the push portal (Sign in with Apple). When the portal's address is known (Settings → Portal address, else `LOFT_PORTAL_URL`, else `PORTAL_URL`
-in `backend/src/apns.rs`, empty until it's live), Settings shows "Open the Loft portal to sign in" and, with a key stored, "Manage keys";
-without it, only the text. The key is pasted in Settings → Push notifications → Loft relay and kept owner-only in
+The relay is login-only. With the relay and portal addresses set, Settings → Push notifications → **Sign in** asks the
+relay for a one-time code (10 minutes, at most 5 per IP per hour) and opens the portal with it. After signing in with Apple and pressing
+Allow there, this backend, polling the relay, receives a new relay key once and stores it: the key never passes
+through the browser, and the code stops working. Approving from a phone works too. Until the portal is live the operator makes
+keys with `relay/scripts/create-key.js`. When the portal's address is known (Settings → Portal address, else `LOFT_PORTAL_URL`, else `PORTAL_URL`
+in `backend/src/apns.rs`, empty until it's live), Settings shows **Sign in** and, with a key stored, "Manage keys"; without it, only the text. Pasting a key in Settings → Push notifications → Loft relay stays as a fallback. Either way it is kept owner-only in
 the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
 phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
 answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its

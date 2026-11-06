@@ -6,7 +6,7 @@ import { createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from
 import { kv as makeKv } from "./kv.js";
 import { createKey } from "./relay.js";
 
-const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_KEY_P8", "PORTAL_URL", "SESSION_SECRET", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
+export const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_KEY_P8", "PORTAL_URL", "SESSION_SECRET", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
 const APPLE = "https://appleid.apple.com";
 const SESSION_SECONDS = 7 * 86400;
 const STATE_SECONDS = 600;
@@ -15,15 +15,15 @@ const STATE_SECONDS = 600;
 const appleHost = (env) => (env.VERCEL_ENV !== "production" && env.APPLE_ID_HOST) || APPLE;
 const origin = (env) => env.PORTAL_URL.replace(/\/+$/, "");
 
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const page = (title, body, status = 200, headers = {}) =>
+export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+export const page = (title, body, status = 200, headers = {}) =>
   new Response(
     `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>` +
       `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}button,input{font:inherit;padding:.5rem .75rem}code{word-break:break-all;display:block;padding:.75rem;background:#eee;border-radius:6px}</style>` +
       `<h1>${esc(title)}</h1>${body}</html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } },
   );
-const notConfigured = () => page("Push portal", "<p>The push portal isn't configured.</p>", 503);
+export const notConfigured = () => page("Push portal", "<p>The push portal isn't configured.</p>", 503);
 
 const hmac = (env, purpose, value) => createHmac("sha256", env.SESSION_SECRET).update(`${purpose}.${value}`).digest("base64url");
 /** `value.expiry.signature`, valid until it expires. The purpose ("session" or "state") is signed but not stored, so a cookie sealed for one is refused as the other. */
@@ -39,14 +39,14 @@ const unseal = (env, purpose, sealed, now) => {
   if (good.length !== given.length || !timingSafeEqual(good, given) || Number(expiry) * 1000 < now) return null;
   return Buffer.from(value, "base64url").toString();
 };
-const cookie = (name, value, seconds) => `${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
-const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
-const redirect = (to, ...cookies) => {
+export const cookie = (name, value, seconds) => `${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+export const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
+export const redirect = (to, ...cookies) => {
   const headers = new Headers({ location: to });
   cookies.forEach((c) => headers.append("set-cookie", c));
   return new Response(null, { status: 303, headers });
 };
-const accountOf = (request, env, now) => unseal(env, "session", cookieOf(request, "session"), now);
+export const accountOf = (request, env, now) => unseal(env, "session", cookieOf(request, "session"), now);
 
 /** The secret Apple wants to see: a short ES256 token signed with the sign-in key. */
 function clientSecret(env, now) {
@@ -64,6 +64,9 @@ export async function home(request, env = process.env, now = Date.now()) {
   if (!accountOf(request, env, now)) {
     return page("Loft push portal", '<p>Sign in with Apple to get a key for pushing from your Loft.</p><p><a href="/auth/start"><button>Sign in with Apple</button></a></p>');
   }
+  // Signed in on the way to approving a Loft's code: back to that page.
+  const pairing = cookieOf(request, "pair");
+  if (pairing && /^[A-Za-z0-9_-]{22}$/.test(pairing)) return redirect(`/connect?code=${pairing}`);
   return page("Loft push portal", '<form method="post" action="/keys"><p><label>Key name <input name="name" maxlength="60" required placeholder="My Mac"></label></p><button>Create key</button></form>');
 }
 

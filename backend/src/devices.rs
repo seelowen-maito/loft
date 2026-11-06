@@ -154,6 +154,8 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(Json(json!({
         "path": route.name(),
         "relay_key": apns::relay_key_present(),
+        // Sign in was pressed and the code isn't allowed yet.
+        "signing_in": crate::signin::waiting(),
         // The addresses in use (saved, else the environment), and the saved ones the Settings fields show.
         "relay_url": apns::relay_url(&state),
         "portal_url": apns::portal_url(&state),

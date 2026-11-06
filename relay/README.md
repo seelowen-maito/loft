@@ -54,6 +54,12 @@ in, the user names a key and gets it once on the next page; only its hash is sto
 account), and the relay accepts it like one made by the script. Without the portal's settings below, the page says
 "The push portal isn't configured" and the relay works as before: the portal is optional.
 
+**Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, expires_in: 600}`, at most 5 per IP per
+hour). Loft opens `<PORTAL_URL>/connect?code=…`: signed out, the page offers Sign in with Apple and brings the user back;
+signed in, **Allow** makes a key for the account and parks it under the code. `POST /api/pair-poll` with `{code}`
+answers `202` while waiting, `200 {key}` exactly once after Allow, then `404` (also for an expired or unknown code). Until
+it's collected, the new key waits in the store, readable only with the code, for at most the code's 10 minutes.
+
 To turn it on (your own Apple developer account; none of these values are in the repo): in Certificates, Identifiers
 & Profiles make a **Services ID**, enable Sign in with Apple for it with the portal's domain and the return URL
 `<PORTAL_URL>/auth/callback`, and make a **Sign in with Apple key**.

@@ -256,6 +256,8 @@ export type PushStatus = {
   path: "own_key" | "relay" | "none";
   /** Whether a relay key is stored. */
   relay_key: boolean;
+  /** Sign in was pressed and the code isn't allowed on the portal yet. */
+  signing_in: boolean;
   /** The push portal, where the user signs in for a relay key; null until it's live. */
   portal_url: string | null;
   /** The relay address in use (saved, else LOFT_RELAY_URL); null when there is none. */
@@ -587,6 +589,8 @@ export const api = {
   pushStatus: () => req<PushStatus>("GET", "/push"),
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string; portal_url?: string }) =>
     req<PushStatus>("PUT", "/push", b),
+  /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
+  pushSignIn: () => req<{ url: string }>("POST", "/push/signin"),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
