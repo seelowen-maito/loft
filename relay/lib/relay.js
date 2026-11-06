@@ -37,11 +37,13 @@ const unconfigured = (env) => (REQUIRED.some((k) => !env[k]) ? json(500, { error
 
 /**
  * A new relay key for `label` (who it's for), stored as its hash only. For the operator's script: the key is
- * returned once and can't be read back.
+ * returned once and can't be read back. The portal passes the Apple user id it belongs to as `account`.
  */
-export async function createKey(env, label, now = Date.now()) {
+export async function createKey(env, label, now = Date.now(), account = undefined) {
   const key = `lrk_${randomBytes(32).toString("base64url")}`;
-  await makeKv(env).set(hashed(key), JSON.stringify({ label, created: new Date(now).toISOString() }));
+  const store = makeKv(env);
+  await store.set(hashed(key), JSON.stringify({ label, created: new Date(now).toISOString(), ...(account && { account }) }));
+  if (account) await store.sadd(`account-keys:${account}`, sha256(key));
   return key;
 }
 

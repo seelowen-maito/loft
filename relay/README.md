@@ -2,9 +2,8 @@
 
 Forwards Loft's pushes to Apple for installs that hold a **relay key** and have no APNs key of their own (ADR 0002).
 It holds the operator's Apple key, serves only the official Loft app's bundle id, and only forwards: payloads and
-device tokens are never stored or logged, and only hashes of relay keys are kept. It's login-only: there's no endpoint
-that hands out keys. The operator makes them with `scripts/create-key.js`; later the push portal (Sign in with Apple)
-will.
+device tokens are never stored or logged, and only hashes of relay keys are kept. It's login-only: a key comes from
+the **push portal** (below), after Sign in with Apple, or from the operator's `scripts/create-key.js`.
 
 Plain JavaScript Vercel functions with no dependencies and no build step. The store is Upstash Redis (Vercel KV) over
 its REST API.
@@ -47,6 +46,27 @@ Every error body is `{"error": "…"}`.
 20 pushes per minute and 1,000 per day per relay key. They're fixed windows (the clock minute and the UTC day),
 counted in the store under the key's hash. Every authorized request counts, whether or not it's forwarded.
 
+## The push portal (ADR 0003)
+
+A web page in the same project. `/` offers **Sign in with Apple**; Apple's answer comes back to `/auth/callback`, and
+the account is Apple's user id (`account:<id>` in the store) and nothing else: no email or name is requested. Signed
+in, the user names a key and gets it once on the next page; only its hash is stored (with the name, the date and the
+account), and the relay accepts it like one made by the script. Without the portal's settings below, the page says
+"The push portal isn't configured" and the relay works as before: the portal is optional.
+
+To turn it on (your own Apple developer account; none of these values are in the repo): in Certificates, Identifiers
+& Profiles make a **Services ID**, enable Sign in with Apple for it with the portal's domain and the return URL
+`<PORTAL_URL>/auth/callback`, and make a **Sign in with Apple key**.
+
+| | |
+|---|---|
+| `APPLE_SERVICES_ID` | The Services ID (the web client id). |
+| `APPLE_TEAM_ID`, `APPLE_SIGNIN_KEY_ID`, `APPLE_SIGNIN_KEY_P8` | Your team, and the sign-in key's id and PEM text. A different key from the push key, though the team is the same. |
+| `PORTAL_URL` | The portal's address, like `https://loft-push-relay.vercel.app`. |
+| `SESSION_SECRET` | A long random string that signs the portal's cookies (`openssl rand -base64 32`). |
+
+`APPLE_ID_HOST` replaces Apple's sign-in host for the tests, and is ignored when `VERCEL_ENV` is `production`.
+
 ## Settings (Vercel environment variables)
 
 | | |
@@ -67,7 +87,7 @@ counted in the store under the key's hash. Every authorized request counts, whet
    `backend/src/apns.rs` stays empty until the project exists, so a name nobody owns can't receive relay keys and push text.
 2. Storage → connect an Upstash Redis (KV) store to the project. It adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
 3. Settings → Environment Variables (Production), all marked **Sensitive**: `APNS_KEY_P8` (paste the whole `.p8`),
-   `APNS_KEY_ID`, `APNS_TEAM_ID`, `LOFT_BUNDLE_ID`. Nothing secret goes in the repo.
+   `APNS_KEY_ID`, `APNS_TEAM_ID`, `LOFT_BUNDLE_ID`, and, for the portal, the settings above. Nothing secret goes in the repo.
 4. Deploy, make a relay key (below), paste it in a Loft with no APNs key (Settings → Push notifications → Loft relay)
    and press Send test push.
 
