@@ -96,7 +96,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             </div>
             <div className="space-y-1.5">
               <span className="eyebrow">Projects</span>
-              {/* Only an agent with a group or a project can be Lead: clearing both drops it back to Custom. */}
+              {/* Only an agent with a group can be Lead: clearing it drops it back to Custom. */}
               <ProjectsField value={form.projects} projects={projects} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
             </div>
             <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(team)}</p>

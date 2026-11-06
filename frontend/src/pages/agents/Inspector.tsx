@@ -96,7 +96,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 export const roleHint = (team: string) =>
   team.trim()
     ? `What it does in ${team.trim()}'s team. One Lead per group, with the captain hat: making it Lead takes the role from any other.`
-    : "What it does in its group's team. Only an agent with a group or a project can be Lead: set one first.";
+    : "What it does in its group's team. Only an agent with a group can be Lead: set one first.";
 
 export const FRESH_CONTEXT_HINT =
   "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
@@ -124,7 +124,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
-  const team = draft.group.trim() || draft.projects[0] || "";
+  const team = draft.group.trim();
 
   const save = async () => {
     setSaving(true);
@@ -161,7 +161,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         </Field>
       </div>
 
-      <Field label="Group" hint="Its team, such as Acme: agents in the same group are listed together and share one Lead. Empty: its main project is its group.">
+      <Field label="Group" hint="Its team, such as Acme: agents in the same group are listed together and share one Lead. Empty: no team, so it can't be Lead.">
         <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
       </Field>
 

@@ -38,19 +38,16 @@ struct Agent: Codable, Identifiable, Hashable {
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
-    /// Free-text name of its team ("Acme"); empty when its main project is its team (older servers don't send it).
+    /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
     var group: String? = nil
     /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
     var projects: [String]? = nil
 
-    /// Leads its project's team; it wears a captain hat.
+    /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
 
-    /// Its team: the group, else its main project (backend `Agent::team`).
-    var team: String {
-        let g = (group ?? "").trimmingCharacters(in: .whitespaces)
-        return g.isEmpty ? (project ?? "").trimmingCharacters(in: .whitespaces) : g
-    }
+    /// Its team: the group; empty when it has none (backend `Agent::team`).
+    var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
 
     /// The projects it works in, main first: `projects`, else the one `project` from an older server.
     var allProjects: [String] {

@@ -50,10 +50,10 @@ export const TEMPLATES = [
   },
 ];
 
-/** Its team (`teamOf`): the group, else the main project. */
-const formTeam = (f: NewAgentForm) => f.group.trim() || (f.projects[0] ?? "").trim();
+/** Its team (`teamOf`): the group. */
+const formTeam = (f: NewAgentForm) => f.group.trim();
 
-/** The form with a new group or projects. Only an agent with a team can be Lead: without one it drops back to Custom. */
+/** The form with a new group or projects. Only an agent with a group can be Lead: without one it drops back to Custom. */
 export const withTeam = (f: NewAgentForm, change: { group?: string; projects?: string[] }): NewAgentForm => {
   const next = { ...f, ...change };
   return { ...next, role: !formTeam(next) && next.role === "lead" ? "custom" : next.role };
@@ -61,7 +61,7 @@ export const withTeam = (f: NewAgentForm, change: { group?: string; projects?: s
 
 /** Whether the dialog offers Fresh context: to every role but a Lead that only coordinates, i.e. whose team has a Dev. */
 export const offersFreshContext = (f: NewAgentForm, agents: { role?: string; project: string; group?: string }[]) =>
-  f.role !== "lead" || !agents.some((a) => a.role === "dev" && (a.group?.trim() || a.project.trim()) === formTeam(f));
+  f.role !== "lead" || !agents.some((a) => a.role === "dev" && a.group?.trim() === formTeam(f));
 
 /** What Create agent sends: the whole form, role and Fresh context included, with a name even when left blank. */
 export const createPayload = (f: NewAgentForm) => ({ ...f, name: f.name.trim() || "Unnamed" });

@@ -124,7 +124,7 @@ pub struct Agent {
     /// none), so clients that only know one project keep working.
     #[serde(default)]
     pub project: String,
-    /// Free-text label its team goes by (Acme); never a path. Empty: its main project is its team.
+    /// Free-text label its team goes by (Acme); never a path. Empty: it has no team.
     #[serde(default)]
     pub group: String,
     /// The projects it works in, main first.
@@ -206,12 +206,9 @@ pub fn default_fresh_context() -> String {
 }
 
 impl Agent {
-    /// Its team's name: its group, else its main project. Empty: it has no team.
+    /// Its team's name: its group. Empty: it has no team.
     pub fn team(&self) -> &str {
-        match self.group.trim() {
-            "" => self.project.trim(),
-            g => g,
-        }
+        self.group.trim()
     }
 
     /// Whether `project` is one it works in.

@@ -2,8 +2,8 @@ import type { Agent, Task } from "./api";
 
 type Teamed = Pick<Agent, "project"> & Partial<Pick<Agent, "group" | "projects">>;
 
-/** The team an agent is in: its group, else its main project ("" for none). Mirrors `Agent::team` in the backend. */
-export const teamOf = (a: Teamed) => a.group?.trim() || a.project?.trim() || "";
+/** The team an agent is in: its group ("" for none). A project alone makes no team. Mirrors `Agent::team` in the backend. */
+export const teamOf = (a: Teamed) => a.group?.trim() || "";
 
 /** The projects an agent works in, main first. A server without groups only sends `project`. */
 export const projectsOf = (a: Teamed) => (a.projects?.length ? a.projects : [a.project?.trim() ?? ""].filter(Boolean));
