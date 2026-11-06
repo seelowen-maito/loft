@@ -1,0 +1,26 @@
+# Keeps one open develop → main release PR listing what a release contains.
+name: Release PR
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/scripts/release-pr.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

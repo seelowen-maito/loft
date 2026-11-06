@@ -1,0 +1,33 @@
+# Keeps develop up to date with main after every push to main.
+name: Sync develop
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-develop
+  cancel-in-progress: false
+
+jobs:
+  sync-develop:
+    runs-on: ubuntu-latest
+    steps:
+      # With the DEVELOP_SYNC_KEY deploy key (allowed to bypass the develop
+      # ruleset), git pushes over SSH. Without it, checkout falls back to
+      # HTTPS with the token, and a rejected push opens the sync PR instead.
+      # Pushes made with the key trigger release-pr.yml on develop, which
+      # only edits the release PR and never pushes, so there's no loop.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.DEVELOP_SYNC_KEY }}
+      # gh (PRs) always uses the token, whichever way git pushes.
+      - run: .github/scripts/sync-develop.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
