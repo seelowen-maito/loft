@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState, type Dispatch, type KeyboardEvent, type 
 import { FileText, Folder } from "lucide-react";
 import { api, type Agent } from "../lib/api";
 import { cx } from "../lib/format";
-import { atToken, matchingEntries, mentionMode, withPick, type Entry } from "../lib/mention";
+import { atToken, matchingEntries, mentionMode, stillFound, withPick, type Entry } from "../lib/mention";
 import { type MentionGroup } from "../lib/mentionPicker";
 import { Sticker } from "./Sticker";
 
@@ -49,11 +49,12 @@ export function useMention(agentId: string, text: string, setText: Dispatch<SetS
       clearTimeout(t);
     };
   }, [agentId, search]);
-  // While the next search runs, the last one's results stay up if the name only grew, so the menu doesn't blink.
+  // While the next search runs, the last one's results that still match stay up, so the menu doesn't blink
+  // and Tab or Enter never pick one that doesn't match what's typed.
   const fileMatches =
     search !== undefined
-      ? found && found.agentId === agentId && search.startsWith(found.typed)
-        ? found.entries
+      ? found && found.agentId === agentId
+        ? stillFound(found, search)
         : []
       : token && listing && listing.typed === fileDir
         ? matchingEntries(listing.entries, token.prefix)
