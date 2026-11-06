@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));
+    tokio::spawn(delivery::track_open_prs(state.clone()));
     tokio::spawn(agents::backfill_context(state.clone()));
     tokio::spawn(updater::updater(state.clone(), root.clone()));
     tokio::spawn(system::sampler(state.clone()));

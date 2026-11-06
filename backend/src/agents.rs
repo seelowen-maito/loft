@@ -1739,6 +1739,10 @@ case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
   exit 1;;
 esac
+case "$prompt" in *sharepr*)
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"mcp__loft__share_pull_request","input":{"url":"https://github.com/octo/share-run/pull/84"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"The user can now see a card for https://github.com/octo/share-run/pull/84."}]}]}}';;
+esac
 case "$prompt" in *delegate*|*orphan*)
   echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Find the parser","subagent_type":"Explore","prompt":"x"}}]}}'
   echo '{"type":"assistant","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_use","id":"n1","name":"Agent","input":{"description":"Nested","subagent_type":"general-purpose","prompt":"y"}}]}}';;
@@ -1850,6 +1854,17 @@ esac
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
         enqueue(st, id, Some(text.into()), "user");
         until("the run", 10, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pr_shared_in_a_run_is_tracked_for_the_agent_that_shared_it() {
+        let (st, a) = fake_claude_state();
+        let fake = crate::github::tests::own_fake(&st);
+        fake.route("GET", "/repos/octo/share-run/pulls/84", 200, json!({ "number": 84 }));
+        run(&st, &a.id, "sharepr", 1).await;
+        until("the PR is tracked", 10, || st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().is_some()).await;
+        let pr = st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().unwrap();
+        assert_eq!(pr.tool_use_id.as_deref(), Some("s1"), "its card sits on the tool call");
     }
 
     #[tokio::test(flavor = "multi_thread")]

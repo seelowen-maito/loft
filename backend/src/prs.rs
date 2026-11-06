@@ -198,7 +198,7 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
     let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
     let known = state.db.list_pull_requests(None).map_err(|e| e.to_string())?.into_iter().find(|p| p.slug == slug && p.number == number);
-    let pr = known.ok_or("Loft doesn't track that pull request: its opener shares it with share_pull_request first.")?;
+    let pr = known.ok_or_else(|| format!("Loft doesn't track {slug}#{number}: its opener shares it with share_pull_request first."))?;
     let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
     let checker = matches!(me.role.as_str(), "qa" | "security" | "code_reviewer");
     if !checker || opener.is_none_or(|o| me.team().is_empty() || o.team() != me.team()) {
@@ -811,7 +811,7 @@ mod tests {
         let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999").await.unwrap_err();
         assert!(err.contains("Its head is now ccc3333"), "{err}");
         assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333").await.unwrap_err().contains("kind must be"));
-        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track"));
+        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track octo/pr-auth#99"));
         let writes = fake.seen("/").into_iter().skip(before).filter(|r| r.method != "GET").count();
         assert_eq!(writes, 0, "a refused verdict writes nothing to GitHub");
     }
