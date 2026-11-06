@@ -317,6 +317,7 @@ final class LoftUITests: XCTestCase {
         let app = openGrillChat(["-fixture-grill-ended"])
         let setup = app.buttons["endCardSetup"]
         XCTAssertTrue(setup.appears(timeout: 5))
+        XCTAssertFalse(app.buttons["openInterview"].exists, "no Open interview once it ended")
         XCTAssertTrue(app.buttons["endCardClear"].exists)
         // The card is the last thing in the chat: bring it out from under the composer.
         app.swipeUp()
@@ -379,6 +380,32 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the open round shows Resume while paused")
         app.buttons["grillResume"].tap()
         XCTAssertTrue(app.buttons["grillResume"].disappears(timeout: 5))
+    }
+
+    /// The open interview full screen: one question as a card, answering moves on, Close goes back to the chat with
+    /// the interview still open, and ending it closes the view by itself.
+    func testInterviewFullScreenOpenAnswerClose() {
+        let app = openGrillChat()
+        let open = app.buttons["openInterview"]
+        XCTAssertTrue(open.appears(timeout: 5))
+        open.tap()
+        XCTAssertTrue(app.buttons["interviewClose"].appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists)
+
+        app.buttons["grillChoice-Both"].firstMatch.tap()
+        app.buttons["grillSaveAnswer"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "Question 2 of 3", app).appears(timeout: 5), "on to the next question")
+
+        app.buttons["interviewClose"].tap()
+        XCTAssertTrue(app.buttons["interviewClose"].disappears(timeout: 5))
+        XCTAssertTrue(any("grillOpenRound", app).exists, "the interview is still open in the chat")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
+
+        open.tap()
+        app.buttons["grillMore"].firstMatch.tap()
+        app.buttons["End interview"].tap()
+        XCTAssertTrue(app.buttons["interviewClose"].disappears(timeout: 5), "closes when the interview ends")
+        XCTAssertTrue(open.disappears(timeout: 5), "no Open interview without one")
     }
 
     /// A dictated answer (the voice walk-through) still answers the question the voice is on and moves to the next.

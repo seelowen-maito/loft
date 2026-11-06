@@ -253,7 +253,8 @@ struct GrillQuestionCard: View {
 
     /// Repeat · Skip · Back on the question the voice is on.
     private var voiceActions: some View {
-        HStack(spacing: 0) {
+        // Wraps rather than squeezing the labels into broken words at large text sizes.
+        FlowLayout(spacing: 0) {
             action("Repeat", "speaker.wave.2", id: "grillRepeat", enabled: true) {
                 Task { await speaker.speak(q.spoken(number: number, of: total, language: language)) }
             }

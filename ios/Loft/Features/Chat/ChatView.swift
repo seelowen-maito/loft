@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var confirmStop = false
     @State private var actionError: APIError?
     @State private var confirmEndGrill = false
+    /// The open interview full screen over the chat (`InterviewView`).
+    @State private var showingInterview = false
     // Grill voice loop, all inside this chat: read the question, open the mic, catch spoken commands.
     @State private var composerControl: ComposerControl?
     /// The last question read aloud, so each is read once.
@@ -172,6 +174,17 @@ struct ChatView: View {
                     .padding(.horizontal, Theme.gutter)
                     .padding(.top, 6)
                     .background(.bar)
+                }
+                if grill != nil {
+                    Button { showingInterview = true } label: {
+                        Label("Open interview", systemImage: "arrow.up.left.and.arrow.down.right").frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 6)
+                    .background(.bar)
+                    .accessibilityHint("Shows one question at a time, full screen")
+                    .accessibilityIdentifier("openInterview")
                 }
                 RunWatchBar(agentId: agentId)
                 if let s = suggested, s.messageId == askingMessage?.id, draft.isEmpty, !s.replies.isEmpty {
@@ -352,6 +365,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
+        .fullScreenCover(isPresented: $showingInterview) { InterviewView(agent: agent, command: grillCommand) }
         .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
