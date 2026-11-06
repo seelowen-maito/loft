@@ -27,6 +27,22 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(a.freshContextApplies, false)
     }
 
+    /// An agent's group and projects (main first); an older server sends only `project`, which then is its one project and its team.
+    func testAgentGroupAndProjects() throws {
+        let with = agentJSON.replacingOccurrences(of: #""project":"loft","#, with: #""project":"api","group":" Dineout ","projects":["api","pos"],"#)
+        let a = try JSONCoding.decoder.decode(Agent.self, from: Data(with.utf8))
+        XCTAssertEqual(a.allProjects, ["api", "pos"])
+        XCTAssertEqual(a.team, "Dineout")
+        let old = try JSONCoding.decoder.decode(Agent.self, from: Data(agentJSON.utf8))
+        XCTAssertNil(old.group)
+        XCTAssertEqual(old.allProjects, ["loft"])
+        XCTAssertEqual(old.team, "loft")
+        let empty = agentJSON.replacingOccurrences(of: #""project":"loft","#, with: #""project":"","group":"","projects":[],"#)
+        let e = try JSONCoding.decoder.decode(Agent.self, from: Data(empty.utf8))
+        XCTAssertEqual(e.allProjects, [])
+        XCTAssertEqual(e.team, "")
+    }
+
     /// `/pull-requests`: the verdict labels come with the PR; an older server sends none.
     func testPullRequestLabels() throws {
         let base = #"{"id":"p","agent_id":"a","slug":"o/r","number":7,"url":"u","title":"T","state":"open","draft":true"#

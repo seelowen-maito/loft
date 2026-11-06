@@ -91,6 +91,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             agent("qa", "QA Agent", "loft", "idle", "", running: false, last: 90, ctx: 12_000),
             agent("docs", "Docs Agent", "website", "error", "Last run failed", running: false, last: 30),
         ]
+        // The loft agents are the group "Loft"; the Orchestrator also works on the website.
+        for i in agentList.indices where agentList[i].project == "loft" { agentList[i].group = "Loft" }
+        agentList[0].projects = ["loft", "website"]
         // `-fixture-run-waiting`: the Orchestrator replied and waits on a background task; `-fixture-run-silent`: no output for a while.
         let args = ProcessInfo.processInfo.arguments
         // `-fixture-lead`: QA leads loft (initials, no sticker) and the Docs Agent leads website (with its sticker).
