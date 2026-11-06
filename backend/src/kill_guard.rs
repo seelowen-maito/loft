@@ -237,7 +237,8 @@ fn hits_everything(args: &[String]) -> bool {
 }
 
 /// Whether `ps` only shows the processes it's given by PID (`ps -p 123`, `ps -o pid= -p $PID`), with nothing that
-/// selects every process (`-A`, `-e`, `-a`, `-x`, `aux`).
+/// selects every process (`-A`, `-e`, `-a`, `-x`, `aux`) or more of them: ps lists the union of its selectors, so
+/// `-u $USER -p 1` lists all the user's processes.
 fn ps_by_pid(args: &[String]) -> bool {
     let (mut pid, mut all) = (false, false);
     let mut it = args.iter().enumerate();
@@ -245,6 +246,8 @@ fn ps_by_pid(args: &[String]) -> bool {
         let flags = match a.strip_prefix('-') {
             Some(long) if long.starts_with('-') => {
                 pid |= long.starts_with("-pid");
+                let selectors = ["-user", "-User", "-group", "-Group", "-tty", "-sid", "-ppid", "-deselect"];
+                all |= selectors.iter().any(|s| long.starts_with(s));
                 continue;
             }
             Some(flags) => flags,
@@ -252,13 +255,16 @@ fn ps_by_pid(args: &[String]) -> bool {
             None => continue,             // an option's value or a PID
         };
         for (k, f) in flags.char_indices() {
+            let dash = a.starts_with('-');
             match f {
                 'A' | 'a' | 'e' | 'x' => all = true,
+                // Users, groups, terminals, sessions, command names, `-N`; `ps u` without a dash is a format.
+                'u' | 'U' | 'g' | 'G' | 't' | 's' | 'C' | 'N' if dash => all = true,
                 'p' => pid = true,
                 _ => {}
             }
             // The rest is this option's value, or the next word is.
-            if "pqoOUuGgt".contains(f) && a.starts_with('-') {
+            if "pqoOUuGgtsC".contains(f) && dash {
                 if k + 1 == flags.len() {
                     it.next();
                 }
@@ -596,6 +602,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
         let next = c.get(i + 1).copied();
         i += 1;
         let opens_array = ch == '(' && l.in_word && l.word.ends_with('=') && assignment(&l.word).is_some();
+        // A `#` that starts an element comments out the rest of the line.
+        if array > 0 && ch == '#' && i >= 2 && matches!(c[i - 2], ' ' | '\t' | '\n' | '(') {
+            while c.get(i).is_some_and(|&n| n != '\n') {
+                i += 1;
+            }
+            continue;
+        }
         if opens_array || (array > 0 && matches!(ch, '(' | ')' | ' ' | '\t' | '\n')) {
             match ch {
                 '(' => array += 1,
@@ -799,6 +812,8 @@ fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
                     'n' => word.push('\n'),
                     't' => word.push('\t'),
                     'x' => word.extend(digits(&mut i, 16, 2)),
+                    'u' => word.extend(digits(&mut i, 16, 4)),
+                    'U' => word.extend(digits(&mut i, 16, 8)),
                     '0'..='7' => {
                         i -= 1;
                         word.extend(digits(&mut i, 8, 3));
@@ -944,6 +959,14 @@ mod tests {
             "ps -A -p 1 | awk '{print $1}' | xargs kill",
             "ps -p 1 -e | awk '{print $1}' | xargs kill",
             "ps aux -p 1 | awk '{print $2}' | xargs kill",
+            "ps -u $USER -p 1 -o pid= | xargs kill",
+            "ps -U $USER -p 1 -o pid= | xargs kill",
+            "ps -g 20 -p 1 -o pid= | xargs kill",
+            "ps -G staff -p 1 -o pid= | xargs kill",
+            "ps -t ttys001 -p 1 -o pid= | xargs kill",
+            "ps -p 1 -uroot -o pid= | xargs kill",
+            "ps --user me --pid 1 -o pid= | xargs kill",
+            "ps -C node -p 1 -o pid= | xargs kill",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
         }
@@ -974,6 +997,12 @@ mod tests {
             "ps -p123 -o pid= | xargs kill",
             "ps -wwp $PID -o pid= | xargs kill",
             "ps --pid $PID -o pid= | xargs kill",
+            "ps -p $PID -o pid= | xargs kill",
+            "ps -o user= -p $PID | xargs kill",
+            "ps -o pid=,user=,tty= -p $PID | xargs kill",
+            "ps u -p $PID | awk 'NR>1 {print $2}' | xargs kill",
+            "a=(x#y); kill 12",
+            "a=(1 # one\n 2); kill ${a[0]}",
         ] {
             assert!(!kills_by_name(cmd), "should allow: {cmd}");
         }
@@ -1023,6 +1052,11 @@ mod tests {
             "$'pkill' x",
             "$'\\x70kill' x",
             "$'\\160kill' -f x",
+            "$'\\u0070kill' x",
+            "$'\\U00000070kill' x",
+            "$'\\u70kill' x",
+            "a=( # (\n ); pkill -f vite",
+            "a=( 1 #)\n ) ; killall node",
             "echo hi; $'kill' -9 $'-1'",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
