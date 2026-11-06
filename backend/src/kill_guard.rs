@@ -12,10 +12,17 @@
 //!   lookup (`PID=$(pgrep x); kill $PID`). A lookup that only checks (`kill 123; ps aux | grep vite`) runs.
 //!
 //! It looks through wrappers (`sudo`, `xargs`, `find -exec`, `watch`, `env -S`, ...), `sh -c`, `eval`, and shells
-//! that read their script from a heredoc or a piped `echo`. Its limits, which the prompt rule covers: it can't see
-//! into a script file the agent writes and runs, a command name built from a variable (`p=pkill; $p`), or another
-//! language sending a signal (osascript, python, node). It fails open: input it can't read lets the command run,
-//! since failing closed would block every Bash call.
+//! that read their script from a heredoc or a piped `echo`.
+//!
+//! Its limits, which the prompt rule covers. It reads shell text, so it doesn't see:
+//! - a script file the agent writes and runs, or one it `source`s (`source <(...)`), and `trap` text;
+//! - a command name built at run time: from a variable (`p=pkill; $p`), brace expansion (`{pkill,-f,x}`), a glob
+//!   (`/usr/bin/pk?ll`), or arithmetic (`kill $((-1))`);
+//! - other languages sending a signal (osascript, python, node), other shells' syntax (fish, csh), and commands
+//!   that run text elsewhere (`ssh`, `tmux`, `screen`, `su -c`, `at`);
+//! - a port lookup filtered by name (`lsof -i | grep node | awk ... | xargs kill`), which looks like the port idiom.
+//!
+//! It fails open: input it can't read lets the command run, since failing closed would block every Bash call.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -112,7 +119,6 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize) -> Scan {
             }
         };
         let Some((name, args)) = words.split_first() else { continue };
-        let has = |flag: &str| args.iter().any(|a| a.starts_with(flag));
         match base(name) {
             "pkill" | "killall" => s.refuse = true,
             "kill" => {
@@ -120,7 +126,7 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize) -> Scan {
                 s.refuse |= hits_everything(args);
             }
             "pgrep" | "pidof" => s.lookup = true,
-            "ps" if !has("-p") => s.lookup = true,
+            "ps" if !ps_by_pid(args) => s.lookup = true,
             "lsof" if args.iter().any(|a| lsof_by_name(a)) => s.lookup = true,
             "find" => runs.extend(find_execs(args)),
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
@@ -230,6 +236,39 @@ fn hits_everything(args: &[String]) -> bool {
     })
 }
 
+/// Whether `ps` only shows the processes it's given by PID (`ps -p 123`, `ps -o pid= -p $PID`), with nothing that
+/// selects every process (`-A`, `-e`, `-a`, `-x`, `aux`).
+fn ps_by_pid(args: &[String]) -> bool {
+    let (mut pid, mut all) = (false, false);
+    let mut it = args.iter().enumerate();
+    while let Some((n, a)) = it.next() {
+        let flags = match a.strip_prefix('-') {
+            Some(long) if long.starts_with('-') => {
+                pid |= long.starts_with("-pid");
+                continue;
+            }
+            Some(flags) => flags,
+            None if n == 0 => a.as_str(), // BSD style, `ps aux`
+            None => continue,             // an option's value or a PID
+        };
+        for (k, f) in flags.char_indices() {
+            match f {
+                'A' | 'a' | 'e' | 'x' => all = true,
+                'p' => pid = true,
+                _ => {}
+            }
+            // The rest is this option's value, or the next word is.
+            if "pqoOUuGgt".contains(f) && a.starts_with('-') {
+                if k + 1 == flags.len() {
+                    it.next();
+                }
+                break;
+            }
+        }
+    }
+    pid && !all
+}
+
 /// Whether an `lsof` option picks processes by command name: `-c`, also in a group (`-tc`, `-ct`).
 fn lsof_by_name(arg: &str) -> bool {
     let Some(flags) = arg.strip_prefix('-').filter(|f| !f.starts_with('-')) else { return false };
@@ -277,7 +316,7 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
             continue;
         }
         if a.starts_with('-') && flags.contains('c') {
-            return rest.first().cloned();
+            return rest.iter().find(|a| *a != "--").cloned(); // `sh -c -- 'script'`
         }
         stdin |= a.starts_with('-') && flags.contains('s');
         if flags.ends_with(['o', 'O']) {
@@ -584,6 +623,10 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
                     i += 1;
                 }
             }
+            '$' if next == Some('\'') => {
+                l.in_word = true;
+                i = ansi_c_quoted(c, i + 1, &mut l.word);
+            }
             '\'' => {
                 l.in_word = true;
                 while let Some(&q) = c.get(i) {
@@ -734,6 +777,41 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
     i
 }
 
+/// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
+/// decoded. Returns the index past its closing quote.
+fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
+    while let Some(&q) = c.get(i) {
+        i += 1;
+        match q {
+            '\'' => break,
+            '\\' => {
+                let Some(&e) = c.get(i) else { break };
+                i += 1;
+                let digits = |i: &mut usize, radix: u32, max: usize| {
+                    let start = *i;
+                    while *i - start < max && c.get(*i).is_some_and(|d| d.is_digit(radix)) {
+                        *i += 1;
+                    }
+                    let s: String = c[start..*i].iter().collect();
+                    u32::from_str_radix(&s, radix).ok().and_then(char::from_u32)
+                };
+                match e {
+                    'n' => word.push('\n'),
+                    't' => word.push('\t'),
+                    'x' => word.extend(digits(&mut i, 16, 2)),
+                    '0'..='7' => {
+                        i -= 1;
+                        word.extend(digits(&mut i, 8, 3));
+                    }
+                    _ => word.push(e),
+                }
+            }
+            _ => word.push(q),
+        }
+    }
+    i
+}
+
 /// Reads the rest of a redirection operator that started with `ch` (`>>`, `2>&`, `<<<`), from `i`, and marks the
 /// next word as its target. Returns the index past the operator.
 fn redirect(l: &mut Level, c: &[char], mut i: usize, ch: char) -> usize {
@@ -860,6 +938,12 @@ mod tests {
             "pids+=( $(pidof node) ); kill -9 ${pids[0]}",
             "pgrep x > >(xargs kill)",
             "pgrep x | tee >(xargs kill)",
+            "PIDS=($(pgrep x)); kill \"${PIDS[@]}\"",
+            "p=( $(pgrep x) )\nkill $p",
+            "f() { local -a p=($(pgrep x)); kill $p; }",
+            "ps -A -p 1 | awk '{print $1}' | xargs kill",
+            "ps -p 1 -e | awk '{print $1}' | xargs kill",
+            "ps aux -p 1 | awk '{print $2}' | xargs kill",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
         }
@@ -884,6 +968,12 @@ mod tests {
             "files=(a b); pgrep -fl x > procs.txt",
             "diff <(pgrep -fl x) >(cat); kill 12",
             "function f { echo hi; }; f",
+            "a=(1 2); kill 12; pgrep -fl x",
+            "kill $PID; ps -o pid=,args= -p $PID",
+            "ps -fp $PID | tail -1 | awk '{print $2}' | xargs kill",
+            "ps -p123 -o pid= | xargs kill",
+            "ps -wwp $PID -o pid= | xargs kill",
+            "ps --pid $PID -o pid= | xargs kill",
         ] {
             assert!(!kills_by_name(cmd), "should allow: {cmd}");
         }
@@ -928,6 +1018,12 @@ mod tests {
             "zsh -o errexit -c 'killall node'",
             "function f { pkill x; }; f",
             "function f() { pkill x; }",
+            "sh -c -- 'pkill x'",
+            "bash -c -- \"killall node\"",
+            "$'pkill' x",
+            "$'\\x70kill' x",
+            "$'\\160kill' -f x",
+            "echo hi; $'kill' -9 $'-1'",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
         }
