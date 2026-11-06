@@ -805,6 +805,10 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
+    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always".
+    func setFreshContext(_ agentId: String, _ value: String) async throws {
+        upsert(&agents, try await requireWrite().updateAgent(id: agentId, ["fresh_context": .string(value)]))
+    }
     func resetSession(_ agentId: String) async throws {
         try await requireWrite().resetSession(agentId: agentId)
         // As for restart: the header's "no session" shouldn't wait for the live stream.
@@ -829,6 +833,18 @@ final class LoftStore {
         let r = try await requireWrite().sendTeamSetup(agentId: agentId, messageId: messageId)
         if let m = r.message { insert(m) }
         scheduleSave()
+    }
+
+    /// "Start delivery" on an end-of-planning card. The server starts the first ticket once and marks the card, so a
+    /// second tap, another device or the web having started it already starts nothing more. Returns the project
+    /// folder when it has no git yet: nothing started, and the user is asked before `initGit` sets it up.
+    @discardableResult
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool = false) async throws -> String? {
+        let r = try await requireWrite().startDelivery(agentId: agentId, messageId: messageId, initGit: initGit)
+        if r.needsGit == true { return r.dir ?? "the project folder" }
+        if let m = r.message { insert(m) }
+        scheduleSave()
+        return nil
     }
 
     @discardableResult

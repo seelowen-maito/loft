@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -72,6 +73,14 @@ async fn fetch(state: &AppState) -> Result<Value> {
     Ok(json!({ "windows": windows, "error": null }))
 }
 
+/// The current Usage week, as (start, reset): the weekly limit's `resets_at` minus 7 days, until
+/// that reset. None when the plan usage couldn't be read or has no weekly reset.
+pub fn usage_week(usage: &Value) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let w = usage["windows"].as_array()?.iter().find(|w| w["key"] == "seven_day")?;
+    let reset = DateTime::parse_from_rfc3339(w["resets_at"].as_str()?).ok()?.with_timezone(&Utc);
+    Some((reset - chrono::Duration::days(7), reset))
+}
+
 /// Usage for the navbar. Failures come back as `error` (and are cached too) rather than retried each poll.
 pub async fn get(state: &AppState) -> Value {
     let mut cache = state.usage.0.lock().await;
@@ -83,4 +92,10 @@ pub async fn get(state: &AppState) -> Value {
     let v = fetch(state).await.unwrap_or_else(|e| json!({ "windows": [], "error": e.to_string() }));
     *cache = Some((Instant::now(), v.clone()));
     v
+}
+
+/// Make `get` answer `v`, as if just read from the API.
+#[cfg(test)]
+pub async fn fake(state: &AppState, v: Value) {
+    *state.usage.0.lock().await = Some((Instant::now(), v));
 }

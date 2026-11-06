@@ -453,18 +453,25 @@ struct GrillSuggestionBar: View {
     }
 }
 
-/// The end of a planning grill: links to the spec and tickets (they open GitHub), Clear context with the next
-/// message left in the composer, and, when the team lacks a Dev or a reviewer, a button that asks `loft`. The
-/// server sends that once and marks the card (`setup.sent_at`), so it shows as sent everywhere and after a restart.
+/// The end of a planning grill: links to the spec and tickets (they open GitHub), Start delivery for a spec with a
+/// Delivery (otherwise Clear context leaves the next message in the composer), and, when the team lacks a role, a
+/// button that asks `loft`. The server does each once and marks the card (`delivery.started`, `setup.sent_at`), so it
+/// shows as done everywhere and after a restart.
 struct EndCardView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
     /// The final summary the card is on.
     let message: ChatMessage
     let card: EndCard
-    var clearWith: (String) -> Void
+    var clearWith: (String) async -> Void
+    @State private var clearing = false
     @State private var sendingSetup = false
     @State private var setupError: String?
+    @State private var starting = false
+    @State private var startError: String?
+    /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
+    @State private var askGitDir: String?
+    @State private var declinedGit = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -474,14 +481,37 @@ struct EndCardView: View {
                 ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
             }
             if card.setup != nil {
-                Label("The team has no \(card.missingText) yet.", systemImage: "person.2.slash")
+                Label(card.teamNote, systemImage: "person.2")
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("endCardTeamNote")
+            }
+            if let d = card.delivery {
+                if let s = d.started {
+                    Label("Delivery started · \(d.local == true ? "“\(s.title ?? "")”" : "#\(s.ticket)") with \(s.agentName)", systemImage: "play.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("endCardStarted")
+                } else {
+                    Button { start(initGit: false) } label: { pending(starting, starting ? "Starting delivery…" : "Start delivery", symbol: "play.fill") }
+                    .buttonStyle(.borderedProminent)
+                    .font(.footnote)
+                    .disabled(starting)
+                    .accessibilityIdentifier("endCardStart")
+                }
+                if let startError {
+                    Text("Not started: \(startError)").font(.caption2).foregroundStyle(.red)
+                }
+                if declinedGit && d.started == nil {
+                    Text("Nothing was set up: the plan stays as Loft issues.").font(.caption2).foregroundStyle(.secondary)
+                }
             }
             HStack(spacing: 8) {
-                Button { clearWith(card.nextMessage) } label: { Label("Clear context", systemImage: "eraser") }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("endCardClear")
+                if card.delivery == nil {
+                    clearButton.buttonStyle(.borderedProminent)
+                } else {
+                    clearButton.buttonStyle(.bordered)
+                }
                 if let setup = card.setup {
                     let sent = setup.sentAt != nil
                     Button {
@@ -493,7 +523,7 @@ struct EndCardView: View {
                             sendingSetup = false
                         }
                     } label: {
-                        Label(sent ? "Sent to loft" : "Set up the team with loft", systemImage: sent ? "checkmark" : "person.2")
+                        pending(sendingSetup, sent ? "Sent to loft" : "Set up the team with loft", symbol: sent ? "checkmark" : "person.2")
                     }
                     .buttonStyle(.bordered)
                     .disabled(sent || sendingSetup)
@@ -504,11 +534,55 @@ struct EndCardView: View {
             if let setupError {
                 Text("Not sent: \(setupError)").font(.caption2).foregroundStyle(.red)
             }
-            Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+            if !card.nextMessage.isEmpty {
+                Text("Next: \(card.nextMessage)").font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog(
+            "Set up git?",
+            isPresented: Binding(get: { askGitDir != nil }, set: { if !$0 { askGitDir = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Set up git and start") { start(initGit: true) }
+            Button("Not now", role: .cancel) { declinedGit = true }
+        } message: {
+            Text("\(askGitDir ?? "") has no git yet. Loft runs git init, adds a .gitignore for .DS_Store and .remember/, and commits the folder as it is. Then the Delivery starts.")
+        }
+    }
+
+    /// Clear context, disabled while the session reset runs so it resets once.
+    private var clearButton: some View {
+        Button {
+            clearing = true
+            Task {
+                await clearWith(card.nextMessage)
+                clearing = false
+            }
+        } label: { pending(clearing, "Clear context", symbol: "eraser") }
+        .disabled(clearing)
+        .accessibilityIdentifier("endCardClear")
+    }
+
+    /// A button's label, with a spinner in place of its icon while the request it sent runs.
+    private func pending(_ busy: Bool, _ title: String, symbol: String) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            if busy { ProgressView().controlSize(.mini) } else { Image(systemName: symbol) }
+        }
+    }
+
+    private func start(initGit: Bool) {
+        starting = true
+        startError = nil
+        Task {
+            do { askGitDir = try await store.startDelivery(agentId: message.agentId, messageId: message.id, initGit: initGit) }
+            catch { startError = error.localizedDescription }
+            starting = false
+        }
     }
 
     private func issue(_ i: EndCard.Issue, symbol: String) -> some View {

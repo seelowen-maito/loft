@@ -1,57 +1,38 @@
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-import { api, type Agent } from "../../lib/api";
+import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { INTERVALS, MODELS } from "./Inspector";
+import { createPayload, EMPTY_FORM, offersFreshContext, TEMPLATES, withProject } from "../../lib/newAgent";
+import { FRESH_CONTEXT, FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
 import { ProjectSelect } from "./ProjectSelect";
 
-const TEMPLATES = [
-  {
-    label: "Repo janitor",
-    name: "Moss",
-    title: "Repo janitor",
-    personality: "Calm, tidy, slightly dry. Speaks in short, precise sentences. Loves a clean working tree.",
-    prompt:
-      "Keep an eye on my repositories. On each wake-up, check for uncommitted work, stale branches, and repos that are behind their remote. Report anything worth my attention in a short bulleted list. Never push or modify my repos directly.",
-    interval_minutes: 360,
-  },
-  {
-    label: "Research scout",
-    name: "Wren",
-    title: "Research scout",
-    personality: "Curious and enthusiastic, but ruthless about signal over noise. Always cites sources.",
-    prompt:
-      "Track new developments relevant to the languages and frameworks used in my projects. Keep running notes in notes/ in your workspace, and remember what you've already reported so you never repeat yourself.",
-    interval_minutes: 1440,
-  },
-  {
-    label: "Pair programmer",
-    name: "Bolt",
-    title: "Pair programmer",
-    personality: "Direct, pragmatic senior engineer. Proposes a plan before big changes and explains trade-offs briefly.",
-    prompt: "Help me with coding tasks on request. Clone repos into your workspace, make changes on a branch, run the tests, and summarize the diff.",
-    interval_minutes: 0,
-  },
-];
-
-export function NewAgentDialog({ projects, onClose, onCreated }: { projects: string[]; onClose: () => void; onCreated: (a: Agent) => void }) {
-  const [form, setForm] = useState({ name: "", title: "", project: "", personality: "", prompt: "", model: "sonnet", interval_minutes: 0 });
+export function NewAgentDialog({ projects, agents, onClose, onCreated }: { projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
+  const [form, setForm] = useState(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Set when creating it took the Lead role from another agent: the dialog stays open to say so, as Save does in the settings.
+  const [moved, setMoved] = useState<{ agent: Agent; notice: string } | null>(null);
   const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
+  const project = form.project.trim();
+  const close = () => (moved ? onCreated(moved.agent) : onClose());
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  });
 
   const create = async () => {
     setBusy(true);
     setErr(null);
     try {
-      const a = await api.createAgent({ ...form, name: form.name.trim() || "Unnamed" });
-      onCreated(a);
+      const { notice, ...a } = await api.createAgent(createPayload(form));
+      if (notice) {
+        setMoved({ agent: a, notice });
+        setBusy(false);
+      } else {
+        onCreated(a);
+      }
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
@@ -60,7 +41,7 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={close} />
       <div className="relative w-full max-w-[620px] animate-rise overflow-clip rounded-3xl border border-line-strong bg-ink-900 shadow-2xl">
         <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-80 rounded-full bg-[radial-gradient(closest-side,rgb(200_242_109/0.14),transparent)] blur-2xl" />
         <div className="relative flex items-start justify-between px-7 pt-7">
@@ -68,7 +49,7 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
             <div className="eyebrow">New agent</div>
             <h2 className="mt-1.5 font-serif text-[34px] leading-none">Bring someone to life.</h2>
           </div>
-          <button className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
+          <button className="btn-ghost" onClick={close} aria-label="Close"><X className="size-4" /></button>
         </div>
 
         <div className="relative space-y-5 px-7 py-6">
@@ -91,14 +72,38 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
               <input autoFocus className="input" placeholder="e.g. Moss" value={form.name} onChange={(e) => set("name", e.target.value)} />
             </label>
             <label className="space-y-1.5">
-              <span className="eyebrow">Role</span>
+              <span className="eyebrow">Title</span>
               <input className="input" placeholder="e.g. Repo janitor" value={form.title} onChange={(e) => set("title", e.target.value)} />
             </label>
           </div>
-          <label className="block space-y-1.5">
-            <span className="eyebrow">Project</span>
-            <ProjectSelect value={form.project} projects={projects} onChange={(v) => set("project", v)} />
-          </label>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1.5">
+                <span className="eyebrow">Project</span>
+                {/* Only an agent with a project can be Lead: clearing the project drops it back to Custom. */}
+                <ProjectSelect value={form.project} projects={projects} onChange={(v) => setForm((f) => withProject(f, v))} />
+              </label>
+              <label className="space-y-1.5">
+                <span className="eyebrow">Role</span>
+                <select className="input" value={form.role} onChange={(e) => set("role", e.target.value)}>
+                  {ROLES.map((r) => (
+                    <option key={r.value} value={r.value} disabled={r.value === "lead" && !project}>
+                      {r.label}: {r.hint}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(form.project)}</p>
+          </div>
+          {offersFreshContext(form, agents) && (
+            <label className="flex items-center justify-between gap-3" title={FRESH_CONTEXT_HINT}>
+              <span className="eyebrow">Fresh context for each Delivery ticket</span>
+              <select className="input w-52" value={form.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
+                {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+            </label>
+          )}
           <label className="block space-y-1.5">
             <span className="eyebrow">Personality</span>
             <textarea className="input min-h-[64px] resize-none" placeholder="How should it sound and behave?" value={form.personality} onChange={(e) => set("personality", e.target.value)} />
@@ -125,8 +130,17 @@ export function NewAgentDialog({ projects, onClose, onCreated }: { projects: str
         </div>
 
         <div className="relative flex items-center justify-between border-t border-line bg-ink-950/40 px-7 py-4">
-          <span className="text-[12px] text-fg-3">It gets its own workspace, memory, and pixel face.</span>
-          <button className="btn-primary" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create agent"}</button>
+          {moved ? (
+            <>
+              <span className="text-[12px] text-fg-2">{moved.notice}</span>
+              <button className="btn-primary" onClick={close}>Open {moved.agent.name}</button>
+            </>
+          ) : (
+            <>
+              <span className="text-[12px] text-fg-3">It gets its own workspace, memory, and pixel face.</span>
+              <button className="btn-primary" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create agent"}</button>
+            </>
+          )}
         </div>
       </div>
     </div>

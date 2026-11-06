@@ -110,17 +110,44 @@ struct EndCard: Codable, Hashable {
         /// When the server sent it to `loft` (RFC 3339), from this phone, another one or the web; nil until then.
         var sentAt: String?
     }
+    /// The spec's Delivery, for "Start delivery"; `started` once it started: who got which ticket.
+    struct Delivery: Codable, Hashable {
+        struct Started: Codable, Hashable {
+            var ticket: Int
+            /// The ticket's title; a plan kept in Loft names its tickets by title, not number.
+            var title: String? = nil
+            var agentId: String
+            var agentName: String
+            var at: String
+        }
+        var repo: String
+        var spec: Int
+        var local: Bool? = nil
+        var started: Started?
+    }
     var repo: String
     var spec: Issue?
     var tickets: [Issue]
+    /// Left in the composer after Clear context; empty for a spec with a Delivery.
     var nextMessage: String
-    /// "dev", "reviewer".
+    /// "dev", "code_reviewer", "qa", "security".
     var missingRoles: [String]
     var setup: Setup?
+    var delivery: Delivery? = nil
 
-    /// "Dev or reviewer", as in "The team has no Dev or reviewer yet."
-    var missingText: String {
-        missingRoles.map { $0 == "dev" ? "Dev" : $0 }.joined(separator: " or ")
+    /// The team check as a suggestion: a missing role never stops a Delivery (the planning agent builds when there
+    /// is no Dev, and a missing reviewer is skipped), so say that, then which agents would help. Empty for a full team.
+    var teamNote: String {
+        let has = { (r: String) in missingRoles.contains(r) }
+        let reviewers = [has("qa") ? "a QA" : nil, has("security") ? "a Security" : nil].compactMap { $0 }
+        var parts = [
+            has("dev") ? "a Dev to build them" : nil,
+            reviewers.isEmpty ? nil : reviewers.joined(separator: " and ") + " agent to have each ticket reviewed",
+            has("code_reviewer") ? "a Code reviewer for the spec PR" : nil,
+        ].compactMap { $0 }
+        guard let last = parts.popLast() else { return "" }
+        let works = has("dev") ? "Delivery works with this agent building the tickets." : "Delivery works with this team."
+        return "\(works) Add \(parts.isEmpty ? last : parts.joined(separator: ", ") + ", and " + last)."
     }
 }
 

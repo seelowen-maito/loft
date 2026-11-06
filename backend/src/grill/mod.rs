@@ -35,8 +35,9 @@ const MAX_ANSWER: usize = 4000;
 /// Context size, in tokens, near the end of the smart zone (about 100k, past which models get noticeably
 /// worse): a round sent beyond it, before the tickets are published, has the agent suggest `/compact`.
 pub const COMPACT_AT: u64 = 80_000;
-/// Before the grill's last call: the glossary and ADRs written along the way go up as one PR.
-const DOCS_PR_STEP: &str = "if your docs branch has commits, push it and open its one PR with `gh pr create` (pass its URL as `docs_pr`; with no commits, open no PR), then ";
+/// Before the grill's last call: the glossary and ADRs written along the way go up as one PR, unless a
+/// spec was published: then they already ship in its spec PR.
+const DOCS_PR_STEP: &str = "if your docs branch has commits and you published no spec, push it and open its one PR with `gh pr create` (pass its URL as `docs_pr`; with no commits, or after publishing a spec, whose spec PR already carries them, open no PR), then ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -188,13 +189,25 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 }
 
 /// The end-of-planning card for a grill that published something: links to the spec and tickets, the
-/// suggested next message for the composer after clearing context, and the roles the team lacks.
+/// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
     let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
+    // A spec's Delivery, or a single standalone ticket's.
+    let has = |n: i64| matches!(state.db.get_delivery(&p.repo, n), Ok(Some(_)));
+    let delivery = match (&p.spec, p.tickets.as_slice()) {
+        // A plan kept in Loft: its spec's Delivery, found by the spec's Loft issue.
+        (Some(sp), _) if p.repo.is_empty() => crate::delivery::local_of(state, &me.project, &sp.id).map(|d| json!({ "repo": d.repo, "spec": d.spec, "local": true })),
+        _ if p.repo.is_empty() => None,
+        (Some(sp), _) => has(sp.number).then(|| json!({ "repo": p.repo, "spec": sp.number })),
+        (None, [t]) => has(t.number).then(|| json!({ "repo": p.repo, "spec": t.number, "standalone": true })),
+        _ => None,
+    };
     let next = match (&p.spec, p.tickets.as_slice()) {
+        _ if delivery.is_some() => String::new(),
         _ if p.repo.is_empty() => say(s, "Implement the plan: hand its ready Loft issues to the team", "Implemente o plano: entregue as issues prontas do Loft ao time"),
         (Some(sp), _) => say(s, &format!("Implement spec #{}: hand the ready tickets to the team", sp.number), &format!("Implemente a spec #{}: entregue os tickets prontos ao time", sp.number)),
         (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
@@ -202,7 +215,12 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     };
     let missing = crate::planning::missing_roles(state, &me.project);
     let setup = (!missing.is_empty()).then(|| {
-        let roles = missing.iter().map(|r| if *r == "dev" { "Dev" } else { "reviewer" }).collect::<Vec<_>>().join(" or ");
+        let labels: Vec<&str> = missing.iter().map(|r| crate::planning::role_label(r)).collect();
+        let roles = match labels.split_last() {
+            Some((last, [])) => last.to_string(),
+            Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+            None => unreachable!("only a team missing a role gets a setup"),
+        };
         let plan = match (&p.spec, p.tickets.first()) {
             _ if p.repo.is_empty() => format!("“{}”, saved as Loft issues", p.spec.as_ref().or(p.tickets.first()).map_or("", |i| i.title.as_str())),
             (Some(sp), _) => format!("spec #{}: {}", sp.number, url(sp)),
@@ -219,6 +237,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         "spec": p.spec.as_ref().map(link),
         "tickets": p.tickets.iter().map(link).collect::<Vec<_>>(),
         "next_message": next,
+        "delivery": delivery,
         "missing_roles": missing,
         "setup": setup,
     }))
@@ -470,7 +489,7 @@ fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
         _ => String::new(),
     };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -1040,12 +1059,13 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
 }
 
 /// The system-prompt section every agent gets: what Planning overrides and what to do with a direct
-/// request for issues. The grill's own instructions come with the grill (`brief`).
+/// request for issues. The grill's own instructions come with the grill (`brief`), and how a ticket is
+/// built, reviewed and closed with each Delivery wake (its role brief, `delivery`).
 pub fn prompt_section() -> &'static str {
-    r#"
+    r###"
 
 # Planning: precedence
-Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). Your standing instructions still set your role, your team and how work is implemented.
+Loft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published (for example an `epic` label, "Part of #N" checklists, or ticket order kept in memory). When Loft wakes you for a step of a Delivery, the wake brings your role's brief and says what your instructions can add to it. Your standing instructions still set your role, your team and how the work itself is done and checked.
 
 # Planning: direct requests
 When the user asks for an issue or a plan without a grill ("create an issue for X"):
@@ -1054,7 +1074,7 @@ When the user asks for an issue or a plan without a grill ("create an issue for 
 - One slice (a color, a copy change, one small behaviour): publish it as a single standalone ticket with `mcp__loft__publish_tickets` and no `spec`, then reply with its link.
 - Several slices: write a spec from the conversation and show the tickets in chat (titles, what each delivers, blockers), asking "Publish these N tickets?". Only after the user's yes, publish the spec with `mcp__loft__publish_spec`, then the tickets.
 - When the request looks big (many decisions still open), suggest a grill in one line ("This has a lot of open decisions: type `/grill <topic>` and I'll grill you on it."). Only the user starts a grill: Loft then sends you its instructions.
-- Work the user sends you as a task stays a task: don't open issues for it."#
+- Work the user sends you as a task stays a task: don't open issues for it."###
 }
 
 /// What a grill needs the agent to know, sent with the first grill run in a context (see `with_brief`).
@@ -1110,7 +1130,8 @@ While you grill, build the project's language and record its hard decisions.
 
 - Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
 - If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
-- One PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
+- With a spec, no Docs PR: before `mcp__loft__publish_spec`, push the docs branch and pass it as `docs_branch`. Loft starts the spec branch from it, so the docs commits ship in the spec PR with the rest of the spec. Commit later glossary or ADR changes on the spec branch.
+- Without a spec, one Docs PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
 
 {SPEC}
 
@@ -1118,13 +1139,13 @@ While you grill, build the project's language and record its hard decisions.
 When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
 - The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
 - Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
-- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for `.DS_Store` and `.remember/`, runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
+- After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for junk and secret files (`.env`, keys), runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
 - If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
 
 {TICKETS}
 
 # Planning: the end
-- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Clear context button that leaves the next message ("Implement spec #N: hand the ready tickets to the team") in the user's composer, and, when your project has no Dev or no reviewer, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
+- When a grill published a spec or tickets, `mcp__loft__grill_end` posts the end-of-planning card with your summary: the links, a Start delivery button for a spec or a standalone ticket on GitHub (Loft starts its first ready ticket on the team's Dev, or on you when there's no Dev), a Clear context button (for a plan without a Delivery it leaves the next message, like "Implement ticket #N", in the user's composer), and, when your project has no Dev, Code reviewer, QA or Security, a button that asks `loft` to set up the team. Don't repeat the links or the next step in the summary.
 - Never create agents yourself, not even when the team is missing a role: agent creation stays with `loft`, through that button.
 - When Loft tells you your context is near the end of the smart zone before the tickets are published, suggest `/compact` to the user in one line."#;
 
@@ -1158,7 +1179,7 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
   - <Anything else: the glossary terms and ADRs it relies on.>
   ```
 
-- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. Without a GitHub repo it saves it as a Loft issue labelled `spec` and gives you its id. A retry with the same title returns the spec already published, so after a failure call it again rather than changing the title. Never create issues with `gh`.
+- Publish it with `mcp__loft__publish_spec` (title: what gets built, in a few words). Loft creates it on your project's repo with the `spec` label, assigned to the user, and creates missing labels. If your docs branch has commits, push it first and pass it as `docs_branch`: the spec branch starts from it. Without a GitHub repo it saves it as a Loft issue labelled `spec` and gives you its id. On GitHub it also creates the spec branch and a draft spec PR and gives you both: share the PR link with the user. If they fail, the spec stays published and the result says why. A retry with the same title returns the spec already published and only makes a missing branch or PR, so after a failure call it again rather than changing the title. Never create issues with `gh`.
 - When it fails (GitHub refused it, for example), tell the user in one or two sentences what went wrong and what to fix, in their language, and keep the grill open so you can publish once it's fixed.
 - Outside a grill, when the user asks for a spec from your conversation, write it the same way and publish it with the same tool."#;
 pub const TICKETS: &str = r#"# Planning: tickets
@@ -1183,7 +1204,7 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
 /// The grill instructions in full.
 pub fn brief() -> String {
@@ -1773,6 +1794,8 @@ pub(crate) mod tests {
             "no `CLAUDE.md`",
             "`gh pr create`",
             "opens no PR",
+            "With a spec, no Docs PR: before `mcp__loft__publish_spec`, push the docs branch and pass it as `docs_branch`",
+            "Without a spec, one Docs PR at the end",
         ] {
             assert!(p.contains(want), "missing {want:?}");
         }
@@ -1785,6 +1808,8 @@ pub(crate) mod tests {
         round(&st, &o, &["A?"]).unwrap();
         let wake = send(&st, &o).unwrap();
         assert!(wake.contains("docs branch") && wake.contains("`gh pr create`") && wake.contains("open no PR"), "{wake}");
+        // A spec takes the docs along: published from the docs branch, it leaves no Docs PR to open.
+        assert!(wake.contains("push your docs branch first and pass it as `docs_branch`") && wake.contains("and you published no spec"), "{wake}");
         round(&st, &o, &["B?"]).unwrap();
         let mut s = active(&st, &o.id).unwrap();
         let stopped = apply_command(&st, &mut s, "end", None, None).unwrap().unwrap();

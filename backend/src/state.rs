@@ -91,6 +91,9 @@ pub struct Runtime {
     pub waiting: HashMap<String, Arc<Notify>>,
     /// agent id -> what its current run is doing, for the "waiting" / "no activity" display
     pub runs: HashMap<String, RunInfo>,
+    /// agents whose next run starts a Delivery ticket they haven't worked on: Loft first clears their
+    /// context if their Fresh context setting says so
+    pub fresh_before: std::collections::HashSet<String>,
     /// agents whose run the user restarted; the stop notice says so
     pub restarting: std::collections::HashSet<String>,
     /// agent id -> chats it was @-mentioned in, waiting for the run that answers the mention
@@ -128,6 +131,8 @@ pub struct AppState {
     pub publish_known: Arc<crate::planning::Known>,
     /// Where mirroring each GitHub repo stands.
     pub mirror: Arc<crate::mirror::Mirror>,
+    /// What `@` file search last listed under each base.
+    pub listings: Arc<crate::file_search::Listings>,
 }
 
 impl AppState {

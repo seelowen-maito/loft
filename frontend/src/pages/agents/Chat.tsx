@@ -17,7 +17,7 @@ import { ContextSize } from "./ContextSize";
 import { ResumeDialog } from "./ResumeDialog";
 import { EndCard } from "./EndCard";
 import { TaskPicker } from "./TaskPicker";
-import { ATTACH } from "../../lib/attach";
+import { ATTACH } from "../../lib/issueFilter";
 import { TASK_LINK, TaskChip } from "../../components/TaskChip";
 import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
@@ -28,7 +28,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
-import { highlightParts } from "../../lib/commandHighlight";
+import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 
 type Item =
@@ -139,19 +139,51 @@ export function Chat({
   const fresh = visible.every((it) => it.t === "msg" && it.m.kind === "clear");
   const lastRun = useMemo(() => lastFinishedRun(messages), [messages]);
 
-  const slash = text.startsWith("/") && !/\s/.test(text.trim());
+  // The caret, so the / menu opens on the /word it's in, wherever that sits in the message.
+  const [caret, setCaret] = useState(0);
+  // The command last picked or completed from the menu: mid-message, only it runs, and only while it's still
+  // the same word at the same place. A known /word typed by hand there is plain text.
+  const [picked, setPicked] = useState<CommandWord | null>(null);
+  useEffect(() => {
+    if (picked && !stillPicked(text, picked)) setPicked(null);
+  }, [text, picked]);
+  useEffect(() => setPicked(null), [agent.id]);
+  const typing = commandAt(text, caret, COMMANDS.map((c) => c.name), picked);
+  // The /word is the whole message: picking runs it, as when / commands could only be typed alone.
+  const alone = !!typing && text.trim() === typing.word;
   const overlay = useRef<HTMLDivElement>(null);
   // The overlay follows the textarea's scroll, also when it appears on text that's already scrolled.
   useLayoutEffect(() => {
     if (overlay.current && composer.current) overlay.current.scrollTop = composer.current.scrollTop;
   });
-  const matches = slash ? COMMANDS.filter((c) => c.name.startsWith(text.trim().toLowerCase())) : [];
+  const matches = typing ? COMMANDS.filter((c) => c.name.startsWith(typing.word.toLowerCase())) : [];
+  // Puts `next` in the composer with the caret at `at`, once React has rendered it.
+  const pendingCaret = useRef<number | null>(null);
+  // Text set from code (a draft, a picked @mention) moves the caret without a select event: follow it too.
+  useLayoutEffect(() => {
+    const box = composer.current;
+    if (!box) return;
+    const at = pendingCaret.current;
+    if (at != null) {
+      pendingCaret.current = null;
+      box.setSelectionRange(at, at);
+    }
+    if (box.selectionEnd !== caret) setCaret(box.selectionEnd);
+  });
+  const replaceWord = (word: CommandWord, name: string) => {
+    const next = completeCommand(text, word, name);
+    pendingCaret.current = next.caret;
+    setText(next.text);
+    setPicked(name ? { start: word.start, end: word.start + name.length, word: name } : null);
+  };
+  // Picked from the menu (Enter or a click): run it when it's the whole message, else complete it in place.
+  const pickCommand = (name: string) => (alone || !typing ? runCommand(name) : replaceWord(typing, name));
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
   // Only agents in the same project: the backend doesn't deliver to others.
   const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
   const mention = useMention(agent.id, text, setText, mentionable);
-  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name));
+  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
@@ -192,11 +224,12 @@ export function Chat({
     setMenuIndex(0);
   }, [text]);
 
-  const clearContext = async () => {
+  // `keep`: the rest of a message /clear was sent in, left in the composer.
+  const clearContext = async (keep = "") => {
     setCmdError(null);
     try {
       await api.resetSession(agent.id);
-      putDraft(agent.id, EMPTY_DRAFT);
+      putDraft(agent.id, { ...EMPTY_DRAFT, text: keep });
       stick.current = true;
     } catch (e) {
       setCmdError((e as Error).message);
@@ -224,11 +257,11 @@ export function Chat({
     }
   };
 
-  const openEditor = async () => {
+  const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
       const r = await api.openEditor(agent.id);
-      putDraft(agent.id, { ...loadDraft(agent.id), text: "" });
+      putDraft(agent.id, { ...loadDraft(agent.id), text: keep });
       setCmdNote(r.url ? `Opening ${r.path} in VS Code over Remote-SSH` : `Opened ${r.path} in VS Code`);
     } catch (e) {
       setCmdError((e as Error).message);
@@ -249,13 +282,14 @@ export function Chat({
     }
   };
 
-  const runCommand = async (name: string) => {
+  // `keep`: the rest of the message the command was sent in, put back in the composer once it has run.
+  const runCommand = async (name: string, keep = "") => {
     setCmdNote(null);
-    if (name === "/clear") return clearContext();
+    if (name === "/clear") return clearContext(keep);
     if (name === "/compact") return compactContext("");
-    if (name === "/code") return openEditor();
+    if (name === "/code") return openEditor(keep);
     if (name === "/resume") {
-      setText("");
+      setText(keep);
       return setResuming(true);
     }
     if (name === "/grill") {
@@ -278,7 +312,8 @@ export function Chat({
     setPickingTask(false);
   }, [agent.id]);
 
-  const send = async (t = text) => {
+  // `pick`: the command picked from the menu, which runs mid-message (see `picked`).
+  const send = async (t = text, pick = picked) => {
     const v = t.trim();
     if (!v && images.length === 0) return;
     if (uploading || failed) return;
@@ -296,10 +331,13 @@ export function Chat({
       }
       return;
     }
-    const compact = /^\/compact(?:\s+([\s\S]*))?$/i.exec(v);
-    if (compact) return compactContext(compact[1]?.trim() ?? "");
-    const grillTopic = /^\/grill(?:\s+([\s\S]*))?$/i.exec(v);
-    if (grillTopic) return startGrill(grillTopic[1]?.trim() ?? "");
+    // The message's one command, leading or picked wherever it sits: /compact and /grill take the rest as their
+    // instructions or topic, the others run and leave the rest in the composer. Cut from the untrimmed text, so
+    // the picked word's place still holds.
+    const cmd = splitCommand(t, COMMANDS.map((c) => c.name), pick);
+    if (cmd?.command === "/compact") return compactContext(cmd.rest);
+    if (cmd?.command === "/grill") return startGrill(cmd.rest);
+    if (cmd) return runCommand(cmd.command, cmd.rest);
     if (v.startsWith("/") && !/\s/.test(v)) return runCommand(v.toLowerCase());
     setSending(true);
     setCmdError(null);
@@ -350,7 +388,7 @@ export function Chat({
       )}
       {/* header */}
       <div className="flex items-center gap-4 border-b border-line px-6 py-4 max-md:gap-3 max-md:px-4 max-md:py-3">
-        <Sticker avatar={agent.avatar} lead={agent.lead} size={52} className="max-md:!size-9" />
+        <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
@@ -358,8 +396,8 @@ export function Chat({
             {agent.project && <span className="shrink-0 rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3">{agent.project}</span>}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
-            <StatusPill agent={agent} />
-            {/* The schedule is a detail: on a phone the status line gets the room. The context size stays, to warn. */}
+            <StatusPill agent={agent} elapsed />
+            {/* The schedule and run time are details: on a phone the context size gets the room, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
@@ -367,7 +405,7 @@ export function Chat({
               <Clock className="size-3" /> {fmtSchedule(agent)}
               {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
             </span>
-            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={clearContext} onResume={() => setResuming(true)} />
+            <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={() => clearContext()} onResume={() => setResuming(true)} />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -383,7 +421,7 @@ export function Chat({
           <button
             className="btn-ghost"
             title="Clear context (/clear). Memory is kept."
-            onClick={clearContext}
+            onClick={() => clearContext()}
             disabled={running}
           >
             <RotateCcw className="size-3.5" />
@@ -430,14 +468,14 @@ export function Chat({
           })}
           {(items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
-              <Sticker avatar={agent.avatar} lead={agent.lead} size={112} className="animate-rise" />
+              <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={112} className="animate-rise" />
               <div className="mt-5 font-serif text-[30px] leading-tight">Say hello to {agent.name}.</div>
               <p className="mt-2 max-w-md text-[13.5px] text-fg-2">
                 It works inside its own workspace, keeps long-term memory, and asks you before it uses anything it hasn't been granted.
               </p>
               <div className="mt-6 flex max-w-xl flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
-                  <button key={s} className="btn text-[12.5px] text-fg-2" onClick={() => send(s)}>
+                  <button key={s} className="btn text-[12.5px] text-fg-2" onClick={() => send(s, null)}>
                     {s}
                   </button>
                 ))}
@@ -501,7 +539,7 @@ export function Chat({
                   onMouseEnter={() => setMenuIndex(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    runCommand(c.name);
+                    pickCommand(c.name);
                   }}
                   className={cx("flex w-full items-baseline gap-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]")}
                 >
@@ -562,7 +600,11 @@ export function Chat({
                 <textarea
                   ref={composer}
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => {
+                    setText(e.target.value);
+                    setCaret(e.target.selectionEnd);
+                  }}
+                  onSelect={(e) => setCaret(e.currentTarget.selectionEnd)}
                   onScroll={(e) => overlay.current && (overlay.current.scrollTop = e.currentTarget.scrollTop)}
                   onPaste={(e) => {
                     const files = pastedImages(e);
@@ -578,17 +620,21 @@ export function Chat({
                       }
                       if (e.key === "Tab") {
                         e.preventDefault();
-                        setText(matches[menuIndex].name);
+                        if (typing) replaceWord(typing, matches[menuIndex].name);
                         return;
                       }
                       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
-                        runCommand(matches[menuIndex].name);
+                        // Mid-message, Enter sends only once the command is picked (and highlighted); typed by hand,
+                        // the first Enter picks it.
+                        if (!alone && typing && enterOnMenu(text, typing, matches[menuIndex].name, picked) === "send") send();
+                        else pickCommand(matches[menuIndex].name);
                         return;
                       }
                     }
-                    if (e.key === "Escape" && slash) {
-                      setText("");
+                    if (e.key === "Escape" && typing) {
+                      // Drops the /word being typed; alone, that empties the composer as before.
+                      replaceWord(typing, "");
                       return;
                     }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -724,7 +770,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     return (
       <div className="flex items-start gap-2 rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[13px] text-fg-2">
         <AlertCircle className="mt-0.5 size-4 shrink-0 text-bad" />
-        <pre className="whitespace-pre-wrap font-sans">{m.content}</pre>
+        <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] font-sans">{m.content}</pre>
       </div>
     );
   }
@@ -747,12 +793,12 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             <FyiMark m={m} agentName={agent.name} />
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
-          <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
         </div>
-        {from && <Sticker avatar={from.avatar} lead={from.lead} size={26} className="mt-5" />}
+        {from && <Sticker avatar={from.avatar} lead={from.role === "lead"} size={26} className="mt-5" />}
       </div>
     );
   }
@@ -775,7 +821,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           </div>
         )}
         {m.content && (
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          <div className="max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
         {m.meta?.mentions?.length > 0 && (
@@ -797,7 +843,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   const replier = m.meta?.mention_reply ? findAgent(agents, m.meta.from_agent?.id) : undefined;
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).lead} size={26} className="mt-0.5" />
+      <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).role === "lead"} size={26} className="mt-0.5" />
       <div className={cx("prose-chat min-w-0 flex-1", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (
           <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{replier?.name ?? m.meta.from_agent?.name} · answering your mention</div>
@@ -812,12 +858,12 @@ function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Me
   const to = findAgent(agents, use.meta?.input?.agent);
   return (
     <div className="flex gap-3 pt-1">
-      <Sticker avatar={agent.avatar} lead={agent.lead} size={26} className="mt-5" />
+      <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={26} className="mt-5" />
       <div className="flex min-w-0 max-w-[80%] flex-col items-start">
         <div className={cx("mb-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3", !result && "animate-pulse-soft")}>
-          {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.lead} size={16} />} {to?.name ?? use.meta?.input?.agent}
+          {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.role === "lead"} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
-        <div className="whitespace-pre-wrap rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
+        <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
       </div>
     </div>
   );
@@ -832,7 +878,7 @@ function Thinking({ m }: { m: Message }) {
         <ChevronRight className={cx("size-3 transition", open && "rotate-90")} />
       </button>
       {open && (
-        <div className="mt-1.5 whitespace-pre-wrap border-l border-line pl-3 text-[13px] italic leading-relaxed text-fg-3">{m.content}</div>
+        <div className="mt-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] border-l border-line pl-3 text-[13px] italic leading-relaxed text-fg-3">{m.content}</div>
       )}
     </div>
   );

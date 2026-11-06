@@ -50,6 +50,28 @@ final class LoftUITests: XCTestCase {
 
     private func composerValue(_ app: XCUIApplication) -> String? { app.textFields["composerField"].value as? String }
 
+    /// Fresh context for each Delivery ticket on the agent's screen: Above 80k by default, and a choice sticks.
+    func testFreshContextPicker() {
+        let app = launch()
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("QA Agent", app)
+        XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
+        let picker = app.buttons["freshContext"].firstMatch
+        // Clear of the floating tab bar, as in `openAgent`: a tap under it lands on the bar.
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<8 where !picker.exists || picker.frame.maxY > bar.frame.minY - 8 { app.swipeUp() }
+        // Let the scroll settle, or the tap lands on a moving row and opens nothing.
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(picker.label.contains("Above 80k"), picker.label)
+        picker.tap()
+        let always = app.buttons["Always"].firstMatch
+        XCTAssertTrue(always.appears(timeout: 5))
+        always.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while !picker.label.contains("Always"), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(picker.label.contains("Always"), picker.label)
+    }
+
     // MARK: - Default fixture
 
     /// One launch: live state, the Needs you card, the Mac's temperature, plan usage, approving a permission and
@@ -255,8 +277,8 @@ final class LoftUITests: XCTestCase {
     }
 
     /// The end-of-planning card in one launch. "Set up the team with loft" sends once (the card then reads "Sent to loft"
-    /// and can't be tapped again), and Clear context leaves the next message unsent in the composer. A card the web
-    /// already sent is a unit test (GrillTests.testATeamSetupSentFromTheWebShowsAsSent).
+    /// and can't be tapped again), and Start delivery starts once (the card then says who has which ticket). A card the
+    /// web already sent is a unit test (GrillTests.testATeamSetupSentFromTheWebShowsAsSent).
     func testEndOfPlanningCard() {
         let app = openGrillChat(["-fixture-grill-ended"])
         let setup = app.buttons["endCardSetup"]
@@ -265,17 +287,44 @@ final class LoftUITests: XCTestCase {
         // The card is the last thing in the chat: bring it out from under the composer.
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
+        XCTAssertEqual(app.staticTexts["endCardTeamNote"].label, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
         setup.tap()
-        var deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertEqual(setup.label, "Sent to loft")
         XCTAssertFalse(setup.isEnabled)
 
-        app.buttons["endCardClear"].tap()
-        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
-        deadline = Date().addingTimeInterval(5)
-        while composerValue(app) != "Implement spec #40: hand the ready tickets to the team", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
-        XCTAssertEqual(composerValue(app), "Implement spec #40: hand the ready tickets to the team")
+        app.buttons["endCardStart"].tap()
+        let started = app.staticTexts["endCardStarted"]
+        XCTAssertTrue(started.appears(timeout: 5))
+        XCTAssertEqual(started.label, "Delivery started · #41 with Dev")
+        XCTAssertFalse(app.buttons["endCardStart"].exists)
+    }
+
+    /// While its request runs, each end-card button shows a spinner and can't be tapped again: Start delivery reads
+    /// "Starting delivery…" until the card says it started, and Clear context waits for the session reset.
+    func testEndCardButtonsShowTheyAreWorking() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-slow-end-card"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        app.swipeUp()
+        setup.tap()
+        XCTAssertFalse(setup.isEnabled, "sending")
+        XCTAssertEqual(setup.label, "Set up the team with loft")
+
+        let start = app.buttons["endCardStart"]
+        start.tap()
+        XCTAssertEqual(start.label, "Starting delivery…")
+        XCTAssertFalse(start.isEnabled)
+        XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
+        XCTAssertFalse(start.exists)
+
+        let clear = app.buttons["endCardClear"]
+        clear.tap()
+        XCTAssertFalse(clear.isEnabled, "resetting")
+        let deadline = Date().addingTimeInterval(5)
+        while !clear.isEnabled, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(clear.isEnabled, "the reset finished")
     }
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
