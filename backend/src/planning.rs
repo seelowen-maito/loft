@@ -1096,7 +1096,7 @@ pub(crate) mod tests {
     }
 
     /// A planner whose project folder is a git repo with this `origin`.
-    fn planner_on(st: &AppState, name: &str, origin: Option<&str>) -> Agent {
+    pub(crate) fn planner_on(st: &AppState, name: &str, origin: Option<&str>) -> Agent {
         let mut a = planner(st, name);
         a.project = name.into();
         st.db.save_agent(&a).unwrap();
