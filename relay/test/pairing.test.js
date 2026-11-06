@@ -82,7 +82,8 @@ beforeEach(() => {
 
 const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
-const post = (path, form, cookies = "") => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies }, body: new URLSearchParams(form) });
+let addresses = 0;
+const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
 const asLoft = (path, body, ip = "203.0.113.7") => new Request(`https://relay.example.com${path}`, { method: "POST", headers: { "x-forwarded-for": ip }, body: JSON.stringify(body) });
 const secrets = new Map();
 const newCode = async (ip) => {
@@ -192,4 +193,13 @@ test("asking for codes is limited per IP", async () => {
   assert.equal((await pair(asLoft("/api/pair", {}), env, clock)).status, 429);
   assert.equal((await pair(asLoft("/api/pair", {}, "198.51.100.1"), env, clock)).status, 200, "another IP is unaffected");
   assert.ok([...store.keys()].every((k) => !k.includes("203.0.113.7")), "the store never holds an IP");
+});
+
+test("approving a code counts as a key creation for the address's hourly limit", async () => {
+  const { cookies } = await signInAs();
+  const ip = "203.0.113.20";
+  for (let i = 1; i <= 5; i++) assert.equal((await approve(post("/connect", { code: await newCode(`198.51.100.${200 + i}`), name: `Mac ${i}` }, cookies, ip), env)).status, 200);
+  const code = await newCode("198.51.100.210");
+  assert.equal((await approve(post("/connect", { code, name: "Mac 6" }, cookies, ip), env)).status, 429);
+  assert.equal((await pollFor(code)).status, 202, "the code is still waiting");
 });

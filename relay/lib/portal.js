@@ -2,7 +2,7 @@
 // Apple's stable user id and hashed keys; no email or name is asked for. The functions in api/ call one handler each.
 // Every Apple value comes from the environment (a self-hoster sets their own); with any missing the portal says so.
 
-import { createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
 import { newKey, MAX_KEYS, USED_SECONDS } from "./relay.js";
 
@@ -10,6 +10,8 @@ export const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY
 const APPLE = "https://appleid.apple.com";
 const SESSION_SECONDS = 7 * 86400;
 const STATE_SECONDS = 600;
+/** Sign-ins, and key creations, one IP can make per hour. */
+export const PER_HOUR = 5;
 
 /** Apple's sign-in host; APPLE_ID_HOST replaces it for the tests' fake Apple, never in production. */
 const appleHost = (env) => (env.VERCEL_ENV !== "production" && env.APPLE_ID_HOST) || APPLE;
@@ -113,15 +115,30 @@ const toApple = (env, now, deleting) => {
   return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS), intent);
 };
 
+/**
+ * Counts one `what` ("sign-in", "callback" or "key") from the request's IP this hour: null within PER_HOUR, else a 429
+ * page saying when to try again. Vercel sets the first x-forwarded-for address; the store holds only its hash.
+ */
+export async function limited(store, request, what, now) {
+  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  const hour = Math.floor(now / 3600000);
+  if ((await store.hit(`limit:${what}:${createHash("sha256").update(ip).digest("hex")}:${hour}`, 3600)) <= PER_HOUR) return null;
+  const retry = (hour + 1) * 3600 - Math.floor(now / 1000);
+  const tries = what === "key" ? "key creations" : "sign-ins";
+  return page("Too many tries", `<p>At most ${PER_HOUR} ${tries} an hour from one network. Try again in ${Math.ceil(retry / 60)} minutes.</p>`, 429, { "retry-after": String(retry) });
+}
+
 /** GET /auth/start: Sign in with Apple. */
 export async function start(request, env = process.env, now = Date.now()) {
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
-  return toApple(env, now);
+  return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now);
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
 export async function callback(request, env = process.env, now = Date.now()) {
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const limit = await limited(makeKv(env), request, "callback", now);
+  if (limit) return limit;
   const params = new URL(request.url).searchParams;
   const state = unseal(env, "state", cookieOf(request, "state"), now);
   const clear = cookie("state", "", 0);
@@ -170,7 +187,7 @@ export async function startDelete(request, env = process.env, now = Date.now()) 
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
-  return toApple(env, now, account);
+  return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
 }
 
 /**
@@ -252,7 +269,10 @@ export async function createAccountKey(request, env = process.env, now = Date.no
   if (!account) return redirect("/");
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. <a href="/">Back</a></p>', 400);
-  const made = await makeAccountKey(makeKv(env), account, name, now);
+  const store = makeKv(env);
+  const limit = await limited(store, request, "key", now);
+  if (limit) return limit;
+  const made = await makeAccountKey(store, account, name, now);
   // A session can outlive its account (deleted since): it's signed out rather than given a key nobody owns.
   if (made.error === "gone") return redirect("/", cookie("session", "", 0));
   if (made.error === "capped") return capped();

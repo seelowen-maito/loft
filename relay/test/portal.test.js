@@ -108,9 +108,14 @@ beforeEach(() => {
   idp = { sub: "001234.abcdef", status: 200 };
 });
 
-const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
+// Each request comes from its own address unless a test gives one, so only the limits' own tests reach them.
+let addresses = 0;
+const fresh = () => `198.51.100.${addresses++ % 250}, 10.0.0.1`;
+const get = (path, cookies = "", ip = fresh()) => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies, "x-forwarded-for": ip } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
-const post = (path, form, cookies) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies }, body: new URLSearchParams(form) });
+const post = (path, form, cookies, ip = fresh()) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
+/** The store's keys but the limits' counters (which hold hashes of addresses only). */
+const kept = () => [...store.keys()].filter((k) => !k.startsWith("limit:"));
 
 /** Starts a sign-in and comes back from Apple: the session cookie. */
 async function signInAs(sub = "001234.abcdef") {
@@ -145,7 +150,7 @@ test("signed out, the page offers Sign in with Apple, which asks Apple for no em
 
 test("signing in creates an account holding only Apple's user id", async () => {
   const session = await signInAs("001234.abcdef");
-  assert.deepEqual([...store.keys()], ["account:001234.abcdef"]);
+  assert.deepEqual(kept(), ["account:001234.abcdef"]);
   assert.deepEqual(Object.keys(JSON.parse(store.get("account:001234.abcdef"))), ["created"]);
   assert.match(await (await home(get("/", session), env)).text(), /Create key/);
   // Apple got the code and a client secret signed with the sign-in key.
@@ -176,7 +181,7 @@ test("a sign-in that Apple didn't start for this browser, or can't confirm, crea
     idp = { sub: "x", status: 200, ...bad };
     assert.equal((await callback(get(`/auth/callback?code=x&state=${state}`, mine), env)).status, 502, JSON.stringify(bad));
   }
-  assert.equal(store.size, 0);
+  assert.deepEqual(kept(), []);
 });
 
 test("the sign-in state cookie is not a session", async () => {
@@ -186,7 +191,7 @@ test("the sign-in state cookie is not a session", async () => {
   const res = await createAccountKey(post("/keys", { name: "x" }, asSession), env);
   assert.equal(res.status, 303);
   assert.equal(res.headers.get("location"), "/");
-  assert.equal(store.size, 0);
+  assert.deepEqual(kept(), []);
 });
 
 test("a forged or expired session is signed out", async () => {
@@ -434,4 +439,40 @@ test("the account is deleted even when Apple doesn't confirm the revocation, and
   assert.equal(res.status, 200);
   assert.match(await res.text(), /Apple didn't confirm ending the sign-in/);
   assert.ok(!store.has("account:001234.abcdef"));
+});
+
+test("the 6th sign-in from one address in an hour is refused, and the next hour it works again", async () => {
+  const ip = "203.0.113.9, 10.0.0.1";
+  const hour = Date.UTC(2026, 10, 6, 14, 20);
+  for (let i = 1; i <= 5; i++) assert.equal((await start(get("/auth/start", "", ip), env, hour)).status, 303, `sign-in ${i}`);
+  const refused = await start(get("/auth/start", "", ip), env, hour);
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get("retry-after"), String(40 * 60));
+  assert.match(await refused.text(), /At most 5 sign-ins an hour from one network\. Try again in 40 minutes/);
+  assert.equal(refused.headers.get("location"), null, "not sent to Apple");
+  assert.equal((await start(get("/auth/start", "", "203.0.113.10"), env, hour)).status, 303, "another address");
+  assert.equal((await start(get("/auth/start", "", ip), env, hour + 3600_000)).status, 303, "the next hour");
+  // Pressing Delete my account is a sign-in too.
+  const session = await signInAs();
+  assert.equal((await startDelete(post("/account/delete", {}, session, ip), env, hour)).status, 429);
+  assert.ok(![...store.keys()].some((k) => k.includes("203.0.113")), "the store holds hashes of addresses only");
+});
+
+test("the 6th sign-in coming back from Apple to one address in an hour is refused before Apple is asked", async () => {
+  const ip = "203.0.113.11";
+  for (let i = 1; i <= 5; i++) assert.equal((await callback(get("/auth/callback?code=x&state=y", "", ip), env)).status, 400);
+  const asked = tokenRequests.length;
+  assert.equal((await callback(get("/auth/callback?code=x&state=y", "", ip), env)).status, 429);
+  assert.equal(tokenRequests.length, asked);
+});
+
+test("the 6th key creation from one address in an hour is refused, across accounts", async () => {
+  const ip = "203.0.113.12";
+  const [a, b] = [await signInAs("111.a"), await signInAs("222.b")];
+  for (const [i, session] of [a, a, a, b, b].entries()) assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: `Mac ${i}` }, session, ip), env)), `key ${i + 1}`);
+  const refused = await createAccountKey(post("/keys", { name: "Mac 6" }, b, ip), env);
+  assert.equal(refused.status, 429);
+  assert.match(await refused.text(), /At most 5 key creations an hour/);
+  assert.equal(sets.get("account-keys:222.b").size, 2);
+  assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: "Mac 6" }, b), env)), "from another address");
 });
