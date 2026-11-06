@@ -628,13 +628,11 @@ extension ChatView {
     }
 
     /// The end-of-planning card's Clear context: a fresh session, with the next message waiting in the composer, unsent.
-    fileprivate func clearWith(_ next: String) {
-        Task {
-            do {
-                try await store.resetSession(agentId)
-                draft = next
-            } catch { actionError = APIError.from(error) }
-        }
+    fileprivate func clearWith(_ next: String) async {
+        do {
+            try await store.resetSession(agentId)
+            draft = next
+        } catch { actionError = APIError.from(error) }
     }
 
     fileprivate func grillCommand(_ c: GrillCommand) {
@@ -712,7 +710,7 @@ private struct ChatItemView: View {
     let agent: Agent
     var currentQuestionId: String?
     var command: (GrillCommand) -> Void = { _ in }
-    var clearWith: (String) -> Void = { _ in }
+    var clearWith: (String) async -> Void = { _ in }
 
     var body: some View {
         switch item {

@@ -3695,70 +3695,102 @@ pub(crate) mod tests {
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
+    /// The Dev's clone of `dir` in its workspace, with `file` committed on the spec branch and pushed back,
+    /// as a Dev builds a plan kept in Loft. The clone is left on the spec branch.
+    fn dev_builds(st: &AppState, d: &crate::db::Delivery, dir: &std::path::Path, file: &str, text: &str) -> std::path::PathBuf {
+        let clone = crate::agents::workspace(st, &d.dev).join("work").join(dir.file_name().unwrap());
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        if !clone.exists() {
+            git_in(clone.parent().unwrap(), &["clone", "-q", dir.to_str().unwrap(), clone.to_str().unwrap()]);
+        }
+        git_in(&clone, &["checkout", "-q", &d.branch]);
+        std::fs::write(clone.join(file), text).unwrap();
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", file]);
+        git_in(&clone, &["push", "-q", "origin", &d.branch]);
+        clone
+    }
+
+    /// Everything in the user's copy Merge could change: its branches, what's checked out and its files.
+    fn user_copy(dir: &std::path::Path) -> (String, String, String) {
+        (git_in(dir, &["for-each-ref", "refs/heads"]), git_in(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), git_in(dir, &["status", "--porcelain", "--untracked-files=all"]))
+    }
+
     #[tokio::test]
-    async fn merge_merges_only_on_a_clean_checkout_of_the_base_and_says_what_to_run() {
+    async fn merge_merges_in_the_devs_clone_and_never_touches_the_users_copy() {
         let st = state();
         let (a, m, _team, dir) = local_plan(&st, "local-merge", &["dev"]).await;
         press(&st, &a, &m).await.unwrap();
         let d = crate::delivery::local_of(&st, "local-merge", &loft_ticket(&st, "local-merge", "Offline mode").id).unwrap();
-        // The Dev's work on the spec branch, pushed back to the project's repo.
-        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
-        std::fs::write(dir.join("store.rs"), "fn store() {}\n").unwrap();
-        git_in(&dir, &["add", "."]);
-        git_in(&dir, &["commit", "-q", "-m", "Store"]);
         let merge = || crate::delivery::merge(&st, &d.repo, d.spec);
-
         assert!(merge().await.unwrap_err().ends_with("isn't ready to merge yet: its reviews haven't all passed."), "only after the last review");
         crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
-        let shown = dir.canonicalize().unwrap().display().to_string();
-        assert_eq!(merge().await.unwrap_err(), format!("`main` isn't checked out in `{shown}` (`spec/1-offline-mode` is). Run `git -C {shown} checkout main`, then press Merge again."));
-        git_in(&dir, &["checkout", "-q", "main"]);
-        std::fs::write(dir.join("README.md"), "edited\n").unwrap();
-        assert_eq!(merge().await.unwrap_err(), format!("`{shown}` has uncommitted changes, so nothing was merged. Commit or stash them (`git -C {shown} stash -u`), then press Merge again."));
-        assert!(!dir.join("store.rs").exists(), "nothing merged");
-        git_in(&dir, &["checkout", "--", "README.md"]);
+        assert!(merge().await.unwrap_err().starts_with("Nothing was merged: the Dev has no clone of "), "no clone, no merge");
 
-        // The repo's own config can't make Loft run anything: no fsmonitor command, no hooks.
+        let clone = dev_builds(&st, &d, &dir, "store.rs", "fn store() {}\n");
+        // The user is on main with uncommitted work of their own.
+        std::fs::write(dir.join("README.md"), "edited\n").unwrap();
+        std::fs::write(dir.join("scratch.txt"), "mine\n").unwrap();
+        let before = user_copy(&dir);
+
+        // The clone's own config can't make Loft run anything: no fsmonitor command, no hooks.
         let marker = dir.parent().unwrap().join("ran-something");
-        git_in(&dir, &["config", "core.fsmonitor", &format!("touch {}", marker.display())]);
-        let hook = dir.join(".git/hooks/post-merge");
+        git_in(&clone, &["config", "core.fsmonitor", &format!("touch {}", marker.display())]);
+        let hook = clone.join(".git/hooks/post-merge");
         std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let git_user = |k: &str, v: &str| git_in(&dir, &["config", k, v]);
-        git_user("user.name", "Test");
-        git_user("user.email", "test@example.com");
-        assert_eq!(merge().await.unwrap(), format!("Merged `spec/1-offline-mode` into `main` in `{shown}`."));
-        assert!(dir.join("store.rs").exists());
-        assert_eq!(git_in(&dir, &["log", "-1", "--format=%s"]), "Merge spec \"Offline mode\"");
-        assert!(!marker.exists(), "neither the fsmonitor command nor the post-merge hook ran");
+        git_in(&clone, &["config", "user.name", "Test"]);
+        git_in(&clone, &["config", "user.email", "test@example.com"]);
+
+        let shown = clone.display().to_string();
+        assert_eq!(merge().await.unwrap(), format!("Merged `spec/1-offline-mode` into `main` in the Dev's clone `{shown}`."));
+        assert_eq!(git_in(&clone, &["-c", "core.fsmonitor=false", "log", "-1", "--format=%s", "main"]), "Merge spec \"Offline mode\"");
+        assert_eq!(git_in(&clone, &["-c", "core.fsmonitor=false", "show", "main:store.rs"]), "fn store() {}");
+        assert!(!marker.exists(), "neither the fsmonitor command nor a hook ran");
+        assert_eq!(user_copy(&dir), before, "the user's copy is exactly as it was");
+        assert!(!dir.join("store.rs").exists());
         assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "merged");
         assert_eq!(st.db.get_task(&d.spec_id).unwrap().unwrap().status, "done");
         assert_eq!(merge().await.unwrap(), "`spec/1-offline-mode` is already merged into `main`.");
     }
 
     #[tokio::test]
-    async fn a_conflict_aborts_the_merge_and_says_what_to_run() {
+    async fn merge_brings_the_devs_checkout_of_the_base_along() {
+        let st = state();
+        let (a, m, _team, dir) = local_plan(&st, "local-merge-on-main", &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let d = crate::delivery::local_of(&st, "local-merge-on-main", &loft_ticket(&st, "local-merge-on-main", "Offline mode").id).unwrap();
+        let clone = dev_builds(&st, &d, &dir, "store.rs", "fn store() {}\n");
+        git_in(&clone, &["checkout", "-q", "main"]);
+        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+        let before = user_copy(&dir);
+
+        crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap();
+        assert_eq!(std::fs::read_to_string(clone.join("store.rs")).unwrap(), "fn store() {}\n", "the Dev's files follow its main");
+        assert_eq!(git_in(&clone, &["status", "--porcelain"]), "");
+        assert_eq!(user_copy(&dir), before);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_merges_nothing() {
         let st = state();
         let (a, m, _team, dir) = local_plan(&st, "local-conflict", &["dev"]).await;
         press(&st, &a, &m).await.unwrap();
         let d = crate::delivery::local_of(&st, "local-conflict", &loft_ticket(&st, "local-conflict", "Offline mode").id).unwrap();
-        // The spec branch and main both change README.md.
-        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
-        std::fs::write(dir.join("README.md"), "from the spec\n").unwrap();
-        git_in(&dir, &["commit", "-qam", "Spec edit"]);
-        git_in(&dir, &["checkout", "-q", "main"]);
-        std::fs::write(dir.join("README.md"), "from main\n").unwrap();
-        git_in(&dir, &["commit", "-qam", "Main edit"]);
+        // The spec branch and the clone's main both change README.md.
+        let clone = dev_builds(&st, &d, &dir, "README.md", "from the spec\n");
+        git_in(&clone, &["checkout", "-q", "main"]);
+        std::fs::write(clone.join("README.md"), "from main\n").unwrap();
+        git_in(&clone, &["commit", "-qam", "Main edit"]);
         crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+        let (main, before) = (git_in(&clone, &["rev-parse", "main"]), user_copy(&dir));
 
         let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
-        let shown = dir.canonicalize().unwrap().display().to_string();
-        assert!(err.starts_with("`spec/1-offline-mode` doesn't merge cleanly into `main`"), "{err}");
-        assert!(err.ends_with(&format!("so nothing was merged. Run `git -C {shown} merge spec/1-offline-mode`, resolve the conflicts and commit.")), "{err}");
-        assert!(!dir.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
-        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "", "the tree is clean again");
-        assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "from main\n");
-        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready", "Merge can be pressed again once it's resolved");
+        assert_eq!(err, "`spec/1-offline-mode` doesn't merge cleanly into `main`, so nothing was merged.");
+        assert_eq!(git_in(&clone, &["rev-parse", "main"]), main, "the clone's main didn't move");
+        assert_eq!(git_in(&clone, &["status", "--porcelain"]), "");
+        assert_eq!(user_copy(&dir), before);
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready", "Merge can be pressed again");
     }
 
     #[tokio::test]

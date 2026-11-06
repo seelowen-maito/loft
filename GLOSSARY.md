@@ -60,6 +60,10 @@ _Avoid_: Sub-agent, child agent, worker
 A message one agent sends another through Loft, as opposed to a message from the user. It says whether the recipient must act on it (needs action) or only needs to know (FYI), and it follows the messaging rules Loft gives every agent.
 _Avoid_: Ping, DM, hand-off
 
+**Mention**:
+An `@` reference in a message: `@name` points at an agent, `@path` at a file or folder, read relative to the agent's project folder. As the user types after `@`, Loft suggests matching agents and files.
+_Avoid_: Tag, reference
+
 **Draft**:
 A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached issue. Each agent keeps its own until it is sent or the agent's context is cleared.
 _Avoid_: Unsent message, pending message

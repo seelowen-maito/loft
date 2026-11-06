@@ -356,6 +356,32 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(app.buttons["endCardStart"].exists)
     }
 
+    /// While its request runs, each end-card button shows a spinner and can't be tapped again: Start delivery reads
+    /// "Starting delivery…" until the card says it started, and Clear context waits for the session reset.
+    func testEndCardButtonsShowTheyAreWorking() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-slow-end-card"])
+        let setup = app.buttons["endCardSetup"]
+        XCTAssertTrue(setup.appears(timeout: 5))
+        app.swipeUp()
+        setup.tap()
+        XCTAssertFalse(setup.isEnabled, "sending")
+        XCTAssertEqual(setup.label, "Set up the team with loft")
+
+        let start = app.buttons["endCardStart"]
+        start.tap()
+        XCTAssertEqual(start.label, "Starting delivery…")
+        XCTAssertFalse(start.isEnabled)
+        XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
+        XCTAssertFalse(start.exists)
+
+        let clear = app.buttons["endCardClear"]
+        clear.tap()
+        XCTAssertFalse(clear.isEnabled, "resetting")
+        let deadline = Date().addingTimeInterval(5)
+        while !clear.isEnabled, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(clear.isEnabled, "the reset finished")
+    }
+
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
     /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
     func testGrillRoundCardsAnswersAndSend() {

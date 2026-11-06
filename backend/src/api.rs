@@ -840,6 +840,18 @@ pub async fn list_dir(State(state): State<AppState>, Path(id): Path<String>, Que
     Ok(Json(json!({ "dir": shown, "entries": entries })))
 }
 
+#[derive(Deserialize)]
+pub struct FindQuery {
+    q: Option<String>,
+}
+
+/// Up to 20 files and folders anywhere under the agent's `@` base whose path fuzzy-matches `q`, best first,
+/// for `@` followed by a name rather than a path. Each is `{ path, dir }`, with `path` relative to the base.
+pub async fn find_files(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<FindQuery>) -> ApiResult<Value> {
+    let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    Ok(Json(json!(crate::file_search::search(&state.listings, &agents::at_base(&state, &a), q.q.as_deref().unwrap_or("")).await)))
+}
+
 fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBuf, Vec<Value>), String> {
     // Resolved for real (`..`, symlinks, absolute paths) before checking where it landed.
     let dir = base.join(path).canonicalize().map_err(|_| format!("No folder {path}"))?;
@@ -1389,5 +1401,98 @@ mod ls_tests {
         std::os::unix::fs::symlink(&root, base.join("escape")).unwrap();
         assert!(names("escape").is_err(), "a symlink out of bounds");
         assert!(names("nope").is_err());
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use axum::extract::{Path, Query, State};
+    use std::path::Path as FsPath;
+
+    async fn find(st: &crate::state::AppState, id: &str, q: &str) -> Vec<(String, bool)> {
+        let v = super::find_files(State(st.clone()), Path(id.to_string()), Query(super::FindQuery { q: Some(q.into()) })).await.unwrap().0;
+        v.as_array().unwrap().iter().map(|e| (e["path"].as_str().unwrap().to_string(), e["dir"].as_bool().unwrap())).collect()
+    }
+
+    fn write(root: &FsPath, files: &[&str]) {
+        for f in files {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+        }
+    }
+
+    fn git(dir: &FsPath, args: &[&str]) {
+        assert!(std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success(), "git {args:?}");
+    }
+
+    #[tokio::test]
+    async fn searches_what_git_shows_under_the_project_and_nothing_else() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let projects = st.settings.boot().projects_dir.clone();
+        // The project is a folder inside a repo; the repo's other folders are outside it.
+        let repo = projects.join("mono");
+        let web = repo.join("web");
+        write(&repo, &["api/chat.rs", "outside-chat.md"]);
+        write(&web, &[
+            ".gitignore", "frontend/src/pages/agents/Chat.tsx", "chats/log.txt", "docs/c/h/a/t.md", "dist/chat.js", "secret-chat.log",
+        ]);
+        std::fs::write(web.join(".gitignore"), "dist/\n*.log\n").unwrap();
+        write(&web, &(0..30).map(|i| format!("many/item{i}.md")).collect::<Vec<_>>().iter().map(String::as_str).collect::<Vec<_>>());
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        write(&web, &["notes/untracked-chat.md", "frontend/src/gone-chat.ts"]);
+        git(&repo, &["add", "web/frontend/src/gone-chat.ts"]);
+        std::fs::remove_file(web.join("frontend/src/gone-chat.ts")).unwrap();
+        st.db.update_agent(&a.id, |a| a.project = "mono/web".into()).unwrap();
+
+        assert_eq!(find(&st, &a.id, "item").await.len(), super::super::file_search::LIMIT, "at most 20");
+        let paths: Vec<String> = find(&st, &a.id, "Chat").await.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(paths, vec![
+            // Name matches: the tightest, then the shortest name. Folders count.
+            "chats", "frontend/src/pages/agents/Chat.tsx", "notes/untracked-chat.md",
+            // Matches only through the folders above.
+            "chats/log.txt", "docs/c/h/a/t.md",
+        ]);
+        let few = find(&st, &a.id, "pageschat").await;
+        assert_eq!(few, vec![("frontend/src/pages/agents/Chat.tsx".to_string(), false)], "a match through the path");
+        let dirs = find(&st, &a.id, "agents").await;
+        assert_eq!(dirs[0], ("frontend/src/pages/agents".to_string(), true), "folders holding files are found");
+        assert!(find(&st, &a.id, "head").await.iter().all(|(p, _)| !p.contains(".git/")), "nothing from .git");
+        assert!(find(&st, &a.id, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outside_git_it_walks_the_workspace_skipping_the_noise() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let ws = crate::agents::workspace(&st, &a.id);
+        write(&ws, &["notes/chat.md", "node_modules/chat/index.js", "target/chat.rs", "app/.DS_Store", "app/src/chatter.ts"]);
+        std::os::unix::fs::symlink(std::env::temp_dir(), ws.join("tmp-link")).unwrap();
+
+        let paths: Vec<String> = find(&st, &a.id, "chat").await.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(paths, vec!["notes/chat.md", "app/src/chatter.ts"]);
+        assert_eq!(find(&st, &a.id, "notes").await[0], ("notes".to_string(), true), "folders too, the name match first");
+        assert_eq!(find(&st, &a.id, "store").await, vec![], ".DS_Store is skipped");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_its_repo_ignores_is_walked_past_the_clones_git_folders() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        // Like agent-local-storage/ in the Loft checkout: the workspaces live in a repo that ignores them.
+        let checkout = st.cfg.storage_dir.parent().unwrap();
+        std::fs::write(checkout.join(".gitignore"), "agents/\n").unwrap();
+        git(checkout, &["init", "-q"]);
+        let ws = crate::agents::workspace(&st, &a.id);
+        write(&ws, &["clone/src/chat.rs"]);
+        git(&ws.join("clone"), &["init", "-q"]);
+        assert!(ws.join("clone/.git/HEAD").exists());
+
+        assert_eq!(find(&st, &a.id, "chat").await, vec![("clone/src/chat.rs".to_string(), false)], "the walk ran, not git");
+        for q in ["head", "config", ".git"] {
+            assert!(find(&st, &a.id, q).await.iter().all(|(p, _)| !p.contains(".git")), "nothing from a clone's .git for {q:?}");
+        }
     }
 }

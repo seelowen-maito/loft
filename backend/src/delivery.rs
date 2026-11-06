@@ -467,33 +467,45 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
     }
 }
 
+/// What a Delivery tool's `number` names: a GitHub issue number, given as an integer or as a string of
+/// digits (`"310"`, `"#310"`), or the Loft issue id of a ticket in a plan kept in Loft.
+#[derive(Debug, PartialEq)]
+enum TicketNumber {
+    GitHub(i64),
+    Loft(String),
+}
+
+/// None when `number` is missing, empty or not a positive issue number.
+fn number_of(number: &Value) -> Option<TicketNumber> {
+    if let Some(n) = number.as_i64() {
+        return (n > 0).then_some(TicketNumber::GitHub(n));
+    }
+    let s = number.as_str()?.trim();
+    let digits = s.strip_prefix('#').map(str::trim);
+    if digits.is_some() || s.bytes().all(|b| b.is_ascii_digit()) {
+        return digits.unwrap_or(s).parse().ok().filter(|n| *n > 0).map(TicketNumber::GitHub);
+    }
+    Some(TicketNumber::Loft(s.to_string()))
+}
+
 /// The repo, number and Delivery of the ticket a Delivery tool names, with the repo's publish lock held.
 async fn ticket_of(state: &AppState, me: &crate::db::Agent, args: &Value, tool: &str) -> Result<(String, i64, Delivery, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = loft_id(args) {
-        // A plan kept in Loft names its tickets by their Loft issue ids.
-        let slug = local_repo(&me.project);
-        let held = state.publish_locks.of(&slug).lock_owned().await;
-        let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
-        let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in project {}: only tickets started with Start delivery go through {tool}. {}", me.project.trim(), in_progress(state, &slug)))?;
-        let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
-        return Ok((slug, n, d, held));
-    }
-    let n = github_number(args).ok_or("number is required: the ticket's GitHub issue number (85), or a Loft issue id in a plan kept in Loft")?;
+    let n = match number_of(&args["number"]).ok_or("number is required: the ticket's GitHub issue number (85), or a Loft issue id in a plan kept in Loft")? {
+        TicketNumber::GitHub(n) => n,
+        TicketNumber::Loft(id) => {
+            // A plan kept in Loft names its tickets by their Loft issue ids.
+            let slug = local_repo(&me.project);
+            let held = state.publish_locks.of(&slug).lock_owned().await;
+            let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
+            let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in project {} (read as a Loft issue id: a GitHub issue number is only digits): only tickets started with Start delivery go through {tool}. {}", me.project.trim(), in_progress(state, &slug)))?;
+            let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
+            return Ok((slug, n, d, held));
+        }
+    };
     let slug = crate::planning::github_home(state, me).await.map_err(|why| format!("{tool} works on tickets on GitHub, and {why}."))?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
-    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery: only tickets started with Start delivery go through {tool}. {}", in_progress(state, &slug)))?;
+    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery (read as a GitHub issue number): only tickets started with Start delivery go through {tool}. {}", in_progress(state, &slug)))?;
     Ok((slug, n, d, held))
-}
-
-/// `number` as a Loft issue id: text that isn't all digits. Agents often send a GitHub number as text ("85").
-fn loft_id(args: &Value) -> Option<&str> {
-    args["number"].as_str().map(str::trim).filter(|s| !s.is_empty() && !s.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// `number` as a GitHub issue or PR number: an integer, or all digits as text ("85").
-fn github_number(args: &Value) -> Option<i64> {
-    let n = &args["number"];
-    n.as_i64().or_else(|| n.as_str().map(str::trim).filter(|s| s.bytes().all(|b| b.is_ascii_digit())).and_then(|s| s.parse().ok())).filter(|n| *n > 0)
 }
 
 /// The tickets being built or in review on `slug`, for a refusal.
@@ -1044,13 +1056,15 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
 /// The Delivery whose spec PR (or spec) is #n on `slug`, or in a plan kept in Loft whose spec is the Loft
 /// issue named, with the repo's publish lock held. The name to use in replies.
 async fn final_of(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result<(String, String, Option<Delivery>, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = loft_id(args) {
-        let slug = local_repo(&me.project);
-        let held = state.publish_locks.of(&slug).lock_owned().await;
-        let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.spec_id == id);
-        return Ok((slug, format!("Loft issue {id}"), d, held));
-    }
-    let n = github_number(args).ok_or("number is required")?;
+    let n = match number_of(&args["number"]).ok_or("number is required")? {
+        TicketNumber::GitHub(n) => n,
+        TicketNumber::Loft(id) => {
+            let slug = local_repo(&me.project);
+            let held = state.publish_locks.of(&slug).lock_owned().await;
+            let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.spec_id == id);
+            return Ok((slug, format!("Loft issue {id}"), d, held));
+        }
+    };
     let slug = crate::planning::github_home(state, me).await?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
     let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.pr == Some(n) || d.spec == n).filter(|d| d.tickets.iter().all(|t| t.number != n) || d.pr == Some(n));
@@ -1244,9 +1258,42 @@ pub async fn merge_route(State(state): State<AppState>, Json(w): Json<Which>) ->
     Ok(Json(json!({ "ok": true, "message": message })))
 }
 
-/// Merges a plan kept in Loft whose last review passed: its spec branch into the branch it started from, in
-/// the project's own repo, only when that branch is checked out and the working tree is clean. Otherwise
-/// says why and what to run. Its spec's Loft issue is then done.
+/// The Dev's clone of the project's own repo `project`: a checkout in its workspace (a few levels deep)
+/// whose `origin` is that folder.
+fn dev_clone(state: &AppState, d: &Delivery, project: &std::path::Path) -> Option<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, depth: usize, project: &std::path::Path) -> Option<std::path::PathBuf> {
+        let mut dirs: Vec<_> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        dirs.sort();
+        for p in dirs {
+            let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.') || n == "node_modules" || n == "target");
+            if hidden || !p.is_dir() {
+                continue;
+            }
+            if crate::repos::own_git_dir(&p) {
+                let cfg = std::fs::read_to_string(p.join(".git").join("config")).unwrap_or_default();
+                let origin = cfg.split("[remote \"origin\"]").nth(1).unwrap_or("").split("\n[").next().unwrap_or("");
+                let url = origin.lines().find_map(|l| l.trim().strip_prefix("url").map(|r| r.trim_start().trim_start_matches('=').trim()));
+                let to = url.map(|u| std::path::PathBuf::from(u.strip_prefix("file://").unwrap_or(u)));
+                if to.and_then(|t| t.canonicalize().ok()).is_some_and(|t| t == project) {
+                    return Some(p);
+                }
+            } else if depth < 3
+                && let Some(found) = walk(&p, depth + 1, project)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    if d.dev.is_empty() {
+        return None;
+    }
+    walk(&crate::agents::workspace(state, &d.dev), 1, &project.canonicalize().ok()?)
+}
+
+/// Merges a plan kept in Loft whose last review passed: its spec branch, as the Dev last pushed it, into
+/// the branch it started from, in the Dev's own clone. The project's folder is only read from, never
+/// written to. Its spec's Loft issue is then done.
 pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.filter(|d| d.local).ok_or("There's no plan kept in Loft with that Delivery.")?;
@@ -1255,25 +1302,51 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
         "merged" => return Ok(format!("`{}` is already merged into `{}`.", d.branch, d.base)),
         _ => return Err(format!("{} isn't ready to merge yet: its reviews haven't all passed.", subject(&d))),
     }
-    let dir = project_dir(state, &d).map_err(|e| format!("Nothing was merged: {e}."))?;
+    let project = project_dir(state, &d).map_err(|e| format!("Nothing was merged: {e}."))?;
+    let dir = dev_clone(state, &d, &project).ok_or_else(|| format!("Nothing was merged: the Dev has no clone of `{}` in its workspace.", project.display()))?;
     let shown = dir.display();
-    let on = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await.map_err(|e| format!("Couldn't read the branch checked out in `{shown}`: {e}"))?;
-    if on != d.base {
-        return Err(format!("`{}` isn't checked out in `{shown}` (`{on}` is). Run `git -C {shown} checkout {}`, then press Merge again.", d.base, d.base));
+    let (base_ref, spec_ref) = (format!("refs/heads/{}", d.base), format!("refs/remotes/origin/{}", d.branch));
+    git(&dir, &["fetch", "-q", "origin", &format!("+refs/heads/{0}:{spec_ref}", d.branch), &format!("+refs/heads/{0}:refs/remotes/origin/{0}", d.base)])
+        .await
+        .map_err(|e| format!("Nothing was merged: couldn't fetch `{}` into `{shown}`: {e}", d.branch))?;
+    let at = dir.as_path();
+    let tip = |r: String| async move { git(at, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).await.ok() };
+    // The clone's own base branch, or the project's when the clone has none yet.
+    let base = match tip(base_ref.clone()).await {
+        Some(b) => b,
+        None => tip(format!("refs/remotes/origin/{}", d.base)).await.ok_or_else(|| format!("Nothing was merged: `{}` isn't in `{shown}`.", d.base))?,
+    };
+    let branch = tip(spec_ref).await.ok_or_else(|| format!("Nothing was merged: `{}` isn't in `{shown}`.", d.branch))?;
+    let done = |how: String| {
+        update(state, repo, spec, |d| d.state = "merged".into());
+        if let Ok(Some(mut t)) = state.db.get_task(&d.spec_id) {
+            crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into `{}`", d.branch, d.base)));
+        }
+        how
+    };
+    let merged = format!("Merged `{}` into `{}` in the Dev's clone `{shown}`.", d.branch, d.base);
+    if git(&dir, &["merge-base", "--is-ancestor", &branch, &base]).await.is_ok() {
+        if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_err() {
+            git(&dir, &["branch", &d.base, &base]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+        }
+        return Ok(done(merged));
     }
-    let dirty = git(&dir, &["status", "--porcelain"]).await.map_err(|e| format!("Couldn't read the state of `{shown}`: {e}"))?;
-    if !dirty.is_empty() {
-        return Err(format!("`{shown}` has uncommitted changes, so nothing was merged. Commit or stash them (`git -C {shown} stash -u`), then press Merge again."));
+    let tree = git(&dir, &["merge-tree", "--write-tree", "--no-messages", &base, &branch]).await;
+    let Some(tree) = tree.ok().and_then(|t| t.lines().next().map(str::to_string)).filter(|t| !t.is_empty()) else {
+        return Err(format!("`{}` doesn't merge cleanly into `{}`, so nothing was merged.", d.branch, d.base));
+    };
+    let message = format!("Merge {}", subject(&d));
+    let commit = git(&dir, &["commit-tree", &tree, "-p", &base, "-p", &branch, "-m", &message]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    let on = git(&dir, &["symbolic-ref", "--quiet", "HEAD"]).await.unwrap_or_default();
+    if on == base_ref {
+        // The Dev has the base checked out: its files follow, and git refuses rather than lose its uncommitted work.
+        git(&dir, &["merge", "-q", "--ff-only", &commit]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    } else {
+        // Moves the branch only from the commit read above (or makes it), so a change since then fails instead of being lost.
+        let old = if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_ok() { base.as_str() } else { "" };
+        git(&dir, &["update-ref", "-m", &message, &base_ref, &commit, old]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
     }
-    if let Err(e) = git(&dir, &["merge", "--no-ff", "-m", &format!("Merge {}", subject(&d)), &d.branch]).await {
-        let _ = git(&dir, &["merge", "--abort"]).await;
-        return Err(format!("`{}` doesn't merge cleanly into `{}` ({e}), so nothing was merged. Run `git -C {shown} merge {}`, resolve the conflicts and commit.", d.branch, d.base, d.branch));
-    }
-    update(state, repo, spec, |d| d.state = "merged".into());
-    if let Ok(Some(mut t)) = state.db.get_task(&d.spec_id) {
-        crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into `{}`", d.branch, d.base)));
-    }
-    Ok(format!("Merged `{}` into `{}` in `{shown}`.", d.branch, d.base))
+    Ok(done(merged))
 }
 
 #[cfg(test)]
@@ -1326,6 +1399,22 @@ mod tests {
             for empty in [serde_json::json!(""), serde_json::json!(0), serde_json::json!(null)] {
                 assert!(ticket_of(&st, &me, &serde_json::json!({ "number": empty }), tool).await.err().unwrap().starts_with("number is required"));
             }
+        }
+    }
+
+    /// Agents send `number` as an integer or a string; digits name a GitHub issue either way (#312).
+    #[test]
+    fn a_numeric_string_names_a_github_issue() {
+        use serde_json::json;
+        assert_eq!(number_of(&json!(310)), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!("310")), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!("#310")), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!(" # 310 ")), Some(TicketNumber::GitHub(310)));
+        let id = "0b9c7a3e-5f1d-4c2b-9e8a-7d6f5e4c3b2a";
+        assert_eq!(number_of(&json!(id)), Some(TicketNumber::Loft(id.into())), "a Loft issue id keeps the Loft path");
+        assert_eq!(number_of(&json!("loft-issue-1")), Some(TicketNumber::Loft("loft-issue-1".into())));
+        for bad in [json!(0), json!(-3), json!("0"), json!("#"), json!(""), json!("  "), json!(null), json!(true)] {
+            assert_eq!(number_of(&bad), None, "{bad} names no ticket");
         }
     }
 }

@@ -2,21 +2,24 @@ import { Fragment, useEffect, useState, type Dispatch, type KeyboardEvent, type 
 import { FileText, Folder } from "lucide-react";
 import { api, type Agent } from "../lib/api";
 import { cx } from "../lib/format";
-import { atToken, matchingEntries, withPick, type Entry } from "../lib/mention";
+import { atToken, matchingEntries, mentionMode, stillFound, withPick, type Entry } from "../lib/mention";
 import { type MentionGroup } from "../lib/mentionPicker";
 import { Sticker } from "./Sticker";
 
 type Pick = { agent: Agent } | { file: Entry };
 
 /**
- * The `@` menu of a text field: while the text ends in `@…`, the `agents` whose names start with it, then the
- * entries of the folder typed so far in `agentId`'s workspace. Pass no agents for a files-only menu.
+ * The `@` menu of a text field: while the text ends in `@…`, the `agents` whose names start with it, then files:
+ * for a name, the best matches anywhere in `agentId`'s project; for a path, the entries of the folder typed so far.
+ * Pass no agents for a files-only menu.
  * `onKeyDown` handles the arrows, Tab and Enter while the menu is open and returns true when it took the key.
  */
 export function useMention(agentId: string, text: string, setText: Dispatch<SetStateAction<string>>, agents: Agent[] = []) {
   const token = atToken(text);
   const agentMatches = token ? agents.filter((a) => a.name.toLowerCase().startsWith(token.query)).slice(0, 6) : [];
-  const fileDir = token?.dir;
+  const mode = token && mentionMode(token.query);
+  const fileDir = mode === "browse" ? token?.dir : undefined;
+  const search = mode === "search" ? token?.query : undefined;
   const [listing, setListing] = useState<{ typed: string; dir: string; entries: Entry[] }>();
   useEffect(() => {
     if (fileDir === undefined) return;
@@ -29,7 +32,33 @@ export function useMention(agentId: string, text: string, setText: Dispatch<SetS
       live = false;
     };
   }, [agentId, fileDir]);
-  const fileMatches = token && listing && listing.typed === fileDir ? matchingEntries(listing.entries, token.prefix) : [];
+  const [found, setFound] = useState<{ agentId: string; typed: string; entries: Entry[] }>();
+  useEffect(() => {
+    if (search === undefined) return;
+    let live = true;
+    const t = setTimeout(
+      () =>
+        api.findFiles(agentId, search).then(
+          (r) => live && setFound({ agentId, typed: search, entries: r.map((e) => ({ name: e.path, dir: e.dir })) }),
+          () => live && setFound({ agentId, typed: search, entries: [] }),
+        ),
+      120,
+    );
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [agentId, search]);
+  // While the next search runs, the last one's results that still match stay up, so the menu doesn't blink
+  // and Tab or Enter never pick one that doesn't match what's typed.
+  const fileMatches =
+    search !== undefined
+      ? found && found.agentId === agentId
+        ? stillFound(found, search)
+        : []
+      : token && listing && listing.typed === fileDir
+        ? matchingEntries(listing.entries, token.prefix)
+        : [];
   const matches: Pick[] = [...agentMatches.map((a) => ({ agent: a })), ...fileMatches.map((f) => ({ file: f }))];
   const [index, setIndex] = useState(0);
   useEffect(() => {
@@ -61,7 +90,7 @@ export function useMention(agentId: string, text: string, setText: Dispatch<SetS
       {matches.map((p, i) => (
         <Fragment key={"agent" in p ? p.agent.id : p.file.name}>
           {"file" in p && i === agentMatches.length && (
-            <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{listing?.dir ? `${listing.dir}/` : "./"}</div>
+            <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{search !== undefined ? "Matching files and folders" : listing?.dir ? `${listing.dir}/` : "./"}</div>
           )}
           <button
             role="option"
@@ -85,10 +114,20 @@ export function useMention(agentId: string, text: string, setText: Dispatch<SetS
             ) : (
               <>
                 {p.file.dir ? <Folder className="size-4 shrink-0 text-fg-3" /> : <FileText className="size-4 shrink-0 text-fg-3" />}
-                <span className="truncate font-mono text-[12.5px]">
-                  {p.file.name}
-                  {p.file.dir && "/"}
-                </span>
+                {search !== undefined ? (
+                  <span className="flex min-w-0 items-baseline gap-2 font-mono">
+                    <span className="shrink-0 text-[12.5px]">
+                      {p.file.name.split("/").pop()}
+                      {p.file.dir && "/"}
+                    </span>
+                    <span className="truncate text-[11px] text-fg-3">{p.file.name.split("/").slice(0, -1).join("/")}</span>
+                  </span>
+                ) : (
+                  <span className="truncate font-mono text-[12.5px]">
+                    {p.file.name}
+                    {p.file.dir && "/"}
+                  </span>
+                )}
               </>
             )}
           </button>
