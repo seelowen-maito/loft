@@ -6,7 +6,7 @@ service, by one of two paths (ADR 0002):
 | | **Your own key** | **The Loft relay** |
 |---|---|---|
 | When | A `.p8` key, key id and team id in Settings | A relay key in Settings, and no key of your own |
-| Setup | The steps below (an Apple developer account) | Paste the relay key you were given ("Sign in to get push") |
+| Setup | The steps below (an Apple developer account) | **Sign in** with Apple on the push portal, or paste a relay key |
 | Path | Loft → Apple | Loft → push relay → Apple |
 | Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
 | Apps | Any bundle id (your own build) | The official Loft app only |
@@ -34,8 +34,16 @@ the same folder as the `.p8` (`relay-key`): never logged, returned by the API or
 phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
 answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its
 limits are 20 a minute and 1,000 a day per key), the push is logged and dropped, and the next one is tried. A revoked
-key gets `401`: pushes stop until a new key is pasted. The relay itself, its API, deploying it, and making and
-revoking keys are in [`relay/README.md`](../relay/README.md).
+key gets `401`: pushes stop until a new key is pasted.
+
+On the portal a user sees their keys (name, created, last used; never the key), creates up to 5 and revokes them.
+**Delete my account** asks them to sign in with Apple once more, then deletes the account (Apple's user id, the only
+thing stored about a person) and every key, and revokes the Sign in with Apple token: the Lofts using those keys
+stop pushing. From one network, at most 5 sign-ins and 5 key creations are taken an hour.
+
+The relay itself, its API, deploying it and the portal (the Apple and Vercel setup, step by step), running it
+without the portal, and making and revoking keys by hand are in [`relay/README.md`](../relay/README.md). To keep push
+entirely between your Mac and Apple, use your own key (below) instead: the relay is then never called.
 
 ## Setting up your own key (by hand, once)
 
