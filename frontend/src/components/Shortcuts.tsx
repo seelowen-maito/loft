@@ -42,9 +42,11 @@ export function Shortcuts() {
       gAt.current = 0;
       const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG });
       if (!a) return;
+      const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
+      // Plain keys don't act on the page behind an open dialog.
+      if (shown && (a.type === "g" || a.type === "go" || a.type === "focus-chat" || a.type === "sheet")) return;
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
-        const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
         if (a.type === "switcher" && shown?.getAttribute("aria-label") === "Open an agent") close();
         else {
           if (!shown) returnTo.current = document.activeElement as HTMLElement | null;
