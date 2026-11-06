@@ -41,7 +41,9 @@ open_sync_pr() {
 
 Resolve anything left on \`$SYNC_BRANCH\` if needed, then merge this PR with a **merge commit** so \`$TARGET\` gets every commit on \`$BASE\`."
   local existing
-  existing=$(gh pr list --repo "$REPO" --base "$TARGET" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+  # --head also matches forks' branches of the same name: skip those.
+  existing=$(gh pr list --repo "$REPO" --base "$TARGET" --head "$SYNC_BRANCH" --state open \
+    --json number,isCrossRepository --jq 'map(select(.isCrossRepository | not)) | .[0].number // empty')
   if [ -n "$existing" ]; then
     gh pr edit "$existing" --repo "$REPO" --title "$TITLE" --body "$body"
     echo "::warning::Updated sync PR #$existing ($reason)"
