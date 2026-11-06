@@ -20,6 +20,8 @@ struct VoiceSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // A full screen covers the root's banner, so it shows its own.
+            if store.isDemo { DemoBanner() }
             header
             questionCard
             Group {
