@@ -9,8 +9,9 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
-import { filterIssues, SOURCES } from "../lib/issueFilter";
-import { ClosedOnGithubCard, CommentBox, HandOffCard, NewTaskDialog, PublishCard, TaskActions } from "./TaskActions";
+import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
+import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
+import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
@@ -107,8 +108,8 @@ export default function TasksPage() {
   const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
   const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
   const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || t.created_by === "user"));
-  }, [tasks, filters.q, project, agentId, mine, source]);
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, project, agentId, mine, source, mirror?.login]);
 
   const groups = useMemo(
     () =>
@@ -257,7 +258,7 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
         </div>
         {t.note && t.status === "in_progress" && <div className="mt-1 truncate text-[12px] text-fg-2">{t.note}</div>}
       </div>
-      {agent && <Sticker avatar={agent.avatar} lead={agent.lead} size={22} />}
+      {agent && <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={22} />}
     </button>
   );
 }
@@ -283,7 +284,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
   );
 
   const agent = t.agent_id ? agentById.get(t.agent_id) : undefined;
-  const creator = t.created_by === "user" ? "you" : t.created_by === "github" ? "GitHub" : agentById.get(t.created_by)?.name ?? "an agent";
+  const creator = t.created_by === "user" ? "you" : t.created_by === "github" ? (t.github?.author ? `@${t.github.author} on GitHub` : "GitHub") : agentById.get(t.created_by)?.name ?? "an agent";
   const parent = t.parent_id ? tasks.find((x) => x.id === t.parent_id) : undefined;
   const subtasks = tasks.filter((x) => x.parent_id === t.id);
   const deps = t.depends_on.map((id) => tasks.find((x) => x.id === id)).filter((x): x is Task => !!x);
@@ -297,7 +298,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       <header className="space-y-2">
         {parent && (
           <Link to={{ pathname: `/tasks/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
-            Part of {parent.title} <ChevronRight className="size-3" />
+            {isSpec(parent) && parent.github ? `Part of spec #${parent.github.number}: ${parent.title}` : `Part of ${parent.title}`} <ChevronRight className="size-3" />
           </Link>
         )}
         <h1 className="text-[22px] font-medium leading-snug tracking-tight">{t.title}</h1>
@@ -339,13 +340,15 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
-      {t.state === "open" && !t.agent_id && !isSpec(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
+      {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
+      {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
+      {t.state === "open" && !t.agent_id && !isSpec(t) && !isStandaloneTicket(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
       {t.state === "open" && !t.github && <PublishCard task={t} repo={repos[t.project]} onEdit={() => setEditAsked((n) => n + 1)} />}
       {t.github && <OwnedBy task={t} agent={agent} deps={deps} />}
 
       {agent && (
         <Link to={`/agents/${agent.id}`} className="panel flex items-center gap-3 p-3 transition-colors hover:bg-white/[0.03]">
-          <Sticker avatar={agent.avatar} lead={agent.lead} size={36} />
+          <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={36} />
           <div className="min-w-0 flex-1">
             <div className="text-[13.5px]">{agent.name}</div>
             <div className="truncate font-mono text-[11px] text-fg-3">{agent.running ? agent.status_text || "Working…" : "Open conversation"}</div>
@@ -412,7 +415,7 @@ function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Ta
       <section className="panel p-4">
         <div className="eyebrow mb-2">In Loft</div>
         <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
-        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.lead} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
+        <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
         <Fact label="Priority">{t.priority}</Fact>
         <Fact label="When done">closes #{g.number} on GitHub</Fact>
         <div className="mt-2 font-mono text-[10.5px] text-fg-3">Who works on it, its progress, priority and notes stay in Loft.</div>
@@ -474,7 +477,7 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   return (
     <li className="flex gap-3">
       {agent ? (
-        <Sticker avatar={agent.avatar} lead={agent.lead} size={26} />
+        <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={26} />
       ) : c.author === "github" ? (
         <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-white/[0.08] font-mono text-[10px] text-fg-2">gh</span>
       ) : (

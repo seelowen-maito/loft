@@ -48,6 +48,7 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     let mut v = agents::client_json(a);
     agents::run_fields(state, &a.id, &mut v);
     v["unread_reply"] = json!(a.unread_reply());
+    v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
     v
 }
@@ -208,11 +209,14 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
             v => Some(v.as_u64().filter(|n| *n <= 20).ok_or_else(|| bad("max_subagents must be null or 0-20"))? as u32),
         };
     }
-    if let Some(v) = p.get("lead") {
-        a.lead = v.as_bool().ok_or_else(|| bad("lead must be true or false"))?;
+    if let Some(v) = str_field("fresh_context") {
+        if !crate::agents::FRESH_CONTEXT.contains(&v.as_str()) {
+            return Err(bad("fresh_context must be one of off, above_80k or always"));
+        }
+        a.fresh_context = v;
     }
     if let Some(v) = p.get("role") {
-        a.role = v.as_str().filter(|r| crate::planning::ROLES.contains(r) || r.is_empty()).ok_or_else(|| bad("role must be \"dev\", \"reviewer\" or \"\""))?.into();
+        a.role = v.as_str().filter(|r| crate::planning::is_role(r)).ok_or_else(|| bad("role must be one of lead, dev, code_reviewer, qa, security or custom"))?.into();
     }
     if let Some(v) = str_field("permission_mode") {
         const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan", "manual"];
@@ -259,7 +263,7 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
-    if a.lead {
+    if a.role == "lead" {
         if a.project.trim().is_empty() {
             return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
         }
@@ -267,16 +271,16 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Makes `a` its project's only Lead: clears the mark on any other agent in the project and returns
-/// the one it moved from.
+/// Makes `a` its project's only Lead: any other Lead in the project becomes Custom. Returns the agent
+/// the role moved from.
 fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
-    if !a.lead {
+    if a.role != "lead" {
         return Ok(None);
     }
     let mut moved = None;
     for mut o in state.db.list_agents()? {
-        if o.lead && o.id != a.id && o.project.trim() == a.project.trim() {
-            o.lead = false;
+        if o.role == "lead" && o.id != a.id && o.project.trim() == a.project.trim() {
+            o.role = "custom".into();
             state.db.save_agent(&o)?;
             emit_agent(state, &o);
             moved = Some(o);
@@ -285,7 +289,7 @@ fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     Ok(moved)
 }
 
-/// The agent as JSON, plus a notice naming both agents when the Lead mark moved to it.
+/// The agent as JSON, plus a notice naming both agents when the Lead role moved to it.
 fn with_lead_notice(mut v: Value, a: &Agent, moved: Option<Agent>) -> Value {
     if let Some(o) = moved {
         v["lead_moved_from"] = json!({ "id": o.id, "name": o.name });
@@ -300,7 +304,7 @@ pub async fn create_agent(State(state): State<AppState>, Json(p): Json<Value>) -
 }
 
 /// Create, save and announce an agent with `id`, defaults overridden by the patch `p`. `created_by` is the agent
-/// that asked for it, if one did. Also returns the agent the Lead mark moved from, if it took it.
+/// that asked for it, if one did. Also returns the agent the Lead role moved from, if it took it.
 pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<String>) -> Result<(Agent, Option<Agent>), ApiError> {
     let mut a = Agent {
         id: id.clone(),
@@ -323,8 +327,9 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         max_subagents: None,
         grill_briefed: false,
         memory_index: None,
-        lead: false,
-        role: String::new(),
+        role: "custom".into(),
+        fresh_context: crate::db::default_fresh_context(),
+        delivery_ticket: None,
         avatar: Avatar::generate(&id),
         status: "idle".into(),
         status_text: String::new(),
@@ -549,16 +554,9 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
         rt.queued.remove(&id);
         rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
+        rt.fresh_before.remove(&id);
     }
-    let a = state.db.update_agent(&id, |a| {
-        a.session_id = None;
-        a.context_tokens = None;
-        a.grill_briefed = false;
-        a.memory_index = None;
-    })?.ok_or_else(not_found)?;
-    let m = state.db.add_message(&id, None, "system", "clear", "Context cleared. Long-term memory carries over.", json!({}))?;
-    state.emit(Event::Message { message: json!(m) });
-    emit_agent(&state, &a);
+    let a = agents::clear_context(&state, &id, "Context cleared. Long-term memory carries over.", json!({})).ok_or_else(not_found)?;
     Ok(Json(agent_json(&state, &a)))
 }
 
@@ -612,6 +610,7 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
+        rt.fresh_before.remove(id);
     }
     // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.
     let total = state.db.session_total(id, &s.id)?;
@@ -825,10 +824,18 @@ pub async fn merge_pull_request(State(state): State<AppState>, Path(id): Path<St
 
 // ---- dashboard --------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct SummaryQuery {
+    totals: Option<bool>,
+}
+
 /// Per-agent activity for the home page over the last `DAYS` days: daily runs
 /// (local days, split autonomous vs on request), totals, PR outcomes, and
-/// anything waiting on the user.
-pub async fn agents_summary(State(state): State<AppState>) -> ApiResult<Value> {
+/// anything waiting on the user. With `?totals=true` the list comes as `agents`
+/// next to the home line's figures (`period`, `all_time`); without it, a bare list, as the iOS app reads it.
+/// `period` counts the current Usage week, or the last 7 days when the plan usage can't be read,
+/// with the span just before it as `previous`: the previous week up to the same point in it, or the 7 days before the last 7.
+pub async fn agents_summary(State(state): State<AppState>, Query(q): Query<SummaryQuery>) -> ApiResult<Value> {
     const DAYS: i64 = 14;
     let today = chrono::Local::now().date_naive();
     let since14 = (chrono::Utc::now() - chrono::Duration::days(DAYS)).to_rfc3339();
@@ -869,7 +876,28 @@ pub async fn agents_summary(State(state): State<AppState>) -> ApiResult<Value> {
             },
         }));
     }
-    Ok(Json(json!(out)))
+    if !q.totals.unwrap_or(false) {
+        return Ok(Json(json!(out)));
+    }
+    let now = Utc::now();
+    let (kind, since, resets_at) = match crate::usage::usage_week(&crate::usage::get(&state).await) {
+        Some((start, reset)) => ("usage_week", start, Some(reset)),
+        None => ("last_7_days", now - chrono::Duration::days(7), None),
+    };
+    let (runs, cost) = state.db.spend_between(&since.to_rfc3339(), None)?;
+    // The period before, like with like: the previous usage week up to the same point in it,
+    // or the 7 days before the last 7 (where that point is the period's end).
+    let before = since - chrono::Duration::days(7);
+    // Capped at this period's start: right after the week resets, the cached plan usage can still
+    // hold the old reset time, putting `now` more than a week past `since`.
+    let until = (before + (now - since)).min(since);
+    let (prev_runs, prev_cost) = state.db.spend_between(&before.to_rfc3339(), Some(&until.to_rfc3339()))?;
+    let period = json!({
+        "kind": kind, "since": since.to_rfc3339(), "resets_at": resets_at.map(|r| r.to_rfc3339()), "runs": runs, "cost_usd": cost,
+        "previous": { "since": before.to_rfc3339(), "until": until.to_rfc3339(), "runs": prev_runs, "cost_usd": prev_cost },
+    });
+    let (runs, cost) = state.db.all_time_spend()?;
+    Ok(Json(json!({ "agents": out, "period": period, "all_time": { "runs": runs, "cost_usd": cost } })))
 }
 
 // ---- editor -----------------------------------------------------------
@@ -937,13 +965,149 @@ pub(crate) mod tests {
 
     use super::{apply_patch, is_plain_id};
 
+    /// Run ends of an agent at each time, costing $1, $2, $4, ... in order.
+    fn ended_runs_at(st: &crate::state::AppState, agent: &str, at: &[chrono::DateTime<chrono::Utc>]) {
+        for (i, t) in at.iter().enumerate() {
+            let m = st.db.add_message(agent, None, "system", "run_end", "", serde_json::json!({ "cost_usd": f64::from(1 << i) })).unwrap();
+            st.db.conn().execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", rusqlite::params![t.to_rfc3339(), m.id]).unwrap();
+            st.db.conn().execute("UPDATE run_ledger SET ended_at = ?1 WHERE rowid = (SELECT max(rowid) FROM run_ledger)", [t.to_rfc3339()]).unwrap();
+        }
+    }
+
+    async fn summary(st: &crate::state::AppState) -> serde_json::Value {
+        use axum::extract::{Query, State};
+        super::agents_summary(State(st.clone()), Query(super::SummaryQuery { totals: Some(true) })).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn the_home_line_counts_the_usage_week() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "A");
+        let now = Utc::now();
+        let reset = now + Duration::days(2);
+        let start = reset - Duration::days(7);
+        // Before the week, its first second, inside it; one 10 days ago, still in the 14-day charts;
+        // the previous week's first second and the second before it; and just before and after the same
+        // point in the previous week as now in this one (5 days in, so 7 days ago).
+        let prev = start - Duration::days(7);
+        let same_point = now - Duration::days(7);
+        ended_runs_at(&st, &a.id, &[
+            start - Duration::seconds(1), start, now - Duration::hours(1), now - Duration::days(10), prev, prev - Duration::seconds(1),
+            same_point - Duration::minutes(1), same_point + Duration::minutes(1),
+        ]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "five_hour", "percent": 10.0, "resets_at": (now + Duration::hours(3)).to_rfc3339() },
+            { "key": "seven_day", "percent": 40.0, "resets_at": reset.to_rfc3339() },
+        ], "error": null })).await;
+        let s = summary(&st).await;
+        let p = &s["period"];
+        assert_eq!(p["kind"], "usage_week");
+        assert_eq!(p["since"], start.to_rfc3339());
+        assert_eq!(p["resets_at"], reset.to_rfc3339());
+        assert_eq!(p["runs"], 2, "the run a second before the week starts isn't counted");
+        assert_eq!(p["cost_usd"], 6.0);
+        assert_eq!(p["previous"]["since"], prev.to_rfc3339());
+        assert_eq!(p["previous"]["runs"], 3, "the previous week counts up to the same point as this one, not to its end");
+        assert_eq!(p["previous"]["cost_usd"], 88.0);
+        let until = chrono::DateTime::parse_from_rfc3339(p["previous"]["until"].as_str().unwrap()).unwrap();
+        assert!((until.with_timezone(&Utc) - same_point).num_seconds().abs() < 5);
+        let card = &s["agents"][0];
+        assert_eq!(card["days"], 14);
+        assert_eq!(card["cost_usd"], 255.0, "the agent card still counts 14 days");
+    }
+
+    #[tokio::test]
+    async fn the_week_keeps_its_runs_when_a_chat_is_cleared_or_an_agent_deleted_and_counts_grill_runs() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
+        let now = Utc::now();
+        ended_runs_at(&st, &a.id, &[now - Duration::hours(2), now - Duration::hours(1)]);
+        ended_runs_at(&st, &b.id, &[now - Duration::hours(3)]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "seven_day", "percent": 40.0, "resets_at": (now + Duration::days(2)).to_rfc3339() },
+        ], "error": null })).await;
+        let week = |s: &serde_json::Value| (s["period"]["runs"].as_i64().unwrap(), s["period"]["cost_usd"].as_f64().unwrap());
+        assert_eq!(week(&summary(&st).await), (3, 4.0));
+        // A grill run's run end isn't saved in the chat, but it counts.
+        st.db.add_unsaved_run_end(&serde_json::json!({ "cost_usd": 0.5 })).unwrap();
+        assert_eq!(week(&summary(&st).await), (4, 4.5));
+        st.db.clear_messages(&a.id).unwrap();
+        assert_eq!(week(&summary(&st).await), (4, 4.5), "clearing a chat changes nothing");
+        st.db.delete_agent(&b.id).unwrap();
+        let s = summary(&st).await;
+        assert_eq!(week(&s), (4, 4.5), "deleting an agent changes nothing");
+        assert_eq!(s["all_time"]["runs"], 4, "the week and the All-time spend agree");
+    }
+
+    #[tokio::test]
+    async fn the_previous_week_never_ends_after_this_one_starts() {
+        use chrono::{Duration, Utc};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "A");
+        let now = Utc::now();
+        // The cached plan usage still holds the reset that just passed, so the week it gives started 7 days and an hour ago.
+        let stale = now - Duration::hours(1);
+        let start = stale - Duration::days(7);
+        // One run in the hour just before the stale week's start: it belongs to that week, not the one before.
+        ended_runs_at(&st, &a.id, &[start - Duration::days(7) + Duration::hours(1), start - Duration::minutes(30), start + Duration::minutes(1)]);
+        crate::usage::fake(&st, serde_json::json!({ "windows": [
+            { "key": "seven_day", "percent": 0.0, "resets_at": stale.to_rfc3339() },
+        ], "error": null })).await;
+        let p = &summary(&st).await["period"];
+        assert_eq!(p["since"], start.to_rfc3339());
+        assert_eq!(p["previous"]["until"], p["since"], "capped at this week's start");
+        assert_eq!(p["runs"], 1);
+        assert_eq!(p["previous"]["runs"], 2, "the run 30 minutes before this week's start is last week's only");
+        assert_eq!(p["previous"]["cost_usd"], 3.0);
+    }
+
+    #[tokio::test]
+    async fn without_plan_usage_the_home_line_counts_the_last_7_days() {
+        use chrono::{Duration, Utc};
+        for usage in [
+            serde_json::json!({ "windows": [], "error": "no Claude Code login found; run `claude` and log in" }),
+            // Read, but no weekly reset to start the week from.
+            serde_json::json!({ "windows": [{ "key": "seven_day", "percent": 0.0, "resets_at": null }], "error": null }),
+        ] {
+            let st = crate::tasks::tests::state();
+            let a = crate::tasks::tests::agent(&st, "A");
+            let now = Utc::now();
+            // Just over and under 7 days ago, yesterday; just under and over 14 days ago.
+            ended_runs_at(&st, &a.id, &[
+                now - Duration::days(7) - Duration::minutes(1), now - Duration::days(7) + Duration::minutes(1), now - Duration::days(1),
+                now - Duration::days(14) + Duration::minutes(1), now - Duration::days(14) - Duration::minutes(1),
+            ]);
+            crate::usage::fake(&st, usage).await;
+            let s = summary(&st).await;
+            let p = &s["period"];
+            assert_eq!(p["kind"], "last_7_days");
+            assert!(p["resets_at"].is_null());
+            let since = chrono::DateTime::parse_from_rfc3339(p["since"].as_str().unwrap()).unwrap();
+            assert!((since.with_timezone(&Utc) - (now - Duration::days(7))).num_seconds().abs() < 5);
+            assert_eq!(p["runs"], 2, "the run just over 7 days ago isn't counted");
+            assert_eq!(p["cost_usd"], 6.0);
+            assert_eq!(p["previous"]["runs"], 2, "the 7 days before the last 7, and not a minute more");
+            assert_eq!(p["previous"]["cost_usd"], 9.0);
+            assert_eq!(p["previous"]["until"], p["since"], "the 7 days before end where the last 7 start");
+            assert_eq!(s["agents"][0]["cost_usd"], 15.0, "the agent card still counts 14 days");
+            assert_eq!(s["all_time"]["runs"], 5);
+        }
+    }
+
     #[test]
     fn the_role_is_set_through_the_patch() {
         let st = crate::tasks::tests::state();
         let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Planner" }), None).unwrap();
-        apply_patch(&mut a, &serde_json::json!({ "role": "reviewer" })).unwrap();
-        assert_eq!(a.role, "reviewer");
-        assert!(apply_patch(&mut a, &serde_json::json!({ "role": "qa" })).is_err());
+        assert_eq!(a.role, "custom", "a new agent is Custom");
+        for role in ["dev", "code_reviewer", "qa", "security", "custom"] {
+            apply_patch(&mut a, &serde_json::json!({ "role": role })).unwrap();
+            assert_eq!(a.role, role);
+        }
+        for role in ["reviewer", "", "Lead"] {
+            assert!(apply_patch(&mut a, &serde_json::json!({ "role": role })).is_err(), "{role:?}");
+        }
     }
 
     async fn patch(st: &crate::state::AppState, id: &str, p: serde_json::Value) -> Result<serde_json::Value, super::ApiError> {
@@ -964,29 +1128,31 @@ pub(crate) mod tests {
         }
         let get = |i: usize| st.db.get_agent(&ids[i]).unwrap().unwrap();
 
-        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true })).await.unwrap();
-        assert_eq!((v["lead"].clone(), v.get("notice")), (true.into(), None));
-        patch(&st, &ids[2], serde_json::json!({ "lead": true })).await.unwrap();
+        let lead = serde_json::json!({ "role": "lead" });
+        let v = patch(&st, &ids[0], lead.clone()).await.unwrap();
+        assert_eq!((v["role"].clone(), v.get("notice")), ("lead".into(), None));
+        patch(&st, &ids[2], lead.clone()).await.unwrap();
 
-        // A second Lead in the same project moves the mark; other projects keep theirs.
-        let v = patch(&st, &ids[1], serde_json::json!({ "lead": true })).await.unwrap();
+        // A second Lead in the same project takes the role: the first becomes Custom. Other projects keep theirs.
+        let v = patch(&st, &ids[1], lead.clone()).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
         assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
-        assert!(!get(0).lead);
-        assert!(get(1).lead && get(2).lead);
+        assert_eq!(get(0).role, "custom");
+        assert_eq!((get(1).role.as_str(), get(2).role.as_str()), ("lead", "lead"));
 
         // No project, no Lead: neither setting it nor clearing the Lead's project.
-        let err = patch(&st, &ids[3], serde_json::json!({ "lead": true })).await.unwrap_err();
+        let err = patch(&st, &ids[3], lead.clone()).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
         assert!(err.1.starts_with("Only an agent with a project can be Lead"), "{}", err.1);
-        assert!(!get(3).lead);
+        assert_eq!(get(3).role, "custom");
         assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
-        patch(&st, &ids[1], serde_json::json!({ "lead": false, "project": "" })).await.unwrap();
-        assert!(!get(1).lead);
+        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "project": "" })).await.unwrap();
+        assert_eq!(get(1).role, "dev");
 
-        // Moving the Lead to another project takes that project's mark.
-        let v = patch(&st, &ids[0], serde_json::json!({ "lead": true, "project": "imole" })).await.unwrap();
+        // Moving the Lead to another project takes that project's Lead role.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "imole" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Other to Dev.");
+        assert_eq!(get(2).role, "custom");
     }
 
     #[test]

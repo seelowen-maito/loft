@@ -107,6 +107,23 @@ struct AgentDetailView: View {
                 }
             }
 
+            // A Lead that only coordinates is never cleared by Delivery, so it has no choice to make here.
+            if let fresh = agent.freshContext, agent.freshContextApplies != false {
+                Section {
+                    Picker("Fresh context", selection: Binding(get: { fresh }, set: { v in act { try await store.setFreshContext(agent.id, v) } })) {
+                        Text("Above 80k").tag("above_80k")
+                        Text("Always").tag("always")
+                        Text("Off").tag("off")
+                    }
+                    .disabled(!store.canWrite || busy)
+                    .accessibilityIdentifier("freshContext")
+                } header: {
+                    Text("Each Delivery ticket")
+                } footer: {
+                    Text("Before Delivery starts \(agent.name) on a new ticket, Loft clears its context, like Clear context: long-term memory carries over and the old session can be resumed. Never between review rounds of the same ticket.")
+                }
+            }
+
             Section("Details") {
                 LabeledContent("Agent ID") {
                     Text(agent.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle)

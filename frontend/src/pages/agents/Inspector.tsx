@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Brain, ChevronRight, Code2, Copy, Dices, File, Folder, FolderGit2, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
 } from "lucide-react";
-import { api, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
+import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
@@ -91,13 +91,28 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "lead" | "role" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+/** The Role field's hint, for the agent's settings and the New agent dialog. */
+export const roleHint = (project: string) =>
+  project.trim()
+    ? `What it does in ${project.trim()}'s team. One Lead per project, with the captain hat: making it Lead takes the role from any other.`
+    : "What it does in its project's team. Only an agent with a project can be Lead: set its project first.";
+
+export const FRESH_CONTEXT_HINT =
+  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
+
+export const FRESH_CONTEXT = [
+  { value: "above_80k", label: "Above 80k (default)" },
+  { value: "always", label: "Always" },
+  { value: "off", label: "Off" },
+];
+
+type Draft = Pick<Agent, "name" | "title" | "project" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
       name: agent.name, title: agent.title, project: agent.project ?? "", personality: agent.personality, prompt: agent.prompt,
-      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, lead: agent.lead ?? false, role: agent.role ?? "", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
+      model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", fresh_context: agent.fresh_context ?? "above_80k", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
@@ -126,7 +141,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
   return (
     <div className="space-y-6 p-5">
       <div className="flex items-center gap-4">
-        <Sticker avatar={agent.avatar} lead={agent.lead} size={88} />
+        <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
           <button className="btn" onClick={() => api.randomizeAvatar(agent.id)}>
             <Dices className="size-3.5" /> Randomize
@@ -139,7 +154,7 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         <Field label="Name">
           <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
         </Field>
-        <Field label="Role">
+        <Field label="Title">
           <input className="input" value={draft.title} placeholder="e.g. Release captain" onChange={(e) => set("title", e.target.value)} />
         </Field>
       </div>
@@ -191,26 +206,24 @@ function ConfigTab({ agent, projects, onCleared }: { agent: Agent; projects: str
         </Field>
       </div>
 
-      <Field label="Lead" hint={draft.project.trim() ? `Leads the agents in ${draft.project.trim()} and wears the captain hat. One per project: marking it here moves the mark from any other.` : "Only an agent with a project can lead: set its project first."}>
-        <label className={cx("flex items-center gap-2 text-[12.5px]", draft.project.trim() || draft.lead ? "text-fg" : "text-fg-3")}>
-          <input
-            type="checkbox"
-            checked={draft.lead}
-            disabled={!draft.project.trim() && !draft.lead}
-            onChange={(e) => setDraft((d) => ({ ...d, lead: e.target.checked }))}
-            className="accent-[var(--color-accent)]"
-          />
-          Leads its team
-        </label>
-      </Field>
-
-      <Field label="Team role" hint="What it does in its project's team. When planning ends, Loft offers to set up the team if no agent there is a Dev or a reviewer.">
+      <Field label="Role" hint={roleHint(draft.project)}>
         <select className="input" value={draft.role} onChange={(e) => set("role", e.target.value)}>
-          <option value="">None</option>
-          <option value="dev">Dev: builds the tickets</option>
-          <option value="reviewer">Reviewer: code review, QA or security</option>
+          {ROLES.map((r) => (
+            <option key={r.value} value={r.value} disabled={r.value === "lead" && !draft.project.trim() && draft.role !== "lead"}>
+              {r.label}: {r.hint}
+            </option>
+          ))}
         </select>
       </Field>
+
+      {/* A Lead only follows it while it builds the tickets itself; one that coordinates is never cleared by Delivery. */}
+      {(draft.role !== "lead" || (agent.role === "lead" && agent.fresh_context_applies !== false)) && (
+        <Field label="Fresh context for each Delivery ticket" hint={FRESH_CONTEXT_HINT}>
+          <select className="input" value={draft.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
+            {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+          </select>
+        </Field>
+      )}
 
       <Field label="Autonomy" hint="How often it wakes up on its own to work on its standing instructions.">
         <div className="flex gap-2">

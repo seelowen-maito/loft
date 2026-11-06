@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
-import { api, type Agent, type Task } from "../lib/api";
+import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
@@ -136,6 +136,125 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
           <Play className="size-3 fill-current" /> Start
         </button>
       </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
+/** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
+export function DeliveryCard({ task: t }: { task: Task }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [started, setStarted] = useState<{ agent_id: string; agent_name: string; pr: number | null } | null>(null);
+  // Started before (here, on another device or from the end-of-planning card): say who has it.
+  useEffect(() => {
+    let live = true;
+    api.issueDelivery(t.id)
+      .then((d) => live && d?.started && d.agent_id && setStarted({ agent_id: d.agent_id, agent_name: d.agent_name ?? "", pr: d.pr }))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [t.id]);
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const d = await api.startIssueDelivery(t.id);
+      setStarted({ agent_id: d.agent_id ?? "", agent_name: d.agent_name ?? "", pr: d.pr });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = t.github?.number;
+  return (
+    <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px]">Start delivery</div>
+          <div className="mt-0.5 text-[12.5px] text-fg-3">
+            {started
+              ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
+              : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
+          </div>
+        </div>
+        {!started && (
+          <button className="btn-primary" disabled={busy} onClick={start}>
+            <Play className="size-3 fill-current" /> Start delivery
+          </button>
+        )}
+      </div>
+      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+    </section>
+  );
+}
+
+/** On an open spec on GitHub: Start delivery builds its Delivery from the spec's sub-issues, then shows who
+ *  has which ticket, and the tickets it skips because they're being built elsewhere. */
+export function SpecDeliveryCard({ task: t }: { task: Task }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [d, setD] = useState<IssueDelivery | null>(null);
+  // Started before (here, on another device or from the end-of-planning card): say who has it.
+  useEffect(() => {
+    let live = true;
+    api.issueDelivery(t.id)
+      .then((d) => live && setD(d))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [t.id]);
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setD(await api.startIssueDelivery(t.id));
+    } catch (e) {
+      setError((e as Error).message);
+      api.issueDelivery(t.id).then(setD).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+  const started = d?.started ? d : null;
+  const tickets = d?.tickets ?? [];
+  const done = tickets.filter((x) => x.state === "closed").length;
+  const skipped = tickets.filter((x) => x.state === "elsewhere");
+  return (
+    <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px]">Start delivery</div>
+          <div className="mt-0.5 text-[12.5px] text-fg-3">
+            {started ? (
+              <>
+                {started.current ? <>#{started.current.number} {started.current.title} is with </> : <>With </>}
+                {started.agent_id ? <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link> : "the team"}
+                {started.pr ? ` on spec PR #${started.pr}` : ""}. {done} of {tickets.length} tickets done.
+              </>
+            ) : (
+              `Loft builds the open sub-issues of #${t.github?.number} one at a time on its spec branch and draft spec PR, starting with the first unblocked one on the team's Dev.`
+            )}
+          </div>
+        </div>
+        {!started && (
+          <button className="btn-primary" disabled={busy} onClick={start}>
+            <Play className="size-3 fill-current" /> Start delivery
+          </button>
+        )}
+      </div>
+      {skipped.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-[12px] text-fg-3">
+          {skipped.map((x) => (
+            <li key={x.number}>
+              Skipped #{x.number} {x.title}: it {x.skipped}, so it's being built elsewhere. It counts as done when it closes.
+            </li>
+          ))}
+        </ul>
+      )}
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </section>
   );

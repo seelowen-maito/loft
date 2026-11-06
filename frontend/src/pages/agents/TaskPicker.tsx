@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleDot, Search } from "lucide-react";
 import type { Agent } from "../../lib/api";
-import { filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
-import { ATTACH } from "../../lib/attach";
+import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
 import { cx, timeAgo } from "../../lib/format";
 import { STATUS_TONE, useTasks } from "../../components/TaskChip";

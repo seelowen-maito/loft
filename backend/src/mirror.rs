@@ -46,6 +46,8 @@ struct Cursor {
     since: Option<String>,
     /// ETag of the last change poll's answer, sent back so an unchanged repo answers 304.
     etag: Option<String>,
+    /// The closed issues were read for the authors their links lack (see `closed_authors`), this run.
+    authors_read: bool,
 }
 
 impl Mirror {
@@ -65,6 +67,9 @@ pub struct Report {
     pub reconciled: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Numbers and bodies of the tickets this sync saw closed on GitHub: each may have been its spec's last.
+    #[serde(skip)]
+    pub closed_tickets: Vec<(i64, String)>,
 }
 
 /// The projects the agents belong to, A–Z (case-insensitive), each once.
@@ -138,6 +143,7 @@ pub struct SyncBody {
 
 /// `POST /api/issues/sync`: what changed on GitHub, now, for one project or all; what the list does on
 /// open and refresh. A change poll, so a quiet repo costs a free 304; a repo never read yet gets a full read.
+/// `login` is the GitHub user of Loft's token (null when nothing is mirrored or it can't be read).
 pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>>) -> Result<Json<Value>, ApiError> {
     let wanted = body.and_then(|b| b.0.project).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     let projects = projects(&state)?;
@@ -164,7 +170,11 @@ pub async fn sync_now(State(state): State<AppState>, body: Option<Json<SyncBody>
             None => skipped.push(json!({ "project": p, "reason": skip_reason(&state, p).await })),
         }
     }
-    Ok(Json(json!({ "connected": crate::github::token(&state).is_some(), "projects": out, "skipped": skipped })))
+    // Who Loft's token belongs to, so "Created by me" can keep the GitHub issues they opened; read
+    // (once per token) only when a project is mirrored.
+    let connected = crate::github::token(&state).is_some();
+    let login = if connected && !out.is_empty() { crate::planning::login(&state).await.ok() } else { None };
+    Ok(Json(json!({ "connected": connected, "login": login, "projects": out, "skipped": skipped })))
 }
 
 /// Syncs one project. None when there's nothing to mirror: no token, or no GitHub repo.
@@ -176,7 +186,8 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
     let mut report = Report { project: project.into(), repo: repo.clone(), ..Default::default() };
     let cursor = state.mirror.cursor(&repo);
     let mut cursor = cursor.lock().await;
-    let result = if full || cursor.since.is_none() { full_read(state, project, &repo, &mut cursor, &mut report).await } else { changes(state, project, &repo, &mut cursor, &mut report).await };
+    let full = full || cursor.since.is_none();
+    let result = if full { full_read(state, project, &repo, &mut cursor, &mut report).await } else { changes(state, project, &repo, &mut cursor, &mut report).await };
     if let Err(e) = result {
         // Paused for the rate limit is expected and says so in the list; it isn't worth a warning each tick.
         if !crate::github::is_paused(&e) {
@@ -184,6 +195,21 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
         }
         report.error = Some(e.to_string());
     }
+    drop(cursor);
+    // A ticket closed on GitHub by hand: when it was its spec's last, the spec PR is ready for review.
+    // Delivery records change under the repo's publish lock, like every other Delivery step, so a poll
+    // can't write back a record a submit or review changed meanwhile.
+    {
+        let _held = state.publish_locks.of(&repo).lock_owned().await;
+        for (n, body) in std::mem::take(&mut report.closed_tickets) {
+            if let Err(e) = crate::planning::ready_when_last(state, &repo, n, &body).await {
+                tracing::warn!("mirror {repo}: {e}");
+            }
+        }
+        crate::planning::retry_ready(state, &repo, full).await;
+    }
+    // Takes the lock itself.
+    crate::delivery::retry(state, &repo).await;
     Some(report)
 }
 
@@ -211,12 +237,19 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
             touched.push(i);
         }
     }
+    // The parent is in each issue's own JSON: every listed issue gets it, changed or not, so a ticket
+    // mirrored before its parent was set (or before Loft read it) catches up without a request.
+    parents_from_github(state, repo, open.iter().filter(|i| i.get("pull_request").is_none()));
     // Links and comments only for issues that are new or changed since the last read: an unchanged
     // issue costs no more requests, which keeps a full read (on every list open) cheap. After every
     // issue is in, so a link to one listed later still resolves.
     for i in touched {
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
+    }
+    if !cursor.authors_read {
+        closed_authors(state, repo).await?;
+        cursor.authors_read = true;
     }
     // Linked issues GitHub still had open last time but didn't list now: ask about each one.
     let gone: Vec<Task> = linked(state, repo).into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.state == "open" && !seen.contains(&g.number))).collect();
@@ -226,6 +259,7 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
             Ok(i) if same_repo(&i, repo) => {
                 newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
                 apply(state, project, repo, &i, report);
+                parents_from_github(state, repo, [&i]);
             }
             Ok(i) => reconcile(state, t, &format!("moved to {}", i["html_url"].as_str().unwrap_or("another repo")), report).await,
             Err(e) if crate::github::is_gone(&e) => reconcile(state, t, "was deleted", report).await,
@@ -242,21 +276,64 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
 }
 
 /// What changed since the last read, open or closed. An unchanged answer comes back as 304 with the same ETag.
+/// More than a page changed: the next page starts from the newest `updated_at` read so far, so an issue
+/// edited while paging moves to the end instead of pushing an unread one onto a page already read.
 async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Cursor, report: &mut Report) -> anyhow::Result<()> {
     let since = cursor.since.clone().unwrap_or_default();
-    let path = format!("/repos/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&since={}", url_encode(&since));
-    let Some((v, etag)) = crate::github::get_if_changed(state, &path, cursor.etag.as_deref()).await? else {
-        return Ok(());
-    };
+    let mut from = since.clone();
+    // Only when a full page shares one `updated_at` does the next page need GitHub's own page number.
+    let mut page = 1;
+    let mut changed: Vec<Value> = vec![];
+    let mut first_etag = None;
+    for read in 0..MAX_PAGES {
+        let path = format!("/repos/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&since={}{}", url_encode(&from), if page > 1 { format!("&page={page}") } else { String::new() });
+        let v = if read == 0 {
+            let Some((v, etag)) = crate::github::get_if_changed(state, &path, cursor.etag.as_deref()).await? else {
+                return Ok(());
+            };
+            first_etag = etag;
+            v
+        } else {
+            crate::github::get(state, &path).await?
+        };
+        let items = v.as_array().cloned().unwrap_or_default();
+        let full = items.len() == 100;
+        let newest = items.iter().filter_map(|i| i["updated_at"].as_str()).max().unwrap_or("").to_string();
+        for i in items {
+            let n = i["number"].as_i64();
+            changed.retain(|c| c["number"].as_i64() != n);
+            changed.push(i);
+        }
+        if !full {
+            break;
+        }
+        if newest > from {
+            from = newest;
+            page = 1;
+        } else {
+            page += 1;
+        }
+    }
+    let changed: Vec<&Value> = changed.iter().filter(|i| i.get("pull_request").is_none()).collect();
     let mut newest = since.clone();
-    let changed: Vec<&Value> = v.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).collect();
     for i in &changed {
         newest = newest.max(i["updated_at"].as_str().unwrap_or("").to_string());
         apply(state, project, repo, i, report);
     }
+    parents_from_github(state, repo, changed.iter().copied());
     for i in &changed {
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
+    }
+    // A ticket closing or reopening changes its spec's sub-issue count, but not the spec's `updated_at`,
+    // so the spec isn't among the changes: read each such parent again for its count.
+    let numbers: HashSet<i64> = changed.iter().filter_map(|i| i["number"].as_i64()).collect();
+    let mut parents: Vec<i64> = changed.iter().filter_map(|i| parent_number(repo, i)).filter(|p| !numbers.contains(p)).collect();
+    parents.sort();
+    parents.dedup();
+    let mirrored = linked(state, repo);
+    for p in parents.into_iter().filter(|p| mirrored.iter().any(|t| t.github.as_ref().is_some_and(|g| g.number == *p))) {
+        refresh_link(state, repo, p).await;
     }
     // `since` is inclusive, so the newest issue comes back each time: the answer only changes, and the
     // ETag with it, when something new does. Keep the URL (and ETag) until then.
@@ -264,7 +341,39 @@ async fn changes(state: &AppState, project: &str, repo: &str, cursor: &mut Curso
         cursor.since = Some(newest);
         cursor.etag = None;
     } else {
-        cursor.etag = etag;
+        cursor.etag = first_etag;
+    }
+    Ok(())
+}
+
+/// Links saved before authors were kept: the open ones get theirs from the full read's listing, but a
+/// closed issue is only read again when it changes. So read the closed issues, page by page, once per
+/// run, while a closed link still lacks its author, and keep just the author.
+async fn closed_authors(state: &AppState, repo: &str) -> anyhow::Result<()> {
+    let missing = || -> HashSet<i64> {
+        linked(state, repo).iter().filter_map(|t| t.github.as_ref()).filter(|g| g.state == "closed" && g.author.is_empty()).map(|g| g.number).collect()
+    };
+    if missing().is_empty() {
+        return Ok(());
+    }
+    for page in 1..=MAX_PAGES {
+        let v = crate::github::get(state, &format!("/repos/{repo}/issues?state=closed&per_page=100&page={page}")).await?;
+        let items = v.as_array().cloned().unwrap_or_default();
+        let wanted = missing();
+        for i in items.iter().filter(|i| i.get("pull_request").is_none() && i["number"].as_i64().is_some_and(|n| wanted.contains(&n))) {
+            let author = i["user"]["login"].as_str().unwrap_or("");
+            let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| Some(g.number) == i["number"].as_i64())) else { continue };
+            if author.is_empty() {
+                continue;
+            }
+            t.github.as_mut().unwrap().author = author.into();
+            if state.db.save_task(&t).is_ok() {
+                crate::tasks::emit(state, &t);
+            }
+        }
+        if items.len() < 100 || missing().is_empty() {
+            break;
+        }
     }
     Ok(())
 }
@@ -299,6 +408,7 @@ fn link(repo: &str, i: &Value) -> GithubLink {
         updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
         sub_total: i["sub_issues_summary"]["total"].as_i64().unwrap_or(0),
         sub_done: i["sub_issues_summary"]["completed"].as_i64().unwrap_or(0),
+        author: i["user"]["login"].as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -314,6 +424,15 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             if t.github.as_ref() == Some(&l) {
                 return;
             }
+            // A link saved before authors were kept, and only the author is new: nothing changed on
+            // GitHub, so it's no update (and costs no reads of its links and comments).
+            if t.github.as_ref().is_some_and(|g| g.author.is_empty() && GithubLink { author: l.author.clone(), ..g.clone() } == l) {
+                t.github = Some(l);
+                if state.db.save_task(&t).is_ok() {
+                    crate::tasks::emit(state, &t);
+                }
+                return;
+            }
             // Open/closed follows GitHub only when GitHub moved: a Loft close still being written isn't undone.
             let moved = t.github.as_ref().is_some_and(|g| g.state != l.state) && t.state() != l.state;
             // Closed on GitHub while an agent works on it: the work isn't stopped behind the user's back.
@@ -326,6 +445,9 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
                 _ => None,
             };
             let closed_under_work = moved && working && l.state == "closed";
+            if t.github.as_ref().is_some_and(|g| g.state == "open") && l.state == "closed" && labels.iter().any(|l| l == "ready-for-agent") {
+                report.closed_tickets.push((i["number"].as_i64().unwrap_or_default(), description.clone()));
+            }
             t.title = if title.is_empty() { t.title } else { title };
             t.description = description;
             t.labels = labels;
@@ -382,6 +504,7 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
 pub(crate) fn bring_in(state: &AppState, project: &str, repo: &str, i: &Value) -> Option<(Task, bool)> {
     let mut report = Report::default();
     apply(state, project, repo, i, &mut report);
+    parents_from_github(state, repo, [i]);
     let n = i["number"].as_i64()?;
     let t = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n))?;
     Some((t, report.created > 0))
@@ -741,6 +864,36 @@ fn keep_link(state: &AppState, repo: &str, v: &Value) {
     }
 }
 
+/// The parent GitHub gives each issue (`parent_issue_url`) onto the Loft issue that mirrors it, so a
+/// spec's ticket knows its spec without waiting for the spec to be read again. GitHub leaves the field
+/// out of an issue with no parent (it never sends null), so this only sets a parent: one taken off its
+/// spec is dropped when the spec's sub-issues are read again.
+fn parents_from_github<'a>(state: &AppState, repo: &str, issues: impl IntoIterator<Item = &'a Value>) {
+    let mut all = linked(state, repo);
+    for i in issues {
+        let Some(n) = i["number"].as_i64() else { continue };
+        let Some(p) = parent_number(repo, i) else { continue };
+        let Some(k) = all.iter().position(|t| t.github.as_ref().is_some_and(|g| g.number == n)) else { continue };
+        let Some(parent) = all.iter().find(|x| x.github.as_ref().is_some_and(|g| g.number == p)).map(|x| x.id.clone()) else { continue };
+        if parent == all[k].id || all[k].parent_id.as_deref() == Some(parent.as_str()) {
+            continue;
+        }
+        let t = &mut all[k];
+        t.parent_id = Some(parent);
+        t.updated_at = now();
+        if state.db.save_task(t).is_ok() {
+            crate::tasks::emit(state, t);
+            crate::tasks::log_status(state, t, FROM_GITHUB, &format!("Made a sub-issue of #{p} on GitHub"));
+        }
+    }
+}
+
+/// The number of issue `i`'s parent in the same repo, from `parent_issue_url`.
+fn parent_number(repo: &str, i: &Value) -> Option<i64> {
+    let prefix = format!("https://api.github.com/repos/{}/issues/", repo.to_lowercase());
+    i["parent_issue_url"].as_str().and_then(|u| u.to_lowercase().strip_prefix(&prefix).and_then(|x| x.parse::<i64>().ok()))
+}
+
 /// GitHub's blocking links and sub-issues of issue `i` onto the Loft issues that mirror them. Only
 /// read when GitHub says the issue has some, or Loft has some to drop. Links to issues Loft doesn't
 /// mirror, and Loft's links to Loft-only issues, are left alone.
@@ -835,6 +988,7 @@ pub(crate) mod tests {
             "number": n, "id": n * 100, "title": title, "state": state, "body": format!("Body of {title}"),
             "html_url": format!("https://github.com/{repo}/issues/{n}"), "updated_at": updated,
             "labels": [{ "name": "bug", "color": "d73a4a" }], "assignees": [{ "login": "octo-dev" }, { "login": "someone" }],
+            "user": { "login": "octo-author" },
         })
     }
 
@@ -859,7 +1013,7 @@ pub(crate) mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!((&t["title"], &t["description"], &t["labels"], &t["owner"]), (&json!("Retry cap"), &json!("Body of Retry cap"), &json!(["bug"]), &json!("octo-dev")));
         assert_eq!((&t["project"], &t["status"], &t["state"], &t["created_by"]), (&json!("mir-open"), &json!("inbox"), &json!("open"), &json!("github")));
-        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0 }));
+        assert_eq!(t["github"], json!({ "repo": "octo/mir-open", "number": 1, "id": 100, "url": "https://github.com/octo/mir-open/issues/1", "state": "open", "updated_at": "2026-10-02T00:00:00Z", "sub_total": 0, "sub_done": 0, "author": "octo-author" }));
         let thread = st.db.list_task_comments(t["id"].as_str().unwrap(), 10, None).unwrap();
         assert_eq!(thread[0].text, "Mirrored from GitHub #1");
 
@@ -868,6 +1022,58 @@ pub(crate) mod tests {
         assert_eq!((r.created, r.updated), (0, 0));
         assert_eq!(mirrored(&st, "octo/mir-open").len(), 1);
         assert!(fake.seen("/repos/octo/mir-open/").iter().all(|s| s.method == "GET"), "the mirror only reads");
+    }
+
+    #[tokio::test]
+    async fn issues_mirrored_before_authors_were_kept_get_theirs_on_the_next_read() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "mir-author", Some("https://github.com/octo/mir-author"));
+        let path = "/repos/octo/mir-author/issues";
+        let open = gh("octo/mir-author", 1, "Retry cap", "open", "2026-10-02T00:00:00Z");
+        let mut closed = gh("octo/mir-author", 2, "Old work", "closed", "2026-10-01T00:00:00Z");
+        closed["user"]["login"] = json!("octo-me");
+        let pr = json!({ "number": 9, "title": "A PR", "state": "closed", "pull_request": {}, "user": { "login": "octo-me" } });
+        let was_open = { let mut c = closed.clone(); c["state"] = json!("open"); c };
+        fake.in_turn("GET", path, vec![
+            // Mirrored while both were open.
+            (200, json!([open.clone(), was_open])),
+            // #2 closed on GitHub: the change poll.
+            (200, json!([closed.clone()])),
+            // After the upgrade: the full read lists the open ones, then the closed ones are read for their authors.
+            (200, json!([open.clone()])),
+            (200, json!([closed.clone(), pr])),
+            // Every read after that.
+            (200, json!([open.clone()])),
+        ]);
+        fake.route("GET", "/user", 200, json!({ "login": "octo-me" }));
+        sync_project(&st, "mir-author", true).await.unwrap();
+        sync_project(&st, "mir-author", false).await.unwrap();
+        let author = |n: i64| linked(&st, "octo/mir-author").into_iter().find_map(|t| t.github.filter(|g| g.number == n)).unwrap().author;
+        assert_eq!((author(1), author(2)), ("octo-author".into(), "octo-me".into()));
+        // As saved before authors were kept: links without one. Then Loft restarts, so its next read is a full one.
+        for mut t in linked(&st, "octo/mir-author") {
+            t.github.as_mut().unwrap().author = String::new();
+            st.db.save_task(&t).unwrap();
+        }
+        assert_eq!(st.db.get_task(&linked(&st, "octo/mir-author")[0].id).unwrap().unwrap().github.unwrap().author, "");
+        st.mirror.repos.lock().unwrap().clear();
+        let before = fake.seen(path).len();
+
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!((author(1), author(2)), ("octo-author".into(), "octo-me".into()), "the open one from the listing, the closed one from the closed issues");
+        assert_eq!((v["projects"][0]["created"].as_i64(), v["projects"][0]["updated"].as_i64()), (Some(0), Some(0)), "a new author alone isn't a change on GitHub");
+        let reads: Vec<String> = fake.seen(path)[before..].iter().map(|s| s.path.clone()).collect();
+        assert_eq!(reads.len(), 2, "{reads:?}");
+        assert!(reads[1].contains("state=closed&per_page=100&page=1"), "{reads:?}");
+        assert_eq!(v["login"], "octo-me", "the list learns who Loft's token belongs to");
+
+        // Once every link has its author, the closed issues aren't read again.
+        st.mirror.repos.lock().unwrap().clear();
+        sync_project(&st, "mir-author", true).await.unwrap();
+        assert!(fake.seen(path)[before + 2..].iter().all(|s| !s.path.contains("state=closed")));
+        let _ = sync_now(State(st.clone()), None).await.unwrap();
+        assert_eq!(fake.seen("/user").len(), 1, "the login is read once");
     }
 
     #[tokio::test]
@@ -1169,6 +1375,38 @@ pub(crate) mod tests {
         sync_project(&st, "ln-in", false).await.unwrap();
         assert!(get(1).depends_on.is_empty());
         assert_eq!(get(3).parent_id, None);
+        assert!(writes(&fake, repo).is_empty(), "following GitHub writes nothing back");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_takes_its_parent_from_its_own_github_issue() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/ln-parent";
+        let at = "2026-10-02T00:00:00Z";
+        // Mirrored before it was made a sub-issue, and GitHub's spec (#1) has no sub-issue count to read.
+        let ids = three_mirrored(&st, &fake, "ln-parent", repo, gh(repo, 1, "One", "open", at)).await;
+        let get = |n: i64| st.db.get_task(&ids[&n]).unwrap().unwrap();
+        assert_eq!(get(3).parent_id, None);
+
+        // The next full read: #3 unchanged, but its own JSON names #1 as its parent. #2's parent isn't mirrored.
+        let mut three = gh(repo, 3, "Three", "open", at);
+        three["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/1"));
+        let mut two = gh(repo, 2, "Two", "open", at);
+        two["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/99"));
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 1, "One", "open", at), two, three]));
+        sync_project(&st, "ln-parent", true).await.unwrap();
+        assert_eq!(get(3).parent_id.as_deref(), Some(ids[&1].as_str()));
+        assert_eq!(get(2).parent_id, None);
+        assert!(fake.seen(&format!("/repos/{repo}/issues/1/sub_issues")).is_empty(), "no extra request");
+
+        // GitHub leaves the field out of an issue with no parent: a list without it keeps the parent Loft has.
+        let mut kept = get(2);
+        kept.parent_id = Some(ids[&1].clone());
+        st.db.save_task(&kept).unwrap();
+        fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([gh(repo, 2, "Two", "open", "2026-10-04T00:00:00Z")]));
+        sync_project(&st, "ln-parent", false).await.unwrap();
+        assert_eq!(get(2).parent_id.as_deref(), Some(ids[&1].as_str()));
         assert!(writes(&fake, repo).is_empty(), "following GitHub writes nothing back");
     }
 
@@ -1667,5 +1905,78 @@ pub(crate) mod tests {
         other.labels = vec!["SPEC".into()];
         st.db.save_task(&other).unwrap();
         assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_change_poll_reads_every_page_when_more_than_a_hundred_changed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-pages";
+        project(&st, "mir-pages", Some("https://github.com/octo/mir-pages"));
+        let path = "/repos/octo/mir-pages/issues";
+        let at = |n: i64| format!("2026-10-02T00:{:02}:{:02}Z", n / 60, n % 60);
+        let page1: Vec<Value> = (1..=100).map(|n| gh(repo, n, &format!("Issue {n}"), "open", &at(n))).collect();
+        fake.in_turn("GET", path, vec![
+            (200, json!([page1[0].clone()])),
+            // 101 issues changed: the first page is full, the next one starts from its newest.
+            (200, json!(page1)),
+            (200, json!([page1[99].clone(), gh(repo, 101, "Issue 101", "open", &at(101))])),
+        ]);
+        sync_project(&st, "mir-pages", true).await.unwrap();
+        let r = sync_project(&st, "mir-pages", false).await.unwrap();
+        assert_eq!((r.created, r.error), (100, None), "none is left on a page never read");
+        assert_eq!(mirrored(&st, repo).len(), 101);
+        let seen = fake.seen(path);
+        assert_eq!(seen.len(), 3);
+        assert!(seen[2].path.contains(&format!("since={}", url_encode(&at(100)))) && !seen[2].path.contains("&page="), "{}", seen[2].path);
+        assert_eq!(state_cursor(&st, repo), Some(at(101)));
+    }
+
+    #[tokio::test]
+    async fn a_full_page_changed_in_one_second_reads_the_next_page_by_number() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-burst";
+        project(&st, "mir-burst", Some("https://github.com/octo/mir-burst"));
+        let path = "/repos/octo/mir-burst/issues";
+        let t = "2026-10-02T00:00:00Z";
+        let page1: Vec<Value> = (1..=100).map(|n| gh(repo, n, &format!("Issue {n}"), "open", t)).collect();
+        fake.in_turn("GET", path, vec![(200, json!([page1[0].clone()])), (200, json!(page1)), (200, json!([gh(repo, 101, "Issue 101", "open", t)]))]);
+        sync_project(&st, "mir-burst", true).await.unwrap();
+        sync_project(&st, "mir-burst", false).await.unwrap();
+        assert_eq!(mirrored(&st, repo).len(), 101);
+        assert!(fake.seen(path)[2].path.ends_with("&page=2"), "{}", fake.seen(path)[2].path);
+    }
+
+    fn state_cursor(st: &AppState, repo: &str) -> Option<String> {
+        let c = st.mirror.cursor(repo);
+        let since = c.try_lock().unwrap().since.clone();
+        since
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closing_updates_its_specs_progress_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/mir-progress";
+        project(&st, "mir-progress", Some("https://github.com/octo/mir-progress"));
+        let mut spec = gh(repo, 1, "A spec", "open", "2026-10-02T00:00:00Z");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        spec["sub_issues_summary"] = json!({ "total": 2, "completed": 0 });
+        let mut ticket = gh(repo, 2, "A ticket", "open", "2026-10-02T00:00:00Z");
+        ticket["parent_issue_url"] = json!(format!("https://api.github.com/repos/{repo}/issues/1"));
+        let mut closed = ticket.clone();
+        closed["state"] = json!("closed");
+        closed["updated_at"] = json!("2026-10-03T00:00:00Z");
+        // Closing a sub-issue leaves the spec's own `updated_at` alone: only the ticket is listed as changed.
+        fake.in_turn("GET", "/repos/octo/mir-progress/issues", vec![(200, json!([spec.clone(), ticket])), (200, json!([closed]))]);
+        let mut now = spec.clone();
+        now["sub_issues_summary"] = json!({ "total": 2, "completed": 1 });
+        fake.route("GET", "/repos/octo/mir-progress/issues/1", 200, now);
+        sync_project(&st, "mir-progress", true).await.unwrap();
+        sync_project(&st, "mir-progress", false).await.unwrap();
+
+        let g = mirrored(&st, repo)[0]["github"].clone();
+        assert_eq!((g["sub_done"].as_i64(), g["sub_total"].as_i64()), (Some(1), Some(2)), "the spec's progress follows its ticket");
     }
 }

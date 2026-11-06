@@ -23,10 +23,12 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** Leads its project's team (one per project). Wears a captain hat. */
-  lead?: boolean;
-  /** Its part in the end-of-planning team check: "dev", "reviewer" or "" (neither). */
+  /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
   role?: string;
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
+  fresh_context?: string;
+  /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
+  fresh_context_applies?: boolean;
   avatar: Avatar;
   status: "idle" | "running" | "waiting" | "error" | string;
   status_text: string;
@@ -53,6 +55,18 @@ export type Agent = {
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
 };
+
+/** The roles an agent can have, as stored in `Agent.role`, with what each does. */
+export const ROLES: { value: string; label: string; hint: string }[] = [
+  { value: "lead", label: "Lead", hint: "plans with you" },
+  { value: "dev", label: "Dev", hint: "builds the tickets" },
+  { value: "code_reviewer", label: "Code reviewer", hint: "reviews the code" },
+  { value: "qa", label: "QA", hint: "tests the work" },
+  { value: "security", label: "Security", hint: "checks for security problems" },
+  { value: "custom", label: "Custom", hint: "follows only its own instructions" },
+];
+
+export const roleLabel = (role: string) => ROLES.find((r) => r.value === role)?.label ?? role;
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -81,6 +95,19 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 
 /** A task on the shared list (`/api/tasks`). */
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
+/** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
+ *  outside it (`skipped` says why), so it never hands them out. */
+export type IssueDelivery = {
+  state: string;
+  started: boolean;
+  agent_id: string | null;
+  agent_name: string | null;
+  pr: number | null;
+  spec?: boolean;
+  current?: { number: number; title: string } | null;
+  tickets?: { number: number; title: string; state: string; skipped: string }[];
+};
+
 export type Task = {
   id: string;
   title: string;
@@ -93,7 +120,7 @@ export type Task = {
   /** Derived from status: done and cancelled are closed. Read-only. */
   state: "open" | "closed";
   /** The GitHub issue it mirrors, or null for a Loft-only issue. `state` is GitHub's. */
-  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number } | null;
+  github: { repo: string; number: number; url: string; state: "open" | "closed"; updated_at: string; sub_total?: number; sub_done?: number; /** who opened it on GitHub */ author?: string } | null;
   /** todo (personal) | work (meant for an agent) */
   kind: string;
   status: TaskStatus;
@@ -193,13 +220,17 @@ export type EndCard = {
   repo: string;
   spec: PlannedIssue | null;
   tickets: PlannedIssue[];
-  /** Left in the composer after Clear context, never sent by Loft. */
+  /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
   next_message: string;
-  /** Roles no agent in the project fills: "dev", "reviewer". */
+  /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
+  delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
+  /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
   setup: { agent_id: string; message: string; sent_at?: string } | null;
 };
+
+export type DeliveryStarted = { ticket: number; title?: string; agent_id: string; agent_name: string; at: string };
 
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
@@ -344,6 +375,23 @@ export type AgentSummary = {
   prs: { total: number; open: number; merged: number };
 };
 
+/** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
+export type AgentsSummary = {
+  agents: AgentSummary[];
+  /** Runs and estimated cost of the current Usage week (from the weekly reset minus 7 days), or of the last 7 days when the plan usage can't be read. */
+  period: {
+    kind: "usage_week" | "last_7_days";
+    since: string;
+    resets_at: string | null;
+    runs: number;
+    cost_usd: number;
+    /** The span before, like with like: the previous usage week up to the same point in it, or the 7 days before the last 7. */
+    previous: { since: string; until: string; runs: number; cost_usd: number };
+  };
+  /** The All-time spend: every run since Loft started counting, deleted agents and cleared chats included. */
+  all_time: { runs: number; cost_usd: number };
+};
+
 export type FileEntry = { path: string; dir: boolean; depth: number; size: number; is_repo: boolean };
 
 export type UpdateStatus = {
@@ -381,6 +429,8 @@ export type GithubBudget = {
 /** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
 export type MirrorSync = {
   connected: boolean;
+  /** The GitHub user of Loft's token; null when nothing is mirrored or it can't be read. */
+  login?: string | null;
   projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
   skipped: { project: string; reason: string }[];
 };
@@ -469,8 +519,8 @@ export const api = {
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
-  agentsSummary: () => req<AgentSummary[]>("GET", "/agents/summary"),
-  createAgent: (a: Partial<Agent>) => req<Agent>("POST", "/agents", a),
+  agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
+  createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
@@ -481,6 +531,14 @@ export const api = {
   /** "Set up the team with lofty" on an end-of-planning card: sends its setup message once. */
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
+  /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
+  startDelivery: (id: string, messageId: number, initGit = false) =>
+    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery${initGit ? "?init_git=true" : ""}`),
+  /** Where a Delivery stands: for a plan kept in Loft, "ready" means Merge can run. */
+  deliveryState: (repo: string, spec: number) =>
+    req<{ state: string; local: boolean; branch: string; base: string }>("GET", `/deliveries/state?repo=${encodeURIComponent(repo)}&spec=${spec}`),
+  /** Merge for a plan kept in Loft: its spec branch into the project's checked-out base, when the tree is clean. */
+  mergeDelivery: (repo: string, spec: number) => req<{ ok: boolean; message: string }>("POST", "/deliveries/merge", { repo, spec }),
   /** Stores a pasted image for the next message; send its `file` in `send`'s images. */
   upload: async (id: string, image: Blob) => {
     const res = await fetch(`/api/agents/${id}/uploads`, { method: "POST", body: image });
@@ -523,6 +581,10 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
+  issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
+  /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
+  startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

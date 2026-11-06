@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { AlertCircle, ArrowRight, Brain, ChevronDown, ChevronUp, GitMerge, GitPullRequest, Plus, ShieldAlert, Wrench } from "lucide-react";
-import { api, type AgentSummary } from "../lib/api";
+import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule, timeAgo } from "../lib/format";
+import { costChange, exactDollars, wholeDollars } from "../lib/usage";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
 import { StatusPill } from "./agents/Status";
@@ -33,7 +34,7 @@ function toolName(n: string) {
 
 /** Stacked daily runs: on request (bottom) + autonomous (top), 2px gap between segments. */
 function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; height?: number }) {
-  const [hover, setHover] = useState<number | null>(null);
+  const [hover, setHover] = useState<{ i: number; el: Element } | null>(null);
   const n = user.length;
   const max = Math.max(1, ...user.map((u, i) => u + auto[i]));
   const slot = 100 / n;
@@ -49,9 +50,9 @@ function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; 
           const hu = u * unit;
           const ha = a * unit;
           const gap = u && a ? 2 : 0;
-          const dim = hover !== null && hover !== i ? 0.4 : 1;
+          const dim = hover !== null && hover.i !== i ? 0.4 : 1;
           return (
-            <g key={i} onMouseEnter={() => setHover(i)} opacity={dim}>
+            <g key={i} onMouseEnter={(e) => setHover({ i, el: e.currentTarget.firstElementChild! })} opacity={dim}>
               <rect x={i * slot} y={0} width={slot} height={height} fill="transparent" />
               {u > 0 && <rect x={x} y={height - hu} width={bw} height={hu} rx={0.8} fill={USER} />}
               {a > 0 && <rect x={x} y={height - hu - gap - ha} width={bw} height={ha} rx={0.8} fill={AUTO} />}
@@ -60,11 +61,11 @@ function RunBars({ user, auto, height = 56 }: { user: number[]; auto: number[]; 
         })}
       </svg>
       {hover !== null && (
-        <Tip x={hover >= n - 4 ? `${((hover + 1) / n) * 100}%` : `${((hover + 0.5) / n) * 100}%`} y={0} align={hover >= n - 4 ? "end" : "center"}>
-          <span className="text-fg-3">{dayLabel(n - 1 - hover)} · </span>
-          <span className="text-fg">{user[hover]} on request</span>
+        <Tip anchor={hover.el}>
+          <span className="text-fg-3">{dayLabel(n - 1 - hover.i)} · </span>
+          <span className="text-fg">{user[hover.i]} on request</span>
           <span className="text-fg-3"> · </span>
-          <span className="text-fg">{auto[hover]} autonomous</span>
+          <span className="text-fg">{auto[hover.i]} autonomous</span>
         </Tip>
       )}
     </div>
@@ -91,7 +92,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
       style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
     >
       <div className="flex items-start gap-3">
-        <Sticker avatar={a.avatar} lead={a.lead} size={44} />
+        <Sticker avatar={a.avatar} lead={a.role === "lead"} size={44} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[15px] font-medium tracking-tight group-hover:text-accent">{a.name}</span>
@@ -167,12 +168,19 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
 
 export function AgentActivity() {
   const [data, setData] = useState<AgentSummary[] | null>(null);
+  const [period, setPeriod] = useState<AgentsSummary["period"] | null>(null);
   const [expanded, setExpanded] = useState(false);
   const perRow = useSyncExternalStore(onResize, () => cardsPerRow(window.innerWidth));
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(() => {
-    api.agentsSummary().then(setData).catch(() => setData((d) => d ?? []));
+    api
+      .agentsSummary()
+      .then((r) => {
+        setData(r.agents);
+        setPeriod(r.period);
+      })
+      .catch(() => setData((d) => d ?? []));
   }, []);
   useEffect(load, [load]);
 
@@ -201,10 +209,10 @@ export function AgentActivity() {
     return {
       working: d.filter((s) => s.agent.running).length,
       waiting: d.reduce((a, s) => a + s.pending_permissions, 0),
-      runs: d.reduce((a, s) => a + sum(s.daily_user) + sum(s.daily_auto), 0),
-      cost: d.reduce((a, s) => a + s.cost_usd, 0),
     };
   }, [data]);
+
+  const change = period && costChange(period.cost_usd, period.previous.cost_usd);
 
   const ordered = useMemo(() => (data ? byActivity(data) : null), [data]);
   const hidden = ordered ? Math.max(0, ordered.length - perRow) : 0;
@@ -222,10 +230,23 @@ export function AgentActivity() {
               <>
                 <span className={totals.working ? "text-accent" : "text-fg-2"}>{totals.working} working</span>
                 {totals.waiting > 0 && <span className="text-warn"> · {totals.waiting} waiting on you</span>}
-                <span className="text-fg-2">
-                  {" "}
-                  · {totals.runs} runs · <span title="API list-price equivalent">est. ${totals.cost.toFixed(2)} spent</span>
-                </span>
+                {period && (
+                  <span className="text-fg-2">
+                    {" "}
+                    · {period.runs} runs ·{" "}
+                    <span title={`Estimated API list-price equivalent: ${exactDollars(period.cost_usd)}`}>
+                      {wholeDollars(period.cost_usd)} {period.kind === "usage_week" ? "this week" : "last 7 days"}
+                    </span>
+                    {change && (
+                      <span
+                        className={cx("ml-2 font-mono text-[12.5px]", change.tone === "good" ? "text-good" : change.tone === "warn" ? "text-warn" : "text-fg-3")}
+                        title={`${period.kind === "usage_week" ? "Last week by now" : "The 7 days before"}: ${period.previous.runs} runs · est. ${exactDollars(period.previous.cost_usd)}`}
+                      >
+                        {change.text}
+                      </span>
+                    )}
+                  </span>
+                )}
               </>
             )}
           </div>

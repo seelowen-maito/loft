@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { tipPosition } from "../lib/tipPosition";
 
 const SEQ = ["var(--color-seq-0)", "var(--color-seq-1)", "var(--color-seq-2)", "var(--color-seq-3)", "var(--color-seq-4)"];
 
@@ -16,7 +18,7 @@ function dayLabel(offsetFromToday: number) {
 
 /** GitHub-style contribution grid. `daily` is oldest-first, ending today. */
 export function Heatmap({ daily, cell = 11, gap = 3 }: { daily: number[]; cell?: number; gap?: number }) {
-  const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
+  const [hover, setHover] = useState<{ i: number; el: Element } | null>(null);
   const { cols, max, lead } = useMemo(() => {
     // Align so the last column ends on today's weekday.
     const today = new Date().getDay();
@@ -70,7 +72,7 @@ export function Heatmap({ daily, cell = 11, gap = 3 }: { daily: number[]; cell?:
                   fill={SEQ[level(v, max)]}
                   stroke={hover?.i === i ? "var(--color-fg)" : "none"}
                   strokeWidth={1}
-                  onMouseEnter={() => setHover({ i, x: ci * (cell + gap), y: ri * (cell + gap) })}
+                  onMouseEnter={(e) => setHover({ i, el: e.currentTarget })}
                   onMouseLeave={() => setHover(null)}
                 />
               );
@@ -79,7 +81,7 @@ export function Heatmap({ daily, cell = 11, gap = 3 }: { daily: number[]; cell?:
         </g>
       </svg>
       {hover && hover.i >= 0 && hover.i < daily.length && (
-        <Tip x={hover.x + cell / 2} y={hover.y + 16}>
+        <Tip anchor={hover.el}>
           <span className="text-fg">{daily[hover.i]} commit{daily[hover.i] === 1 ? "" : "s"}</span>
           <span className="text-fg-3"> · {dayLabel(daily.length - 1 - hover.i)}</span>
         </Tip>
@@ -95,22 +97,37 @@ export function Heatmap({ daily, cell = 11, gap = 3 }: { daily: number[]; cell?:
   );
 }
 
-export function Tip({
-  x, y, children, align = "center",
-}: {
-  x: number | string;
-  y: number;
-  children: React.ReactNode;
-  /** "end" anchors the tooltip's right edge at x, for marks near the right edge. */
-  align?: "center" | "end";
-}) {
-  return (
+/**
+ * A chart's hover info, drawn in a layer above the whole page at `anchor`'s
+ * screen position and kept inside the viewport, so no card or scroll box hides it.
+ */
+export function Tip({ anchor, children }: { anchor: Element; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const place = () => {
+      const tip = ref.current;
+      if (!tip) return;
+      const r = anchor.getBoundingClientRect();
+      setPos(tipPosition(r, { width: tip.offsetWidth, height: tip.offsetHeight }, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [anchor, children]);
+  return createPortal(
     <div
-      className={`pointer-events-none absolute z-20 -translate-y-full whitespace-nowrap ${align === "end" ? "-translate-x-full" : "-translate-x-1/2"} rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 font-mono text-[11px] shadow-xl backdrop-blur`}
-      style={{ left: x, top: y - 6 }}
+      ref={ref}
+      className="pointer-events-none fixed z-[100] whitespace-nowrap rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 font-mono text-[11px] shadow-xl backdrop-blur"
+      style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: "hidden" }}
     >
       {children}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -126,7 +143,7 @@ export function WeeklyBars({
   weeks?: number;
   className?: string;
 }) {
-  const [hover, setHover] = useState<number | null>(null);
+  const [hover, setHover] = useState<{ i: number; el: Element } | null>(null);
   const series = useMemo(() => {
     const out: number[] = [];
     for (let w = weeks - 1; w >= 0; w--) {
@@ -145,7 +162,7 @@ export function WeeklyBars({
         {series.map((v, i) => {
           const h = v === 0 ? 0 : Math.max(2, (v / max) * (height - 4));
           return (
-            <g key={i} onMouseEnter={() => setHover(i)}>
+            <g key={i} onMouseEnter={(e) => setHover({ i, el: e.currentTarget.firstElementChild! })}>
               <rect x={i * bw} y={0} width={bw} height={height} fill="transparent" />
               {h > 0 && (
                 <rect
@@ -154,8 +171,8 @@ export function WeeklyBars({
                   width={bw * 0.64}
                   height={h}
                   rx={0.6}
-                  fill={hover === i ? "var(--color-fg)" : "var(--color-accent)"}
-                  opacity={hover === null || hover === i ? 0.9 : 0.45}
+                  fill={hover?.i === i ? "var(--color-fg)" : "var(--color-accent)"}
+                  opacity={hover === null || hover.i === i ? 0.9 : 0.45}
                 />
               )}
             </g>
@@ -163,9 +180,9 @@ export function WeeklyBars({
         })}
       </svg>
       {hover !== null && (
-        <Tip x={`${((hover + 0.5) / weeks) * 100}%`} y={0}>
-          <span className="text-fg">{series[hover]} commits</span>
-          <span className="text-fg-3"> · week of {dayLabel((weeks - 1 - hover) * 7 + 6)}</span>
+        <Tip anchor={hover.el}>
+          <span className="text-fg">{series[hover.i]} commits</span>
+          <span className="text-fg-3"> · week of {dayLabel((weeks - 1 - hover.i) * 7 + 6)}</span>
         </Tip>
       )}
     </div>

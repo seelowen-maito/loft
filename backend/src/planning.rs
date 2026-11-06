@@ -13,8 +13,20 @@ use crate::db::Agent;
 use crate::grill::IssueLink;
 use crate::state::AppState;
 
-/// The roles a team needs to implement a plan, as stored in `Agent::role`.
-pub const ROLES: &[&str] = &["dev", "reviewer"];
+/// An agent's role in its team, as stored in `Agent::role`, with how the user sees it.
+pub const ROLES: &[(&str, &str)] = &[("lead", "Lead"), ("dev", "Dev"), ("code_reviewer", "Code reviewer"), ("qa", "QA"), ("security", "Security"), ("custom", "Custom")];
+
+/// The roles that implement a plan: the end-of-planning team check looks for each in the team.
+pub const TEAM_ROLES: &[&str] = &["dev", "code_reviewer", "qa", "security"];
+
+pub fn is_role(r: &str) -> bool {
+    ROLES.iter().any(|(k, _)| *k == r)
+}
+
+/// How the user sees `role`; an unknown one as it is.
+pub fn role_label(role: &str) -> &str {
+    ROLES.iter().find(|(k, _)| *k == role).map_or(role, |(_, l)| l)
+}
 
 /// Labels publishing relies on: name, color, description. Created when the repo lacks them.
 const LABELS: &[(&str, &str, &str)] = &[
@@ -28,14 +40,15 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. Calling it again with the same title returns the spec already published instead of creating another, so a retry is safe.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
-            "body": { "type": "string", "description": "The spec in Markdown, following the spec template." }
+            "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
+            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
-        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
+        "description": "Publish tickets as GitHub issues on your project's repo, only after the user approved the breakdown. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links each blocker as a GitHub issue dependency. Under a spec with a spec PR, Loft adds a \"## Branch\" section to each ticket naming the spec branch and the spec PR. When the project has no GitHub repo they become Loft issues under the spec instead, with the blockers as dependencies, and nothing goes to GitHub. Without `spec` it publishes one standalone ticket. Calling it again with the same tickets skips what is already published, so a retry after a failure is safe.",
         "inputSchema": { "type": "object", "properties": {
             "spec": { "type": ["integer", "string"], "description": "The spec from publish_spec: its GitHub issue number, or its Loft issue id when the plan is kept in Loft. Leave it out only for a single standalone ticket." },
             "tickets": { "type": "array", "description": "The tickets, in any order.", "items": { "type": "object", "properties": {
@@ -79,7 +92,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     let out = if name == "publish_tickets" {
         publish_tickets(state, me, args).await
     } else {
-        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or("")).await.map(|(msg, slug, spec)| {
+        let docs = args["docs_branch"].as_str().map(str::trim).filter(|d| !d.is_empty());
+        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await.map(|(msg, slug, spec)| {
             crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
             msg
         })
@@ -113,22 +127,57 @@ pub async fn send_team_setup(State(state): State<AppState>, Path((id, mid)): Pat
 pub fn missing_roles(state: &AppState, project: &str) -> Vec<&'static str> {
     let project = project.trim();
     let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !project.is_empty() && a.project.trim() == project).map(|a| a.role).collect();
-    ROLES.iter().copied().filter(|r| !team.iter().any(|t| t == r)).collect()
+    TEAM_ROLES.iter().copied().filter(|r| !team.iter().any(|t| t == r)).collect()
+}
+
+/// The words of an agent's name and title, lowercased.
+fn words(name: &str, title: &str) -> Vec<String> {
+    format!("{name} {title}").to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+}
+
+/// Which reviewer an agent with the old "reviewer" role is, from its name and title: QA or test → QA,
+/// security → Security, anything else → Code reviewer.
+pub fn reviewer_role(name: &str, title: &str) -> &'static str {
+    let words = words(name, title);
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+    if has(&["qa", "test", "tests", "tester", "testing"]) {
+        "qa"
+    } else if has(&["security", "seguranca", "segurança"]) {
+        "security"
+    } else {
+        "code_reviewer"
+    }
 }
 
 /// A role for an agent saved before roles existed, from the words in its name and title. Reviewing
-/// words win, so a "QA engineer" reviews.
+/// words win, so a "QA engineer" is QA.
 pub fn infer_role(name: &str, title: &str) -> &'static str {
-    let text = format!("{name} {title}").to_lowercase();
-    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    let has = |list: &[&str]| words.iter().any(|w| list.contains(w));
-    if has(&["reviewer", "review", "revisor", "revisora", "qa", "tester", "auditor", "security"]) {
-        "reviewer"
+    let words = words(name, title);
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+    if has(&["reviewer", "review", "revisor", "revisora", "qa", "test", "tests", "tester", "testing", "auditor", "security"]) {
+        reviewer_role(name, title)
     } else if has(&["dev", "developer", "engineer", "programmer", "coder", "desenvolvedor", "desenvolvedora"]) {
         "dev"
     } else {
-        ""
+        "custom"
     }
+}
+
+/// The role an agent stored before the six roles gets, from its raw JSON: the `lead` flag becomes Lead,
+/// the old "reviewer" is split by name and title, "dev" stays Dev, no role becomes Custom, and an agent
+/// from before roles has one inferred. None when it already has one of the six and no `lead` flag.
+pub fn migrated_role(v: &Value) -> Option<&'static str> {
+    let role = v.get("role").map(|r| r.as_str().unwrap_or(""));
+    if role.is_some_and(is_role) && v.get("lead").is_none() {
+        return None;
+    }
+    let (name, title) = (v["name"].as_str().unwrap_or(""), v["title"].as_str().unwrap_or(""));
+    Some(match role {
+        _ if v["lead"] == true => "lead",
+        None => infer_role(name, title),
+        Some("reviewer") => reviewer_role(name, title),
+        Some(r) => ROLES.iter().map(|(k, _)| *k).find(|k| *k == r).unwrap_or("custom"),
+    })
 }
 
 /// One lock per repo, held for a whole publish: the check for what is already published and the
@@ -138,7 +187,7 @@ pub fn infer_role(name: &str, title: &str) -> &'static str {
 pub struct Locks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
 
 impl Locks {
-    fn of(&self, slug: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn of(&self, slug: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(slug.into()).or_default().clone()
     }
 }
@@ -152,13 +201,13 @@ pub struct Known {
 }
 
 /// Same spec, same key: case and spacing don't make a new one.
-fn key(title: &str) -> String {
+pub(crate) fn key(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 /// Where a plan goes: `owner/repo` from the `origin` of the agent's project folder, with GitHub
 /// connected. Err says why it stays in Loft instead: no project, no git, no GitHub remote, no token.
-async fn github_home(state: &AppState, a: &Agent) -> Result<String, String> {
+pub(crate) async fn github_home(state: &AppState, a: &Agent) -> Result<String, String> {
     if a.project.trim().is_empty() {
         return Err("you have no project".into());
     }
@@ -199,6 +248,7 @@ mod in_loft {
                 (t, msg)
             }
         };
+        crate::delivery::record_local_spec(state, &project, &t.id, &t.title, &me.id);
         Ok((msg, String::new(), IssueLink { number: 0, title: t.title.clone(), id: t.id.clone() }))
     }
 
@@ -239,6 +289,9 @@ mod in_loft {
                     (made, true)
                 }
             };
+            if let Some(s) = &spec {
+                crate::delivery::record_local_ticket(state, &project, &s.id, &made.id, &t.title, &blockers);
+            }
             let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone() });
             crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone() }]);
             let by: Vec<String> = t.blocked_by.iter().map(|&b| format!("\"{}\"", ts[b].title)).collect();
@@ -257,6 +310,21 @@ mod in_loft {
 }
 
 /// Creates the labels the repo doesn't have yet; existing ones are left as they are.
+/// Creates label `name` on `slug` unless Loft already made sure of it there; one GitHub says exists counts.
+pub(crate) async fn ensure_label(state: &AppState, slug: &str, name: &str, color: &str, description: &str) -> Result<(), String> {
+    let key = format!("{slug} {name}");
+    if state.publish_known.labelled.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+        return Ok(());
+    }
+    let made = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/labels"), Some(json!({ "name": name, "color": color, "description": description }))).await;
+    match made {
+        Err(e) if !e.to_string().contains("already_exists") => return Err(format!("couldn't create the `{name}` label on {slug}: {e}")),
+        _ => {}
+    }
+    state.publish_known.labelled.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+    Ok(())
+}
+
 async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
     if state.publish_known.labelled.lock().unwrap_or_else(|e| e.into_inner()).contains(slug) {
         return Ok(());
@@ -280,7 +348,7 @@ async fn ensure_labels(state: &AppState, slug: &str) -> Result<(), String> {
 }
 
 /// The login of the token's user: everything Loft publishes is assigned to them.
-async fn login(state: &AppState) -> Result<String, String> {
+pub(crate) async fn login(state: &AppState) -> Result<String, String> {
     let token = crate::github::token(state).unwrap_or_default();
     if let Some(l) = state.publish_known.logins.lock().unwrap_or_else(|e| e.into_inner()).get(&token) {
         return Ok(l.clone());
@@ -291,11 +359,15 @@ async fn login(state: &AppState) -> Result<String, String> {
     Ok(l)
 }
 
-/// The reply, the repo and the spec published (or already there).
-async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> Result<(String, String, IssueLink), String> {
+/// The reply, the repo and the spec published (or already there). On GitHub the reply also gives the
+/// spec branch and spec PR, or says why they couldn't be made: the spec stays published either way.
+async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str, docs: Option<&str>) -> Result<(String, String, IssueLink), String> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() || body.trim().is_empty() {
         return Err("title and body are required".into());
+    }
+    if let Some(d) = docs.filter(|d| !is_branch_name(d)) {
+        return Err(format!("\"{d}\" isn't a branch name: pass the docs branch as you pushed it, like `docs/<topic>`"));
     }
     if title.chars().count() > MAX_TITLE {
         return Err(format!("the title is at most {MAX_TITLE} characters"));
@@ -306,22 +378,33 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     };
     let _held = state.publish_locks.of(&slug).lock_owned().await;
     let k = key(&title);
-    let already = |n: i64| {
-        let msg = format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed.");
-        (msg, slug.clone(), IssueLink { number: n, title: title.clone(), id: String::new() })
+    let (msg, n) = spec_issue(state, me, &slug, &title, &k, body).await?;
+    crate::delivery::record_spec(state, &slug, n, me.project.trim(), &me.id, &spec_branch(n, title.as_str()));
+    let pr = match spec_pr(state, &slug, n, &title, docs).await {
+        Ok(line) => line,
+        Err(e) => {
+            let same = if docs.is_some() { " and `docs_branch`" } else { "" };
+            format!("The spec is published, but {e}. Call publish_spec again with the same title{same} to retry only the spec branch and PR.")
+        }
     };
-    if let Ok(Some(n)) = state.db.published_issue(&slug, "spec", &k) {
+    Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new() }))
+}
+
+/// The spec's issue on `slug`: the reply and its number, published now or found already there.
+async fn spec_issue(state: &AppState, me: &Agent, slug: &str, title: &str, k: &str, body: &str) -> Result<(String, i64), String> {
+    let already = |n: i64| (format!("The spec \"{title}\" is already published as #{n}: https://github.com/{slug}/issues/{n}. Nothing new was created and its text wasn't changed."), n);
+    if let Ok(Some(n)) = state.db.published_issue(slug, "spec", k) {
         return Ok(already(n));
     }
     let login = login(state).await?;
-    ensure_labels(state, &slug).await?;
+    ensure_labels(state, slug).await?;
     // Created before but never recorded (the reply was lost): adopt it rather than publish it twice.
     let existing = crate::github::get(state, &format!("/repos/{slug}/issues?labels=spec&state=all&per_page=100"))
         .await
         .map_err(|e| format!("Couldn't check {slug} for an existing spec: {e}"))?;
     let found = existing.as_array().into_iter().flatten().find(|i| i.get("pull_request").is_none() && i["title"].as_str().is_some_and(|t| key(t) == k));
     if let Some(n) = found.and_then(|i| i["number"].as_i64()) {
-        let _ = state.db.record_published_issue(&slug, "spec", &k, n);
+        let _ = state.db.record_published_issue(slug, "spec", k, n);
         return Ok(already(n));
     }
     let made = crate::github::request(
@@ -333,10 +416,329 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str) -> 
     .await
     .map_err(|e| format!("GitHub rejected the spec on {slug}: {e}"))?;
     let n = made["number"].as_i64().ok_or("GitHub created the spec but didn't return its number.")?;
-    state.db.record_published_issue(&slug, "spec", &k, n).map_err(|e| e.to_string())?;
-    crate::mirror::bring_in(state, me.project.trim(), &slug, &made);
-    let msg = format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}");
-    Ok((msg, slug, IssueLink { number: n, title, id: String::new() }))
+    state.db.record_published_issue(slug, "spec", k, n).map_err(|e| e.to_string())?;
+    crate::mirror::bring_in(state, me.project.trim(), slug, &made);
+    Ok((format!("Published the spec as #{n}, assigned to {login}: https://github.com/{slug}/issues/{n}"), n))
+}
+
+/// The spec branch of spec #n: `spec/<N>-<slug>`, the slug from the first words of its title.
+pub(crate) fn spec_branch(n: i64, title: &str) -> String {
+    branch_of("spec", n, title)
+}
+
+/// A standalone ticket's branch: `ticket/<N>-<slug>`.
+pub(crate) fn ticket_branch(n: i64, title: &str) -> String {
+    branch_of("ticket", n, title)
+}
+
+/// `<kind>/<N>-<slug>`, the slug from the first words of the title.
+fn branch_of(kind: &str, n: i64, title: &str) -> String {
+    let mut slug = String::new();
+    for w in title.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
+        if !slug.is_empty() && slug.len() + w.len() >= 40 {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&w.to_lowercase());
+    }
+    if slug.is_empty() { format!("{kind}/{n}") } else { format!("{kind}/{n}-{slug}") }
+}
+
+/// A branch name as git takes it: letters, digits and `-_./`, no `..`, not starting or ending with `/`.
+fn is_branch_name(b: &str) -> bool {
+    !b.is_empty() && b.len() <= 200 && b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)) && !b.contains("..") && !b.starts_with('/') && !b.ends_with('/') && !b.ends_with(".lock")
+}
+
+/// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
+/// GitHub API. The branch starts at the head of the grill's docs branch when there is one, so the
+/// docs commits ship in the spec PR; otherwise at an empty commit on the default branch. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
+/// what's missing; a spec branch already there gets the docs branch merged in instead. The PR is recorded on the spec's Delivery, for its tickets to find. Ok is the
+/// reply's line naming both; Err says what failed.
+async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, docs: Option<&str>) -> Result<String, String> {
+    let branch = spec_branch(n, title);
+    let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
+    if let Some(pr) = state.db.get_delivery(slug, n).ok().flatten().and_then(|d| d.pr) {
+        return Ok(format!("{}{}", line(pr), docs_onto(state, slug, &branch, docs).await));
+    }
+    let (pr, docs_note) = branch_and_pr(state, slug, n, title, "spec", docs).await?;
+    Ok(format!("{}{docs_note}", line(pr)))
+}
+
+/// Makes issue #n's `<kind>/<N>-<slug>` branch (a spec's, or a standalone ticket's) and its draft PR to
+/// the default branch with `Closes #n`, keeping whatever is already there, and records the PR on the
+/// Delivery of #n. The PR and a line about the docs branch (see [`spec_pr`]).
+pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &str, kind: &str, docs: Option<&str>) -> Result<(i64, String), String> {
+    let branch = branch_of(kind, n, title);
+    let gh = |path: String| async move { crate::github::get(state, &format!("/repos/{slug}{path}")).await };
+    let post = |path: &'static str, body: Value| async move { crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}{path}"), Some(body)).await };
+    let repo = gh(String::new()).await.map_err(|e| format!("couldn't read {slug} for its default branch: {e}"))?;
+    let base = repo["default_branch"].as_str().filter(|b| !b.is_empty()).ok_or_else(|| format!("GitHub didn't give the default branch of {slug}"))?.to_string();
+    let mut docs_note = String::new();
+    match gh(format!("/git/ref/heads/{branch}")).await {
+        Ok(_) => docs_note = docs_onto(state, slug, &branch, docs).await,
+        Err(e) if crate::github::is_gone(&e) => {
+            let failed = |e: anyhow::Error| format!("the {kind} branch `{branch}` couldn't be created: {e}");
+            let start = match docs {
+                Some(d) => {
+                    let head = gh(format!("/git/ref/heads/{d}")).await.map_err(|e| {
+                        if crate::github::is_gone(&e) { format!("the docs branch `{d}` isn't on GitHub, so the {kind} branch `{branch}` wasn't created: push it first") } else { failed(e) }
+                    })?;
+                    head["object"]["sha"].clone()
+                }
+                None => {
+                    let head = gh(format!("/git/ref/heads/{base}")).await.map_err(failed)?;
+                    let sha = head["object"]["sha"].as_str().unwrap_or_default().to_string();
+                    let commit = gh(format!("/git/commits/{sha}")).await.map_err(failed)?;
+                    // An empty commit: the tree of the default branch, so the branch has something to open a PR for.
+                    let made = post("/git/commits", json!({ "message": format!("Start {kind} #{n}"), "tree": commit["tree"]["sha"], "parents": [sha] })).await.map_err(failed)?;
+                    made["sha"].clone()
+                }
+            };
+            post("/git/refs", json!({ "ref": format!("refs/heads/{branch}"), "sha": start })).await.map_err(failed)?;
+        }
+        Err(e) => return Err(format!("couldn't check {slug} for the {kind} branch `{branch}`: {e}")),
+    }
+    // Opened before but never recorded: adopt it rather than open a second one.
+    let owner = slug.split('/').next().unwrap_or_default();
+    let open = gh(format!("/pulls?head={owner}:{branch}&state=all")).await.map_err(|e| format!("couldn't check {slug} for the {kind} PR: {e}"))?;
+    let pr = match open.as_array().and_then(|ps| ps.first()).and_then(|p| p["number"].as_i64()) {
+        Some(pr) => pr,
+        None => {
+            let made = post("/pulls", json!({ "title": title, "head": branch, "base": base, "body": format!("Closes #{n}"), "draft": true }))
+                .await
+                .map_err(|e| format!("the draft {kind} PR from `{branch}` couldn't be opened: {e}"))?;
+            made["number"].as_i64().ok_or_else(|| format!("GitHub opened the {kind} PR but didn't return its number"))?
+        }
+    };
+    crate::delivery::update(state, slug, n, |d| d.pr = Some(pr));
+    Ok((pr, docs_note))
+}
+
+/// Merges the grill's docs branch into a spec branch made before it (a retry, say), so its glossary
+/// and ADR commits still ship in the spec PR. Empty when there's no docs branch or the spec branch
+/// already has them; otherwise a line for the reply saying what happened.
+async fn docs_onto(state: &AppState, slug: &str, branch: &str, docs: Option<&str>) -> String {
+    let Some(d) = docs else { return String::new() };
+    let body = json!({ "base": branch, "head": d, "commit_message": format!("Merge the grill's docs from {d}") });
+    match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/merges"), Some(body)).await {
+        // 204: nothing to merge.
+        Ok(Value::Null) => String::new(),
+        Ok(v) => format!("\nThe spec branch was already there: merged the docs branch `{d}` into it ({}).", v["sha"].as_str().map(|s| &s[..s.len().min(7)]).unwrap_or("merge commit")),
+        Err(e) if crate::github::is_gone(&e) => format!("\nThe docs branch `{d}` isn't on GitHub, so its commits aren't on `{branch}`: push it, then call publish_spec again with the same title and `docs_branch`."),
+        Err(e) if e.to_string().starts_with("GitHub 409") => format!("\nThe docs branch `{d}` conflicts with `{branch}`, so its commits aren't on it: merge `{d}` into `{branch}` by hand."),
+        Err(e) => format!("\nThe docs branch `{d}` couldn't be merged into `{branch}`: {e}. Call publish_spec again with the same title and `docs_branch` to retry."),
+    }
+}
+
+/// The "## Branch" section of a ticket under spec #spec, when the spec has a spec PR: where to commit
+/// and where it ships, from its Delivery. None for a spec without one (published before spec PRs, or
+/// its PR failed). Only a Delivery migrated from before branches were recorded reads its branch from GitHub, once.
+async fn branch_section(state: &AppState, slug: &str, spec: i64) -> Result<Option<String>, String> {
+    let Some(d) = state.db.get_delivery(slug, spec).ok().flatten() else { return Ok(None) };
+    let Some(pr) = d.pr else { return Ok(None) };
+    let branch = if d.branch.is_empty() {
+        let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("Couldn't read spec PR #{pr} on {slug} for its branch: {e}"))?;
+        let b = p["head"]["ref"].as_str().ok_or_else(|| format!("GitHub didn't give the branch of spec PR #{pr} on {slug}"))?.to_string();
+        crate::delivery::update(state, slug, spec, |d| d.branch = b.clone());
+        b
+    } else {
+        d.branch
+    };
+    Ok(Some(format!("## Branch\n\nCommit on the spec branch `{branch}`. It ships in the spec PR https://github.com/{slug}/pull/{pr}.")))
+}
+
+/// The ticket's body with this "## Branch" section at the end, in place of one the body already had.
+fn with_branch(body: &str, section: &str) -> String {
+    let mut kept = vec![];
+    let mut skipping = false;
+    for line in body.lines() {
+        if line.starts_with("## ") {
+            skipping = line.trim_end() == "## Branch";
+        }
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    format!("{}\n\n{section}", kept.join("\n").trim_end())
+}
+
+/// The spec PR a ticket's "## Branch" section links to, if it has one.
+fn spec_pr_in(body: &str, slug: &str) -> Option<i64> {
+    let at = format!("https://github.com/{slug}/pull/");
+    let section = body.lines().skip_while(|l| l.trim_end() != "## Branch").skip(1).take_while(|l| !l.starts_with("## "));
+    section.filter_map(|l| l.split_once(&at)).find_map(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
+}
+
+/// The commit SHAs in `args["commits"]`, lowercased: each 7 to 40 hex characters.
+pub(crate) fn commits_in(args: &Value) -> Result<Vec<String>, String> {
+    let commits: Vec<String> = args["commits"].as_array().into_iter().flatten().filter_map(|c| c.as_str()).map(|c| c.trim().to_lowercase()).collect();
+    if commits.is_empty() {
+        return Err("commits is required: the SHAs of the ticket's commits".into());
+    }
+    if let Some(bad) = commits.iter().find(|c| !(7..=40).contains(&c.len()) || !c.chars().all(|ch| ch.is_ascii_hexdigit())) {
+        return Err(format!("\"{bad}\" isn't a commit SHA: give 7 to 40 hex characters"));
+    }
+    Ok(commits)
+}
+
+/// Closes ticket #n on `slug` once its reviewers passed it: comments "Done in `<sha…>`, part of #<spec PR>",
+/// closes it as completed so the tickets it blocks can start, and marks its Loft issue (in `project`) done,
+/// logged as `by`'s work. Then marks the spec PR ready when it was the spec's last ticket. The caller holds
+/// the repo's publish lock. Ok is the line saying what was done.
+pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, slug: &str, n: i64, commits: &[String]) -> Result<String, String> {
+    let slug = slug.to_string();
+    let i = crate::github::get(state, &format!("/repos/{slug}/issues/{n}")).await.map_err(|e| format!("Couldn't read #{n} on {slug}: {e}"))?;
+    let is_ticket = i.get("pull_request").is_none() && i["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent");
+    if !is_ticket {
+        return Err(format!("#{n} on {slug} isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed."));
+    }
+    if i["state"] != "open" {
+        return Err(format!("#{n} on {slug} is already closed: nothing was done."));
+    }
+    let pr = crate::delivery::of_ticket(state, &slug, n).and_then(|d| d.pr).or_else(|| spec_pr_in(i["body"].as_str().unwrap_or(""), &slug));
+    let shas: Vec<String> = commits.iter().map(|c| format!("`{}`", &c[..7])).collect();
+    let part = pr.map(|p| format!(", part of #{p}")).unwrap_or_default();
+    let comment = format!("Done in {}{part}.", shas.join(", "));
+    // Posted this same comment but the close failed: the retry doesn't comment twice. Keyed by the
+    // comment so the reply always names a comment that is on the ticket. A record older than the
+    // ticket's last close (by hand on GitHub, then reopened) belongs to an earlier round.
+    let key = format!("{n} {comment}");
+    let rfc = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+    let last_closed = i["closed_at"].as_str().and_then(rfc);
+    let posted = state.db.published_issue_at(&slug, "close_comment", &key).ok().flatten().and_then(|t| rfc(&t));
+    if !posted.is_some_and(|p| last_closed.is_none_or(|c| p > c)) {
+        crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues/{n}/comments"), Some(json!({ "body": comment })))
+            .await
+            .map_err(|e| format!("Couldn't comment on #{n}, so it wasn't closed: {e}"))?;
+        let _ = state.db.record_published_issue(&slug, "close_comment", &key, n);
+    }
+    let closed = crate::github::request(state, reqwest::Method::PATCH, &format!("/repos/{slug}/issues/{n}"), Some(json!({ "state": "closed", "state_reason": "completed" })))
+        .await
+        .map_err(|e| format!("Commented on #{n} but couldn't close it: {e}. Loft tries the close again on its next poll."))?;
+    // Closed: a close after a reopen comments again, whichever comments the failed tries left.
+    let _ = state.db.forget_published_issues_of(&slug, "close_comment", n);
+    // The mirror leaves an issue someone is working on open when GitHub closes it; this close is the work's end.
+    if let Some((mut t, _)) = crate::mirror::bring_in(state, project.trim(), &slug, &closed)
+        && t.status != "done"
+    {
+        crate::tasks::set_status(state, &mut t, "done", &by.id, Some(&format!("Closed by Loft: {}'s work passed review", by.name)));
+    }
+    state.emit(crate::state::Event::Issues { project: project.trim().to_string() });
+    let ready = match ready_when_last(state, &slug, n, i["body"].as_str().unwrap_or("")).await {
+        Ok(line) => line.unwrap_or_default(),
+        Err(e) => format!("\nThe ticket is closed, but {e}."),
+    };
+    Ok(format!("Closed #{n} as completed with the comment \"{comment}\": https://github.com/{slug}/issues/{n}{ready}"))
+}
+
+/// After ticket #number closed: notes it on its Delivery (found by the ticket, or for a ticket the
+/// record doesn't list, by the spec PR its "## Branch" section links to), then moves the Delivery on
+/// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did. The
+/// caller holds the repo's publish lock.
+pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<String>, String> {
+    let d = crate::delivery::ticket_closed(state, slug, number).or_else(|| {
+        let pr = spec_pr_in(ticket_body, slug)?;
+        state.db.deliveries(slug, false).ok()?.into_iter().find(|d| d.pr == Some(pr))
+    });
+    match d {
+        Some(d) if !waits(&d) => after_tickets(state, &d).await,
+        _ => Ok(None),
+    }
+}
+
+/// A Delivery past its tickets, or waiting on someone: nothing to move on.
+fn waits(d: &crate::db::Delivery) -> bool {
+    matches!(d.state.as_str(), "ready" | "merged" | "settled" | "final_review" | "final_fixes" | "needs_human")
+}
+
+/// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
+/// failed, and on a full read every one not settled yet (Loft may have been down when the last ticket
+/// closed). A Delivery whose record still has an open ticket costs no GitHub read (#197), and neither
+/// does one with no tickets yet (a spec published before its tickets) on a full read: a ticket closing on
+/// it still moves it on. The caller holds the repo's publish lock.
+pub(crate) async fn retry_ready(state: &AppState, slug: &str, full: bool) {
+    let open = state.db.deliveries(slug, true).unwrap_or_default();
+    let unticketed = |d: &crate::db::Delivery| !d.migrated && d.tickets.is_empty();
+    for d in open.into_iter().filter(|d| d.pr.is_some() && (d.ready_retry || full && !unticketed(d)) && !waits(d)) {
+        match after_tickets(state, &d).await {
+            Ok(Some(line)) => tracing::info!("mirror {slug}: a missed call caught up: {}", line.trim()),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("mirror {slug}: {e}"),
+        }
+    }
+}
+
+/// When every ticket of the Delivery is closed: a Delivery Loft ran goes to the team's Code reviewer for
+/// one review of the whole spec PR, and otherwise (no Code reviewer, or tickets closed outside a
+/// Delivery) its spec PR is marked ready for review. The record says whether the tickets are closed; only
+/// one migrated from before Deliveries asks GitHub. Some(line) for the reply.
+pub(crate) async fn after_tickets(state: &AppState, d: &crate::db::Delivery) -> Result<Option<String>, String> {
+    if !d.migrated && d.tickets.iter().any(|t| t.state != "closed") {
+        return Ok(None);
+    }
+    if d.state == "running" && !d.tickets.is_empty()
+        && let Some(line) = crate::delivery::begin_final_review(state, d)
+    {
+        return Ok(Some(line));
+    }
+    if d.local {
+        return Ok(Some(format!("\nIt was the spec's last open ticket.{}", crate::delivery::local_ready(state, d))));
+    }
+    let slug = &d.repo;
+    Ok(ready_if_done(state, d).await?.map(|pr| format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}")))
+}
+
+/// [`mark_ready`], noting a call that failed for the mirror to retry on its next poll; a PR found ready,
+/// merged or closed is settled and never asked about again.
+pub(crate) async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
+    let out = mark_ready(state, d).await;
+    let failed = out.is_err();
+    crate::delivery::update(state, &d.repo, d.spec, |d| d.ready_retry = failed);
+    out
+}
+
+/// Marks the Delivery's spec PR ready for review when it's still an open draft, and has Loft watch it, so
+/// it reaches Needs you (with a push) once it can be merged. The caller knows every ticket is closed; a
+/// Delivery migrated from before Deliveries (or with no tickets listed) checks the spec's sub-issues on
+/// GitHub instead.
+async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
+    let (slug, spec) = (d.repo.as_str(), d.spec);
+    let Some(pr) = d.pr else { return Ok(None) };
+    let settle = |to: &str| {
+        let to = to.to_string();
+        crate::delivery::update(state, slug, spec, |d| d.state = to);
+    };
+    let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("couldn't read spec PR #{pr}: {e}"))?;
+    if p["state"] != "open" || p["draft"] != true {
+        settle("settled");
+        return Ok(None);
+    }
+    if d.migrated || d.tickets.is_empty() {
+        let subs = crate::github::get(state, &format!("/repos/{slug}/issues/{spec}/sub_issues?per_page=100")).await.map_err(|e| format!("couldn't read the tickets of spec #{spec}: {e}"))?;
+        let subs = subs.as_array().cloned().unwrap_or_default();
+        if subs.is_empty() || subs.iter().any(|s| s["state"] != "closed") {
+            return Ok(None);
+        }
+    }
+    let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
+    let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
+        .await
+        .map_err(|e| format!("couldn't mark spec PR #{pr} ready for review: {e}"))?;
+    if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
+        return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
+    }
+    settle("ready");
+    // Watched like a PR an agent opened: Needs you lists it, with a push and a Merge button, once GitHub
+    // says it can be merged.
+    let owner = [&d.dev, &d.planner].into_iter().find(|id| !id.is_empty() && matches!(state.db.get_agent(id), Ok(Some(_))));
+    if let Some(owner) = owner
+        && let Err(e) = crate::prs::register(state, owner, slug, pr, None).await
+    {
+        tracing::warn!("delivery {slug}#{spec}: couldn't watch spec PR #{pr}: {e}");
+    }
+    Ok(Some(pr))
 }
 
 struct Ticket {
@@ -448,6 +850,10 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             .map_err(|e| format!("Couldn't check {slug} for an existing ticket: {e}"))?,
     };
     let listed: Vec<(i64, i64, String)> = listed.as_array().into_iter().flatten().filter(|i| i.get("pull_request").is_none()).filter_map(issue_ref).collect();
+    let branch = match spec {
+        Some(s) => branch_section(state, &slug, s).await?,
+        None => None,
+    };
     let scope = spec.map_or("standalone".to_string(), |s| format!("#{s}"));
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let mut made: Vec<Option<(i64, Option<i64>)>> = vec![None; ts.len()];
@@ -471,7 +877,7 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
                 state,
                 reqwest::Method::POST,
                 &format!("/repos/{slug}/issues"),
-                Some(json!({ "title": t.title, "body": t.body, "labels": ["ready-for-agent"], "assignees": [login] })),
+                Some(json!({ "title": t.title, "body": branch.as_deref().map_or(t.body.clone(), |b| with_branch(&t.body, b)), "labels": ["ready-for-agent"], "assignees": [login] })),
             )
             .await
             .map_err(|e| format!("GitHub rejected the ticket \"{}\" on {slug}: {e}. {retry}", t.title))?;
@@ -498,6 +904,11 @@ async fn publish_tickets(state: &AppState, me: &Agent, args: &Value) -> Result<S
             }
         }
         let mut blockers = vec![];
+        let blocker_numbers: Vec<i64> = t.blocked_by.iter().map(|&b| made[b].expect("blockers are published first").0).collect();
+        match spec {
+            Some(s) => crate::delivery::record_ticket(state, &slug, s, n, &t.title, blocker_numbers),
+            None => crate::delivery::record_standalone(state, &slug, n, &t.title, me.project.trim(), &me.id),
+        }
         for &b in &t.blocked_by {
             // Blockers go first, so every one of them is on GitHub by now.
             let (bn, bid) = made[b].expect("blockers are published first");
@@ -607,6 +1018,20 @@ pub(crate) mod tests {
         fake.route("POST", &format!("/repos/{slug}/labels"), 201, json!({}));
         fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
         fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": number }));
+        spec_pr_on(fake, slug);
+    }
+
+    /// What making the spec branch and spec PR on the fake needs: no spec branch or PR yet, and the PR
+    /// opened as #500, from `spec/the-branch` when its tickets read it.
+    fn spec_pr_on(fake: &Fake, slug: &str) {
+        fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main" }));
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/main"), 200, json!({ "object": { "sha": "main-sha" } }));
+        fake.route("GET", &format!("/repos/{slug}/git/commits/main-sha"), 200, json!({ "sha": "main-sha", "tree": { "sha": "main-tree" } }));
+        fake.route("POST", &format!("/repos/{slug}/git/commits"), 201, json!({ "sha": "start-sha" }));
+        fake.route("POST", &format!("/repos/{slug}/git/refs"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/pulls"), 201, json!({ "number": 500 }));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "head": { "ref": "spec/the-branch" } }));
     }
 
     async fn publish(st: &AppState, a: &Agent, title: &str) -> Result<String, String> {
@@ -627,7 +1052,7 @@ pub(crate) mod tests {
         let mut events = st.events.subscribe();
 
         let out = publish(&st, &a, "  Planning   in rounds ").await.unwrap();
-        assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40");
+        assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40\nSpec branch: `spec/40-planning-in-rounds`. Spec PR (draft, to the default branch): https://github.com/octo/spec-new/pull/500");
         // The Issues tab hears about it and refetches.
         let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
         assert_eq!(ev, json!({ "type": "issues", "project": "spec-new" }));
@@ -638,6 +1063,197 @@ pub(crate) mod tests {
         assert_eq!(posts(&fake, "octo/spec-new", "issues"), [json!({
             "title": "Planning in rounds", "body": "## Problem Statement\n\nIt hurts.", "labels": ["spec"], "assignees": ["octo-me"],
         })]);
+    }
+
+    #[tokio::test]
+    async fn a_published_spec_is_a_loft_issue_at_once_and_stays_after_a_poll_and_a_full_read() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-shows";
+        let a = planner_on(&st, "spec-shows", Some("git@github.com:octo/spec-shows.git"));
+        repo(&fake, slug, &["spec"], 60);
+        let made = json!({
+            "number": 60, "id": 6000, "title": "Planning in rounds", "state": "open", "body": "## Problem Statement\n\nIt hurts.",
+            "html_url": format!("https://github.com/{slug}/issues/60"), "updated_at": "2026-11-04T19:12:20Z",
+            "labels": [{ "name": "spec" }], "assignees": [{ "login": "octo-me" }], "user": { "login": "octo-me" },
+        });
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, made.clone());
+        publish(&st, &a, "Planning in rounds").await.unwrap();
+
+        let listed = || async {
+            let Json(v) = crate::tasks::list(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({})).unwrap())).await.unwrap();
+            v.as_array().unwrap().iter().filter(|t| t["github"]["number"] == 60).cloned().collect::<Vec<_>>()
+        };
+        let check = |v: Vec<Value>, when: &str| {
+            assert_eq!(v.len(), 1, "{when}: {v:?}");
+            assert_eq!((&v[0]["project"], &v[0]["labels"], &v[0]["state"], &v[0]["parent_id"]), (&json!("spec-shows"), &json!(["spec"]), &json!("open"), &Value::Null), "{when}");
+        };
+        check(listed().await, "right after publishing");
+        // GitHub now lists it, with sub-issues added since.
+        let mut later = made.clone();
+        later["updated_at"] = json!("2026-11-04T19:26:04Z");
+        later["sub_issues_summary"] = json!({ "total": 2, "completed": 0 });
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([later]));
+        fake.route("GET", &format!("/repos/{slug}/issues/60/sub_issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "spec-shows", false).await.unwrap();
+        crate::mirror::sync_project(&st, "spec-shows", false).await.unwrap();
+        check(listed().await, "after a poll");
+        crate::mirror::sync_project(&st, "spec-shows", true).await.unwrap();
+        let v = listed().await;
+        check(v.clone(), "after a full read");
+        assert_eq!(v[0]["github"]["sub_total"], 2);
+    }
+
+    #[tokio::test]
+    async fn publishing_starts_the_spec_branch_and_opens_a_draft_spec_pr() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-branch", Some("git@github.com:octo/spec-branch.git"));
+        repo(&fake, "octo/spec-branch", &["spec", "ready-for-agent"], 186);
+
+        let out = publish(&st, &a, "One PR per spec: branch & ticket closing, ready on the last close").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/186-one-pr-per-spec-branch-ticket-closing`. Spec PR (draft, to the default branch): https://github.com/octo/spec-branch/pull/500"), "{out}");
+        // An empty commit on top of the default branch, then the branch pointing at it.
+        assert_eq!(posts(&fake, "octo/spec-branch", "git/commits"), [json!({ "message": "Start spec #186", "tree": "main-tree", "parents": ["main-sha"] })]);
+        assert_eq!(posts(&fake, "octo/spec-branch", "git/refs"), [json!({ "ref": "refs/heads/spec/186-one-pr-per-spec-branch-ticket-closing", "sha": "start-sha" })]);
+        assert_eq!(posts(&fake, "octo/spec-branch", "pulls"), [json!({
+            "title": "One PR per spec: branch & ticket closing, ready on the last close", "head": "spec/186-one-pr-per-spec-branch-ticket-closing",
+            "base": "main", "body": "Closes #186", "draft": true,
+        })]);
+
+        // The retry finds both recorded and asks GitHub nothing about them.
+        let before = fake.seen("/repos/octo/spec-branch").len();
+        let again = publish(&st, &a, "one pr per spec: branch & ticket closing, ready on the last close").await.unwrap();
+        assert!(again.contains("already published as #186") && again.ends_with("/pull/500"), "{again}");
+        assert_eq!(fake.seen("/repos/octo/spec-branch").len(), before);
+    }
+
+    async fn publish_with_docs(st: &AppState, a: &Agent, title: &str, docs: &str) -> Result<String, String> {
+        mcp_call(st, a, "publish_spec", &json!({ "title": title, "body": "## Problem Statement\n\nIt hurts.", "docs_branch": docs })).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_grills_docs_branch_starts_the_spec_branch() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs";
+        let a = planner_on(&st, "spec-docs", Some("git@github.com:octo/spec-docs.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+
+        // Not pushed yet: the spec is published, the branch waits for a retry.
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.starts_with("Published the spec as #12"), "{out}");
+        assert!(out.ends_with("The spec is published, but the docs branch `docs/rounds` isn't on GitHub, so the spec branch `spec/12-rounds` wasn't created: push it first. Call publish_spec again with the same title and `docs_branch` to retry only the spec branch and PR."), "{out}");
+        assert!(posts(&fake, slug, "git/refs").is_empty() && posts(&fake, slug, "pulls").is_empty());
+
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/docs/rounds"), 200, json!({ "object": { "sha": "docs-sha" } }));
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/12-rounds`. Spec PR (draft, to the default branch): https://github.com/octo/spec-docs/pull/500"), "{out}");
+        // The spec branch points at the docs head, so its history holds the docs commits: no empty commit.
+        assert_eq!(posts(&fake, slug, "git/refs"), [json!({ "ref": "refs/heads/spec/12-rounds", "sha": "docs-sha" })]);
+        assert!(fake.seen(&format!("/repos/{slug}/git/commits")).is_empty(), "no empty commit");
+        assert_eq!(posts(&fake, slug, "pulls")[0]["base"], "main");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1, "never a second spec");
+    }
+
+    /// Spec #12's branch `spec/12-rounds` already on the fake (a retry after a failed PR), and the docs branch pushed.
+    fn spec_branch_there(fake: &Fake, slug: &str) {
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/spec/12-rounds"), 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/docs/rounds"), 200, json!({ "object": { "sha": "docs-sha" } }));
+    }
+
+    #[tokio::test]
+    async fn a_docs_branch_is_merged_into_a_spec_branch_already_there() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs-merge";
+        let a = planner_on(&st, "spec-docs-merge", Some("git@github.com:octo/spec-docs-merge.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+        spec_branch_there(&fake, slug);
+        fake.route("POST", &format!("/repos/{slug}/merges"), 201, json!({ "sha": "merge1234abcd" }));
+
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("Spec PR (draft, to the default branch): https://github.com/octo/spec-docs-merge/pull/500\nThe spec branch was already there: merged the docs branch `docs/rounds` into it (merge12)."), "{out}");
+        assert_eq!(posts(&fake, slug, "merges"), [json!({ "base": "spec/12-rounds", "head": "docs/rounds", "commit_message": "Merge the grill's docs from docs/rounds" })]);
+        assert!(posts(&fake, slug, "git/refs").is_empty(), "the branch isn't made again");
+
+        // A retry once the PR is recorded: GitHub has nothing left to merge (204) and the reply adds nothing.
+        fake.route("POST", &format!("/repos/{slug}/merges"), 204, Value::Null);
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("https://github.com/octo/spec-docs-merge/pull/500"), "{out}");
+        assert_eq!(posts(&fake, slug, "merges").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docs_that_cant_be_merged_are_named_and_the_spec_stays_published() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-docs-conflict";
+        let a = planner_on(&st, "spec-docs-conflict", Some("git@github.com:octo/spec-docs-conflict.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 12);
+        spec_branch_there(&fake, slug);
+        fake.route("POST", &format!("/repos/{slug}/merges"), 409, json!({ "message": "Merge conflict" }));
+
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.starts_with("Published the spec as #12"), "{out}");
+        assert!(out.ends_with("/pull/500\nThe docs branch `docs/rounds` conflicts with `spec/12-rounds`, so its commits aren't on it: merge `docs/rounds` into `spec/12-rounds` by hand."), "{out}");
+        assert_eq!(posts(&fake, slug, "pulls").len(), 1, "the spec PR is still opened");
+
+        fake.route("POST", &format!("/repos/{slug}/merges"), 404, json!({ "message": "Head does not exist" }));
+        let out = publish_with_docs(&st, &a, "Rounds", "docs/rounds").await.unwrap();
+        assert!(out.ends_with("\nThe docs branch `docs/rounds` isn't on GitHub, so its commits aren't on `spec/12-rounds`: push it, then call publish_spec again with the same title and `docs_branch`."), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_docs_branch_that_isnt_a_branch_name_is_turned_down() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-docs-bad", Some("git@github.com:octo/spec-docs-bad.git"));
+        repo(&fake, "octo/spec-docs-bad", &["spec", "ready-for-agent"], 1);
+        for bad in ["docs/../main", "docs rounds", "/docs", "docs/"] {
+            let err = publish_with_docs(&st, &a, "Rounds", bad).await.unwrap_err();
+            assert_eq!(err, format!("\"{bad}\" isn't a branch name: pass the docs branch as you pushed it, like `docs/<topic>`"));
+        }
+        assert!(fake.seen("/repos/octo/spec-docs-bad").is_empty(), "nothing asked of GitHub");
+    }
+
+    #[tokio::test]
+    async fn a_failed_spec_branch_or_pr_leaves_the_spec_published_and_a_retry_makes_only_whats_missing() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-pr-fail", Some("git@github.com:octo/spec-pr-fail.git"));
+        repo(&fake, "octo/spec-pr-fail", &["spec", "ready-for-agent"], 8);
+        let retry = "Call publish_spec again with the same title to retry only the spec branch and PR.";
+
+        // No push rights: the branch is turned down.
+        fake.route("POST", "/repos/octo/spec-pr-fail/git/refs", 403, json!({ "message": "Resource not accessible by integration" }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert_eq!(out, format!("Published the spec as #8, assigned to octo-me: https://github.com/octo/spec-pr-fail/issues/8\nThe spec is published, but the spec branch `spec/8-ship-it` couldn't be created: GitHub 403: Resource not accessible by integration. {retry}"));
+        assert!(posts(&fake, "octo/spec-pr-fail", "pulls").is_empty());
+
+        // The branch goes up now, then the draft PR is turned down.
+        fake.route("POST", "/repos/octo/spec-pr-fail/git/refs", 201, json!({}));
+        fake.route("POST", "/repos/octo/spec-pr-fail/pulls", 422, json!({ "message": "Validation Failed", "errors": [{ "message": "Draft pull requests are not supported in this repository." }] }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert!(out.starts_with("The spec \"Ship it\" is already published as #8"), "{out}");
+        assert!(out.ends_with(&format!("but the draft spec PR from `spec/8-ship-it` couldn't be opened: GitHub 422: Validation Failed (Draft pull requests are not supported in this repository.). {retry}")), "{out}");
+
+        // The branch exists now: only the PR is made.
+        fake.route("GET", "/repos/octo/spec-pr-fail/git/ref/heads/spec/8-ship-it", 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("POST", "/repos/octo/spec-pr-fail/pulls", 201, json!({ "number": 9 }));
+        let out = publish(&st, &a, "Ship it").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/8-ship-it`. Spec PR (draft, to the default branch): https://github.com/octo/spec-pr-fail/pull/9"), "{out}");
+
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "issues").len(), 1, "never a second spec");
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "git/refs").len(), 2, "one refused, one created");
+        assert_eq!(posts(&fake, "octo/spec-pr-fail", "pulls").len(), 2, "one refused, one opened");
+    }
+
+    #[tokio::test]
+    async fn a_spec_pr_opened_but_never_recorded_is_adopted() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "spec-pr-lost", Some("git@github.com:octo/spec-pr-lost.git"));
+        repo(&fake, "octo/spec-pr-lost", &["spec", "ready-for-agent"], 4);
+        fake.route("GET", "/repos/octo/spec-pr-lost/git/ref/heads/spec/4-lost", 200, json!({ "object": { "sha": "start-sha" } }));
+        fake.route("GET", "/repos/octo/spec-pr-lost/pulls", 200, json!([{ "number": 77 }]));
+
+        let out = publish(&st, &a, "Lost").await.unwrap();
+        assert!(out.ends_with("https://github.com/octo/spec-pr-lost/pull/77"), "{out}");
+        assert_eq!(fake.seen("/repos/octo/spec-pr-lost/pulls?").iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), ["/repos/octo/spec-pr-lost/pulls?head=octo:spec/4-lost&state=all"]);
+        assert!(posts(&fake, "octo/spec-pr-lost", "pulls").is_empty() && posts(&fake, "octo/spec-pr-lost", "git/refs").is_empty());
     }
 
     #[tokio::test]
@@ -736,6 +1352,408 @@ pub(crate) mod tests {
         assert!(posts(&fake, "octo/spec-bad-token", "issues").is_empty());
     }
 
+    /// Ticket #n on `slug` as GitHub gives it.
+    fn gh_ticket(slug: &str, n: i64, state: &str, body: &str) -> Value {
+        json!({
+            "number": n, "id": n * 100, "title": format!("Ticket {n}"), "body": body, "state": state, "state_reason": if state == "closed" { json!("completed") } else { Value::Null },
+            "labels": [{ "name": "ready-for-agent" }], "html_url": format!("https://github.com/{slug}/issues/{n}"), "updated_at": format!("2026-10-31T00:00:0{}Z", if state == "closed" { 1 } else { 0 }),
+        })
+    }
+
+    /// What closing a ticket whose reviewers all passed does, as `a`'s work.
+    async fn close(st: &AppState, a: &Agent, n: i64, commits: &[&str]) -> Result<String, String> {
+        let slug = github_home(st, a).await?;
+        let commits = commits_in(&json!({ "commits": commits }))?;
+        close_ticket(st, &a.project, a, &slug, n, &commits).await
+    }
+
+    #[tokio::test]
+    async fn close_ticket_comments_the_commits_and_spec_pr_then_closes_it_completed() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-one";
+        let a = planner_on(&st, "close-one", Some("git@github.com:octo/close-one.git"));
+        let body = "## What to build\n\nStore.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/octo/close-one/pull/500.";
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", body));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "state": "open", "draft": false }));
+        // Its Loft issue is being worked on, which a close from GitHub alone would leave open.
+        let (mut t, _) = crate::mirror::bring_in(&st, "close-one", slug, &gh_ticket(slug, 41, "open", body)).unwrap();
+        t.status = "in_progress".into();
+        st.db.save_task(&t).unwrap();
+
+        let out = close(&st, &a, 41, &["ABC1234def5678abc1234def5678abc1234def56", "def5678"]).await.unwrap();
+        assert_eq!(out, "Closed #41 as completed with the comment \"Done in `abc1234`, `def5678`, part of #500.\": https://github.com/octo/close-one/issues/41");
+        assert_eq!(posts(&fake, slug, "issues/41/comments"), [json!({ "body": "Done in `abc1234`, `def5678`, part of #500." })]);
+        let patched: Vec<Value> = fake.seen(&format!("/repos/{slug}/issues/41")).into_iter().filter(|s| s.method == "PATCH").map(|s| s.body).collect();
+        assert_eq!(patched, [json!({ "state": "closed", "state_reason": "completed" })]);
+        let t = st.db.get_task(&t.id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.github.unwrap().state.as_str()), ("done", "closed"));
+    }
+
+    /// Spec #40 on the fake: its draft spec PR #500 and tickets #41 and #42, both open, ready to close.
+    /// Spec #40's Delivery: spec PR #500 on `spec/40-rounds`, tickets #41 and #42.
+    fn delivery_40(st: &AppState, slug: &str) {
+        crate::delivery::record_spec(st, slug, 40, "", "", "spec/40-rounds");
+        crate::delivery::update(st, slug, 40, |d| d.pr = Some(500));
+        for n in [41, 42] {
+            crate::delivery::record_ticket(st, slug, 40, n, "", vec![]);
+        }
+    }
+
+    fn spec_with_tickets(st: &AppState, fake: &Fake, slug: &str) -> String {
+        delivery_40(st, slug);
+        let body = format!("## What to build\n\nX.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/{slug}/pull/500.");
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "body": "Closes #40" }));
+        for n in [41, 42] {
+            fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "open", &body));
+            fake.route("POST", &format!("/repos/{slug}/issues/{n}/comments"), 201, json!({}));
+            fake.route("PATCH", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "closed", &body));
+        }
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        body
+    }
+
+    /// Spec #40's tickets #41, #42… in these states on GitHub only.
+    fn subs_on_github(fake: &Fake, slug: &str, states: &[&str]) {
+        let list: Vec<Value> = states.iter().enumerate().map(|(i, s)| json!({ "number": 41 + i as i64, "state": s })).collect();
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, json!(list));
+    }
+
+    /// Spec #40's tickets #41, #42… in these states, on GitHub and on its Delivery record.
+    fn subs(st: &AppState, fake: &Fake, slug: &str, states: &[&str]) {
+        subs_on_github(fake, slug, states);
+        crate::delivery::update(st, slug, 40, |d| {
+            for (t, s) in d.tickets.iter_mut().zip(states) {
+                t.state = s.to_string();
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_ticket_marks_the_spec_pr_ready_and_not_before() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-last";
+        let a = planner_on(&st, "ready-last", Some("git@github.com:octo/ready-last.git"));
+        spec_with_tickets(&st, &fake, slug);
+
+        subs(&st, &fake, slug, &["closed", "open"]);
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(!out.contains("ready for review"), "{out}");
+        assert!(fake.seen("/graphql").is_empty(), "#42 is still open");
+
+        subs(&st, &fake, slug, &["closed", "closed"]);
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.ends_with("\nIt was the spec's last open ticket: spec PR #500 is now ready for review: https://github.com/octo/ready-last/pull/500"), "{out}");
+        let calls = fake.seen("/graphql");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].body["query"].as_str().unwrap().contains("markPullRequestReadyForReview(input: { pullRequestId: $id })"));
+        assert_eq!(calls[0].body["variables"], json!({ "id": "PR_500" }));
+    }
+
+    #[tokio::test]
+    async fn a_refused_ready_for_review_call_leaves_the_ticket_closed_and_says_so() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-refused";
+        let a = planner_on(&st, "ready-refused", Some("git@github.com:octo/ready-refused.git"));
+        spec_with_tickets(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "closed"]);
+        // GraphQL turns a mutation down with a 200 and `errors`.
+        fake.route("POST", "/graphql", 200, json!({ "errors": [{ "message": "Resource not accessible by integration" }] }));
+
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.ends_with("\nThe ticket is closed, but couldn't mark spec PR #500 ready for review: Resource not accessible by integration."), "{out}");
+        assert!(!out.contains("now ready for review"), "{out}");
+        let patched: Vec<Value> = fake.seen(&format!("/repos/{slug}/issues/42")).into_iter().filter(|s| s.method == "PATCH").map(|s| s.body).collect();
+        assert_eq!(patched, [json!({ "state": "closed", "state_reason": "completed" })]);
+        assert_eq!(fake.seen("/graphql").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_spec_pr_already_ready_or_merged_is_left_alone() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-done";
+        let a = planner_on(&st, "ready-done", Some("git@github.com:octo/ready-done.git"));
+        spec_with_tickets(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "closed"]);
+
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "body": "Closes #40" }));
+        assert!(!close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("ready for review"));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "closed", "merged": true, "draft": false, "body": "Closes #40" }));
+        assert!(!close(&st, &a, 42, &["def5678"]).await.unwrap().contains("ready for review"));
+        assert!(fake.seen("/graphql").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_last_ticket_closed_on_github_by_hand_readies_the_spec_pr_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-hand";
+        planner_on(&st, "ready-hand", Some("git@github.com:octo/ready-hand.git"));
+        let body = spec_with_tickets(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "open"]);
+        let mut spec = gh_ticket(slug, 40, "open", "Spec.");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([spec.clone(), gh_ticket(slug, 42, "open", &body)])),
+            // #42, the last open ticket, closed by hand on GitHub.
+            (200, json!([gh_ticket(slug, 42, "closed", &body)])),
+            (200, json!([gh_ticket(slug, 42, "closed", &body)])),
+        ]);
+
+        crate::mirror::sync_project(&st, "ready-hand", true).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty(), "nothing closed yet");
+        // The poll sees #42 closed and notes it on the record itself.
+        subs_on_github(&fake, slug, &["closed", "closed"]);
+        crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1, "the last ticket closed: the PR is ready");
+        assert_eq!(fake.seen("/graphql")[0].body["variables"], json!({ "id": "PR_500" }));
+        // Seeing it closed again isn't a new close.
+        crate::mirror::sync_project(&st, "ready-hand", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_migrated_delivery_asks_github_whether_its_tickets_are_closed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-migrated";
+        planner_on(&st, "ready-migrated", Some("git@github.com:octo/ready-migrated.git"));
+        let body = spec_with_tickets(&st, &fake, slug);
+        // As migrated from a spec PR recorded before Deliveries: every ticket "open" on the record, though
+        // #41 closed long ago.
+        crate::delivery::update(&st, slug, 40, |d| d.migrated = true);
+        subs_on_github(&fake, slug, &["closed", "open"]);
+        let mut spec = gh_ticket(slug, 40, "open", "Spec.");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([spec.clone(), gh_ticket(slug, 42, "open", &body)])),
+            (200, json!([gh_ticket(slug, 42, "closed", &body)])),
+        ]);
+        crate::mirror::sync_project(&st, "ready-migrated", true).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty(), "#42 is still open on GitHub");
+
+        // #42 closed by hand between polls: GitHub says both are closed now.
+        subs_on_github(&fake, slug, &["closed", "closed"]);
+        crate::mirror::sync_project(&st, "ready-migrated", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.tickets[0].state.as_str()), ("ready", "open"), "#41's state on the record didn't matter");
+    }
+
+    /// Spec #40's draft spec PR #500 recorded as Loft's, on a repo whose issue list is empty.
+    fn recorded_spec_pr(st: &AppState, fake: &Fake, slug: &str) {
+        delivery_40(st, slug);
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_failed_ready_call_is_retried_on_the_next_poll() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-retry";
+        let a = planner_on(&st, "ready-retry", Some("git@github.com:octo/ready-retry.git"));
+        spec_with_tickets(&st, &fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "open"]);
+        crate::mirror::sync_project(&st, "ready-retry", true).await.unwrap();
+
+        subs(&st, &fake, slug, &["closed", "closed"]);
+        fake.in_turn("POST", "/graphql", vec![
+            (502, json!({ "message": "Server Error" })),
+            (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } })),
+        ]);
+        let out = close(&st, &a, 42, &["def5678"]).await.unwrap();
+        assert!(out.contains("couldn't mark spec PR #500 ready for review"), "{out}");
+
+        // A change poll, not a full read: the failed call alone brings it back.
+        crate::mirror::sync_project(&st, "ready-retry", false).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 2, "retried and done");
+        crate::mirror::sync_project(&st, "ready-retry", false).await.unwrap();
+        crate::mirror::sync_project(&st, "ready-retry", true).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 2, "a ready PR isn't asked again");
+    }
+
+    #[tokio::test]
+    async fn a_full_read_readies_a_spec_pr_whose_last_close_loft_missed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-missed";
+        planner_on(&st, "ready-missed", Some("git@github.com:octo/ready-missed.git"));
+        spec_with_tickets(&st, &fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        // Every ticket closed while Loft was down.
+        subs(&st, &fake, slug, &["closed", "closed"]);
+
+        crate::mirror::sync_project(&st, "ready-missed", true).await.unwrap();
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(fake.seen("/graphql")[0].body["variables"], json!({ "id": "PR_500" }));
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_leaves_ready_merged_and_closed_spec_prs_alone() {
+        for (i, pr) in [json!({ "state": "open", "draft": false }), json!({ "state": "closed", "merged": true, "draft": false }), json!({ "state": "closed", "draft": true })].into_iter().enumerate() {
+            let st = state();
+            let fake = own_fake(&st);
+            let (name, slug) = (format!("ready-settled-{i}"), format!("octo/ready-settled-{i}"));
+            planner_on(&st, &name, Some(&format!("git@github.com:{slug}.git")));
+            spec_with_tickets(&st, &fake, &slug);
+            recorded_spec_pr(&st, &fake, &slug);
+            subs(&st, &fake, &slug, &["closed", "closed"]);
+            fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "body": "Closes #40", "state": pr["state"], "draft": pr["draft"] }));
+
+            crate::mirror::sync_project(&st, &name, true).await.unwrap();
+            crate::mirror::sync_project(&st, &name, true).await.unwrap();
+            assert!(fake.seen("/graphql").is_empty(), "{pr}");
+            assert_eq!(fake.seen(&format!("/repos/{slug}/pulls/500")).len(), 1, "settled after one look: {pr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_skips_a_spec_with_an_open_ticket() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-open";
+        planner_on(&st, "ready-open", Some("git@github.com:octo/ready-open.git"));
+        spec_with_tickets(&st, &fake, slug);
+        recorded_spec_pr(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "open"]);
+
+        crate::mirror::sync_project(&st, "ready-open", true).await.unwrap();
+        crate::mirror::sync_project(&st, "ready-open", false).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty());
+        // The record says #42 is open: neither a full read nor a change poll asks GitHub (#197).
+        assert!(fake.seen("/repos/octo/ready-open/pulls/500").is_empty());
+        assert!(fake.seen("/repos/octo/ready-open/issues/40/sub_issues").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_skips_a_spec_with_no_tickets_yet() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-none";
+        planner_on(&st, "ready-none", Some("git@github.com:octo/ready-none.git"));
+        // A spec published with its PR, before its tickets.
+        crate::delivery::record_spec(&st, slug, 40, "", "", "");
+        crate::delivery::update(&st, slug, 40, |d| d.pr = Some(500));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        subs(&st, &fake, slug, &[]);
+
+        crate::mirror::sync_project(&st, "ready-none", true).await.unwrap();
+        assert!(fake.seen(&format!("/repos/{slug}/pulls/500")).is_empty(), "a full read doesn't ask GitHub (#237)");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).is_empty());
+
+        // A call that failed is still retried.
+        crate::delivery::update(&st, slug, 40, |d| d.ready_retry = true);
+        crate::mirror::sync_project(&st, "ready-none", false).await.unwrap();
+        assert_eq!(fake.seen(&format!("/repos/{slug}/pulls/500")).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_ticket_turns_down_what_isnt_an_open_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-no";
+        let a = planner_on(&st, "close-no", Some("git@github.com:octo/close-no.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/1"), 200, gh_ticket(slug, 1, "closed", ""));
+        let mut pr = gh_ticket(slug, 2, "open", "");
+        pr["pull_request"] = json!({});
+        fake.route("GET", &format!("/repos/{slug}/issues/2"), 200, pr);
+        let mut spec = gh_ticket(slug, 3, "open", "");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        fake.route("GET", &format!("/repos/{slug}/issues/3"), 200, spec);
+
+        assert_eq!(close(&st, &a, 1, &["abc1234"]).await.unwrap_err(), "#1 on octo/close-no is already closed: nothing was done.");
+        assert_eq!(close(&st, &a, 2, &["abc1234"]).await.unwrap_err(), "#2 on octo/close-no isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed.");
+        assert_eq!(close(&st, &a, 3, &["abc1234"]).await.unwrap_err(), "#3 on octo/close-no isn't a ticket (an issue labelled `ready-for-agent`), so it wasn't closed.");
+        assert!(close(&st, &a, 9, &["abc1234"]).await.unwrap_err().starts_with("Couldn't read #9 on octo/close-no: GitHub 404"));
+        assert!(fake.seen(&format!("/repos/{slug}")).iter().all(|s| s.method == "GET"), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_close_ticket_retry_after_a_failed_close_comments_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-retry";
+        let a = planner_on(&st, "close-retry", Some("git@github.com:octo/close-retry.git"));
+        // A standalone ticket: no Branch section, so no spec PR in the comment.
+        fake.route("GET", &format!("/repos/{slug}/issues/5"), 200, gh_ticket(slug, 5, "open", "## What to build\n\nBlue."));
+        fake.route("POST", &format!("/repos/{slug}/issues/5/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/5"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 5, "closed", ""))]);
+
+        let err = close(&st, &a, 5, &["abc1234"]).await.unwrap_err();
+        assert_eq!(err, "Commented on #5 but couldn't close it: GitHub 502: Server Error. Loft tries the close again on its next poll.");
+        assert!(close(&st, &a, 5, &["abc1234"]).await.unwrap().starts_with("Closed #5 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/5/comments").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closed_reopened_and_closed_again_gets_a_second_comment() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-reopen";
+        let a = planner_on(&st, "close-reopen", Some("git@github.com:octo/close-reopen.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/6"), 200, gh_ticket(slug, 6, "open", "## What to build\n\nGreen."));
+        fake.route("POST", &format!("/repos/{slug}/issues/6/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/6"), 200, gh_ticket(slug, 6, "closed", ""));
+
+        assert!(close(&st, &a, 6, &["abc1234"]).await.unwrap().starts_with("Closed #6 as completed with the comment \"Done in `abc1234`.\""));
+        // Reopened on GitHub (the fake still serves it open), fixed, and closed again, even with the same commits.
+        let out = close(&st, &a, 6, &["def5678"]).await.unwrap();
+        assert!(out.starts_with("Closed #6 as completed with the comment \"Done in `def5678`.\""), "{out}");
+        assert!(close(&st, &a, 6, &["def5678"]).await.unwrap().starts_with("Closed #6 as completed with the comment \"Done in `def5678`.\""));
+        assert_eq!(posts(&fake, slug, "issues/6/comments"), [json!({ "body": "Done in `abc1234`." }), json!({ "body": "Done in `def5678`." }), json!({ "body": "Done in `def5678`." })]);
+    }
+
+    #[tokio::test]
+    async fn a_retry_with_other_commits_after_a_failed_close_comments_what_it_says() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-other";
+        let a = planner_on(&st, "close-other", Some("git@github.com:octo/close-other.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/7"), 200, gh_ticket(slug, 7, "open", "## What to build\n\nRed."));
+        fake.route("POST", &format!("/repos/{slug}/issues/7/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/7"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 7, "closed", ""))]);
+
+        close(&st, &a, 7, &["abc1234"]).await.unwrap_err();
+        let out = close(&st, &a, 7, &["abc1234", "def5678"]).await.unwrap();
+        assert!(out.starts_with("Closed #7 as completed with the comment \"Done in `abc1234`, `def5678`.\""), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/7/comments"), [json!({ "body": "Done in `abc1234`." }), json!({ "body": "Done in `abc1234`, `def5678`." })]);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_a_reopen_comments_whatever_earlier_tries_left() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-stale";
+        let a = planner_on(&st, "close-stale", Some("git@github.com:octo/close-stale.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/8"), 200, gh_ticket(slug, 8, "open", "## What to build\n\nPink."));
+        fake.route("POST", &format!("/repos/{slug}/issues/8/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/8"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 8, "closed", ""))]);
+
+        // Fails with abc, succeeds with abc and def, then reopened and closed with abc alone.
+        close(&st, &a, 8, &["abc1234"]).await.unwrap_err();
+        close(&st, &a, 8, &["abc1234", "def5678"]).await.unwrap();
+        assert!(close(&st, &a, 8, &["abc1234"]).await.unwrap().starts_with("Closed #8 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/8/comments").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_a_failed_close_and_a_close_by_hand_comments_again() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/close-hand";
+        let a = planner_on(&st, "close-hand", Some("git@github.com:octo/close-hand.git"));
+        fake.route("GET", &format!("/repos/{slug}/issues/9"), 200, gh_ticket(slug, 9, "open", "## What to build\n\nGrey."));
+        fake.route("POST", &format!("/repos/{slug}/issues/9/comments"), 201, json!({}));
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/9"), vec![(502, json!({ "message": "Server Error" })), (200, gh_ticket(slug, 9, "closed", ""))]);
+
+        close(&st, &a, 9, &["abc1234"]).await.unwrap_err();
+        // Closed by hand on GitHub after that, then reopened: GitHub keeps the last close's time.
+        let mut reopened = gh_ticket(slug, 9, "open", "## What to build\n\nGrey.");
+        reopened["closed_at"] = json!(crate::db::now());
+        fake.route("GET", &format!("/repos/{slug}/issues/9"), 200, reopened);
+        assert!(close(&st, &a, 9, &["abc1234"]).await.unwrap().starts_with("Closed #9 as completed with the comment \"Done in `abc1234`.\""));
+        assert_eq!(posts(&fake, slug, "issues/9/comments").len(), 2);
+    }
+
     #[test]
     fn the_planning_prompt_offers_the_spec_and_asks_the_seams() {
         let p = crate::grill::brief();
@@ -819,7 +1837,9 @@ pub(crate) mod tests {
         assert_eq!(card["repo"], "");
         assert_eq!(card["spec"], json!({ "number": 0, "title": "Offline mode", "url": format!("/tasks/{}", spec.id) }));
         assert_eq!(card["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect::<Vec<_>>()[..3], [format!("/tasks/{}", store.id), format!("/tasks/{}", ui.id), format!("/tasks/{}", sync.id)]);
-        assert_eq!(card["next_message"], "Implement the plan: hand its ready Loft issues to the team");
+        // Its Delivery, started from the card like a spec on GitHub.
+        let d = crate::delivery::local_of(&st, &a.project, &spec.id).unwrap();
+        assert_eq!((&card["next_message"], &card["delivery"]), (&json!(""), &json!({ "repo": d.repo, "spec": d.spec, "local": true })));
         assert!(fake.seen("/").is_empty(), "no GitHub request at all: {:?}", fake.seen("/"));
     }
 
@@ -937,6 +1957,59 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn tickets_under_a_spec_with_a_spec_pr_say_which_branch_they_go_on() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-branch";
+        let a = planner_on(&st, "tickets-branch", Some("git@github.com:octo/tickets-branch.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 40);
+        publish(&st, &a, "Rounds").await.unwrap();
+        tickets_repo(&fake, slug, 40, &[41, 42]);
+        // The branch comes from the Delivery: a read of the spec PR would fail the publish.
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 502, json!({ "message": "Server Error" }));
+
+        // A body that already has a Branch section gets Loft's in its place, at the end.
+        let stale = json!({ "title": "API", "body": "## What to build\n\nAPI.\n\n## Branch\n\nmain\n\n## Acceptance criteria\n\n- [ ] Works", "blocked_by": ["Store"] });
+        publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[]), stale.clone()]).await.unwrap();
+        let section = "## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/octo/tickets-branch/pull/500.";
+        let bodies: Vec<Value> = posts(&fake, slug, "issues").into_iter().skip(1).map(|i| i["body"].clone()).collect();
+        assert_eq!(bodies, [
+            json!(format!("## What to build\n\nStore.\n\n{section}")),
+            json!(format!("## What to build\n\nAPI.\n\n## Acceptance criteria\n\n- [ ] Works\n\n{section}")),
+        ]);
+
+        // The retry leaves the published tickets as they are.
+        let again = publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[]), stale]).await.unwrap();
+        assert!(again.contains("Nothing new was created"), "{again}");
+        assert_eq!(posts(&fake, slug, "issues").len(), 3, "the spec and two tickets");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/4")).iter().all(|s| s.method != "PATCH"), "no ticket is edited");
+    }
+
+    #[tokio::test]
+    async fn a_migrated_delivery_reads_its_branch_from_github_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/tickets-no-pr";
+        let a = planner_on(&st, "tickets-no-pr", Some("git@github.com:octo/tickets-no-pr.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 40);
+        publish(&st, &a, "Rounds").await.unwrap();
+        tickets_repo(&fake, slug, 40, &[41, 42]);
+        // As migrated from a spec PR recorded before Deliveries: no branch.
+        crate::delivery::update(&st, slug, 40, |d| d.branch.clear());
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 502, json!({ "message": "Server Error" }));
+
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[])]).await.unwrap_err();
+        assert_eq!(err, "Couldn't read spec PR #500 on octo/tickets-no-pr for its branch: GitHub 502: Server Error");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1, "no ticket goes up without its branch");
+
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "head": { "ref": "spec/40-old-name" } }));
+        publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[])]).await.unwrap();
+        // Kept on the Delivery: the next publish doesn't read it again.
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 502, json!({ "message": "Server Error" }));
+        publish_tickets(&st, &a, Some(40), vec![ticket("API", &[])]).await.unwrap();
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().branch, "spec/40-old-name");
+        assert!(posts(&fake, slug, "issues")[2]["body"].as_str().unwrap().contains("`spec/40-old-name`"));
+    }
+
+    #[tokio::test]
     async fn a_retry_after_a_partial_failure_creates_nothing_twice() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/tickets-partial";
@@ -1022,6 +2095,7 @@ pub(crate) mod tests {
         assert_eq!(out, "Published a standalone ticket, labelled `ready-for-agent` and assigned to octo-me:\n- #5 Blue button: https://github.com/octo/tickets-alone/issues/5");
         assert_eq!(posts(&fake, slug, "labels").len(), 2, "missing labels are created");
         assert_eq!(posts(&fake, slug, "issues")[0]["labels"], json!(["ready-for-agent"]));
+        assert_eq!(posts(&fake, slug, "issues")[0]["body"], "## What to build\n\nBlue button.", "no Branch section");
         assert!(fake.seen(&format!("/repos/{slug}/issues/")).is_empty(), "no parent, no links");
         assert!(fake.seen(&format!("/repos/{slug}/issues?labels=ready-for-agent&state=open")).len() == 1);
 
@@ -1091,6 +2165,23 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn no_system_prompt_carries_the_implementation_rules() {
+        let st = state();
+        // Whatever its role: the rules come only with a Delivery wake, in its role's brief.
+        for role in ["dev", "qa", "security", "code_reviewer", "lead", "custom"] {
+            let mut a = crate::tasks::tests::agent(&st, role);
+            a.role = role.into();
+            let p = crate::agents::system_prompt(&st, &a);
+            for gone in ["# Planning: implementation", "submit_ticket", "review_ticket", "Refs #", "spec branch", "`ticket/<N>-<slug>`", "and on how a ticket is implemented"] {
+                assert!(!p.contains(gone), "{role}'s prompt still has {gone:?}");
+            }
+            assert!(p.contains("override your standing instructions on how specs and tickets are written, labelled, linked and published"));
+            assert!(p.contains("When Loft wakes you for a step of a Delivery, the wake brings your role's brief and says what your instructions can add to it."));
+        }
+        assert!(crate::grill::prompt_section().len() < 2000, "{} bytes", crate::grill::prompt_section().len());
+    }
+
     #[tokio::test]
     async fn the_planning_guide_gives_the_spec_and_ticket_templates() {
         let st = state();
@@ -1110,10 +2201,12 @@ pub(crate) mod tests {
         let slug = "octo/card-team";
         let a = planner_on(&st, "card-team", Some("git@github.com:octo/card-team.git"));
         tickets_repo(&fake, slug, 40, &[40, 41, 42]);
-        // The team has a reviewer but no developer.
-        let mut rev = crate::tasks::tests::agent(&st, "Checker");
-        (rev.project, rev.role) = ("card-team".into(), "reviewer".into());
-        st.db.save_agent(&rev).unwrap();
+        // The team has reviewers but no developer.
+        for (name, role) in [("Checker", "code_reviewer"), ("Tester", "qa"), ("Guard", "security")] {
+            let mut rev = crate::tasks::tests::agent(&st, name);
+            (rev.project, rev.role) = ("card-team".into(), role.into());
+            st.db.save_agent(&rev).unwrap();
+        }
 
         crate::grill::tests::round(&st, &a, &["Turn this into a spec and tickets?"]).unwrap();
         crate::grill::tests::send(&st, &a).unwrap();
@@ -1134,7 +2227,8 @@ pub(crate) mod tests {
                 { "number": 41, "title": "Store", "url": "https://github.com/octo/card-team/issues/41" },
                 { "number": 42, "title": "API", "url": "https://github.com/octo/card-team/issues/42" },
             ],
-            "next_message": "Implement spec #40: hand the ready tickets to the team",
+            "next_message": "",
+            "delivery": { "repo": slug, "spec": 40 },
             "missing_roles": ["dev"],
             "setup": {
                 "agent_id": "loft",
@@ -1220,11 +2314,1350 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_setup_message_names_every_missing_role() {
+        let (fake, st) = (fake_github(), state());
+        for (project, n, team, roles, text) in [
+            ("card-empty", 11, &[][..], json!(["dev", "code_reviewer", "qa", "security"]), "no Dev, Code reviewer, QA or Security yet"),
+            ("card-qa", 12, &["qa"][..], json!(["dev", "code_reviewer", "security"]), "no Dev, Code reviewer or Security yet"),
+            ("card-two", 13, &["dev", "qa"][..], json!(["code_reviewer", "security"]), "no Code reviewer or Security yet"),
+        ] {
+            let a = planner_on(&st, project, Some(&format!("git@github.com:octo/{project}.git")));
+            tickets_repo(&fake, &format!("octo/{project}"), n, &[n]);
+            for role in team {
+                let mut x = crate::tasks::tests::agent(&st, role);
+                (x.project, x.role) = (project.into(), role.to_string());
+                st.db.save_agent(&x).unwrap();
+            }
+            crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+            crate::grill::tests::send(&st, &a).unwrap();
+            publish(&st, &a, "Roles").await.unwrap();
+            crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+            let card = &summary(&st, &a).meta["grill"]["end_card"];
+            assert_eq!(card["missing_roles"], roles, "{project}");
+            assert_eq!(
+                card["setup"]["message"],
+                format!("Set up the team for the {project} project: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve.", a.name),
+            );
+        }
+    }
+
+    /// A grill on `name` that published spec #40 (PR #500 on `spec/40-rounds`) and these tickets as #41,
+    /// #42… in publishing order, ended with its card. The planner and the card's message.
+    async fn planned(st: &AppState, fake: &Fake, name: &str, tickets: Vec<Value>) -> (Agent, crate::db::Message) {
+        let slug = format!("octo/{name}");
+        let a = planner_on(st, name, Some(&format!("git@github.com:{slug}.git")));
+        let numbers: Vec<i64> = (0..tickets.len() as i64).map(|i| 41 + i).collect();
+        tickets_repo(fake, &slug, 40, &[&[40][..], &numbers].concat());
+        // The mirror's catch-up after publishing finds the spec PR still a draft.
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        for n in &numbers {
+            fake.route("POST", &format!("/repos/{slug}/issues/{n}/labels"), 200, json!([{ "name": "in-progress" }]));
+        }
+        crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish(st, &a, "Rounds").await.unwrap();
+        publish_tickets(st, &a, Some(40), tickets).await.unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let m = summary(st, &a);
+        (a, m)
+    }
+
+    /// An agent in `project` with `role`, busy, so a wake waits in its queue instead of starting claude.
+    fn busy(st: &AppState, name: &str, project: &str, role: &str) -> Agent {
+        let mut x = crate::tasks::tests::agent(st, name);
+        (x.project, x.role) = (project.into(), role.into());
+        st.db.save_agent(&x).unwrap();
+        st.rt.lock().unwrap().running.insert(x.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        x
+    }
+
+    fn woken(st: &AppState, a: &Agent) -> Vec<String> {
+        st.rt.lock().unwrap().queued.get(&a.id).cloned().unwrap_or_default()
+    }
+
+    async fn press(st: &AppState, a: &Agent, m: &crate::db::Message) -> Result<Value, crate::api::ApiError> {
+        press_with(st, a, m, json!({})).await
+    }
+
+    /// Start delivery with these query parameters (`init_git`).
+    async fn press_with(st: &AppState, a: &Agent, m: &crate::db::Message, q: Value) -> Result<Value, crate::api::ApiError> {
+        let q = axum::extract::Query(serde_json::from_value(q).unwrap());
+        crate::delivery::start_from_card(State(st.clone()), Path((a.id.clone(), m.id)), q).await.map(|j| j.0)
+    }
+
+    #[tokio::test]
+    async fn publishing_a_spec_and_its_tickets_records_the_delivery() {
+        let (fake, st) = (fake_github(), state());
+        let (a, _) = planned(&st, &fake, "dl-record", vec![ticket("Store", &[]), ticket("API", &["Store"]), ticket("UI", &["API", "Store"])]).await;
+        let d = st.db.get_delivery("octo/dl-record", 40).unwrap().unwrap();
+        assert_eq!(
+            (d.project.as_str(), d.planner.as_str(), d.branch.as_str(), d.pr, d.state.as_str(), d.current),
+            ("dl-record", a.id.as_str(), "spec/40-rounds", Some(500), "planned", None)
+        );
+        let ts: Vec<_> = d.tickets.iter().map(|t| (t.number, t.title.as_str(), t.blocked_by.clone(), t.state.as_str())).collect();
+        assert_eq!(ts, [(41, "Store", vec![], "open"), (42, "API", vec![41], "open"), (43, "UI", vec![42, 41], "open")]);
+        // A retry adds nothing.
+        publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[])]).await.unwrap();
+        assert_eq!(st.db.get_delivery("octo/dl-record", 40).unwrap().unwrap().tickets.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn start_delivery_wakes_the_dev_on_the_first_unblocked_ticket_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-start";
+        let (a, m) = planned(&st, &fake, "dl-start", vec![ticket("API", &["Store"]), ticket("Store", &[])]).await;
+        assert_eq!(m.meta["grill"]["end_card"]["delivery"], json!({ "repo": slug, "spec": 40 }));
+        let dev = busy(&st, "Builder", "dl-start", "dev");
+        busy(&st, "Builder elsewhere", "other", "dev");
+        let planner_queue = woken(&st, &a).len();
+
+        let v = press(&st, &a, &m).await.unwrap();
+        assert_eq!(v["duplicate"], false);
+        // Store (#41) blocks API (#42), so it goes first: labelled, and the Dev woken with the Dev brief.
+        assert_eq!(posts(&fake, slug, "issues/41/labels"), [json!({ "labels": ["in-progress"] })]);
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 1, "{w:?}");
+        for want in [
+            "[Loft Delivery: spec #40] This is not a message from the user. You are the Dev on this Delivery: build ticket #41 \"Store\" (https://github.com/octo/dl-start/issues/41).",
+            "Work on the spec branch `spec/40-rounds`: pull it, commit there and push. Open no PR: the spec PR https://github.com/octo/dl-start/pull/500 is the spec's only one.",
+            "each message ending with `Refs #41`",
+            "Your own instructions can add anything to this brief, like how to build and check the work in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges.",
+        ] {
+            assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
+        }
+        assert_eq!(woken(&st, &a).len(), planner_queue, "the planner isn't woken when the team has a Dev");
+        let started = &v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"];
+        assert_eq!((&started["ticket"], &started["agent_name"]), (&json!(41), &json!("Builder")));
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.current, d.tickets[0].state.as_str()), ("running", Some(41), "started"));
+
+        // Pressed again (or on another device): nothing new starts, and the card still says who has it.
+        let again = press(&st, &a, &m).await.unwrap();
+        assert_eq!(again["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), 1);
+        assert_eq!(posts(&fake, slug, "issues/41/labels").len(), 1);
+        assert_eq!(again["message"]["meta"]["grill"]["end_card"]["delivery"]["started"], *started);
+    }
+
+    #[tokio::test]
+    async fn without_a_dev_the_planner_builds_and_a_closed_blocker_frees_the_next_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-solo";
+        let (a, m) = planned(&st, &fake, "dl-solo", vec![ticket("Store", &[]), ticket("API", &["Store"])]).await;
+        // Its grill run ends first, so the wake below waits in its queue.
+        for _ in 0..200 {
+            if !crate::agents::is_running(&st, &a.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        busy(&st, "Reviewer", "dl-solo", "code_reviewer");
+        // #41 is already done: #42, which it blocked, is next.
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "closed".into());
+
+        press(&st, &a, &m).await.unwrap();
+        let w = woken(&st, &a);
+        assert!(w.last().is_some_and(|p| p.contains("You are the Dev on this Delivery: build ticket #42 \"API\"")), "{w:?}");
+        assert_eq!(posts(&fake, slug, "issues/42/labels").len(), 1);
+        assert!(posts(&fake, slug, "issues/41/labels").is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_delivery_fails_cleanly_when_github_refuses_the_label_or_nothing_is_ready() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-fail";
+        let (a, m) = planned(&st, &fake, "dl-fail", vec![ticket("Store", &[])]).await;
+        let dev = busy(&st, "Builder", "dl-fail", "dev");
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 502, json!({ "message": "Server Error" }));
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert!(err.1.starts_with("The Delivery didn't start. Couldn't label #41 `in-progress`: GitHub 502"), "{}", err.1);
+        assert!(woken(&st, &dev).is_empty());
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "planned", "a later press can still start it");
+
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].blocked_by = vec![99]);
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert!(err.1.contains("has no ticket ready to start"), "{}", err.1);
+    }
+
+    /// Where a Delivery stands on ticket #n: its state, the current ticket, and the next one to start.
+    fn standing(st: &AppState, slug: &str, n: i64) -> (String, Option<i64>, Option<i64>) {
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        let t = d.ticket(n).unwrap().state.clone();
+        (t, d.current, crate::delivery::next_ticket(&d).map(|t| t.number))
+    }
+
+    #[tokio::test]
+    async fn close_ticket_closes_the_ticket_on_its_delivery_and_frees_the_one_it_blocked() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-close";
+        let (a, m) = planned(&st, &fake, "dl-close", vec![ticket("Store", &[]), ticket("API", &["Store"])]).await;
+        busy(&st, "Builder", "dl-close", "dev");
+        press(&st, &a, &m).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("started".into(), Some(41), None), "#42 waits for #41");
+
+        // No "## Branch" section: the spec PR comes from the Delivery.
+        let body = "## What to build\n\nStore.";
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", body));
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(out.contains("\"Done in `abc1234`, part of #500.\""), "{out}");
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+    }
+
+    #[tokio::test]
+    async fn a_ticket_closed_by_hand_on_github_closes_on_its_delivery() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/dl-hand";
+        planner_on(&st, "dl-hand", Some("git@github.com:octo/dl-hand.git"));
+        delivery_40(&st, slug);
+        crate::delivery::update(&st, slug, 40, |d| {
+            (d.state, d.current) = ("running".into(), Some(41));
+            d.tickets[0].state = "started".into();
+            d.tickets[1].blocked_by = vec![41];
+        });
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        let body = "## What to build\n\nStore.";
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([gh_ticket(slug, 41, "open", body), gh_ticket(slug, 42, "open", body)])),
+            (200, json!([gh_ticket(slug, 41, "closed", body)])),
+        ]);
+        crate::mirror::sync_project(&st, "dl-hand", true).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("started".into(), Some(41), None));
+        crate::mirror::sync_project(&st, "dl-hand", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+        assert!(fake.seen("/graphql").is_empty(), "#42 is still open: the spec PR stays a draft");
+    }
+
+    #[tokio::test]
+    async fn a_poll_waits_for_a_delivery_step_and_keeps_what_it_wrote() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/dl-race";
+        planner_on(&st, "dl-race", Some("git@github.com:octo/dl-race.git"));
+        delivery_40(&st, slug);
+        crate::delivery::update(&st, slug, 40, |d| {
+            (d.state, d.current) = ("running".into(), Some(41));
+            d.tickets[0].state = "started".into();
+            d.tickets[1].blocked_by = vec![41];
+        });
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        let body = "## What to build\n\nStore.";
+        fake.in_turn("GET", &format!("/repos/{slug}/issues"), vec![
+            (200, json!([gh_ticket(slug, 41, "open", body), gh_ticket(slug, 42, "open", body)])),
+            (200, json!([gh_ticket(slug, 41, "closed", body)])),
+        ]);
+        crate::mirror::sync_project(&st, "dl-race", true).await.unwrap();
+
+        // A Delivery step holds the lock (finish closing #41 and starting #42) while the poll sees #41 closed.
+        let held = st.publish_locks.of(slug).lock_owned().await;
+        let poll = tokio::spawn({
+            let st = st.clone();
+            async move { crate::mirror::sync_project(&st, "dl-race", false).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!poll.is_finished(), "the poll waits for the step");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.current, d.tickets[0].state.as_str()), (Some(41), "started"), "the poll hasn't touched the record while the step holds the lock");
+        crate::delivery::update(&st, slug, 40, |d| {
+            d.tickets[0].state = "closed".into();
+            d.tickets[1].state = "started".into();
+            d.current = Some(42);
+        });
+        drop(held);
+        poll.await.unwrap().unwrap();
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), (Some(42), "closed", "started"), "the step's write survives the poll");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_its_delivery_doesnt_list_finds_it_by_its_branch_section() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-fallback";
+        let a = planner_on(&st, "dl-fallback", Some("git@github.com:octo/dl-fallback.git"));
+        // As migrated from before Deliveries with no sub-issue links: the record has no tickets.
+        crate::delivery::record_spec(&st, slug, 40, "", "", "");
+        crate::delivery::update(&st, slug, 40, |d| d.pr = Some(500));
+        let body = format!("## What to build\n\nStore.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/{slug}/pull/500.");
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "open", &body));
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", &body));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        subs(&st, &fake, slug, &["closed"]);
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+
+        let out = close(&st, &a, 41, &["abc1234"]).await.unwrap();
+        assert!(out.contains("part of #500") && out.contains("spec PR #500 is now ready for review"), "{out}");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready", "found by its spec PR");
+    }
+
+    async fn tool(st: &AppState, a: &Agent, name: &str, args: Value) -> Result<String, String> {
+        crate::delivery::mcp_call(st, a, name, &args).await.unwrap()
+    }
+
+    /// A started Delivery on `name`: #41 then #42 (blocked by #41), #41 with the Dev, and the team's other
+    /// `roles`, all busy. What reviewing and closing #41 needs on the fake is routed.
+    async fn building(st: &AppState, fake: &Fake, name: &str, roles: &[&str]) -> (Agent, Vec<Agent>) {
+        let slug = format!("octo/{name}");
+        let (a, m) = planned(st, fake, name, vec![ticket("Store", &[]), ticket("API", &["Store"])]).await;
+        let dev = busy(st, "Builder", name, "dev");
+        let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
+        press(st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments"] {
+            fake.route("POST", &format!("/repos/{slug}/{p}"), 201, json!({}));
+        }
+        fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/changes-requested"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(&slug, 41, "open", "## What to build\n\nStore."));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(&slug, 41, "closed", "## What to build\n\nStore."));
+        (dev, team)
+    }
+
+    fn submit_41() -> Value {
+        json!({ "number": 41, "commits": ["abc1234def", "fed4321abc"] })
+    }
+
+    /// `a` set to Always with a Session, so any ticket boundary clears it.
+    fn always_fresh(st: &AppState, a: &Agent) {
+        st.db.update_agent(&a.id, |a| (a.fresh_context, a.session_id) = ("always".into(), Some("s-ticket".into()))).unwrap();
+    }
+
+    /// Whether the run that takes `a`'s queued wake starts by clearing its context. The agent is busy in these
+    /// tests, so this runs that step by hand. It gets a Session back for the next check.
+    fn cleared_at_next_run(st: &AppState, a: &Agent) -> bool {
+        let n = || st.db.list_messages(&a.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
+        let before = n();
+        crate::agents::fresh_boundary(st, &a.id);
+        st.db.update_agent(&a.id, |a| a.session_id = Some("s-ticket".into())).unwrap();
+        n() > before
+    }
+
+    #[tokio::test]
+    async fn the_dev_keeps_its_context_through_review_rounds_of_a_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "fc-rounds", &["qa"]).await;
+        fake.route("POST", "/repos/octo/fc-rounds/issues/41/labels", 200, json!([]));
+        always_fresh(&st, &dev);
+        // `building` already handed #41 to the Dev: a new ticket for it.
+        assert!(cleared_at_next_run(&st, &dev), "a new ticket");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert!(woken(&st, &dev).last().unwrap().contains("asked for changes on ticket #41"));
+        assert!(!cleared_at_next_run(&st, &dev), "round 2 of #41 needs round 1");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_is_cleared_for_a_new_ticket_but_not_to_review_the_same_one_again() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/fc-reviewer";
+        let (dev, team) = building(&st, &fake, "fc-reviewer", &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        let qa = &team[0];
+        always_fresh(&st, qa);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(cleared_at_next_run(&st, qa), "reviewing #41 for the first time");
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(!cleared_at_next_run(&st, qa), "#41 again");
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["1234567abc"] })).await.unwrap();
+        assert!(cleared_at_next_run(&st, qa), "a new ticket, #42");
+    }
+
+    #[tokio::test]
+    async fn a_lead_building_alone_is_cleared_before_its_first_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "fc-solo", vec![ticket("Store", &[])]).await;
+        for _ in 0..200 {
+            if !crate::agents::is_running(&st, &a.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        // The Lead that ran the grill is the whole team: it builds the tickets.
+        st.db.update_agent(&a.id, |a| a.role = "lead".into()).unwrap();
+        always_fresh(&st, &a);
+        let lead = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!(crate::delivery::fresh_context_applies(&st, &lead));
+        press(&st, &a, &m).await.unwrap();
+        assert!(woken(&st, &a).last().is_some_and(|p| p.contains("build ticket #41")));
+        assert!(cleared_at_next_run(&st, &a), "the grill's context goes before ticket #41");
+    }
+
+    #[tokio::test]
+    async fn submit_wakes_qa_and_security_with_their_briefs() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "rv-submit", &["qa", "security", "code_reviewer"]).await;
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41: qa agent (QA) and security agent (Security) are reviewing it."), "{out}");
+        let (qa, sec, cr) = (woken(&st, &team[0]), woken(&st, &team[1]), woken(&st, &team[2]));
+        assert!(cr.is_empty(), "Code review comes once, at the end of the spec: {cr:?}");
+        assert_eq!((qa.len(), sec.len()), (1, 1));
+        for (w, who) in [(&qa[0], "QA"), (&sec[0], "Security")] {
+            for want in [
+                format!("[Loft Delivery: spec #40] This is not a message from the user. You are {who} on this Delivery: review ticket #41 \"Store\""),
+                "submitted as `abc1234`, `fed4321` on the spec branch `spec/40-rounds` (spec PR https://github.com/octo/rv-submit/pull/500)".into(),
+                "call `mcp__loft__review_ticket` with 41, `verdict` \"pass\" or \"changes\"".into(),
+            ] {
+                assert!(w.contains(&want), "missing {want:?} in {w}");
+            }
+        }
+        assert!(qa[0].contains("acceptance criteria") && sec[0].contains("security problems"));
+        let d = st.db.get_delivery("octo/rv-submit", 40).unwrap().unwrap();
+        assert_eq!((d.tickets[0].state.as_str(), d.tickets[0].commits.len()), ("review", 2));
+        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "qa": "pending", "security": "pending" }));
+    }
+
+    #[tokio::test]
+    async fn a_missing_role_is_skipped_and_a_team_without_reviewers_passes_on_submit() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "rv-qa-only", &["qa"]).await;
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41: qa agent (QA) are reviewing it."), "{out}");
+        assert_eq!(woken(&st, &team[0]).len(), 1);
+        let d = st.db.get_delivery("octo/rv-qa-only", 40).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "qa": "pending" }));
+
+        let (fake, st) = (fake_github(), state());
+        let (dev, _) = building(&st, &fake, "rv-alone", &[]).await;
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("The team has no QA or Security, so it passed as submitted.") && out.contains("Next: #42 is with Builder."), "{out}");
+        assert_eq!(standing(&st, "octo/rv-alone", 41), ("closed".into(), Some(42), None));
+    }
+
+    #[tokio::test]
+    async fn verdicts_go_on_the_pr_and_two_passes_close_the_ticket_and_start_the_next() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-pass";
+        let (dev, team) = building(&st, &fake, "rv-pass", &["qa", "security"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let dev_wakes = woken(&st, &dev).len();
+
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Ran the suite; the table renders." })).await.unwrap();
+        assert_eq!(out, "Posted your pass on #500. #41 waits for its other reviewers.");
+        assert_eq!(posts(&fake, slug, "issues/500/comments"), [json!({ "body": "**QA** (qa agent) passed ticket #41 at `fed4321`.\n\nRan the suite; the table renders." })]);
+        assert_eq!(posts(&fake, slug, "issues/500/labels"), [json!({ "labels": ["qa-passed"] })]);
+        assert_eq!(posts(&fake, slug, "labels")[0]["name"], "qa-passed", "a missing label is created");
+        assert!(posts(&fake, slug, "issues/41/comments").is_empty(), "not closed yet");
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "again" })).await.unwrap_err(), "You already passed #41 in this round: nothing was posted.");
+
+        let out = tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "No input reaches a query." })).await.unwrap();
+        assert!(out.contains("Closed #41 as completed with the comment \"Done in `abc1234`, `fed4321`, part of #500.\"") && out.ends_with("Next: #42 is with Builder."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/labels")[1], json!({ "labels": ["security:passed"] }));
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(posts(&fake, slug, "issues/42/labels"), [json!({ "labels": ["in-progress"] })]);
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), dev_wakes + 1);
+        assert!(w.last().unwrap().contains("build ticket #42 \"API\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn changes_go_back_to_the_dev_and_the_third_round_needs_the_user() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-changes";
+        let (dev, team) = building(&st, &fake, "rv-changes", &["qa", "security"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't waiting for a review: nothing was posted.");
+
+        for round in 1..=3 {
+            tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+            let before = woken(&st, &dev).len();
+            let changes = json!({ "number": 41, "verdict": "changes", "notes": format!("Round {round}: the total is off by one.") });
+            assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": " " })).await.unwrap_err().starts_with("notes are required"));
+            let out = tool(&st, &team[0], "review_ticket", changes).await.unwrap();
+            let posted = posts(&fake, slug, "issues/500/comments");
+            assert_eq!(posted.last().unwrap()["body"], format!("**QA** (qa agent) asks for changes on ticket #41 at `fed4321`.\n\nRound {round}: the total is off by one."));
+            assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+            // Security's review of this round is moot now.
+            assert!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.is_err());
+            if round < 3 {
+                assert!(out.ends_with(&format!("The Dev is fixing #41 (round {round} of 3).")), "{out}");
+                let w = woken(&st, &dev);
+                assert_eq!(w.len(), before + 1);
+                assert!(w.last().unwrap().contains(&format!("qa agent (QA) asked for changes on ticket #41 \"Store\" (round {round} of 3):\n\nRound {round}: the total is off by one.")), "{w:?}");
+                assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` again"));
+            } else {
+                assert!(out.contains("That's round 3 of changes on #41, so it waits for the user now."), "{out}");
+                assert_eq!(woken(&st, &dev).len(), before, "the Dev isn't woken a third time");
+            }
+        }
+        assert_eq!(posts(&fake, slug, "issues/41/labels"), [json!({ "labels": ["in-progress"] }), json!({ "labels": ["needs-human"] })]);
+        assert_eq!(standing(&st, slug, 41).0, "needs_human");
+        assert!(tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err().contains("waiting for the user"));
+        // In Needs you, which is also what pushes it to the phone.
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "task_blocked").unwrap_or_else(|| panic!("{v:#}"));
+        assert!(item["reason"].as_str().unwrap().contains("3 rounds of changes on #41: it needs you."), "{item}");
+    }
+
+    #[tokio::test]
+    async fn only_the_dev_submits_and_only_a_waited_for_reviewer_reviews() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "rv-guard", &["qa", "code_reviewer"]).await;
+        assert_eq!(tool(&st, &team[0], "submit_ticket", submit_41()).await.unwrap_err(), "#41 is with Builder: only the agent building it submits it.");
+        assert_eq!(tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["abc1234"] })).await.unwrap_err(), "#42 can't be submitted: it isn't the ticket being built.");
+        assert!(tool(&st, &dev, "submit_ticket", json!({ "number": 99, "commits": ["abc1234"] })).await.unwrap_err().starts_with("#99 on octo/rv-guard isn't a ticket of a Delivery"));
+        assert_eq!(tool(&st, &dev, "submit_ticket", json!({ "number": 41, "commits": ["main"] })).await.unwrap_err(), "\"main\" isn't a commit SHA: give 7 to 40 hex characters");
+        assert_eq!(tool(&st, &dev, "submit_ticket", json!({ "number": 41, "commits": [] })).await.unwrap_err(), "commits is required: the SHAs of the ticket's commits");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err(), "#41 can't be submitted: it's already submitted and waiting for its reviewers.");
+        assert_eq!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "maybe", "notes": "x" })).await.unwrap_err(), "verdict must be \"pass\" or \"changes\"");
+        // The old tool is gone.
+        let names: Vec<String> = crate::mcp::tools(&st).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"submit_ticket".into()) && names.contains(&"review_ticket".into()) && !names.contains(&"close_ticket".into()), "{names:?}");
+        assert!(mcp_call(&st, &dev, "close_ticket", &json!({ "number": 41, "commits": ["abc1234"] })).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_close_that_fails_after_the_passes_is_retried_by_the_mirror() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rv-retry";
+        let (dev, _) = building(&st, &fake, "rv-retry", &[]).await;
+        fake.in_turn("PATCH", &format!("/repos/{slug}/issues/41"), vec![
+            (502, json!({ "message": "Server Error" })),
+            (200, gh_ticket(slug, 41, "closed", "## What to build\n\nStore.")),
+        ]);
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("#41 passed, but Commented on #41 but couldn't close it"), "{out}");
+        assert_eq!(standing(&st, slug, 41), ("closing".into(), Some(41), None));
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "rv-retry", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(posts(&fake, slug, "issues/41/comments").len(), 1, "the retry doesn't comment twice");
+    }
+
+    #[tokio::test]
+    async fn a_next_start_that_failed_is_retried_by_the_mirror() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rv-next";
+        let (dev, _) = building(&st, &fake, "rv-next", &[]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/42/labels"), 502, json!({ "message": "Server Error" }));
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("#42 is next, but Couldn't label #42 `in-progress`: GitHub 502"), "{out}");
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), None, Some(42)));
+        let before = woken(&st, &dev).len();
+
+        fake.route("POST", &format!("/repos/{slug}/issues/42/labels"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "rv-next", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 42), ("started".into(), Some(42), None));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        assert!(w.last().unwrap().contains("build ticket #42 \"API\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn a_close_whose_answer_was_lost_counts_as_closed_on_the_retry() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rv-lost";
+        let (dev, _) = building(&st, &fake, "rv-lost", &[]).await;
+        fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 502, json!({ "message": "Server Error" }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "closing");
+
+        // The close went through on GitHub after all.
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(slug, 41, "closed", "## What to build\n\nStore."));
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "rv-lost", false).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().filter(|s| s.method == "PATCH").count(), 1, "not closed twice");
+        assert!(woken(&st, &dev).last().unwrap().contains("build ticket #42"));
+    }
+
+    #[tokio::test]
+    async fn a_pass_after_changes_takes_changes_requested_off_the_pr() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-relabel";
+        let (dev, team) = building(&st, &fake, "rv-relabel", &["qa"]).await;
+        let deletes = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert_eq!(deletes(), 0, "still waiting for changes");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(deletes(), 1);
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+    }
+
+    /// `building` for both tickets: closing #42 is routed too.
+    async fn building_both(st: &AppState, fake: &Fake, name: &str, roles: &[&str]) -> (Agent, Vec<Agent>) {
+        let out = building(st, fake, name, roles).await;
+        let slug = format!("octo/{name}");
+        fake.route("POST", &format!("/repos/{slug}/issues/42/comments"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "open", "## What to build\n\nAPI."));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "closed", "## What to build\n\nAPI."));
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        out
+    }
+
+    #[tokio::test]
+    async fn each_wake_carries_only_its_roles_brief_and_what_its_instructions_can_change() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, team) = building_both(&st, &fake, "brief-roles", &["qa", "security", "code_reviewer"]).await;
+        let (qa, sec, cr) = (&team[0], &team[1], &team[2]);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        let roles = ["You are the Dev on this Delivery", "You are QA on this Delivery", "You are Security on this Delivery", "You are the Code reviewer on this Delivery"];
+        let limit = "but they can't change the Delivery's tools, its branch or how the work closes or merges.";
+        let only = |w: &str, mine: Option<&str>| {
+            assert!(w.contains(limit), "no limits in {w}");
+            for r in roles {
+                assert_eq!(w.contains(r), Some(r) == mine, "{r:?} in {w}");
+            }
+        };
+        let dw = woken(&st, &dev);
+        only(&dw[0], Some(roles[0]));
+        assert!(dw[0].contains("like how to build and check the work in this project"));
+        only(&woken(&st, qa)[0], Some(roles[1]));
+        assert!(woken(&st, qa)[0].contains("like how to test it in this project"));
+        only(&woken(&st, sec)[0], Some(roles[2]));
+        assert!(woken(&st, sec)[0].contains("like how to check its security in this project"));
+        // A changes round: the Dev's fix wake carries no other role's brief either.
+        only(dw.last().unwrap(), None);
+        assert!(dw.last().unwrap().contains("asked for changes on ticket #41"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        tool(&st, sec, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let cw = woken(&st, cr);
+        assert_eq!(cw.len(), 1);
+        only(&cw[0], Some(roles[3]));
+        assert!(cw[0].contains("like how to review it in this project"));
+        tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "A race." })).await.unwrap();
+        only(woken(&st, &dev).last().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_last_close_wakes_the_code_reviewer_once_for_the_whole_spec_pr() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-wake";
+        let (dev, team) = building_both(&st, &fake, "cr-wake", &["code_reviewer"]).await;
+        let cr = &team[0];
+        // No QA or Security: each ticket passes on submit, and the Code reviewer isn't asked about either.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("Next: #42 is with Builder."), "{out}");
+        assert!(woken(&st, cr).is_empty(), "no per-ticket Code Review");
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        assert!(out.contains("It was the spec's last open ticket: code_reviewer agent (Code reviewer) is reviewing the whole spec PR #500 now."), "{out}");
+        let w = woken(&st, cr);
+        assert_eq!(w.len(), 1);
+        for want in [
+            "You are the Code reviewer on this Delivery: every ticket of spec #40 is closed (#41, #42), and you review the whole spec PR https://github.com/octo/cr-wake/pull/500 once, on the spec branch `spec/40-rounds`.",
+            "call `mcp__loft__review_ticket` with 500",
+            "Put findings that can wait in `tech_debt`",
+        ] {
+            assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
+        }
+        assert!(fake.seen("/graphql").is_empty(), "the spec PR stays a draft until the Code Review passes");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "final_review");
+        // A catch-up poll doesn't wake it again or mark the PR ready.
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        crate::mirror::sync_project(&st, "cr-wake", true).await.unwrap();
+        assert_eq!((woken(&st, cr).len(), fake.seen("/graphql").len()), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn blocking_findings_go_to_the_dev_and_a_pass_marks_the_pr_ready_and_tells_the_user() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-flow";
+        let (dev, team) = building_both(&st, &fake, "cr-flow", &["code_reviewer"]).await;
+        let cr = &team[0];
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.in_turn("POST", &format!("/repos/{slug}/issues"), vec![(201, json!({ "number": 77 })), (201, json!({ "number": 78 }))]);
+        let debt = json!([{ "title": "Split delivery.rs", "body": "It grew past 600 lines." }]);
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
+
+        // Blocking: back to the Dev, the PR stays a draft, and what can wait is filed.
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: #77.") && out.ends_with("The Dev is fixing them (round 1 of 3); the spec PR stays a draft."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) asks for changes on the spec PR.\n\nstore.rs:12 drops the error.\n\nFiled as tech debt: #77.");
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        let filed = posts(&fake, slug, "issues");
+        let issue = filed.last().unwrap();
+        assert_eq!((&issue["title"], &issue["labels"], &issue["assignees"]), (&json!("Split delivery.rs"), &json!(["tech-debt"]), &json!(["octo-me"])));
+        assert_eq!(issue["body"], "Found in the Code Review of spec PR #500, spec #40.\n\nIt grew past 600 lines.");
+        assert!(posts(&fake, slug, "labels").iter().any(|l| l["name"] == "tech-debt"), "the label is created");
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        assert!(w.last().unwrap().contains("asked for changes on the spec PR https://github.com/octo/cr-flow/pull/500 (round 1 of 3):\n\nstore.rs:12 drops the error."), "{w:?}");
+        assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` with 500"));
+        assert!(fake.seen("/graphql").is_empty());
+
+        // The fixes go back to the Code reviewer.
+        assert!(tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "x" })).await.is_err(), "not before the fixes");
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert_eq!(out, "Submitted the fixes for spec PR #500: code_reviewer agent (Code reviewer) is looking again.");
+        let again = woken(&st, cr);
+        assert!(again.len() == 2 && again[1].contains("The Dev pushed fixes for your last notes") && again[1].contains("The fixes: `feed123`."), "{again:?}");
+
+        // A pass: the PR is marked ready from the record alone, and watched so Needs you offers to merge it.
+        let sub_reads = fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len();
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![
+            (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true })),
+            (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean", "title": "Rounds", "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } })),
+        ]);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Fixed.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: #77.") && out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues").len(), filed.len(), "the same finding isn't filed twice");
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len(), sub_reads, "the tickets aren't read again from GitHub");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().any(|s| s.method == "DELETE"));
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "pr_ready").unwrap_or_else(|| panic!("{v:#}"));
+        assert!(item["title"].as_str().unwrap().starts_with("octo/cr-flow#500"), "{item}");
+    }
+
+    #[tokio::test]
+    async fn the_third_round_of_final_changes_waits_for_the_user() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-stuck";
+        let (dev, team) = building_both(&st, &fake, "cr-stuck", &["code_reviewer"]).await;
+        let cr = &team[0];
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([]));
+        // The spec's Loft issue, which the user is pointed at.
+        let mut spec = gh_ticket(slug, 40, "open", "Spec.");
+        spec["labels"] = json!([{ "name": "spec" }]);
+        let (spec_task, _) = crate::mirror::bring_in(&st, "cr-stuck", slug, &spec).unwrap();
+
+        for round in 1..=3 {
+            let before = woken(&st, &dev).len();
+            let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": format!("Round {round}: a race in retry.") })).await.unwrap();
+            if round < 3 {
+                assert_eq!(woken(&st, &dev).len(), before + 1);
+                tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+            } else {
+                assert!(out.contains("That's round 3 of changes on the spec PR, so it waits for the user now."), "{out}");
+                assert_eq!(woken(&st, &dev).len(), before, "the Dev isn't woken a third time");
+            }
+        }
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["needs-human"] }));
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.final_rounds), ("needs_human", 3));
+        assert!(fake.seen("/graphql").is_empty(), "still a draft");
+        let t = st.db.get_task(&spec_task.id).unwrap().unwrap();
+        assert_eq!(t.status, "blocked");
+        assert!(t.error.starts_with("3 rounds of changes on spec PR #500: it needs you."), "{}", t.error);
+        assert!(tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.is_err());
+        assert!(tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "x" })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn without_a_code_reviewer_the_last_close_marks_the_pr_ready() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/cr-none";
+        let (dev, team) = building_both(&st, &fake, "cr-none", &["qa"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(fake.seen("/graphql").is_empty());
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("It was the spec's last open ticket: spec PR #500 is now ready for review"), "{out}");
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
+        assert!(st.db.list_pull_requests(None).unwrap().iter().any(|p| p.slug == slug && p.number == 500), "watched for Needs you");
+        // QA can't file tech debt: that's the Code reviewer's.
+        assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok", "tech_debt": [{ "title": "x", "body": "y" }] })).await.unwrap_err().starts_with("Only the Code reviewer files tech_debt"));
+    }
+
+    /// A grill on `name` that published the standalone ticket #41 "Store" and ended with its card, with
+    /// the team's `roles` (a Dev first) busy and what starting and reviewing it needs routed on the fake.
+    async fn standalone(st: &AppState, fake: &Fake, name: &str, roles: &[&str]) -> (Agent, crate::db::Message, Vec<Agent>) {
+        let slug = format!("octo/{name}");
+        let a = planner_on(st, name, Some(&format!("git@github.com:{slug}.git")));
+        repo(fake, &slug, &["spec", "ready-for-agent"], 41);
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 41, "id": 4100, "title": "Store" }));
+        crate::grill::tests::round(st, &a, &["One ticket?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish_tickets(st, &a, None, vec![ticket("Store", &[])]).await.unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
+        for p in ["issues/41/labels", "issues/500/comments", "issues/500/labels", "labels"] {
+            fake.route("POST", &format!("/repos/{slug}/{p}"), 201, json!({}));
+        }
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        let m = summary(st, &a);
+        (a, m, team)
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_standalone_ticket_makes_its_branch_and_draft_pr() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/solo-start";
+        let (a, m, team) = standalone(&st, &fake, "solo-start", &["dev"]).await;
+        let card = &m.meta["grill"]["end_card"];
+        assert_eq!((&card["delivery"], &card["next_message"]), (&json!({ "repo": slug, "spec": 41, "standalone": true }), &json!("")));
+        let d = st.db.get_delivery(slug, 41).unwrap().unwrap();
+        assert_eq!((d.standalone, d.branch.as_str(), d.pr, d.tickets.len()), (true, "ticket/41-store", None, 1), "no branch or PR until it starts");
+        assert!(posts(&fake, slug, "pulls").is_empty());
+
+        press(&st, &a, &m).await.unwrap();
+        assert_eq!(posts(&fake, slug, "git/commits"), [json!({ "message": "Start ticket #41", "tree": "main-tree", "parents": ["main-sha"] })]);
+        assert_eq!(posts(&fake, slug, "git/refs"), [json!({ "ref": "refs/heads/ticket/41-store", "sha": "start-sha" })]);
+        assert_eq!(posts(&fake, slug, "pulls"), [json!({ "title": "Store", "head": "ticket/41-store", "base": "main", "body": "Closes #41", "draft": true })]);
+        assert_eq!(posts(&fake, slug, "issues/41/labels"), [json!({ "labels": ["in-progress"] })]);
+        let w = woken(&st, &team[0]);
+        assert_eq!(w.len(), 1);
+        for want in [
+            "[Loft Delivery: ticket #41] This is not a message from the user. You are the Dev on this Delivery: build ticket #41 \"Store\"",
+            "- Read the ticket first, and build only what the ticket asks.",
+            "Work on the ticket branch `ticket/41-store`: pull it, commit there and push. Open no PR: the PR https://github.com/octo/solo-start/pull/500 is the ticket's only one.",
+        ] {
+            assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
+        }
+        // Pressed again: nothing new.
+        assert_eq!(press(&st, &a, &m).await.unwrap()["duplicate"], true);
+        assert_eq!(posts(&fake, slug, "pulls").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_standalone_ticket_goes_through_the_same_reviews_and_stays_open_until_its_pr_merges() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/solo-flow";
+        let (a, m, team) = standalone(&st, &fake, "solo-flow", &["dev", "qa", "security", "code_reviewer"]).await;
+        let (dev, qa, sec, cr) = (&team[0], &team[1], &team[2], &team[3]);
+        press(&st, &a, &m).await.unwrap();
+
+        tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(woken(&st, qa)[0].contains("on the ticket branch `ticket/41-store` (PR https://github.com/octo/solo-flow/pull/500)"));
+        // A changes round first: the label it puts on the PR comes off with the later passes.
+        let deletes = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        assert!(woken(&st, dev).last().unwrap().contains("Fix it on the ticket branch `ticket/41-store`"));
+        tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(deletes(), 0);
+        let out = tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("#41 passed its reviews. It stays open until its PR #500 merges.") && out.contains("It passed its reviews: code_reviewer agent (Code reviewer) is reviewing the whole PR #500 now."), "{out}");
+        assert_eq!(deletes(), 1, "changes-requested comes off the PR when the ticket passes");
+        // Loft doesn't close it: its PR does, when it merges.
+        assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|s| s.method != "PATCH"));
+        assert!(posts(&fake, slug, "issues/41/comments").is_empty());
+        let w = woken(&st, cr);
+        assert!(w.len() == 1 && w[0].contains("ticket #41 passed QA and Security, and you review the whole PR https://github.com/octo/solo-flow/pull/500 once, on the ticket branch `ticket/41-store`."), "{w:?}");
+
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Clean." })).await.unwrap();
+        assert!(out.contains("PR #500 is ready for review now"), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) passed the PR.\n\nClean.");
+        assert_eq!(fake.seen("/graphql").len(), 1);
+        assert_eq!(st.db.get_delivery(slug, 41).unwrap().unwrap().state, "ready");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|s| s.method != "PATCH"), "still open until the merge");
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_standalone_tickets_loft_issue() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/solo-issue";
+        planner_on(&st, "solo-issue", Some("git@github.com:octo/solo-issue.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "solo-issue", "dev");
+        // Published before Deliveries: a ticket with no record yet.
+        let ticket = gh_ticket(slug, 41, "open", "## What to build\n\nStore.");
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, ticket.clone());
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        let (t, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &ticket).unwrap();
+        let start = |id: String| crate::delivery::start_from_issue(State(st.clone()), Path(id));
+
+        let v = start(t.id.clone()).await.unwrap().0;
+        assert_eq!((&v["duplicate"], &v["ticket"], &v["agent_name"], &v["pr"]), (&json!(false), &json!(41), &json!("Builder"), &json!(500)));
+        assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "ticket/41-ticket-41");
+        assert_eq!(posts(&fake, slug, "pulls")[0]["body"], "Closes #41");
+        assert!(woken(&st, &dev)[0].contains("build ticket #41 \"Ticket 41\""));
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), 1);
+        // After a reload the page asks Loft, which says who has it.
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
+        assert_eq!(shown, json!({ "state": "running", "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
+
+        // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
+        delivery_40(&st, slug);
+        let (t42, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &gh_ticket(slug, 42, "open", "x")).unwrap();
+        assert!(start(t42.id).await.unwrap_err().1.starts_with("#42 is a ticket of spec #40: start the spec's Delivery"));
+        let mut plain = gh_ticket(slug, 43, "open", "x");
+        plain["labels"] = json!([]);
+        fake.route("GET", &format!("/repos/{slug}/issues/43"), 200, plain.clone());
+        let (t43, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &plain).unwrap();
+        assert_eq!(crate::delivery::issue_delivery(State(st.clone()), Path(t43.id.clone())).await.unwrap().0, Value::Null, "no Delivery");
+        assert!(start(t43.id).await.unwrap_err().1.starts_with("#43 isn't an open ticket"));
+        // A sub-issue of a spec with no Delivery isn't started on its own either.
+        let (mut t44, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &gh_ticket(slug, 44, "open", "x")).unwrap();
+        t44.parent_id = Some(t.id.clone());
+        st.db.save_task(&t44).unwrap();
+        assert!(start(t44.id).await.unwrap_err().1.starts_with("#44 is part of a spec"));
+        // Nor one whose spec Loft doesn't mirror: GitHub says it has a parent.
+        let mut t45 = gh_ticket(slug, 45, "open", "x");
+        t45["parent_issue_url"] = json!(format!("https://api.github.com/repos/{slug}/issues/99"));
+        fake.route("GET", &format!("/repos/{slug}/issues/45"), 200, t45.clone());
+        let (t45, _) = crate::mirror::bring_in(&st, "solo-issue", slug, &t45).unwrap();
+        assert_eq!(t45.parent_id, None, "#99 isn't mirrored");
+        assert!(start(t45.id).await.unwrap_err().1.starts_with("#45 is part of a spec on GitHub"));
+    }
+
+    /// Spec #40 on GitHub as `sub_issues` lists it and its Loft issue, with no Delivery yet.
+    fn spec_40_on(st: &AppState, fake: &Fake, project: &str, slug: &str, subs: Value) -> crate::db::Task {
+        let mut spec = gh_ticket(slug, 40, "open", "## Problem Statement\n\nIt hurts.");
+        (spec["title"], spec["labels"]) = (json!("Rounds"), json!([{ "name": "spec" }]));
+        fake.route("GET", &format!("/repos/{slug}/issues/40"), 200, spec.clone());
+        fake.route("GET", &format!("/repos/{slug}/issues/40/sub_issues"), 200, subs);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/issues/45/labels"), 200, json!([]));
+        crate::mirror::bring_in(st, project, slug, &spec).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_published_earlier_builds_it_from_github() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-page";
+        planner_on(&st, "spec-page", Some("git@github.com:octo/spec-page.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "spec-page", "dev");
+        let with = |n: i64, state: &str, labels: Value, blocked: i64| {
+            let mut x = gh_ticket(slug, n, state, "x");
+            x["labels"] = labels;
+            x["issue_dependencies_summary"] = json!({ "blocked_by": blocked });
+            x
+        };
+        let ready = json!([{ "name": "ready-for-agent" }]);
+        let subs = json!([
+            with(41, "closed", ready.clone(), 0),
+            with(42, "open", json!([{ "name": "ready-for-agent" }, { "name": "in-progress" }]), 0),
+            with(43, "open", ready.clone(), 1),
+            with(45, "open", ready.clone(), 2),
+        ]);
+        let spec = spec_40_on(&st, &fake, "spec-page", slug, subs);
+        fake.route("GET", &format!("/repos/{slug}/issues/43/dependencies/blocked_by"), 200, json!([{ "number": 42 }]));
+        // #99 isn't the spec's: the Delivery can't tell when it closes, so it doesn't hold #45 back.
+        fake.route("GET", &format!("/repos/{slug}/issues/45/dependencies/blocked_by"), 200, json!([{ "number": 41 }, { "number": 99 }]));
+        let start = |id: String| crate::delivery::start_from_issue(State(st.clone()), Path(id));
+
+        let v = start(spec.id.clone()).await.unwrap().0;
+        assert_eq!((&v["duplicate"], &v["ticket"], &v["agent_name"], &v["pr"]), (&json!(false), &json!(45), &json!("Builder"), &json!(500)));
+        assert_eq!(posts(&fake, slug, "git/refs")[0]["ref"], "refs/heads/spec/40-rounds");
+        assert_eq!((&posts(&fake, slug, "pulls")[0]["head"], &posts(&fake, slug, "pulls")[0]["body"]), (&json!("spec/40-rounds"), &json!("Closes #40")));
+        assert!(woken(&st, &dev)[0].contains("build ticket #45 \"Ticket 45\""));
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        let shape: Vec<(i64, &str, Vec<i64>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone())).collect();
+        assert_eq!(shape, vec![(41, "closed", vec![]), (42, "elsewhere", vec![]), (43, "open", vec![42]), (45, "started", vec![41])]);
+        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress" }));
+        assert_eq!(v["current"], json!({ "number": 45, "title": "Ticket 45" }));
+
+        // Again, or on another device: who has it, and nothing started twice.
+        assert_eq!(start(spec.id.clone()).await.unwrap().0["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), 1);
+        assert_eq!(posts(&fake, slug, "pulls").len(), 1);
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&shown["started"], &shown["agent_name"], &shown["current"]["number"]), (&json!(true), &json!("Builder"), &json!(45)));
+        // A ticket of it starts from the spec's page, not on its own.
+        let (t43, _) = crate::mirror::bring_in(&st, "spec-page", slug, &with(43, "open", ready, 1)).unwrap();
+        assert!(start(t43.id).await.unwrap_err().1.starts_with("#43 is a ticket of spec #40: start the spec's Delivery from the spec's page"));
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_reuses_its_spec_pr_and_skips_a_ticket_with_its_own_pr() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-reuse";
+        planner_on(&st, "spec-reuse", Some("git@github.com:octo/spec-reuse.git"));
+        let dev = busy(&st, "Builder", "spec-reuse", "dev");
+        let spec = spec_40_on(&st, &fake, "spec-reuse", slug, json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        let own = json!({ "full_name": "Octo/Spec-Reuse" });
+        fake.route("GET", &format!("/repos/{slug}/pulls"), 200, json!([
+            { "number": 77, "body": "Fixes: #42", "head": { "ref": "someone/work", "repo": own } },
+            { "number": 600, "body": "Closes #40", "head": { "ref": "spec/40-old-title", "repo": own } },
+        ]));
+
+        let v = crate::delivery::start_from_issue(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&v["ticket"], &v["pr"]), (&json!(41), &json!(600)));
+        assert_eq!(v["tickets"][1]["skipped"], "has its own open PR #77");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.branch, "spec/40-old-title");
+        assert!(posts(&fake, slug, "pulls").is_empty() && posts(&fake, slug, "git/refs").is_empty(), "the spec branch and PR are reused");
+        assert!(woken(&st, &dev)[0].contains("Work on the spec branch `spec/40-old-title`"));
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_spec_ignores_fork_prs() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/spec-fork";
+        planner_on(&st, "spec-fork", Some("git@github.com:octo/spec-fork.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "spec-fork", "dev");
+        let spec = spec_40_on(&st, &fake, "spec-fork", slug, json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        // An outsider's fork PRs: one closes the spec from a `main` head, one closes ticket #41. And one of
+        // the repo's own that closes the spec but isn't on a spec branch.
+        let fork = json!({ "full_name": "mallory/spec-fork" });
+        // The second read is the spec PR lookup by `head=octo:spec/40-rounds`, which GitHub filters.
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls"), vec![(200, json!([
+            { "number": 66, "body": "Closes #40", "head": { "ref": "main", "repo": fork } },
+            { "number": 67, "body": "Closes #41", "head": { "ref": "ticket/41-x", "repo": fork } },
+            { "number": 68, "body": "Closes #40", "head": { "ref": "fix-things", "repo": { "full_name": slug } } },
+        ])), (200, json!([]))]);
+
+        let v = crate::delivery::start_from_issue(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&v["ticket"], &v["pr"]), (&json!(41), &json!(500)), "neither fork PR is reused or skips a ticket");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().branch, "spec/40-rounds");
+        assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "spec/40-rounds");
+        assert!(woken(&st, &dev)[0].contains("Work on the spec branch `spec/40-rounds`"));
+    }
+
+    #[test]
+    fn a_closing_keyword_names_the_issue_it_closes() {
+        use crate::delivery::closes_issue;
+        assert!(closes_issue("Closes #40", 40));
+        assert!(closes_issue("Some text.\n\nfixes: #40, and more", 40));
+        assert!(closes_issue("RESOLVED #40", 40));
+        assert!(!closes_issue("Closes #400", 40));
+        assert!(!closes_issue("Refs #40", 40));
+        assert!(!closes_issue("Part of #40", 40));
+    }
+
+    /// Runs git in `dir`, as a test author.
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=Test", "-c", "user.email=test@example.com"]).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A grill on `name`, a project whose folder is a git repo with no GitHub `origin` (one commit on
+    /// `main`), that saved the spec "Offline mode" with the tickets "Store" then "API" (blocked by Store)
+    /// as Loft issues and ended with its card. The team's `roles` (a Dev first) are busy.
+    async fn local_plan(st: &AppState, name: &str, roles: &[&str]) -> (Agent, crate::db::Message, Vec<Agent>, std::path::PathBuf) {
+        let a = planner_on(st, name, None);
+        let dir = st.settings.boot().projects_dir.join(name);
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "init"]);
+        crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish(st, &a, "Offline mode").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == name && t.labels == ["spec"]).unwrap();
+        mcp_call(st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": [ticket("API", &["Store"]), ticket("Store", &[])] })).await.unwrap().unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Offline it is." })).unwrap().unwrap();
+        let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
+        let m = summary(st, &a);
+        (a, m, team, dir)
+    }
+
+    /// The Loft issue of the ticket titled `title` in `project`.
+    fn loft_ticket(st: &AppState, project: &str, title: &str) -> crate::db::Task {
+        st.db.list_tasks().unwrap().into_iter().find(|t| t.project == project && t.title == title).unwrap()
+    }
+
+    fn notes_on(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_task_comments(id, 200, None).unwrap().into_iter().filter(|c| c.kind == "comment").map(|c| c.text).collect()
+    }
+
+    #[tokio::test]
+    async fn start_delivery_on_a_plan_kept_in_loft_makes_its_branch_in_the_project_repo() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (a, m, team, dir) = local_plan(&st, "local-start", &["dev"]).await;
+        let d = crate::delivery::local_of(&st, "local-start", &loft_ticket(&st, "local-start", "Offline mode").id).unwrap();
+        assert_eq!((d.local, d.branch.as_str(), d.tickets.iter().map(|t| (t.number, t.title.as_str(), t.blocked_by.clone())).collect::<Vec<_>>()), (true, "spec/1-offline-mode", vec![(1, "Store", vec![]), (2, "API", vec![1])]));
+
+        let v = press(&st, &a, &m).await.unwrap();
+        assert_eq!(v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["title"], "Store", "the card names the ticket");
+        assert_eq!(git_in(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "the checkout is left alone");
+        assert_eq!(git_in(&dir, &["rev-parse", "spec/1-offline-mode"]), git_in(&dir, &["rev-parse", "main"]), "the spec branch starts at main");
+        let store = loft_ticket(&st, "local-start", "Store");
+        let w = woken(&st, &team[0]);
+        assert_eq!(w.len(), 1);
+        for want in [
+            "[Loft Delivery: spec \"Offline mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Store\" (Loft issue ".to_string(),
+            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.canonicalize().unwrap().display()),
+            format!("each message ending with `Refs {}`", store.id),
+            format!("call `mcp__loft__submit_ticket` with \"{}\"", store.id),
+        ] {
+            assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
+        }
+        assert!(notes_on(&st, &store.id).iter().any(|n| n.starts_with("Started by Loft's Delivery: with dev agent")), "{:?}", notes_on(&st, &store.id));
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().base, "main");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    #[tokio::test]
+    async fn a_plan_kept_in_loft_posts_verdicts_as_notes_closes_tickets_and_offers_merge() {
+        let st = state();
+        let fake = own_fake(&st);
+        let project = "local-flow";
+        let (a, m, team, _dir) = local_plan(&st, project, &["dev", "qa", "security", "code_reviewer"]).await;
+        let (dev, qa, sec, cr) = (&team[0], &team[1], &team[2], &team[3]);
+        press(&st, &a, &m).await.unwrap();
+        let (store, api, spec) = (loft_ticket(&st, project, "Store"), loft_ticket(&st, project, "API"), loft_ticket(&st, project, "Offline mode"));
+        let submit = |id: &str| json!({ "number": id, "commits": ["abc1234def"] });
+
+        let out = tool(&st, dev, "submit_ticket", submit(&store.id)).await.unwrap();
+        assert!(out.starts_with("Submitted \"Store\": qa agent (QA) and security agent (Security) are reviewing it."), "{out}");
+        assert!(woken(&st, qa)[0].contains("Loft posts it on the ticket's Loft issue."));
+        tool(&st, qa, "review_ticket", json!({ "number": store.id, "verdict": "changes", "notes": "Saving twice loses data." })).await.unwrap();
+        assert!(notes_on(&st, &store.id).contains(&"**QA** (qa agent) asks for changes on ticket \"Store\" at `abc1234`.\n\nSaving twice loses data.".to_string()));
+        assert!(woken(&st, dev).last().unwrap().contains(&format!("call `mcp__loft__submit_ticket` again with \"{}\"", store.id)));
+        tool(&st, dev, "submit_ticket", submit(&store.id)).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": store.id, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        let out = tool(&st, sec, "review_ticket", json!({ "number": store.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("\"Store\" is done.") && out.contains("Next: \"API\" is with dev agent."), "{out}");
+        let s = st.db.get_task(&store.id).unwrap().unwrap();
+        assert_eq!(s.status, "done");
+        assert!(notes_on(&st, &store.id).iter().any(|n| n == "Done in `abc1234`, on the spec branch `spec/1-offline-mode`."));
+
+        tool(&st, dev, "submit_ticket", submit(&api.id)).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": api.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let out = tool(&st, sec, "review_ticket", json!({ "number": api.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("code_reviewer agent (Code reviewer) is reviewing the whole spec branch `spec/1-offline-mode` now."), "{out}");
+        let w = woken(&st, cr);
+        assert!(w.len() == 1 && w[0].contains("against `main` (`git diff main...spec/1-offline-mode`)") && w[0].contains(&format!("`mcp__loft__review_ticket` with \"{}\"", spec.id)), "{w:?}");
+
+        let debt = json!([{ "title": "Index the store", "body": "Lookups scan." }]);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap();
+        assert!(out.contains("Tech debt: Loft issue ") && out.ends_with("The spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge."), "{out}");
+        let filed = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == project && t.labels == ["tech-debt"]).unwrap();
+        assert_eq!(filed.title, "Index the store");
+        assert!(notes_on(&st, &spec.id).iter().any(|n| n.starts_with("**Code reviewer** (code_reviewer agent) passed the spec branch.")));
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "delivery_merge").unwrap_or_else(|| panic!("{v:#}"));
+        assert_eq!(item["title"], "Merge \"Offline mode\"");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    #[tokio::test]
+    async fn merge_merges_only_on_a_clean_checkout_of_the_base_and_says_what_to_run() {
+        let st = state();
+        let (a, m, _team, dir) = local_plan(&st, "local-merge", &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let d = crate::delivery::local_of(&st, "local-merge", &loft_ticket(&st, "local-merge", "Offline mode").id).unwrap();
+        // The Dev's work on the spec branch, pushed back to the project's repo.
+        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
+        std::fs::write(dir.join("store.rs"), "fn store() {}\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "Store"]);
+        let merge = || crate::delivery::merge(&st, &d.repo, d.spec);
+
+        assert!(merge().await.unwrap_err().ends_with("isn't ready to merge yet: its reviews haven't all passed."), "only after the last review");
+        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+        let shown = dir.canonicalize().unwrap().display().to_string();
+        assert_eq!(merge().await.unwrap_err(), format!("`main` isn't checked out in `{shown}` (`spec/1-offline-mode` is). Run `git -C {shown} checkout main`, then press Merge again."));
+        git_in(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("README.md"), "edited\n").unwrap();
+        assert_eq!(merge().await.unwrap_err(), format!("`{shown}` has uncommitted changes, so nothing was merged. Commit or stash them (`git -C {shown} stash -u`), then press Merge again."));
+        assert!(!dir.join("store.rs").exists(), "nothing merged");
+        git_in(&dir, &["checkout", "--", "README.md"]);
+
+        // The repo's own config can't make Loft run anything: no fsmonitor command, no hooks.
+        let marker = dir.parent().unwrap().join("ran-something");
+        git_in(&dir, &["config", "core.fsmonitor", &format!("touch {}", marker.display())]);
+        let hook = dir.join(".git/hooks/post-merge");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let git_user = |k: &str, v: &str| git_in(&dir, &["config", k, v]);
+        git_user("user.name", "Test");
+        git_user("user.email", "test@example.com");
+        assert_eq!(merge().await.unwrap(), format!("Merged `spec/1-offline-mode` into `main` in `{shown}`."));
+        assert!(dir.join("store.rs").exists());
+        assert_eq!(git_in(&dir, &["log", "-1", "--format=%s"]), "Merge spec \"Offline mode\"");
+        assert!(!marker.exists(), "neither the fsmonitor command nor the post-merge hook ran");
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "merged");
+        assert_eq!(st.db.get_task(&d.spec_id).unwrap().unwrap().status, "done");
+        assert_eq!(merge().await.unwrap(), "`spec/1-offline-mode` is already merged into `main`.");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_aborts_the_merge_and_says_what_to_run() {
+        let st = state();
+        let (a, m, _team, dir) = local_plan(&st, "local-conflict", &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let d = crate::delivery::local_of(&st, "local-conflict", &loft_ticket(&st, "local-conflict", "Offline mode").id).unwrap();
+        // The spec branch and main both change README.md.
+        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
+        std::fs::write(dir.join("README.md"), "from the spec\n").unwrap();
+        git_in(&dir, &["commit", "-qam", "Spec edit"]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("README.md"), "from main\n").unwrap();
+        git_in(&dir, &["commit", "-qam", "Main edit"]);
+        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
+
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        let shown = dir.canonicalize().unwrap().display().to_string();
+        assert!(err.starts_with("`spec/1-offline-mode` doesn't merge cleanly into `main`"), "{err}");
+        assert!(err.ends_with(&format!("so nothing was merged. Run `git -C {shown} merge spec/1-offline-mode`, resolve the conflicts and commit.")), "{err}");
+        assert!(!dir.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
+        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "", "the tree is clean again");
+        assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "from main\n");
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready", "Merge can be pressed again once it's resolved");
+    }
+
+    #[tokio::test]
+    async fn git_never_runs_in_a_project_that_resolves_into_an_agent_workspace() {
+        let st = state();
+        // An agent's workspace holds a repo; a project folder links to it.
+        let inside = st.cfg.storage_dir.join("some-agent").join("x");
+        std::fs::create_dir_all(&inside).unwrap();
+        git_in(&inside, &["init", "-q", "-b", "main"]);
+        git_in(&inside, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::os::unix::fs::symlink(&inside, st.settings.boot().projects_dir.join("sneaky")).unwrap();
+        crate::delivery::record_local_spec(&st, "sneaky", "spec-id", "Offline mode", "");
+        crate::delivery::record_local_ticket(&st, "sneaky", "spec-id", "t1", "Store", &[]);
+        busy(&st, "Builder", "sneaky", "dev");
+        let d = crate::delivery::local_of(&st, "sneaky", "spec-id").unwrap();
+
+        let Err(err) = crate::delivery::start(&st, &d.repo, d.spec, "").await else { panic!("started in an agent's workspace") };
+        assert_eq!(err, "The Delivery didn't start: the project folder of sneaky isn't a git repo of its own in the projects folder, so Loft won't run git there.");
+        assert!(git_in(&inside, &["branch", "--list", "spec/*"]).is_empty(), "no branch was made there");
+        crate::delivery::update(&st, &d.repo, d.spec, |d| (d.state, d.base) = ("ready".into(), "main".into()));
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        assert!(err.starts_with("Nothing was merged: the project folder of sneaky isn't a git repo of its own"), "{err}");
+    }
+
+    /// `local_plan`, in a project folder with no git at all (it holds one file).
+    async fn plan_without_git(st: &AppState, name: &str) -> (Agent, crate::db::Message, Agent, std::path::PathBuf) {
+        let mut a = planner(st, name);
+        a.project = name.into();
+        st.db.save_agent(&a).unwrap();
+        let dir = st.settings.boot().projects_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "plans\n").unwrap();
+        crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(st, &a).unwrap();
+        publish(st, &a, "Offline mode").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == name && t.labels == ["spec"]).unwrap();
+        mcp_call(st, &a, "publish_tickets", &json!({ "spec": spec.id, "tickets": [ticket("Store", &[])] })).await.unwrap().unwrap();
+        crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let dev = busy(st, "Builder", name, "dev");
+        let m = summary(st, &a);
+        (a, m, dev, dir)
+    }
+
+    #[tokio::test]
+    async fn start_delivery_in_a_folder_with_no_git_asks_first_and_changes_nothing_until_yes() {
+        let st = state();
+        let (a, m, dev, dir) = plan_without_git(&st, "no-git").await;
+        let v = press(&st, &a, &m).await.unwrap();
+        assert_eq!((&v["ok"], &v["needs_git"], &v["dir"]), (&json!(false), &json!(true), &json!(dir.canonicalize().unwrap().display().to_string())));
+        // Asked, not done: no repo, no Delivery started, nobody woken.
+        assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists());
+        let d = crate::delivery::local_of(&st, "no-git", &loft_ticket(&st, "no-git", "Offline mode").id).unwrap();
+        assert_eq!((d.state.as_str(), d.base.as_str()), ("planned", ""));
+        assert!(woken(&st, &dev).is_empty());
+
+        // Yes: git is set up with a first commit that leaves secret files out, then the Delivery starts.
+        std::fs::write(dir.join(".env"), "KEY=1\n").unwrap();
+        let v = press_with(&st, &a, &m, json!({ "init_git": true })).await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert!(dir.join(".git").is_dir());
+        assert!(std::fs::read_to_string(dir.join(".gitignore")).unwrap().contains(".DS_Store"));
+        assert_eq!(git_in(&dir, &["log", "--format=%s"]), "First commit");
+        assert_eq!(git_in(&dir, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\nnotes.md");
+        assert_eq!(git_in(&dir, &["status", "--porcelain"]), "", "the ignored .env isn't left over as a change");
+        assert!(dir.join(".env").exists());
+        let d = st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap();
+        assert_eq!(d.state, "running");
+        assert!(git_in(&dir, &["branch", "--list", "spec/1-offline-mode"]).contains("spec/1-offline-mode"));
+        assert!(woken(&st, &dev)[0].contains("build ticket \"Store\""));
+        // Once it has git, Start delivery doesn't ask again.
+        assert_eq!(press(&st, &a, &m).await.unwrap()["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_git_isnt_a_folder_of_its_own_is_refused_and_not_offered_git() {
+        let st = state();
+        let (a, m, dev, dir) = plan_without_git(&st, "gitdir-file").await;
+        // Its .git is a `gitdir:` file pointing at a repo in an agent's workspace.
+        let agent_repo = st.cfg.storage_dir.join("some-agent").join("repo");
+        std::fs::create_dir_all(&agent_repo).unwrap();
+        git_in(&agent_repo, &["init", "-q", "-b", "main"]);
+        git_in(&agent_repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::write(dir.join(".git"), format!("gitdir: {}\n", agent_repo.join(".git").display())).unwrap();
+
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert_eq!(err.1, "The Delivery didn't start: the project folder of gitdir-file isn't a git repo of its own in the projects folder, so Loft won't run git there.");
+        let err = press_with(&st, &a, &m, json!({ "init_git": true })).await.unwrap_err();
+        assert!(err.1.contains("isn't a git repo of its own"), "{}", err.1);
+        assert!(git_in(&agent_repo, &["branch", "--list", "spec/*"]).is_empty(), "nothing ran in the agent's repo");
+        assert!(woken(&st, &dev).is_empty());
+        let d = crate::delivery::local_of(&st, "gitdir-file", &loft_ticket(&st, "gitdir-file", "Offline mode").id).unwrap();
+        crate::delivery::update(&st, &d.repo, d.spec, |d| (d.state, d.base) = ("ready".into(), "main".into()));
+        assert!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err().starts_with("Nothing was merged: the project folder of gitdir-file isn't a git repo of its own"));
+    }
+
+    #[test]
+    fn spec_prs_recorded_before_deliveries_become_delivery_records() {
+        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loft.db");
+        drop(crate::db::Db::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (slug, kind, key, n) in [
+            ("octo/a", "spec", "rounds", 40),
+            ("octo/a", "spec_pr", "40", 500),
+            ("octo/a", "sub_issue", "40/41", 41),
+            ("octo/a", "sub_issue", "40/42", 42),
+            ("octo/a", "blocked_by", "42/41", 41),
+            ("octo/a", "spec_pr_retry", "500", 500),
+            ("octo/a", "spec_pr", "60", 600),
+            ("octo/a", "spec_pr_settled", "600", 600),
+            ("octo/b", "spec_pr", "40", 700),
+            ("octo/b", "sub_issue", "40/43", 43),
+            ("octo/a", "close_comment", "41 Done in `abc1234`.", 41),
+        ] {
+            conn.execute("INSERT INTO published_issues (slug, kind, key, number, created_at) VALUES (?1, ?2, ?3, ?4, '2026-10-01T00:00:00Z')", rusqlite::params![slug, kind, key, n]).unwrap();
+        }
+        drop(conn);
+
+        let db = crate::db::Db::open(&path).unwrap();
+        let a40 = db.get_delivery("octo/a", 40).unwrap().unwrap();
+        assert_eq!((a40.pr, a40.state.as_str(), a40.ready_retry, a40.branch.as_str(), a40.migrated), (Some(500), "planned", true, "", true));
+        let ts: Vec<_> = a40.tickets.iter().map(|t| (t.number, t.blocked_by.clone(), t.state.as_str())).collect();
+        assert_eq!(ts, [(41, vec![], "open"), (42, vec![41], "open")]);
+        let a60 = db.get_delivery("octo/a", 60).unwrap().unwrap();
+        assert_eq!((a60.pr, a60.state.as_str(), a60.ready_retry, a60.tickets.len()), (Some(600), "settled", false, 0));
+        let b40 = db.get_delivery("octo/b", 40).unwrap().unwrap();
+        assert_eq!((b40.pr, b40.tickets.iter().map(|t| t.number).collect::<Vec<_>>()), (Some(700), vec![43]));
+        // The old kinds are gone; the rest stays.
+        for kind in ["spec_pr", "spec_pr_retry", "spec_pr_settled"] {
+            assert_eq!(db.published_issue("octo/a", kind, "40").unwrap(), None);
+            assert_eq!(db.published_issue("octo/a", kind, "500").unwrap(), None);
+        }
+        assert_eq!(db.published_issue("octo/a", "spec", "rounds").unwrap(), Some(40));
+        assert_eq!(db.published_issue("octo/a", "sub_issue", "40/41").unwrap(), Some(41));
+        // Once: a Delivery changed afterwards isn't rebuilt on the next start.
+        let mut d = a40.clone();
+        d.state = "running".into();
+        db.save_delivery(&d).unwrap();
+        drop(db);
+        assert_eq!(crate::db::Db::open(&path).unwrap().get_delivery("octo/a", 40).unwrap().unwrap().state, "running");
+    }
+
+    #[tokio::test]
     async fn a_full_team_gets_no_setup_button_and_an_unpublished_grill_no_card() {
         let (fake, st) = (fake_github(), state());
         let a = planner_on(&st, "card-full", Some("git@github.com:octo/card-full.git"));
         tickets_repo(&fake, "octo/card-full", 7, &[7]);
-        for (name, role) in [("Builder", "dev"), ("Checker", "reviewer")] {
+        for (name, role) in [("Builder", "dev"), ("Checker", "code_reviewer"), ("Tester", "qa"), ("Guard", "security")] {
             let mut x = crate::tasks::tests::agent(&st, name);
             x.project = " card-full ".into();
             x.role = role.into();
@@ -1236,7 +3669,7 @@ pub(crate) mod tests {
         crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
         let card = &summary(&st, &a).meta["grill"]["end_card"];
         assert_eq!((&card["missing_roles"], &card["setup"], &card["tickets"]), (&json!([]), &Value::Null, &json!([])));
-        assert_eq!(card["next_message"], "Implement spec #7: hand the ready tickets to the team");
+        assert_eq!((&card["next_message"], &card["delivery"]), (&json!(""), &json!({ "repo": "octo/card-full", "spec": 7 })));
 
         // A grill that stopped before publishing ends with the summary only.
         crate::grill::tests::round(&st, &a, &["Another?"]).unwrap();
@@ -1254,51 +3687,99 @@ pub(crate) mod tests {
             st.db.save_agent(&x).unwrap();
             x
         };
-        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"]);
-        add("Lead", "Team lead", "", "team-a");
-        add("Dev", "Feature developer", "", "team-a");
+        let all = ["dev", "code_reviewer", "qa", "security"];
+        assert_eq!(missing_roles(&st, "team-a"), all);
+        add("Lead", "Team lead", "lead", "team-a");
+        add("Dev", "Feature developer", "custom", "team-a");
         add("Builder", "", "dev", "team-b");
-        assert_eq!(missing_roles(&st, "team-a"), ["dev", "reviewer"], "names, titles and other projects don't count");
-        // A QA engineer reviews: it doesn't make the team's Dev.
-        add("QA", "QA engineer", "reviewer", "team-a");
-        assert_eq!(missing_roles(&st, "team-a"), ["dev"]);
+        assert_eq!(missing_roles(&st, "team-a"), all, "names, titles, the Lead and other projects don't count");
+        // A QA engineer is QA: it doesn't make the team's Dev or its other reviewers.
+        add("QA", "QA engineer", "qa", "team-a");
+        assert_eq!(missing_roles(&st, "team-a"), ["dev", "code_reviewer", "security"]);
+        add("Reviewer", "", "code_reviewer", "team-a");
+        add("Guard", "", "security", "team-a");
         // A renamed Dev still counts.
         let mut dev = add("Dev", "Feature developer", "dev", "team-a");
         (dev.name, dev.title) = ("Ana".into(), "Frontend".into());
         st.db.save_agent(&dev).unwrap();
         assert!(missing_roles(&st, "team-a").is_empty(), "a full team");
-        assert_eq!(missing_roles(&st, " "), ["dev", "reviewer"], "no project, no team");
+        assert_eq!(missing_roles(&st, " "), all, "no project, no team");
     }
 
     #[test]
-    fn agents_saved_before_roles_get_one_inferred_once() {
-        assert_eq!(infer_role("QA", "QA engineer"), "reviewer");
-        assert_eq!(infer_role("Security", "Security auditor"), "reviewer");
-        assert_eq!(infer_role("Loft Reviewer", ""), "reviewer");
+    fn roles_come_from_names_and_titles_only_for_agents_without_one() {
+        assert_eq!(infer_role("QA", "QA engineer"), "qa");
+        assert_eq!(infer_role("QA", "Test keeper"), "qa");
+        assert_eq!(infer_role("Security", "Security auditor"), "security");
+        assert_eq!(infer_role("Loft Reviewer", ""), "code_reviewer");
         assert_eq!(infer_role("Ana", "Desenvolvedora"), "dev");
         assert_eq!(infer_role("Dev", "Feature developer"), "dev");
-        assert_eq!(infer_role("Devious", "Docs writer"), "");
-        assert_eq!(infer_role("Lead", "Team lead"), "");
+        assert_eq!(infer_role("Devious", "Docs writer"), "custom");
+        assert_eq!(infer_role("Lead", "Team lead"), "custom");
+        assert_eq!(reviewer_role("Checker", "Test runner"), "qa");
+        assert_eq!(reviewer_role("Shield", "Security auditor"), "security");
+        assert_eq!(reviewer_role("Loft Reviewer", "Code reviewer"), "code_reviewer");
+        assert_eq!(reviewer_role("Ana", ""), "code_reviewer");
+    }
 
+    #[test]
+    fn agents_get_the_six_roles_once_and_keep_their_schedules() {
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("loft.db");
         let db = crate::db::Db::open(&path).unwrap();
         let st = AppState { db, ..state() };
-        let mut old = crate::tasks::tests::agent(&st, "QA");
-        old.title = "QA engineer".into();
-        st.db.save_agent(&old).unwrap();
+        // As stored before the six roles: (name, title, `lead`, `role`, None for no `role` key at all).
+        let old: &[(&str, &str, bool, Option<&str>)] = &[
+            ("Captain", "Team lead", true, Some("")),
+            ("Builder Lead", "Feature developer", true, Some("dev")),
+            ("Loft Reviewer", "Code reviewer", false, Some("reviewer")),
+            ("QA", "Test keeper", false, Some("reviewer")),
+            ("Tester", "", false, Some("reviewer")),
+            ("Shield", "Security auditor", false, Some("reviewer")),
+            ("Loft Dev", "Feature developer", false, Some("dev")),
+            ("Docs", "Docs keeper", false, Some("")),
+            ("Ancient", "Security auditor", false, None),
+            ("Ancient Lead", "", true, None),
+        ];
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut ids = vec![];
+        for (i, (name, title, lead, role)) in old.iter().enumerate() {
+            let mut a = crate::tasks::tests::agent(&st, name);
+            (a.title, a.project, a.interval_minutes) = (title.to_string(), "team".into(), 60 * (i as i64 + 1));
+            a.next_run_at = Some(format!("2026-11-0{}T10:00:00Z", i % 9 + 1));
+            st.db.save_agent(&a).unwrap();
+            let mut raw = serde_json::to_value(&a).unwrap();
+            let o = raw.as_object_mut().unwrap();
+            o.insert("lead".into(), json!(lead));
+            match role {
+                Some(r) => o.insert("role".into(), json!(r)),
+                None => o.remove("role"),
+            };
+            conn.execute("UPDATE agents SET data = ?1 WHERE id = ?2", rusqlite::params![raw.to_string(), a.id]).unwrap();
+            ids.push(a.id);
+        }
+        // Already on the six roles: left alone, even a role its name doesn't suggest.
         let mut set = crate::tasks::tests::agent(&st, "Dev");
-        set.role = "reviewer".into();
+        set.role = "security".into();
         st.db.save_agent(&set).unwrap();
-        // Strip `role` from the first, as a database from before roles has it.
-        let mut raw = serde_json::to_value(&old).unwrap();
-        raw.as_object_mut().unwrap().remove("role");
-        rusqlite::Connection::open(&path).unwrap().execute("UPDATE agents SET data = ?1 WHERE id = ?2", rusqlite::params![raw.to_string(), old.id]).unwrap();
         drop(st);
 
         let db = crate::db::Db::open(&path).unwrap();
-        assert_eq!(db.get_agent(&old.id).unwrap().unwrap().role, "reviewer");
-        assert_eq!(db.get_agent(&set.id).unwrap().unwrap().role, "reviewer", "a stored role is kept, even one its name doesn't suggest");
+        let roles: Vec<String> = ids.iter().map(|id| db.get_agent(id).unwrap().unwrap().role).collect();
+        assert_eq!(roles, ["lead", "lead", "code_reviewer", "qa", "qa", "security", "dev", "custom", "security", "lead"]);
+        for (i, id) in ids.iter().enumerate() {
+            let a = db.get_agent(id).unwrap().unwrap();
+            assert_eq!((a.interval_minutes, a.next_run_at.as_deref()), (60 * (i as i64 + 1), Some(format!("2026-11-0{}T10:00:00Z", i % 9 + 1)).as_deref()), "{} keeps its schedule", a.name);
+        }
+        assert_eq!(db.get_agent(&set.id).unwrap().unwrap().role, "security");
+        // The `lead` flag is gone from what is stored, so the next start changes nothing.
+        let raw: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT data FROM agents WHERE id = ?1", [&ids[0]], |r| r.get(0)).unwrap();
+        assert!(serde_json::from_str::<Value>(&raw).unwrap().get("lead").is_none(), "{raw}");
+        let mut a = db.get_agent(&ids[0]).unwrap().unwrap();
+        a.role = "dev".into();
+        db.save_agent(&a).unwrap();
+        drop(db);
+        assert_eq!(crate::db::Db::open(&path).unwrap().get_agent(&ids[0]).unwrap().unwrap().role, "dev", "migrated once: the user's later choice stays");
     }
 }

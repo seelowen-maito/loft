@@ -17,6 +17,10 @@ protocol LoftAPI: Sendable {
     /// "Set up the team with loft" on the end-of-planning card `messageId`: the server sends its setup message
     /// once and returns the card with `sent_at` (`duplicate` when it was already sent).
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse
+    /// "Start delivery" on the end-of-planning card `messageId`: the server starts the spec's first ready ticket
+    /// on the team's Dev once and returns the card with `delivery.started` (`duplicate` when it had started).
+    /// `initGit`: the user said yes to setting up git in a project folder that has none (`needsGit` came back).
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse
     func taskPlan(id: String) async throws -> TaskPlan
     func needsYou() async throws -> NeedsYouList
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws
@@ -26,6 +30,8 @@ protocol LoftAPI: Sendable {
     /// `PATCH /api/devices/{token}` with some of `kinds`, `quiet_hours` (null clears them), `name`.
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws
     func runNow(agentId: String) async throws
+    /// `PATCH /api/agents/{id}` with some of its editable fields (today `fresh_context`).
+    func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent
     func stopRun(agentId: String) async throws
     /// Stops the run and keeps the queue; queued messages run next (`run_watchdog`).
     func restartRun(agentId: String) async throws
@@ -199,6 +205,10 @@ struct LiveLoftAPI: LoftAPI {
         try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/team-setup"))
     }
 
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
+        try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/start-delivery\(initGit ? "?init_git=true" : "")"))
+    }
+
     /// The grill endpoints answer with the session either bare or wrapped as `{ "session": … }`
     /// (`{ "session": null }` when there is none).
     static func decodeGrillSession(_ data: Data) throws -> GrillSession? {
@@ -211,6 +221,9 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func runNow(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/run") }
+    func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent {
+        try decode(Agent.self, try await send("PATCH", "/agents/\(id)", body: .object(fields)))
+    }
     func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
     func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
@@ -342,7 +355,9 @@ extension LoftAPI {
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
+    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse { throw APIError.unsupported("Delivery") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
+    func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent { throw APIError.unsupported("Agent settings") }
     func taskComments(id: String) async throws -> [TaskComment] { [] }
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }
     func serverSettings() async throws -> JSONValue { throw APIError.unsupported("Server settings") }
