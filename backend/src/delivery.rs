@@ -12,7 +12,8 @@ use crate::db::{Delivery, DeliveryTicket};
 use crate::state::AppState;
 
 /// Has Loft track the Delivery's PR, owned by its Dev or else its planner, so its card shows and checkers can
-/// set verdicts on it. A PR Loft already tracks keeps its owner and is read again.
+/// set verdicts on it. A PR Loft already tracks keeps its owner and is read again: the planner, when it was
+/// opened before a Dev was assigned, which is the same team.
 pub async fn track_pr(state: &AppState, d: &Delivery) {
     let Some(pr) = d.pr else { return };
     if let Some(known) = state.db.list_pull_requests(None).ok().and_then(|ps| ps.into_iter().find(|p| p.slug == d.repo && p.number == pr)) {

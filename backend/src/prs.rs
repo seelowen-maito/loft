@@ -197,7 +197,8 @@ async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
 pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str) -> Result<String, String> {
     let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
     let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
-    let known = state.db.list_pull_requests(None).map_err(|e| e.to_string())?.into_iter().find(|p| p.slug == slug && p.number == number);
+    // The first agent that tracked it is its opener: a later share by another agent doesn't change whose team may.
+    let known = state.db.list_pull_requests(None).map_err(|e| e.to_string())?.into_iter().filter(|p| p.slug == slug && p.number == number).min_by(|a, b| a.created_at.cmp(&b.created_at));
     let pr = known.ok_or_else(|| format!("Loft doesn't track {slug}#{number}: its opener shares it with share_pull_request first."))?;
     let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
     let checker = matches!(me.role.as_str(), "qa" | "security" | "code_reviewer");
@@ -834,6 +835,27 @@ mod tests {
 
     fn ready_calls(fake: &crate::github::tests::Fake) -> usize {
         fake.seen("/graphql").iter().filter(|r| r.body["query"].as_str().is_some_and(|q| q.contains("markPullRequestReadyForReview"))).count()
+    }
+
+    #[tokio::test]
+    async fn a_later_share_by_another_agent_doesnt_change_who_may_set_verdicts() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/pr-takeover";
+        let (dev, qa) = team(&st, "pr-takeover");
+        let (other_dev, other_qa) = team(&st, "pr-takeover-b");
+        fake.route("GET", "/repos/octo/pr-takeover/pulls/7", 200, pull(slug, 7, "ccc3333444"));
+        settled_checks(&fake, slug, "ccc3333444");
+        fake.route("POST", "/repos/octo/pr-takeover/labels", 201, json!({}));
+        fake.route("POST", "/repos/octo/pr-takeover/issues/7/labels", 200, label_objects(&["qa:passed"]));
+        fake.route("DELETE", "/repos/octo/pr-takeover/issues/7/labels/qa%3Afailed", 404, json!({ "message": "Label does not exist" }));
+        register(&st, &dev.id, slug, 7, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        register(&st, &other_dev.id, slug, 7, None).await.unwrap();
+        let url = "https://github.com/octo/pr-takeover/pull/7";
+
+        assert!(set_verdict(&st, &other_qa, url, "qa", true, "ccc3333").await.unwrap_err().starts_with("Only a QA"));
+        set_verdict(&st, &qa, url, "qa", true, "ccc3333").await.unwrap();
     }
 
     #[tokio::test]
