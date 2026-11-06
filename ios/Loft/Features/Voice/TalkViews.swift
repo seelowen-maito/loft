@@ -258,32 +258,37 @@ struct RecentAgentsRow: View {
         let current = voice.agentId
         let recent = store.agents.sorted { ($0.lastRunAt ?? .distantPast) > ($1.lastRunAt ?? .distantPast) }
         let shown = (recent.filter { $0.id == current } + recent.filter { $0.id != current }).prefix(5)
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                Text("To").font(.subheadline).foregroundStyle(.secondary)
-                ForEach(Array(shown)) { a in
-                    Button { voice.switchAgent(a.id) } label: {
-                        Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
+        // More stays at the end of the row, outside the scrolling chips, so it's always on screen.
+        HStack(spacing: 8) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    Text("To").font(.subheadline).foregroundStyle(.secondary)
+                    ForEach(Array(shown)) { a in
+                        Button { voice.switchAgent(a.id) } label: {
+                            Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(a.id == current ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(a.id == current ? .isSelected : [])
                 }
-                Button { picking = true } label: {
-                    Label("More", systemImage: "ellipsis").font(.subheadline)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Color.secondary.opacity(0.12), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("More agents")
-                .accessibilityHint("Lists every agent, to pick who this goes to.")
-                .accessibilityIdentifier("voiceMoreAgents")
+                .padding(.leading, Theme.gutter)
             }
-            .padding(.horizontal, Theme.gutter)
+            .scrollIndicators(.hidden)
+            .accessibilityIdentifier("voiceRecentAgents")
+            Button { picking = true } label: {
+                Label("More", systemImage: "ellipsis").font(.subheadline)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .accessibilityLabel("More agents")
+            .accessibilityHint("Lists every agent, to pick who this goes to.")
+            .accessibilityIdentifier("voiceMoreAgents")
         }
-        .scrollIndicators(.hidden)
-        .accessibilityIdentifier("voiceRecentAgents")
+        .padding(.trailing, Theme.gutter)
         .sheet(isPresented: $picking) {
             TalkAgentPicker().presentationDetents([.medium, .large])
         }
