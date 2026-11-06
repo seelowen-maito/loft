@@ -208,7 +208,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
     let url = |i: &IssueLink| match (p.repo.as_str(), i.repo.as_str()) {
-        ("", _) => format!("/tasks/{}", i.id),
+        ("", _) => format!("/issues/{}", i.id),
         (repo, "") | (_, repo) => format!("https://github.com/{repo}/issues/{}", i.number),
     };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });

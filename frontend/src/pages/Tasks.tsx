@@ -223,7 +223,7 @@ export default function TasksPage() {
                 </button>
                 {!folded &&
                   g.tasks.slice(0, g.key === "closed" ? 50 : undefined).map((t) => (
-                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/tasks/${t.id}`, search: params.toString() })} />
+                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/issues/${t.id}`, search: params.toString() })} />
                   ))}
               </section>
             );
@@ -306,12 +306,12 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
-      <Link to={{ pathname: "/tasks", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
+      <Link to={{ pathname: "/issues", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
         <ArrowLeft className="size-3" /> All issues
       </Link>
       <header className="space-y-2">
         {parent && (
-          <Link to={{ pathname: `/tasks/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+          <Link to={{ pathname: `/issues/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
             {isSpec(parent) && parent.github ? `Part of spec #${parent.github.number}: ${parent.title}` : `Part of ${parent.title}`} <ChevronRight className="size-3" />
           </Link>
         )}
@@ -456,7 +456,7 @@ function TaskLinks({ title, tasks }: { title: string; tasks: Task[] }) {
       <div className="eyebrow mb-2">{title}</div>
       <div className="space-y-1">
         {tasks.map((x) => (
-          <Link key={x.id} to={{ pathname: `/tasks/${x.id}`, search }} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
+          <Link key={x.id} to={{ pathname: `/issues/${x.id}`, search }} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
             <StateIcon task={x} className="size-3 shrink-0" />
             <span className="truncate">{x.title}</span>
           </Link>

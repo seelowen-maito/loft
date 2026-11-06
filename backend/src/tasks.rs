@@ -511,10 +511,10 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Re
 // ---- task references in messages ----------------------------------------
 
 /// Task ids a message points at: the one attached (`meta.task_id`) first, then task links in the
-/// text (`…/tasks/<id>` or `loft://task/<id>`), existing tasks only, at most 5.
+/// text (`…/issues/<id>`, the old `…/tasks/<id>` or `loft://task/<id>`), existing tasks only, at most 5.
 pub fn references(state: &AppState, attached: Option<&str>, text: &str) -> Vec<String> {
     let mut ids: Vec<String> = attached.into_iter().map(|s| s.trim().to_lowercase()).collect();
-    for marker in ["/tasks/", "loft://task/"] {
+    for marker in ["/issues/", "/tasks/", "loft://task/"] {
         let mut rest = text;
         while let Some(i) = rest.find(marker) {
             let after = &rest[i + marker.len()..];
@@ -1460,7 +1460,7 @@ pub(crate) mod tests {
         assert!(q.contains(&format!("[The user refers to task {} “Fix login” (status: in progress, agent: Worker). Latest note: halfway.", t.id)), "{q}");
         // A link in the text works too; an unknown attached task is refused; unknown links are ignored.
         st.rt.lock().unwrap().queued.remove(&a.id);
-        let Json(r) = send(&format!("see http://mac:7420/tasks/{} and loft://task/{}", t.id, uuid::Uuid::new_v4()), None).await.ok().unwrap();
+        let Json(r) = send(&format!("see http://mac:7420/issues/{} or http://mac:7420/tasks/{} and loft://task/{}", t.id, t.id, uuid::Uuid::new_v4()), None).await.ok().unwrap();
         assert_eq!((r["message"]["meta"]["task_refs"].clone(), r["message"]["meta"]["task_id"].clone()), (json!([t.id]), Value::Null));
         assert!(send("hi", Some(&uuid::Uuid::new_v4().to_string())).await.is_err());
         let Json(r) = send("plain message", None).await.ok().unwrap();

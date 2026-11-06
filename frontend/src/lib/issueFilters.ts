@@ -40,7 +40,7 @@ export function parseFilters(params: URLSearchParams): IssueFilters {
   };
 }
 
-/** The query string for `f`, without the filters at their default, so a plain list is a plain `/tasks`. */
+/** The query string for `f`, without the filters at their default, so a plain list is a plain `/issues`. */
 export function filtersToParams(f: IssueFilters): URLSearchParams {
   const p = new URLSearchParams();
   if (f.q.trim()) p.set("q", f.q.trim());

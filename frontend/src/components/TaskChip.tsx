@@ -5,8 +5,8 @@ import { api, type Task } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
 
-/** Task ids in links: `…/tasks/<id>` (the web app) or `loft://task/<id>` (the iOS app). */
-export const TASK_LINK = /(?:\/tasks\/|loft:\/\/task\/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+/** Task ids in links: `…/issues/<id>` (or the old `…/tasks/<id>`) (the web app) or `loft://task/<id>` (the iOS app). */
+export const TASK_LINK = /(?:\/(?:issues|tasks)\/|loft:\/\/task\/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 // One shared, live copy of the task list for chips and pickers across the chat.
 let tasks: Task[] | null = null;
@@ -65,7 +65,7 @@ export function TaskChip({ id, onRemove, className }: { id: string; onRemove?: (
   return (
     <span className={cx("inline-flex max-w-full items-center gap-1.5 rounded-full border border-line-strong bg-ink-850 py-0.5 pl-2 text-[12px] align-middle", onRemove ? "pr-1" : "pr-2.5", className)}>
       <CircleDot className={cx("size-3 shrink-0", t ? STATUS_TONE[t.status] : "text-fg-3")} />
-      <Link to={`/tasks/${id}`} className="truncate text-fg hover:underline" title={t ? `${t.title} · ${t.status.replace("_", " ")}` : undefined}>
+      <Link to={`/issues/${id}`} className="truncate text-fg hover:underline" title={t ? `${t.title} · ${t.status.replace("_", " ")}` : undefined}>
         {label}
       </Link>
       {t && <span className="shrink-0 font-mono text-[10px] text-fg-3">{t.status === "waiting_approval" ? "waiting" : t.status.replace("_", " ")}</span>}

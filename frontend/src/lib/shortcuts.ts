@@ -16,7 +16,7 @@ export type Combos = Record<Rebindable, string>;
 /** `g` then a letter. */
 export const GO: Record<string, { path: string; label: string }> = {
   a: { path: "/agents", label: "Agents" },
-  i: { path: "/tasks", label: "Issues" },
+  i: { path: "/issues", label: "Issues" },
   r: { path: "/repos", label: "Repos" },
   s: { path: "/settings", label: "Settings" },
   m: { path: "/simulator", label: "Simulator" },

@@ -4,6 +4,7 @@ import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartp
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
+import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
@@ -113,13 +114,18 @@ function useShowSimulator() {
 /** `/issues/:project/:number` from the old Issues tab: the list, searched for `#number` in that project. */
 function OldIssue() {
   const { project = "", number = "" } = useParams();
-  return <Navigate to={`/tasks?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+  return <Navigate to={`/issues?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+}
+
+function OldTask() {
+  const { id } = useParams();
+  return <Navigate to={oldTasksTarget(id, window.location.search)} replace />;
 }
 
 /** The Issues tab: from an agent's page, on that agent's group (the Issues page turns `from` into it). */
 function issuesLink(path: string): string {
   const id = /^\/agents\/([^/]+)/.exec(path)?.[1];
-  return id ? `/tasks?from=${encodeURIComponent(id)}` : "/tasks";
+  return id ? `/issues?from=${encodeURIComponent(id)}` : "/issues";
 }
 
 export default function App() {
@@ -189,11 +195,13 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
-          {/* The old GitHub Issues tab's links: the one list, showing GitHub's, or that issue. */}
-          <Route path="/issues" element={<Navigate to="/tasks?source=github" replace />} />
+          {/* The old GitHub Issues tab's links: each opens that issue, found in the list. */}
+          <Route path="/issues" element={<TasksPage />} />
+          <Route path="/issues/:id" element={<TasksPage />} />
           <Route path="/issues/:project/:number" element={<OldIssue />} />
-          <Route path="/tasks" element={<TasksPage />} />
-          <Route path="/tasks/:id" element={<TasksPage />} />
+          {/* Issues were once "tasks": old links keep working. */}
+          <Route path="/tasks" element={<OldTask />} />
+          <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

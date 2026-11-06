@@ -238,7 +238,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions,
             push: (
                 match t.status.as_str() {
@@ -267,7 +267,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("#{} was closed on GitHub while it's being worked on.", g.number), MAX_REASON),
             text: String::new(),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("deny", "Cancel issue", "POST", format!("{base}/cancel"), json!({})),
                 action("approve", &format!("Keep working (reopens #{})", g.number), "POST", format!("{base}/keep-working"), json!({})),
@@ -296,7 +296,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Not on GitHub yet: approve to post it on {}#{}.", g.repo, g.number), MAX_REASON),
             text: text(&c.text, MAX_TEXT),
             created_at: c.created_at.clone(),
-            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("approve", "Approve", "POST", format!("{base}/approve"), json!({})),
                 action("answer", "Edit and approve", "POST", format!("{base}/approve"), json!({ "text": c.text })),
@@ -325,7 +325,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&if t.summary.is_empty() { "Done.".to_string() } else { format!("Done: {}", first_line(&t.summary)) }, MAX_REASON),
             text: text(&t.summary, MAX_TEXT),
             created_at: done_at,
-            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("answer", "Follow up", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })),
                 open_task(&t.id),
@@ -469,7 +469,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Its reviews passed: merge `{}` into `{}`.", d.branch, d.base), MAX_REASON),
             text: String::new(),
             created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
-            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/tasks/{}", t.id) })]).unwrap_or_default(),
+            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
             actions: vec![
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 dismiss(&id),

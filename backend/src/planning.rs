@@ -2049,8 +2049,8 @@ pub(crate) mod tests {
         crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Offline it is." })).unwrap().unwrap();
         let card = &summary(&st, &a).meta["grill"]["end_card"];
         assert_eq!(card["repo"], "");
-        assert_eq!(card["spec"], json!({ "number": 0, "title": "Offline mode", "url": format!("/tasks/{}", spec.id) }));
-        assert_eq!(card["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect::<Vec<_>>()[..3], [format!("/tasks/{}", store.id), format!("/tasks/{}", ui.id), format!("/tasks/{}", sync.id)]);
+        assert_eq!(card["spec"], json!({ "number": 0, "title": "Offline mode", "url": format!("/issues/{}", spec.id) }));
+        assert_eq!(card["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect::<Vec<_>>()[..3], [format!("/issues/{}", store.id), format!("/issues/{}", ui.id), format!("/issues/{}", sync.id)]);
         // Its Delivery, started from the card like a spec on GitHub.
         let d = crate::delivery::local_of(&st, &a.project, &spec.id).unwrap();
         assert_eq!((&card["next_message"], &card["delivery"]), (&json!(""), &json!({ "repo": d.repo, "spec": d.spec, "local": true })));
