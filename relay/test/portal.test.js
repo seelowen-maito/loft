@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
-import { home, start, callback, createAccountKey } from "../lib/portal.js";
+import { home, start, callback, createAccountKey, revokeAccountKey } from "../lib/portal.js";
 import { push } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
@@ -14,12 +14,20 @@ const apns = generateKeyPairSync("ec", { namedCurve: "P-256" });
 const pem = (k) => k.privateKey.export({ type: "pkcs8", format: "pem" });
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 
-// The store: Upstash's REST API.
+// The store: Upstash's REST API, with its transactions (`/multi-exec`) recorded.
 const store = new Map();
 const sets = new Map();
-const run = ([cmd, key, value, nx]) => {
-  if (cmd === "SET") return nx === "NX" && store.has(key) ? null : (store.set(key, value), "OK");
-  if (cmd === "SADD") return (sets.set(key, [...(sets.get(key) ?? []), value]), 1);
+const transactions = [];
+const members = (key) => sets.get(key) ?? new Set();
+const run = ([cmd, key, ...args]) => {
+  if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
+  if (cmd === "GET") return store.get(key) ?? null;
+  if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k)).length;
+  if (cmd === "SADD") return (sets.set(key, members(key).add(args[0])), 1);
+  if (cmd === "SREM") return members(key).delete(args[0]) ? 1 : 0;
+  if (cmd === "SMEMBERS") return [...members(key)];
+  if (cmd === "SCARD") return members(key).size;
+  if (cmd === "SISMEMBER") return members(key).has(args[0]) ? 1 : 0;
   if (cmd === "EXISTS") return store.has(key) ? 1 : 0;
   if (cmd === "INCR") return (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
   return 1;
@@ -29,7 +37,8 @@ const kvServer = createServer((req, res) => {
   req.on("data", (d) => (body += d));
   req.on("end", () => {
     const parsed = JSON.parse(body);
-    const out = req.url === "/pipeline" ? parsed.map((c) => ({ result: run(c) })) : { result: run(parsed) };
+    if (req.url === "/multi-exec") transactions.push(parsed.map((c) => c[0]));
+    const out = req.url === "/" ? { result: run(parsed) } : parsed.map((c) => ({ result: run(c) }));
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
   });
 });
@@ -80,6 +89,7 @@ after(() => [kvServer, idpServer, apnsServer].forEach((s) => s.close()));
 beforeEach(() => {
   store.clear();
   sets.clear();
+  transactions.length = 0;
   tokenRequests.length = 0;
   pushed.length = 0;
   idp = { sub: "001234.abcdef", status: 200 };
@@ -182,8 +192,9 @@ test("a key is shown once and only its hash is stored", async () => {
   const key = (await res.text()).match(/lrk_[A-Za-z0-9_-]{43}/)[0];
   const record = store.get(`relay-key:${sha256(key)}`);
   assert.deepEqual(JSON.parse(record), { label: "My <Mac>", created: "2026-11-05T00:00:00.000Z", account: "001234.abcdef" });
-  assert.deepEqual(sets.get("account-keys:001234.abcdef"), [sha256(key)]);
-  assert.ok(![...store.keys(), ...store.values(), ...[...sets.values()].flat()].some((v) => v.includes(key)), "the key itself isn't stored");
+  assert.deepEqual([...sets.get("account-keys:001234.abcdef")], [sha256(key)]);
+  assert.deepEqual(transactions, [["SET", "SADD"]], "the key and its place in the account are written together");
+  assert.ok(![...store.keys(), ...store.values(), ...[...sets.values()].flatMap((m) => [...m])].some((v) => v.includes(key)), "the key itself isn't stored");
   assert.ok(!(await (await home(get("/", session), env)).text()).includes(key), "it isn't shown again");
   assert.equal((await createAccountKey(post("/keys", { name: " " }, session), env)).status, 400, "a key needs a name");
 });
@@ -197,4 +208,68 @@ test("a push with a portal key is forwarded; an unknown key is refused", async (
   assert.deepEqual(pushed, [`/3/device/${DEVICE}`]);
   assert.equal((await send(`lrk_${"b".repeat(43)}`)).status, 401);
   assert.equal(pushed.length, 1);
+});
+
+const keyFrom = async (res) => (await res.text()).match(/lrk_[A-Za-z0-9_-]{43}/)?.[0];
+const pushWith = (key) =>
+  push(new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload: { aps: { alert: "hi" } } }) }), env, Date.UTC(2026, 10, 6, 12));
+const idsOn = (html) => [...html.matchAll(/name="id" value="([0-9a-f]{64})"/g)].map((m) => m[1]);
+
+test("the key list shows each key's name, created and last-used dates, never the key", async () => {
+  const session = await signInAs();
+  const mini = await keyFrom(await createAccountKey(post("/keys", { name: "Mac <mini>" }, session), env, Date.UTC(2026, 10, 3)));
+  const book = await keyFrom(await createAccountKey(post("/keys", { name: "MacBook" }, session), env, Date.UTC(2026, 10, 4)));
+  assert.equal((await pushWith(mini)).status, 200);
+  const html = await (await home(get("/", session), env)).text();
+  assert.match(html, /<td>Mac &lt;mini&gt;<\/td><td>Nov 3, 2026<\/td><td>Nov 6, 2026<\/td>/);
+  assert.match(html, /<td>MacBook<\/td><td>Nov 4, 2026<\/td><td>never<\/td>/);
+  assert.match(html, /2 of 5 keys/);
+  assert.ok(!html.includes(mini) && !html.includes(book), "no key on the page");
+  // Another account sees none of them.
+  assert.match(await (await home(get("/", await signInAs("999.other")), env)).text(), /No keys yet[\s\S]*0 of 5 keys/);
+});
+
+test("a revoked key stops working at once, and only its owner can revoke it", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Old iMac" }, session), env));
+  assert.equal((await pushWith(key)).status, 200);
+  const [id] = idsOn(await (await home(get("/", session), env)).text());
+  assert.equal(id, sha256(key));
+  const other = await signInAs("999.other");
+  for (const [form, cookies] of [[{ id }, other], [{ id: "x" }, session], [{}, session]]) {
+    assert.equal((await revokeAccountKey(post("/keys/revoke", form, cookies), env)).status, 404, JSON.stringify(form));
+  }
+  assert.equal((await revokeAccountKey(post("/keys/revoke", { id }, ""), env)).status, 303, "signed out goes home");
+  assert.equal((await pushWith(key)).status, 200, "still works after the refused attempts");
+  const res = await revokeAccountKey(post("/keys/revoke", { id }, session), env);
+  assert.equal(res.status, 303);
+  assert.equal((await pushWith(key)).status, 401);
+  assert.ok(!store.has(`relay-key:${id}`) && !store.has(`relay-key-used:${id}`), "the key's record and last-used date are gone");
+  assert.equal(sets.get("account-keys:001234.abcdef").size, 0);
+  assert.deepEqual(idsOn(await (await home(get("/", session), env)).text()), []);
+});
+
+test("a 6th key is refused with a clear message until one is revoked", async () => {
+  const session = await signInAs();
+  for (let i = 1; i <= 5; i++) assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: `Mac ${i}` }, session), env)));
+  const page = await (await home(get("/", session), env)).text();
+  assert.match(page, /5 of 5 keys/);
+  assert.ok(!page.includes("Create key"), "the form is gone at the cap");
+  const refused = await createAccountKey(post("/keys", { name: "Mac 6" }, session), env);
+  assert.equal(refused.status, 409);
+  const text = await refused.text();
+  assert.match(text, /at most 5 keys\. Revoke one to make room/);
+  assert.equal(await keyFrom(new Response(text)), undefined);
+  assert.equal(sets.get("account-keys:001234.abcdef").size, 5);
+  await revokeAccountKey(post("/keys/revoke", { id: idsOn(page)[0] }, session), env);
+  assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: "Mac 6" }, session), env)));
+});
+
+test("a session whose account is gone gets no key and is signed out", async () => {
+  const session = await signInAs();
+  store.delete("account:001234.abcdef");
+  const res = await createAccountKey(post("/keys", { name: "Mac" }, session), env);
+  assert.equal(res.status, 303);
+  assert.match(res.headers.getSetCookie().join(), /session=; Max-Age=0/);
+  assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
 });

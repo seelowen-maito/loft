@@ -19,6 +19,9 @@ const json = (status, body, headers) => Response.json(body, { status, headers })
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const hashed = (key) => `relay-key:${sha256(key)}`;
 
+/** The most keys one portal account can hold. */
+export const MAX_KEYS = 5;
+
 /**
  * Counts one request against a fixed-window limit: null when it's within it, else a 429 saying when to try again.
  * `who` is already a hash, so the store never holds an IP or a token.
@@ -41,9 +44,11 @@ const unconfigured = (env) => (REQUIRED.some((k) => !env[k]) ? json(500, { error
  */
 export async function createKey(env, label, now = Date.now(), account = undefined) {
   const key = `lrk_${randomBytes(32).toString("base64url")}`;
+  const record = JSON.stringify({ label, created: new Date(now).toISOString(), ...(account && { account }) });
   const store = makeKv(env);
-  await store.set(hashed(key), JSON.stringify({ label, created: new Date(now).toISOString(), ...(account && { account }) }));
-  if (account) await store.sadd(`account-keys:${account}`, sha256(key));
+  // With an account, the key and its place in the account's list are written together, so neither is ever left alone.
+  if (account) await store.transaction([["SET", hashed(key), record], ["SADD", `account-keys:${account}`, sha256(key)]]);
+  else await store.set(hashed(key), record);
   return key;
 }
 
@@ -76,6 +81,7 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
+  await store.set(`relay-key-used:${who}`, new Date(now).toISOString());
   const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
   // The whole request (payload plus a few small fields) can't be much over the payload's cap.
   if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
