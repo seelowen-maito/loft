@@ -180,12 +180,13 @@ Loft over their tailnet. Push can go through the Loft push relay, which needs a 
 not the app). Paste these into App Store Connect:
 
 - *Review notes:* "Loft is a client for a server the user runs on their own Mac, reached over Tailscale, so the app
-  can't be used without one. Notifications are optional: the server sends them with the user's own APNs key, or through
+  can't be used without one. To try it, type demo-loft-dev.get-loft.com on the connect screen: it opens a demo with
+  sample data, no server or sign-in needed. Notifications are optional: the server sends them with the user's own APNs key, or through
   our push relay after the user signs in with Apple on our push portal (<PORTAL_URL>). The portal stores only Apple's
   user id and hashed keys, and has Delete my account, which deletes them and revokes the Sign in with Apple token."
-- *Privacy (App Privacy questionnaire):* the app collects no data. If the listing covers the portal too: **User ID**
-  (Apple's user id), used for **App Functionality**, linked to the user, not used for tracking. No name or email is
-  asked for. Push text passes through the relay in transit only and is never stored.
+- *Privacy (App Privacy questionnaire):* declare **User ID** (Apple's user id, from the portal sign-in), used for
+  **App Functionality**, linked to the user, not used for tracking. Nothing else: the app itself collects no data and
+  no name or email is asked for. Push text passes through the relay in transit only and is never stored.
 - *Account deletion:* the only account is on the portal, and it has **Delete my account** (`<PORTAL_URL>/account/delete`).
 
 **Tests**
