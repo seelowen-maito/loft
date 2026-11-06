@@ -247,10 +247,12 @@ struct VoiceStatusView: View {
 
 // MARK: - E: dictate
 
-/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches.
+/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches; More lists
+/// every agent.
 struct RecentAgentsRow: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
+    @State private var picking = false
 
     var body: some View {
         let current = voice.agentId
@@ -268,11 +270,79 @@ struct RecentAgentsRow: View {
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(a.id == current ? .isSelected : [])
                 }
+                Button { picking = true } label: {
+                    Label("More", systemImage: "ellipsis").font(.subheadline)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("More agents")
+                .accessibilityHint("Lists every agent, to pick who this goes to.")
+                .accessibilityIdentifier("voiceMoreAgents")
             }
             .padding(.horizontal, Theme.gutter)
         }
         .scrollIndicators(.hidden)
         .accessibilityIdentifier("voiceRecentAgents")
+        .sheet(isPresented: $picking) {
+            TalkAgentPicker().presentationDetents([.medium, .large])
+        }
+    }
+}
+
+/// Talk's More: every agent, by group, searchable by name, title, group or project. Picking one switches Talk to it.
+struct TalkAgentPicker: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(VoiceSession.self) private var voice
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    /// The agents matching `query`, in sections by group (A to Z, agents without one last), names A to Z.
+    static func sections(_ agents: [Agent], query: String) -> [(title: String, agents: [Agent])] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let hits = agents.filter { a in
+            q.isEmpty || ([a.name, a.title ?? "", a.group ?? ""] + a.allProjects).contains { $0.localizedCaseInsensitiveContains(q) }
+        }
+        let byGroup = Dictionary(grouping: hits) { ($0.group ?? "").trimmingCharacters(in: .whitespaces) }
+        return byGroup.keys
+            .sorted { ($0.isEmpty ? 1 : 0, $0.lowercased()) < ($1.isEmpty ? 1 : 0, $1.lowercased()) }
+            .map { g in
+                (g.isEmpty ? "No group" : g, byGroup[g]!.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
+            }
+    }
+
+    var body: some View {
+        NavigationStack {
+            let sections = Self.sections(store.agents, query: query)
+            List {
+                ForEach(sections, id: \.title) { section in
+                    Section(section.title) {
+                        ForEach(section.agents) { a in
+                            let current = a.id == voice.agentId
+                            Button {
+                                voice.switchAgent(a.id)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    AgentRow(agent: a)
+                                    if current { Image(systemName: "checkmark").foregroundStyle(Theme.accent).accessibilityHidden(true) }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(current ? .isSelected : [])
+                            .accessibilityHint(current ? "Talk goes to this agent now." : "Talk goes to this agent.")
+                            .accessibilityIdentifier("talkPick-\(a.name)")
+                        }
+                    }
+                }
+            }
+            .overlay { if sections.isEmpty { ContentUnavailableView.search(text: query) } }
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Name, title, group or project")
+            .navigationTitle("Talk to…")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
     }
 }
 

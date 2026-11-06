@@ -254,6 +254,26 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("speechStatus", app).appears(timeout: 5))
     }
 
+    /// Talk's To row offers five agents; More lists all eleven, and one picked there is who Talk goes to, in the row.
+    func testTalkMorePicksAnAgentThatWasNotInTheRow() {
+        let app = launch(["-fixture-many-agents", "-fixture-voice", "listening"])
+        let row = any("voiceRecentAgents", app)
+        XCTAssertTrue(row.appears(timeout: 8))
+        XCTAssertFalse(row.buttons["Web Agent"].exists, "not one of the five in the row")
+        app.buttons["voiceMoreAgents"].tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.appears(timeout: 5))
+        search.tap()
+        search.typeText("web")
+        let pick = app.buttons["talkPick-Web Agent"].firstMatch
+        XCTAssertTrue(pick.appears(timeout: 5))
+        XCTAssertFalse(app.buttons["talkPick-QA Agent"].exists, "the search leaves the others out")
+        pick.tap()
+        XCTAssertTrue(pick.disappears(timeout: 5), "the list closes")
+        XCTAssertTrue(row.buttons["Web Agent"].appears(timeout: 5), "and the picked agent is in the row")
+        XCTAssertTrue(row.buttons["Web Agent"].isSelected, "as the one Talk goes to")
+    }
+
     // MARK: - Other fixtures
 
     /// Talk: the tidied dictation lands in the chat's message box; sending it there shows the full-screen status,
