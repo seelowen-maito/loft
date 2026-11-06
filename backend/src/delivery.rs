@@ -11,6 +11,32 @@ use crate::api::{ApiResult, bad, not_found};
 use crate::db::{Delivery, DeliveryTicket};
 use crate::state::AppState;
 
+/// Has Loft track the Delivery's PR, owned by its Dev or else its planner, so its card shows and checkers can
+/// set verdicts on it. A PR Loft already tracks keeps its owner and is read again: the planner, when it was
+/// opened before a Dev was assigned, which is the same team.
+pub async fn track_pr(state: &AppState, d: &Delivery) {
+    let Some(pr) = d.pr else { return };
+    if let Some(known) = state.db.list_pull_requests(None).ok().and_then(|ps| ps.into_iter().find(|p| p.slug == d.repo && p.number == pr)) {
+        let _ = crate::prs::refresh(state, &known.id).await;
+        return;
+    }
+    let owner = [&d.dev, &d.planner].into_iter().find(|id| !id.is_empty() && matches!(state.db.get_agent(id), Ok(Some(_))));
+    if let Some(owner) = owner
+        && let Err(e) = crate::prs::register(state, owner, &d.repo, pr, None).await
+    {
+        tracing::warn!("delivery {}#{}: couldn't track PR #{pr}: {e}", d.repo, d.spec);
+    }
+}
+
+/// On start-up: tracks the PRs of Deliveries not yet settled, opened before Loft tracked them.
+pub async fn track_open_prs(state: AppState) {
+    for s in ["planned", "running", "final_review", "final_fixes", "needs_human"] {
+        for d in state.db.deliveries_in_state(s).unwrap_or_default() {
+            track_pr(&state, &d).await;
+        }
+    }
+}
+
 /// The Delivery of spec #spec on `repo`, made when the spec is published, with its branch. A record
 /// already there keeps what it has, and gets the branch if it had none.
 pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, planner: &str, branch: &str) {

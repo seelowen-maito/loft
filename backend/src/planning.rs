@@ -548,7 +548,9 @@ pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &
             made["number"].as_i64().ok_or_else(|| format!("GitHub opened the {kind} PR but didn't return its number"))?
         }
     };
-    crate::delivery::update(state, slug, n, |d| d.pr = Some(pr));
+    if let Some(d) = crate::delivery::update(state, slug, n, |d| d.pr = Some(pr)) {
+        crate::delivery::track_pr(state, &d).await;
+    }
     Ok((pr, docs_note))
 }
 
@@ -768,12 +770,7 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
     settle("ready");
     // Watched like a PR an agent opened: Needs you lists it, with a push and a Merge button, once GitHub
     // says it can be merged.
-    let owner = [&d.dev, &d.planner].into_iter().find(|id| !id.is_empty() && matches!(state.db.get_agent(id), Ok(Some(_))));
-    if let Some(owner) = owner
-        && let Err(e) = crate::prs::register(state, owner, slug, pr, None).await
-    {
-        tracing::warn!("delivery {slug}#{spec}: couldn't watch spec PR #{pr}: {e}");
-    }
+    crate::delivery::track_pr(state, d).await;
     Ok(Some(pr))
 }
 
@@ -1154,8 +1151,8 @@ pub(crate) mod tests {
         let out = publish(&st, &a, "  Planning   in rounds ").await.unwrap();
         assert_eq!(out, "Published the spec as #40, assigned to octo-me: https://github.com/octo/spec-new/issues/40\nSpec branch: `spec/40-planning-in-rounds`. Spec PR (draft, to the default branch): https://github.com/octo/spec-new/pull/500");
         // The Issues tab hears about it and refetches.
-        let ev = serde_json::to_value(events.try_recv().unwrap()).unwrap();
-        assert_eq!(ev, json!({ "type": "issues", "project": "spec-new" }));
+        let evs: Vec<Value> = std::iter::from_fn(|| events.try_recv().ok()).map(|e| serde_json::to_value(e).unwrap()).collect();
+        assert!(evs.contains(&json!({ "type": "issues", "project": "spec-new" })), "{evs:?}");
 
         let labels = posts(&fake, "octo/spec-new", "labels");
         assert_eq!(labels.len(), 1, "only the missing label is created: {labels:?}");
@@ -1224,6 +1221,43 @@ pub(crate) mod tests {
         let again = publish(&st, &a, "one pr per spec: branch & ticket closing, ready on the last close").await.unwrap();
         assert!(again.contains("already published as #186") && again.ends_with("/pull/500"), "{again}");
         assert_eq!(fake.seen("/repos/octo/spec-branch").len(), before);
+    }
+
+    #[tokio::test]
+    async fn the_spec_pr_is_tracked_for_its_planner_so_a_checker_of_the_team_can_set_its_verdict() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-tracked";
+        let a = planner_on(&st, "spec-tracked", Some("git@github.com:octo/spec-tracked.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 31);
+        publish(&st, &a, "Tracked spec PRs").await.unwrap();
+        assert!(st.db.find_pull_request(&a.id, slug, 500).unwrap().is_some(), "tracked as soon as it's opened");
+
+        let mut qa = crate::tasks::tests::agent(&st, "Tester spec-tracked");
+        (qa.project, qa.group, qa.role) = ("spec-tracked".into(), "spec-tracked".into(), "qa".into());
+        st.db.save_agent(&qa).unwrap();
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "state": "open", "draft": true, "head": { "ref": "spec/31-tracked-spec-prs", "sha": "abc1234def" }, "base": { "ref": "main", "repo": {} }, "user": { "login": "octo" } }));
+        fake.route("GET", &format!("/repos/{slug}/commits/abc1234def/check-runs"), 200, json!({ "check_runs": [] }));
+        fake.route("GET", &format!("/repos/{slug}/commits/abc1234def/status"), 200, json!({ "statuses": [] }));
+        fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([{ "name": "qa:passed" }]));
+        fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/qa%3Afailed"), 404, json!({ "message": "Label does not exist" }));
+        let said = crate::prs::set_verdict(&st, &qa, &format!("https://github.com/{slug}/pull/500"), "qa", true, "abc1234").await.unwrap();
+        assert!(said.contains("qa:passed"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn on_start_up_the_pr_of_a_delivery_not_yet_settled_is_tracked() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/spec-startup";
+        let a = planner_on(&st, "spec-startup", None);
+        crate::delivery::record_spec(&st, slug, 4, "spec-startup", &a.id, "spec/4-x");
+        crate::delivery::update(&st, slug, 4, |d| d.pr = Some(7));
+        fake.route("GET", &format!("/repos/{slug}/pulls/7"), 200, json!({ "number": 7 }));
+        assert!(st.db.find_pull_request(&a.id, slug, 7).unwrap().is_none());
+
+        crate::delivery::track_open_prs(st.clone()).await;
+        assert!(st.db.find_pull_request(&a.id, slug, 7).unwrap().is_some());
+        crate::delivery::track_open_prs(st.clone()).await;
+        assert_eq!(st.db.list_pull_requests(None).unwrap().iter().filter(|p| p.slug == slug).count(), 1, "once");
     }
 
     async fn publish_with_docs(st: &AppState, a: &Agent, title: &str, docs: &str) -> Result<String, String> {
