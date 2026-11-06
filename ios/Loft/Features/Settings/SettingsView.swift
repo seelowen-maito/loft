@@ -61,11 +61,14 @@ struct SettingsView: View {
     @State private var issueSettingsError: APIError?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
+    /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
+    @State private var aiStatus = OnDeviceModel.status
+    @Environment(\.scenePhase) private var scenePhase
     @State private var copied = false
 
     /// An Apple Intelligence switch with its one-line explanation; off and disabled while the model can't run.
     private func aiToggle(_ title: String, _ value: Binding<Bool>, enabled: Bool = true, id: String, note: String) -> some View {
-        let usable = OnDeviceModel.status.isAvailable && enabled
+        let usable = aiStatus.isAvailable && enabled
         return Toggle(isOn: usable ? value : .constant(false)) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -242,7 +245,7 @@ struct SettingsView: View {
             }
 
             Section {
-                LabeledContent("On-device model", value: OnDeviceModel.status.text)
+                LabeledContent("On-device model", value: aiStatus.text)
                     .accessibilityIdentifier("onDeviceModelStatus")
                 // Off and disabled while the model can't run, so it doesn't look like it's working; the setting is kept.
                 aiToggle("Understand voice commands", $aiCommands, id: "aiCommandsToggle",
@@ -315,6 +318,15 @@ struct SettingsView: View {
         .task { issueSettings = try? await store.issueSettings() }
         .errorAlert($issueSettingsError)
         .task { notificationStatus = await store.notifier.authorizationStatus() }
+        .task {
+            while !Task.isCancelled {
+                aiStatus = OnDeviceModel.status
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { aiStatus = OnDeviceModel.status }
+        }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
         } message: {
