@@ -113,7 +113,12 @@ function useShowSimulator() {
 /** `/issues/:project/:number` from the old Issues tab: the list, searched for `#number` in that project. */
 function OldIssue() {
   const { project = "", number = "" } = useParams();
-  return <Navigate to={`/tasks?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+  return <Navigate to={`/issues?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+}
+
+function OldTask() {
+  const { id = "" } = useParams();
+  return <Navigate to={{ pathname: `/issues/${id}`, search: window.location.search }} replace />;
 }
 
 export default function App() {
@@ -144,7 +149,7 @@ export default function App() {
               </span>{" "}
               <span className="max-md:hidden">Agents</span>
             </NavLink>
-            <NavLink to="/tasks" className={tab} aria-label="Issues">
+            <NavLink to="/issues" className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
             </NavLink>
             {showSimulator && (
@@ -182,11 +187,13 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
-          {/* The old GitHub Issues tab's links: the one list, showing GitHub's, or that issue. */}
-          <Route path="/issues" element={<Navigate to="/tasks?source=github" replace />} />
+          {/* The old GitHub Issues tab's links: the that issue, found in the list. */}
+          <Route path="/issues" element={<TasksPage />} />
+          <Route path="/issues/:id" element={<TasksPage />} />
           <Route path="/issues/:project/:number" element={<OldIssue />} />
-          <Route path="/tasks" element={<TasksPage />} />
-          <Route path="/tasks/:id" element={<TasksPage />} />
+          {/* Issues were once "tasks": old links keep working. */}
+          <Route path="/tasks" element={<Navigate to="/issues" replace />} />
+          <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

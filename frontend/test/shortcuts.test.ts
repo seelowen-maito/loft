@@ -108,7 +108,7 @@ test("g then a letter opens a page; / focuses the chat box and ? opens the sheet
   const at = (e: ReturnType<typeof key>, afterG = false) => shortcutAction(e, { combos: defaults, typing: false, afterG, mac: true });
   assert.deepEqual(at(key("KeyG")), { type: "g" });
   assert.deepEqual(at(key("KeyA"), true), { type: "go", path: "/agents" });
-  assert.deepEqual(at(key("KeyI"), true), { type: "go", path: "/tasks" });
+  assert.deepEqual(at(key("KeyI"), true), { type: "go", path: "/issues" });
   assert.deepEqual(at(key("KeyR"), true), { type: "go", path: "/repos" });
   assert.deepEqual(at(key("KeyS"), true), { type: "go", path: "/settings" });
   assert.deepEqual(at(key("KeyM"), true), { type: "go", path: "/simulator" });
