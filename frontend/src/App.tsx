@@ -4,6 +4,7 @@ import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartp
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
+import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
@@ -117,8 +118,8 @@ function OldIssue() {
 }
 
 function OldTask() {
-  const { id = "" } = useParams();
-  return <Navigate to={{ pathname: `/issues/${id}`, search: window.location.search }} replace />;
+  const { id } = useParams();
+  return <Navigate to={oldTasksTarget(id, window.location.search)} replace />;
 }
 
 export default function App() {
@@ -187,12 +188,12 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
-          {/* The old GitHub Issues tab's links: the that issue, found in the list. */}
+          {/* The old GitHub Issues tab's links: each opens that issue, found in the list. */}
           <Route path="/issues" element={<TasksPage />} />
           <Route path="/issues/:id" element={<TasksPage />} />
           <Route path="/issues/:project/:number" element={<OldIssue />} />
           {/* Issues were once "tasks": old links keep working. */}
-          <Route path="/tasks" element={<Navigate to="/issues" replace />} />
+          <Route path="/tasks" element={<OldTask />} />
           <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
