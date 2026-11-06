@@ -2,7 +2,7 @@
 //! workspace, streams its events into the chat log, and routes permission prompts
 //! to the UI through the Loft MCP server.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -915,20 +915,33 @@ fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
     state.cfg.storage_dir.join(AGENT_FILES).join(format!("{agent_id}.{kind}"))
 }
 
-const AGENT_FILES: &str = ".system-prompts";
+const AGENT_FILES: &str = ".agent-files";
 const AGENT_FILE_KINDS: [&str; 3] = ["md", "mcp.json", "settings.json"];
+/// Where the agents' files were kept before they held more than the prompt.
+const OLD_AGENT_FILES: &str = ".system-prompts";
 
 /// Writes one of the agent's files owner-only (it may hold MCP tokens) and returns the path claude reads it at
-/// from the workspace, `../.system-prompts/<id>.<kind>`: an absolute one would put the user's folders on argv.
+/// from the workspace, `../.agent-files/<id>.<kind>`: an absolute one would put the user's folders on argv.
 fn write_agent_file(state: &AppState, agent_id: &str, kind: &str, text: &str) -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let path = agent_file(state, agent_id, kind);
+    write_private(&path, text)?;
+    Ok(PathBuf::from("..").join(AGENT_FILES).join(path.file_name().unwrap()))
+}
+
+/// Writes `text` to `path` readable by the user only, in a folder only they can open.
+pub fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(&path, text)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(PathBuf::from("..").join(AGENT_FILES).join(path.file_name().unwrap()))
+    std::fs::write(path, text)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Deletes the folder older Loft builds kept the agents' files in, with any MCP tokens they left there.
+pub fn remove_old_agent_files(storage_dir: &Path) {
+    let _ = std::fs::remove_dir_all(storage_dir.join(OLD_AGENT_FILES));
 }
 
 /// Removes the files claude was started with, when the agent is deleted.
@@ -1750,6 +1763,8 @@ esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
 case "$prompt" in *exit-143*) exit 143;; esac
+case "$prompt" in *sigkill*) kill -KILL $$;; esac
+case "$prompt" in *exit-137*) exit 137;; esac
 case "$prompt" in *stuck-pipes*) exec >&-; sleep 3; exit 0;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *chatty*)
@@ -1895,7 +1910,7 @@ esac
         for text in [storage.as_str(), "agent-local-storage", "npm", "WebFetch", "loft ·"] {
             assert!(!argv.contains(text), "{text:?} is on claude's command line:\n{argv}");
         }
-        assert!(argv.contains(&format!("../.system-prompts/{}.settings.json", a.id)), "{argv}");
+        assert!(argv.contains(&format!("../.agent-files/{}.settings.json", a.id)), "{argv}");
         // The fake read the settings file from that relative path.
         let settings: Value = serde_json::from_str(&std::fs::read_to_string(workspace(&st, &a.id).join("settings.log")).unwrap()).unwrap();
         assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "Agent"] }));
@@ -1931,6 +1946,44 @@ esac
             until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
             assert!(error_text(&st, &a.id).unwrap().contains("from outside Loft"), "{prompt}: {:?}", error_text(&st, &a.id));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sigkill_is_not_blamed_on_the_outside() {
+        // macOS ends a process that runs out of memory with SIGKILL, so it isn't named as some agent's kill.
+        for prompt in ["sigkill", "exit-137"] {
+            let (st, a) = fake_claude_state();
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            let err = error_text(&st, &a.id).unwrap();
+            assert!(err.contains("without a result") && !err.contains("outside Loft"), "{prompt}: {err}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_file_write_fails_the_run_with_nothing_on_argv() {
+        let (st, a) = fake_claude_state();
+        // A file where the folder should be: none of claude's files can be written.
+        std::fs::create_dir_all(&st.cfg.storage_dir).unwrap();
+        std::fs::write(st.cfg.storage_dir.join(AGENT_FILES), "").unwrap();
+        enqueue(&st, &a.id, Some("hello".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        assert!(error_text(&st, &a.id).unwrap().contains("File exists"));
+        // claude never started: no prompt on argv instead.
+        assert!(!workspace(&st, &a.id).join("argv.log").exists());
+        assert!(!workspace(&st, &a.id).join("prompts.log").exists());
+    }
+
+    #[test]
+    fn the_old_agent_files_folder_is_deleted() {
+        let dir = std::env::temp_dir().join(format!("loft-old-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(OLD_AGENT_FILES)).unwrap();
+        std::fs::write(dir.join(OLD_AGENT_FILES).join("a.mcp.json"), "{\"token\":\"x\"}").unwrap();
+        std::fs::create_dir_all(dir.join(AGENT_FILES)).unwrap();
+        remove_old_agent_files(&dir);
+        assert!(!dir.join(OLD_AGENT_FILES).exists());
+        assert!(dir.join(AGENT_FILES).exists(), "the current folder stays");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -58,6 +58,11 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn serve() -> anyhow::Result<()> {
+    // Loft takes no arguments. Refuse any before opening the db or binding a port: an older binary run as a newer
+    // Loft's hook (`loft kill-guard`, or a later subcommand) must not start a whole server on every call.
+    if let Some(arg) = std::env::args().nth(1) {
+        anyhow::bail!("unknown argument {arg:?}: loft takes no arguments");
+    }
     tracing_subscriber::fmt().init();
     signing::ensure();
 
@@ -72,6 +77,7 @@ async fn serve() -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
     std::fs::create_dir_all(&data_dir)?;
+    agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {

@@ -152,17 +152,33 @@ pub fn added(input: &str, brief: &str) -> Option<String> {
     None
 }
 
+/// A file that is deleted when this is dropped.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn run(state: &AppState, text: &str, prompt: &str, effort: Option<&str>, timeout: Duration) -> anyhow::Result<String> {
+    // The prompt goes in a private file, not on argv, where a `pkill -f` with one of its phrases would match it. The
+    // path is relative to claude's folder so it names none of the user's.
+    let dir = std::env::temp_dir();
+    let name = std::path::Path::new("loft-voice").join(format!("{}.md", uuid::Uuid::new_v4()));
+    let file = TempFile(dir.join(&name));
+    crate::agents::write_private(&file.0, prompt)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     // No tools, no MCP, none of the user's settings: a single text-in, text-out turn.
-    cmd.current_dir(std::env::temp_dir())
+    cmd.current_dir(&dir)
         .args(["-p", "--model", "haiku", "--output-format", "text"])
         .args(["--tools", ""])
         .args(["--permission-mode", "dontAsk"])
         .args(["--setting-sources", ""])
         .arg("--strict-mcp-config")
         .arg("--no-session-persistence")
-        .args(["--system-prompt", prompt])
+        .arg("--system-prompt-file")
+        .arg(&name)
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -224,6 +240,12 @@ mod tests {
     /// A stand-in `claude`: echoes a canned brief depending on the dictation.
     const FAKE: &str = r#"#!/bin/sh
 input=$(cat)
+while [ $# -gt 0 ]; do
+  case "$1" in --system-prompt) echo 'prompt on argv' >&2; exit 1;; esac
+  # The prompt comes from a private file, at a path relative to the folder claude runs in.
+  [ "$1" = --system-prompt-file ] && case "$2" in /*) exit 1;; *) [ -s "$2" ] || exit 1;; esac
+  shift
+done
 case "$input" in
   *FAIL*) exit 1;;
   *SLOW*) exec sleep 60;;
