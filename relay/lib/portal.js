@@ -157,10 +157,10 @@ export async function confirmDelete(request, env = process.env, now = Date.now()
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const n = (await keysOf(makeKv(env), account)).length;
-  const keys = n === 1 ? "your key, so its Loft stops" : n ? `all ${n} keys, so those Lofts stop` : "your account, so new Lofts can't";
+  const what = n === 1 ? "your account and its key, so its Loft stops pushing" : n ? `your account and all ${n} keys, so those Lofts stop pushing` : "your account";
   return page(
     "Delete your account?",
-    `<p>This deletes ${keys} pushing, and ends Sign in with Apple for this portal. It can't be undone. You can sign in again later and start fresh.</p>` +
+    `<p>This deletes ${what}, and ends Sign in with Apple for this portal. It can't be undone. You can sign in again later and start fresh.</p>` +
       '<p>Apple asks you to sign in once more to confirm.</p><form method="post" action="/account/delete"><button>Delete my account</button> <a href="/">Cancel</a></form>',
   );
 }
@@ -174,13 +174,18 @@ export async function startDelete(request, env = process.env, now = Date.now()) 
 }
 
 /**
- * Deletes `account` and its keys. The account goes first: from then on no key can be made for it, so every key it
- * has is in its set when the set is read.
+ * Deletes `account` and its keys. The account and every key read beforehand go in one transaction, which also reads
+ * any key made since; once the account is gone `makeAccountKey` undoes its own key, so those are the last ones.
+ * A failure part way leaves the set holding whatever is left, so signing in again shows those keys and deleting
+ * again finishes the job.
  */
 export async function deleteAccount(store, account) {
-  await store.transaction([["DEL", `account:${account}`]]);
-  const [ids] = await store.pipeline([["SMEMBERS", `account-keys:${account}`]]);
-  await store.transaction([["DEL", `account-keys:${account}`, ...(ids ?? []).flatMap((id) => [`relay-key:${id}`, `relay-key-used:${id}`])]]);
+  const set = `account-keys:${account}`;
+  const records = (ids) => (ids ?? []).flatMap((id) => [`relay-key:${id}`, `relay-key-used:${id}`]);
+  const [ids] = await store.pipeline([["SMEMBERS", set]]);
+  const drop = ids?.length ? [["SREM", set, ...ids]] : [];
+  const answers = await store.transaction([["DEL", `account:${account}`, ...records(ids)], ...drop, ["SMEMBERS", set]]);
+  await store.transaction([["DEL", set, ...records(answers.at(-1))]]);
 }
 
 /** Back from Apple on the way to deleting: only the account that asked can be deleted. */
@@ -191,7 +196,14 @@ async function finishDelete(env, now, account, sub, tokens) {
     signedOut.forEach((c) => res.headers.append("set-cookie", c));
     return res;
   }
-  await deleteAccount(makeKv(env), account);
+  try {
+    await deleteAccount(makeKv(env), account);
+  } catch (e) {
+    console.error(`push portal: deleting an account failed (${e.message})`);
+    const res = page("Not deleted yet", '<p>Your account couldn\'t be deleted completely. <a href="/account/delete">Try again</a>.</p>', 502);
+    signedOut.forEach((c) => res.headers.append("set-cookie", c));
+    return res;
+  }
   const revoked = await revokeApple(env, tokens, now);
   const res = page(
     "Account deleted",

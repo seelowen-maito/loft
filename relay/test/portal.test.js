@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
-import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete } from "../lib/portal.js";
+import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { kv as makeKv } from "../lib/kv.js";
 import { push } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
@@ -343,7 +344,7 @@ test("Delete my account deletes the keys and the account and revokes Apple's tok
   const other = await signInAs("999.other");
   const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, other), env));
   assert.match(await (await home(get("/", session), env)).text(), /href="\/account\/delete"/);
-  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes all 3 keys, so those Lofts stop pushing[\s\S]*sign in once more/);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all 3 keys, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
 
   const res = await deleteAs(session);
   assert.equal(res.status, 200);
@@ -387,6 +388,43 @@ test("deleting needs a signed-in session and a sign-in started for it", async ()
   assert.equal(done.headers.get("location"), "/");
   assert.ok(store.has("account:001234.abcdef"));
   assert.equal(revoked.length, 0);
+});
+
+test("the delete page reads well with no key and with one", async () => {
+  const session = await signInAs();
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /This deletes your account, and ends Sign in with Apple/);
+  await createAccountKey(post("/keys", { name: "Mac" }, session), env);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /This deletes your account and its key, so its Loft stops pushing, and ends/);
+});
+
+test("a delete that fails part way says so, keeps the keys reachable, and can be tried again", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  failing = "SMEMBERS";
+  const res = await deleteAs(session);
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /couldn't be deleted completely[\s\S]*href="\/account\/delete"/);
+  assert.doesNotMatch(res.headers.getSetCookie().join(), /session=;/, "still signed in, to try again");
+  assert.equal(revoked.length, 0);
+  assert.equal((await pushWith(key)).status, 200);
+  failing = null;
+  assert.equal((await deleteAs(session)).status, 200);
+  assert.equal((await pushWith(key)).status, 401);
+});
+
+test("a key made while the account is being deleted is deleted too", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const kv = makeKv(env);
+  let late = null;
+  // Between reading the keys and deleting them, another tab makes one.
+  const racing = { ...kv, transaction: async (commands) => {
+    if (!late) late = await keyFrom(await createAccountKey(post("/keys", { name: "Late" }, session), env));
+    return kv.transaction(commands);
+  } };
+  await deleteAccount(racing, "001234.abcdef");
+  for (const k of [key, late]) assert.equal((await pushWith(k)).status, 401);
+  assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.includes("001234.abcdef") || k.endsWith(sha256(late))), "nothing is left");
 });
 
 test("the account is deleted even when Apple doesn't confirm the revocation, and the page says so", async () => {
