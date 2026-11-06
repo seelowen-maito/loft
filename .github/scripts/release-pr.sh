@@ -22,16 +22,23 @@ fi
 
 # Merged PRs into develop, keyed by their merge commit.
 prs=$(gh pr list --repo "$REPO" --base "$HEAD" --state merged --limit 500 \
-  --json number,title,author,url,mergeCommit \
-  --jq '.[] | select(.mergeCommit) | [.mergeCommit.oid, (.number|tostring), .author.login, .url, .title] | @tsv')
+  --json number,title,author,url,mergeCommit,headRefName \
+  --jq '.[] | select(.mergeCommit) | [.mergeCommit.oid, (.number|tostring), .author.login, .url, .headRefName, .title] | @tsv')
 
 lines=""
 n_prs=0
 n_commits=0
 for sha in $commits; do
+  # Merges of main into develop (sync-develop.yml) bring nothing new to ship.
+  if git rev-parse --quiet --verify "$sha^2" >/dev/null &&
+    git merge-base --is-ancestor "$sha^2" "origin/$BASE"; then
+    continue
+  fi
   pr=$(printf '%s\n' "$prs" | awk -F'\t' -v s="$sha" '$1 == s' | head -1)
   if [ -n "$pr" ]; then
-    IFS=$'\t' read -r _ number login url title <<<"$pr"
+    IFS=$'\t' read -r _ number login url head title <<<"$pr"
+    # Sync PRs (sync-develop.yml) only carry main's own commits.
+    [[ $head == sync/* ]] && continue
     # Author as a link, not an @mention, so edits don't ping anyone.
     lines+="- [#$number]($url) $title, by [$login](https://github.com/$login)"$'\n'
     n_prs=$((n_prs + 1))
@@ -42,6 +49,11 @@ for sha in $commits; do
     n_commits=$((n_commits + 1))
   fi
 done
+
+if [ -z "$lines" ]; then
+  echo "Only $BASE's own commits are on $HEAD: nothing to release."
+  exit 0
+fi
 
 count="**$n_prs PR(s)**"
 [ "$n_commits" -gt 0 ] && count+=" and **$n_commits direct commit(s)**"

@@ -96,7 +96,7 @@ Each agent runs headless Claude Code in its own folder under `agent-local-storag
 
 Run `./dev.sh` for hot reload and open http://localhost:7421. `LOFT_PORT` changes the backend port (default `7420`).
 
-Feature pull requests target `develop`. A GitHub Action keeps one `Release: develop → main` pull request open that lists every merged PR not on `main` yet; merge it with a merge commit to ship a release.
+Feature pull requests target `develop`. A GitHub Action keeps one `Release: develop → main` pull request open that lists every merged PR not on `main` yet; merge it with a merge commit to ship a release. Every push to `main` is synced back into `develop` (fast-forward, or a merge commit); when that can't be pushed, a `Sync main → develop` pull request opens instead.
 
 ## License
 
