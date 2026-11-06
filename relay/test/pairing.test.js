@@ -26,11 +26,14 @@ const run = ([cmd, key, value, opt, secs]) => {
   if (cmd === "INCR") return (store.set(key, { value: String(Number(store.get(key)?.value ?? 0) + 1), until: Infinity }), Number(store.get(key).value));
   return 1;
 };
+// Milliseconds the store takes to save a relay key, so a test can poll while a key is being made.
+let slowKeySave = 0;
 const kvServer = createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
-  req.on("end", () => {
+  req.on("end", async () => {
     const parsed = JSON.parse(body);
+    if (slowKeySave && String(parsed[1]).startsWith("relay-key:")) await new Promise((r) => setTimeout(r, slowKeySave));
     const out = req.url === "/pipeline" ? parsed.map((c) => ({ result: run(c) })) : { result: run(parsed) };
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
   });
@@ -66,6 +69,7 @@ after(() => [kvServer, idpServer].forEach((s) => s.close()));
 beforeEach(() => {
   store.clear();
   clock = 0;
+  slowKeySave = 0;
   sub = "001234.abcdef";
 });
 
@@ -135,6 +139,17 @@ test("approving needs a signed-in user and a name; two approvals make one key", 
   const both = await Promise.all([approve(post("/connect", { code, name: "A" }, cookies), env), approve(post("/connect", { code, name: "B" }, cookies), env)]);
   assert.deepEqual(both.map((r) => r.status).sort(), [200, 404]);
   assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 1);
+});
+
+test("a poll while the key is being made waits; it doesn't lose the code", async () => {
+  const code = await newCode();
+  const { cookies } = await signInAs();
+  slowKeySave = 100;
+  const approving = approve(post("/connect", { code, name: "Mac" }, cookies), env);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal((await pollFor(code)).status, 202, "not 404 while the key is saved");
+  assert.equal((await approving).status, 200);
+  assert.equal((await pollFor(code)).status, 200, "the key arrives");
 });
 
 test("asking for codes is limited per IP", async () => {

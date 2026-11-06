@@ -8,7 +8,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::Json;
 use axum::extract::State;
-use axum::http::HeaderMap;
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, bad};
@@ -24,7 +23,7 @@ pub fn waiting() -> bool {
 
 /// `POST /api/push/signin`: asks the relay for a code and returns the portal link that allows it. The key is
 /// collected in the background, so approving from a phone works too.
-pub async fn start(State(state): State<AppState>, _headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+pub async fn start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (Some(relay), Some(portal)) = (apns::relay_url(&state), apns::portal_url(&state)) else {
         return Err(bad("Set the relay and portal addresses first (or paste a relay key)."));
     };
@@ -76,6 +75,7 @@ async fn wait_for_key(state: &AppState, relay: &str, code: &str, every: Duration
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
 
     #[tokio::test]
     async fn the_code_flow_ends_with_the_relays_key_stored_once_and_never_returned() {
@@ -84,7 +84,7 @@ mod tests {
         let mut s = st.settings.get();
         s.push.portal_url = "https://portal.example.com".into();
         st.settings.save(s).unwrap();
-        let Json(r) = start(State(st.clone()), HeaderMap::new()).await.unwrap();
+        let Json(r) = start(State(st.clone())).await.unwrap();
         let url = r["url"].as_str().unwrap();
         let code = url.strip_prefix("https://portal.example.com/connect?code=").expect(url).to_string();
         assert_eq!(r.as_object().unwrap().len(), 1, "only the link comes back, never a key");
@@ -94,7 +94,9 @@ mod tests {
         assert!(wait_for_key(&st, &relay, &code, fast, Duration::from_millis(100)).await.is_err());
         apns::tests::approve_code(&code);
         wait_for_key(&st, &relay, &code, fast, Duration::from_secs(2)).await.unwrap();
-        assert_eq!(std::fs::read_to_string(apns::key_dir().join("relay-key")).unwrap(), apns::tests::RELAY_KEY);
+        let key_file = apns::key_dir().join("relay-key");
+        assert_eq!(std::fs::read_to_string(&key_file).unwrap(), apns::tests::RELAY_KEY);
+        std::fs::remove_file(&key_file).unwrap();
         // The code is dead: a second wait is refused instead of getting a key again.
         assert!(format!("{:#}", wait_for_key(&st, &relay, &code, fast, Duration::from_secs(2)).await.unwrap_err()).contains("no longer knows"));
         assert!(!format!("{:?}", crate::devices::status(State(st.clone()), HeaderMap::new()).await.unwrap().0).contains("lrk_"));
@@ -108,9 +110,9 @@ mod tests {
         s.push.relay_url = "http://127.0.0.1:9".into();
         s.push.portal_url = String::new();
         st.settings.save(s.clone()).unwrap();
-        assert!(start(State(st.clone()), HeaderMap::new()).await.unwrap_err().1.contains("addresses"));
+        assert!(start(State(st.clone())).await.unwrap_err().1.contains("addresses"));
         s.push.portal_url = "https://portal.example.com".into();
         st.settings.save(s).unwrap();
-        assert!(start(State(st.clone()), HeaderMap::new()).await.unwrap_err().1.contains("unreachable"));
+        assert!(start(State(st.clone())).await.unwrap_err().1.contains("unreachable"));
     }
 }

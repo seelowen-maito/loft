@@ -16,6 +16,7 @@ const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const waiting = (code) => `pair:${sha256(code)}`;
 const approved = (code) => `pair-key:${sha256(code)}`;
+const claimed = (code) => `pair-claim:${sha256(code)}`;
 
 /** POST /api/pair: a new code for a Loft, `{code, expires_in}`. Limited per IP; the store holds only a hash of the IP. */
 export async function pair(request, env = process.env, now = Date.now()) {
@@ -50,7 +51,7 @@ export async function connect(request, env = process.env, now = Date.now()) {
   }
   return page(
     "Connect your Loft",
-    `<form method="post" action="/connect"><input type="hidden" name="code" value="${esc(code)}"><p><label>Key name <input name="name" maxlength="60" required value="My Mac"></label></p><p>Allow this Loft to send you push notifications?</p><button>Allow</button></form>`,
+    `<form method="post" action="/connect"><input type="hidden" name="code" value="${esc(code)}"><p><label>Key name <input name="name" maxlength="60" required value="My Mac"></label></p><p>Allow this Loft to send you push notifications? Only allow if you just pressed Sign in in Loft; if someone sent you this link, close the page.</p><button>Allow</button></form>`,
     200,
     { "set-cookie": cookie("pair", "", 0) },
   );
@@ -66,8 +67,12 @@ export async function approve(request, env = process.env, now = Date.now()) {
   const name = String(form.get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. Go back and try again.</p>', 400);
   const store = makeKv(env);
-  // Taking the waiting marker is what approves: a second click or a second tab finds it gone.
-  if (!CODE.test(code) || !(await store.getdel(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
+  // The first approval claims the code; a second click or tab finds it claimed. The waiting marker stays until the key
+  // is stored, so a poll in between still answers 202 instead of 404.
+  const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
+  if (!CODE.test(code) || !(await store.exists(waiting(code)))) return expired();
+  if ((await store.hit(claimed(code), CODE_SECONDS)) > 1) return expired();
   await store.setEx(approved(code), await createKey(env, name, now, account), CODE_SECONDS);
+  await store.getdel(waiting(code));
   return page("Loft is signed in", "<p>Your Loft has its key. You can close this page.</p>");
 }
