@@ -7,6 +7,7 @@ import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
 import { MentionMenu } from "../components/MentionMenu";
+import { StartDeliveryButton } from "../components/StartDeliveryButton";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -181,9 +182,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           </div>
         </div>
         {!started && (
-          <button className="btn-primary" disabled={busy} onClick={start}>
-            <Play className="size-3 fill-current" /> Start delivery
-          </button>
+          <StartDeliveryButton pending={busy} onClick={start} />
         )}
       </div>
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
@@ -241,9 +240,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
           </div>
         </div>
         {!started && (
-          <button className="btn-primary" disabled={busy} onClick={start}>
-            <Play className="size-3 fill-current" /> Start delivery
-          </button>
+          <StartDeliveryButton pending={busy} onClick={start} />
         )}
       </div>
       {skipped.length > 0 && (
