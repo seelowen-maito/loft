@@ -475,7 +475,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "template": { "type": "string", "description": "A template key from list_agent_templates, e.g. \"reviewer\". Fills in anything you leave out." },
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "group": { "type": "string", "description": "Its group, the label that makes its team, e.g. \"Loft\". Leave it out and it has no group, so no team and no part in a Delivery." },
-                "name": { "type": "string", "description": "Short name, unique within the project. Defaults to the template's." },
+                "name": { "type": "string", "description": "Short name, unique within its main project. Defaults to the template's." },
                 "title": { "type": "string" },
                 "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per group: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },

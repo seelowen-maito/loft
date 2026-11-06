@@ -9,7 +9,7 @@ export type Agent = {
   title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
-  /** Free-text group its team goes by (Acme); "" groups it by its main project. Missing from servers before groups. */
+  /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
   group?: string;
   /** The projects it works in, main first. Missing from servers before groups. */
   projects?: string[];

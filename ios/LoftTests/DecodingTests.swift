@@ -27,7 +27,7 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(a.freshContextApplies, false)
     }
 
-    /// An agent's group and projects (main first); an older server sends only `project`, which then is its one project and its team.
+    /// An agent's group and projects (main first); an older server sends only `project`, which then is its one project; with no group it has no team.
     func testAgentGroupAndProjects() throws {
         let with = agentJSON.replacingOccurrences(of: #""project":"loft","#, with: #""project":"api","group":" Dineout ","projects":["api","pos"],"#)
         let a = try JSONCoding.decoder.decode(Agent.self, from: Data(with.utf8))
@@ -36,7 +36,7 @@ final class DecodingTests: XCTestCase {
         let old = try JSONCoding.decoder.decode(Agent.self, from: Data(agentJSON.utf8))
         XCTAssertNil(old.group)
         XCTAssertEqual(old.allProjects, ["loft"])
-        XCTAssertEqual(old.team, "loft")
+        XCTAssertEqual(old.team, "")
         let empty = agentJSON.replacingOccurrences(of: #""project":"loft","#, with: #""project":"","group":"","projects":[],"#)
         let e = try JSONCoding.decoder.decode(Agent.self, from: Data(empty.utf8))
         XCTAssertEqual(e.allProjects, [])

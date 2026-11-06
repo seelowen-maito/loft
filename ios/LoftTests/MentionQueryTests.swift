@@ -31,11 +31,11 @@ final class MentionQueryTests: XCTestCase {
         XCTAssertEqual(names("agent", in: many, excluding: "Orchestrator").last, "Agent 12")
     }
 
-    /// The backend delivers a mention to any agent, its own team's first: the chat agent's team (its group, else its
-    /// main project) comes first, then every other agent.
+    /// The backend delivers a mention to any agent, its own team's first: the chat agent's team (its group) comes
+    /// first, then every other agent. Agents without a group have no team, so no team mates.
     func testTheChatsTeamComesFirstThenEveryOtherAgent() {
-        let team = [Agent(id: "orch", name: "Orchestrator", project: "loft ", status: "idle"),
-                    Agent(id: "qa", name: "QA Agent", project: "loft", status: "idle"),
+        let team = [Agent(id: "orch", name: "Orchestrator", project: "loft", status: "idle", group: "loft "),
+                    Agent(id: "qa", name: "QA Agent", project: "imole", status: "idle", group: "loft"),
                     Agent(id: "web", name: "Web Dev", project: "imole", status: "idle"),
                     Agent(id: "free", name: "Helper", status: "idle"),
                     Agent(id: "api", name: "API Dev", project: "api", status: "idle", group: "Dineout", projects: ["api"]),
@@ -45,6 +45,8 @@ final class MentionQueryTests: XCTestCase {
         XCTAssertEqual(sections("API Dev"), [#"Dineout: ["POS Dev"]"#, #"Other agents: ["Helper", "Orchestrator", "QA Agent", "Web Dev"]"#],
                        "the group is the team, whatever the main project")
         XCTAssertEqual(sections("Helper"), [#"Other agents: ["API Dev", "Orchestrator", "POS Dev", "QA Agent", "Web Dev"]"#], "no team mates")
+        XCTAssertEqual(sections("Web Dev"), [#"Other agents: ["API Dev", "Helper", "Orchestrator", "POS Dev", "QA Agent"]"#],
+                       "a main project without a group is no team")
         XCTAssertEqual(sections("Unknown"), [#"Agents: ["API Dev", "Helper", "Orchestrator", "POS Dev", "QA Agent", "Web Dev"]"#],
                        "chat's agent not loaded: one list")
         XCTAssertEqual(MentionQuery.sections("zz", in: team, excluding: "Orchestrator").count, 0)

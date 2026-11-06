@@ -23,8 +23,8 @@ enum MentionQuery {
         }
         .sorted { ($0.name.lowercased().hasPrefix(q) ? 0 : 1, $0.name) < ($1.name.lowercased().hasPrefix(q) ? 0 : 1, $1.name) }
         guard let team else { return hits.isEmpty ? [] : [("Agents", hits)] }
-        let ours = hits.filter { $0.team == team }, rest = hits.filter { $0.team != team }
-        return [(team.isEmpty ? "No team" : team, ours), ("Other agents", rest)].filter { !$0.agents.isEmpty }
+        let ours = team.isEmpty ? [] : hits.filter { $0.team == team }, rest = hits.filter { team.isEmpty || $0.team != team }
+        return [(team, ours), ("Other agents", rest)].filter { !$0.agents.isEmpty }
     }
 
     /// `text` with the `@…` being typed replaced by the agent's exact name and a space.
