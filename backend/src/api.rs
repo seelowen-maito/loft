@@ -1276,4 +1276,23 @@ mod find_tests {
         assert_eq!(find(&st, &a.id, "notes").await[0], ("notes".to_string(), true), "folders too, the name match first");
         assert_eq!(find(&st, &a.id, "store").await, vec![], ".DS_Store is skipped");
     }
+
+    #[tokio::test]
+    async fn a_workspace_its_repo_ignores_is_walked_past_the_clones_git_folders() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        // Like agent-local-storage/ in the Loft checkout: the workspaces live in a repo that ignores them.
+        let checkout = st.cfg.storage_dir.parent().unwrap();
+        std::fs::write(checkout.join(".gitignore"), "agents/\n").unwrap();
+        git(checkout, &["init", "-q"]);
+        let ws = crate::agents::workspace(&st, &a.id);
+        write(&ws, &["clone/src/chat.rs"]);
+        git(&ws.join("clone"), &["init", "-q"]);
+        assert!(ws.join("clone/.git/HEAD").exists());
+
+        assert_eq!(find(&st, &a.id, "chat").await, vec![("clone/src/chat.rs".to_string(), false)], "the walk ran, not git");
+        for q in ["head", "config", ".git"] {
+            assert!(find(&st, &a.id, q).await.iter().all(|(p, _)| !p.contains(".git")), "nothing from a clone's .git for {q:?}");
+        }
+    }
 }
