@@ -7,6 +7,7 @@
     { "source": "/", "destination": "/api/portal" },
     { "source": "/auth/start", "destination": "/api/auth-start" },
     { "source": "/auth/callback", "destination": "/api/auth-callback" },
-    { "source": "/keys", "destination": "/api/keys" }
+    { "source": "/keys", "destination": "/api/keys" },
+    { "source": "/keys/revoke", "destination": "/api/revoke" }
   ]
 }

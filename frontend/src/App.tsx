@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useParams } from "react-router";
+import { NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router";
 import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
@@ -122,7 +122,14 @@ function OldTask() {
   return <Navigate to={oldTasksTarget(id, window.location.search)} replace />;
 }
 
+/** The Issues tab: from an agent's page, on that agent's group (the Issues page turns `from` into it). */
+function issuesLink(path: string): string {
+  const id = /^\/agents\/([^/]+)/.exec(path)?.[1];
+  return id ? `/issues?from=${encodeURIComponent(id)}` : "/issues";
+}
+
 export default function App() {
+  const location = useLocation();
   const live = useLiveConnection();
   const showSimulator = useShowSimulator();
   const tab = ({ isActive }: { isActive: boolean }) =>
@@ -150,7 +157,7 @@ export default function App() {
               </span>{" "}
               <span className="max-md:hidden">Agents</span>
             </NavLink>
-            <NavLink to="/issues" className={tab} aria-label="Issues">
+            <NavLink to={issuesLink(location.pathname)} className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
             </NavLink>
             {showSimulator && (

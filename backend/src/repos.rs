@@ -194,6 +194,23 @@ pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf
     (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
 }
 
+/// Why `project` can't be a project, if it can't: it must be one folder that is, or will become, one repo,
+/// so a missing folder and a folder holding several repos are out. None when it is fine.
+pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
+    let Some(dir) = project_dir(state, project).filter(|d| d.is_dir()) else {
+        return Some(format!("There's no folder {} in the projects folder", project.trim()));
+    };
+    let holds_repos = !dir.join(".git").exists()
+        && std::fs::read_dir(&dir).is_ok_and(|rd| rd.flatten().any(|e| e.path().is_dir() && e.path().join(".git").exists()));
+    holds_repos.then(|| format!("{} holds several repos: pick one of them", project.trim()))
+}
+
+/// An agent's projects that `project_problem` refuses, each with why, for clients to flag.
+pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
+    let problems: Vec<serde_json::Value> = a.projects.iter().filter_map(|p| project_problem(state, p).map(|why| serde_json::json!({ "project": p, "problem": why }))).collect();
+    serde_json::json!(problems)
+}
+
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
 /// could point the project at any repo on the Mac (and its origin).
 pub(crate) fn own_git_dir(dir: &Path) -> bool {
@@ -707,7 +724,7 @@ mod tests {
         assert!(crate::tasks::update(axum::extract::State(st.clone()), axum::extract::Path(t.id.clone()), axum::Json(json!({ "project": outside.to_str().unwrap() }))).await.is_err());
         let a = crate::tasks::tests::agent(&st, "Dev");
         let mut patched = a.clone();
-        assert!(crate::api::tests::apply_project(&mut patched, "../outside").is_err());
+        assert!(crate::api::tests::apply_project(&st, &mut patched, "../outside").is_err());
 
         // A project stored before this check (or through the symlink) still can't publish there.
         let mut old = st.db.get_task(&t.id).unwrap().unwrap();

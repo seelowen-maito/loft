@@ -99,7 +99,7 @@ test("a relay key is a secret: only its hash and label are stored", async () => 
 
 test("the only endpoint that hands out keys is the portal's, behind Sign in with Apple", async () => {
   const { readdir } = await import("node:fs/promises");
-  assert.deepEqual((await readdir(new URL("../api/", import.meta.url))).sort(), ["auth-callback.js", "auth-start.js", "keys.js", "portal.js", "push.js"]);
+  assert.deepEqual((await readdir(new URL("../api/", import.meta.url))).sort(), ["auth-callback.js", "auth-start.js", "keys.js", "portal.js", "push.js", "revoke.js"]);
 });
 
 test("a push is forwarded to Apple's host for its environment, with the Loft topic and the payload unchanged", async () => {
@@ -204,7 +204,7 @@ test("no payload or device token is written to the store or to the logs", async 
   }
   // Only hashed keys and counters keyed by those hashes.
   assert.ok(
-    commands.every((c) => /^\["(SET|EXISTS)","relay-key:[0-9a-f]{64}"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"/.test(c)),
+    commands.every((c) => /^\["(SET|EXISTS)","relay-key:[0-9a-f]{64}"|^\["SET","relay-key-used:[0-9a-f]{64}","[\d-]+T[\d:.]+Z"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"/.test(c)),
     commands.join("\n"),
   );
 });

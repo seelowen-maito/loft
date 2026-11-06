@@ -8,13 +8,17 @@ A local command center where a team of Claude Code agents works on the user's pr
 A long-lived Claude Code worker with its own name, instructions, memory and workspace.
 _Avoid_: Bot, assistant
 
+**Group**:
+A label that keeps agents together, such as Dineout or Loft. It owns no projects, folder or main project, and is never a repo or a place to publish: projects belong to each agent.
+_Avoid_: Workspace, organisation
+
 **Team**:
-The agents that share a project.
-_Avoid_: Group, squad
+The agents of one group. A team has at most one Lead.
+_Avoid_: Squad, crew
 
 **Project**:
-A folder under the user's projects directory. Its git `origin`, once it has one, is the project's repo; Loft can create the repo for a project that has none.
-_Avoid_: Workspace (that is the agent's private folder)
+One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is never a project.
+_Avoid_: Workspace (that is the agent's private folder), group
 
 **Lead**:
 The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
@@ -33,7 +37,7 @@ The fixed instructions Loft writes for a role and sends with that role's wake in
 _Avoid_: Role prompt, template
 
 **Run**:
-One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
+One stretch of an agent working, from what woke it (a message, an issue, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
 **Session**:
@@ -57,12 +61,20 @@ A message one agent sends another through Loft, as opposed to a message from the
 _Avoid_: Ping, DM, hand-off
 
 **Draft**:
-A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached task. Each agent keeps its own until it is sent or the agent's context is cleared.
+A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached issue. Each agent keeps its own until it is sent or the agent's context is cleared.
 _Avoid_: Unsent message, pending message
 
-**Task**:
-An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
-_Avoid_: Ticket, job, issue
+**Issue**:
+A work item in Loft's list. It belongs to exactly one project; lists filter issues by group, but an issue never belongs to a group. An issue is either a GitHub issue or a Loft issue.
+_Avoid_: Task (kept only in old API names), job, card
+
+**GitHub issue**:
+An issue mirrored two-way with its project's repo on GitHub: title, description, labels, owner and open or closed.
+_Avoid_: Remote issue, synced task
+
+**Loft issue**:
+An issue that lives only in Loft, because its project has no repo yet or it isn't published; it can be published to GitHub later.
+_Avoid_: Local task, draft issue
 
 ## Planning
 

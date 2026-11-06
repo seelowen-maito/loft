@@ -61,7 +61,7 @@ export const STATUS_TONE: Record<string, string> = {
 export function TaskChip({ id, onRemove, className }: { id: string; onRemove?: () => void; className?: string }) {
   const all = useTasks();
   const t = all?.find((x) => x.id === id.toLowerCase());
-  const label = t ? t.title : all ? "Deleted task" : "Task";
+  const label = t ? t.title : all ? "Deleted issue" : "Issue";
   return (
     <span className={cx("inline-flex max-w-full items-center gap-1.5 rounded-full border border-line-strong bg-ink-850 py-0.5 pl-2 text-[12px] align-middle", onRemove ? "pr-1" : "pr-2.5", className)}>
       <CircleDot className={cx("size-3 shrink-0", t ? STATUS_TONE[t.status] : "text-fg-3")} />
@@ -70,7 +70,7 @@ export function TaskChip({ id, onRemove, className }: { id: string; onRemove?: (
       </Link>
       {t && <span className="shrink-0 font-mono text-[10px] text-fg-3">{t.status === "waiting_approval" ? "waiting" : t.status.replace("_", " ")}</span>}
       {onRemove && (
-        <button type="button" className="rounded-full p-0.5 text-fg-3 hover:bg-white/[0.08] hover:text-fg" onClick={onRemove} aria-label="Remove the attached task">
+        <button type="button" className="rounded-full p-0.5 text-fg-3 hover:bg-white/[0.08] hover:text-fg" onClick={onRemove} aria-label="Remove the attached issue">
           <X className="size-3" />
         </button>
       )}

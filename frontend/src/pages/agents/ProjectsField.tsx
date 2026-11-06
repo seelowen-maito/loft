@@ -65,7 +65,7 @@ export function ProjectsField({ value, projects, onChange }: { value: string[]; 
           className="input"
           list="agent-project-choices"
           value={adding}
-          placeholder={value.length ? "Add another project" : "Add a project: a git repo, or any name"}
+          placeholder={value.length ? "Add another project" : "Add a project: a folder with one git repo"}
           onChange={(e) => setAdding(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), add())}
           aria-label="Add a project"

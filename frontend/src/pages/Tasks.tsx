@@ -13,7 +13,7 @@ import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
-import { projectsOf } from "../lib/team";
+import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -105,12 +105,21 @@ export default function TasksPage() {
 
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
-  // An agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
+  const teams = useMemo(() => [...new Set(agents.map(teamOf).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [agents]);
+  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`.
+  const from = params.get("from");
+  useEffect(() => {
+    const a = from && agentById.get(from);
+    if (from && agents.length) setParams((cur) => filtersToParams({ ...parseFilters(cur), group: a ? teamOf(a) : "" }), { replace: true });
+  }, [from, agents.length, agentById, setParams]);
+  // A group, agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
+  const group = agents.length && !teams.includes(filters.group) ? "" : filters.group;
+  const groupProjectList = useMemo(() => groupProjects(group, agents, projects), [group, agents, projects]);
   const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
-  const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
+  const project = tasks && !groupProjectList.includes(filters.project) ? "" : filters.project;
   const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
-  }, [tasks, filters.q, project, agentId, mine, source, mirror?.login]);
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, group, agents, project, agentId, mine, source, mirror?.login]);
 
   const groups = useMemo(
     () =>
@@ -163,9 +172,13 @@ export default function TasksPage() {
                 </button>
               ))}
             </div>
+            <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "" })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
+              <option value="">All groups</option>
+              {teams.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
             <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
               <option value="">All projects</option>
-              {projects.map((p) => <option key={p} value={p}>{p}</option>)}
+              {groupProjectList.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
             <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
               <option value="">All agents</option>
@@ -250,7 +263,7 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
-          {t.github && <span className="text-fg-2">· #{t.github.number}</span>}
+          <span className="text-fg-2">· {t.github ? `#${t.github.number}` : "Loft"}</span>
           {progress && <span className="text-fg-2" title="Tickets done of this spec's tickets">· {progress.done}/{progress.total} done</span>}
           {agent && <>· {agent.name}</>}
           {t.project && <>· {t.project}</>}
@@ -365,7 +378,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
       {(subtasks.length > 0 || deps.length > 0 || blocking.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
-          {subtasks.length > 0 && <TaskLinks title="Subtasks" tasks={subtasks} />}
+          {subtasks.length > 0 && <TaskLinks title="Sub-issues" tasks={subtasks} />}
           {deps.length > 0 && <TaskLinks title="Blocked by" tasks={deps} />}
           {blocking.length > 0 && <TaskLinks title="Blocking" tasks={blocking} />}
         </div>

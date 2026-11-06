@@ -151,7 +151,7 @@ fn open_chat(agent_id: &str) -> Value {
 }
 
 fn open_task(task_id: &str) -> Value {
-    json!({ "kind": "open", "label": "Open task", "target": { "screen": "task", "task_id": task_id } })
+    json!({ "kind": "open", "label": "Open issue", "target": { "screen": "task", "task_id": task_id } })
 }
 
 fn dismiss(id: &str) -> Value {
@@ -222,7 +222,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
-        let mut actions = vec![action("answer", "Reply on the task", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
         if t.status == "failed" && t.agent_id.is_some() {
             actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
         }
@@ -242,9 +242,9 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions,
             push: (
                 match t.status.as_str() {
-                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    _ => "A task failed".to_string(),
+                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    _ => "An issue failed".to_string(),
                 },
                 t.title.clone(),
             ),
@@ -331,7 +331,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 open_task(&t.id),
                 dismiss(&id),
             ],
-            push: ("Task done".to_string(), t.title.clone()),
+            push: ("Issue done".to_string(), t.title.clone()),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             pr: None,
             id,

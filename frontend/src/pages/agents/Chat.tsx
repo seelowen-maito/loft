@@ -519,7 +519,7 @@ export function Chat({
                   {watch.kind === "waiting" && <span className="text-fg-3"> · {watch.minutes} min</span>}
                 </div>
                 <div className="truncate font-mono text-[11px] text-fg-3">
-                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the task." : "It may be stuck. Restart keeps queued messages."}
+                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the run." : "It may be stuck. Restart keeps queued messages."}
                 </div>
               </div>
               <button className="btn shrink-0" onClick={restart} disabled={restarting} title="Stops this run. Queued messages are kept and run next.">

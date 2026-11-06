@@ -412,7 +412,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
       )}
       {dialog === "delete" && (
         <Modal title="Delete this issue?" onClose={() => setDialog(null)}>
-          <p className="text-[13px] text-fg-2">It's removed with its thread. Subtasks stay, without a parent. This can't be undone.</p>
+          <p className="text-[13px] text-fg-2">It's removed with its thread. Sub-issues stay, without a parent. This can't be undone.</p>
           <div className="flex justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
             <button className="btn-primary" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}>Delete</button>
