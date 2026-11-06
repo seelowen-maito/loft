@@ -441,21 +441,44 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
     }
 }
 
+/// What a Delivery tool's `number` names: a GitHub issue number, given as an integer or as a string of
+/// digits (`"310"`, `"#310"`), or the Loft issue id of a ticket in a plan kept in Loft.
+#[derive(Debug, PartialEq)]
+enum TicketNumber {
+    GitHub(i64),
+    Loft(String),
+}
+
+/// None when `number` is missing, empty or not a positive issue number.
+fn number_of(number: &Value) -> Option<TicketNumber> {
+    if let Some(n) = number.as_i64() {
+        return (n > 0).then_some(TicketNumber::GitHub(n));
+    }
+    let s = number.as_str()?.trim();
+    let digits = s.strip_prefix('#').map(str::trim);
+    if digits.is_some() || s.bytes().all(|b| b.is_ascii_digit()) {
+        return digits.unwrap_or(s).parse().ok().filter(|n| *n > 0).map(TicketNumber::GitHub);
+    }
+    Some(TicketNumber::Loft(s.to_string()))
+}
+
 /// The repo, number and Delivery of the ticket a Delivery tool names, with the repo's publish lock held.
 async fn ticket_of(state: &AppState, me: &crate::db::Agent, args: &Value, tool: &str) -> Result<(String, i64, Delivery, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = args["number"].as_str().map(str::trim) {
-        // A plan kept in Loft names its tickets by their Loft issue ids.
-        let slug = local_repo(&me.project);
-        let held = state.publish_locks.of(&slug).lock_owned().await;
-        let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
-        let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in your project: only tickets started with Start delivery go through {tool}."))?;
-        let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
-        return Ok((slug, n, d, held));
-    }
-    let n = args["number"].as_i64().filter(|n| *n > 0).ok_or("number is required: the ticket's GitHub issue number")?;
+    let n = match number_of(&args["number"]).ok_or("number is required: the ticket's GitHub issue number")? {
+        TicketNumber::GitHub(n) => n,
+        TicketNumber::Loft(id) => {
+            // A plan kept in Loft names its tickets by their Loft issue ids.
+            let slug = local_repo(&me.project);
+            let held = state.publish_locks.of(&slug).lock_owned().await;
+            let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
+            let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in your project (read as a Loft issue id: a GitHub issue number is only digits): only tickets started with Start delivery go through {tool}."))?;
+            let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
+            return Ok((slug, n, d, held));
+        }
+    };
     let slug = crate::planning::github_home(state, me).await.map_err(|why| format!("{tool} works on tickets on GitHub, and {why}."))?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
-    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery: only tickets started with Start delivery go through {tool}."))?;
+    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery (read as a GitHub issue number): only tickets started with Start delivery go through {tool}."))?;
     Ok((slug, n, d, held))
 }
 
@@ -1000,13 +1023,15 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
 /// The Delivery whose spec PR (or spec) is #n on `slug`, or in a plan kept in Loft whose spec is the Loft
 /// issue named, with the repo's publish lock held. The name to use in replies.
 async fn final_of(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result<(String, String, Option<Delivery>, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = args["number"].as_str().map(str::trim) {
-        let slug = local_repo(&me.project);
-        let held = state.publish_locks.of(&slug).lock_owned().await;
-        let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.spec_id == id);
-        return Ok((slug, format!("Loft issue {id}"), d, held));
-    }
-    let n = args["number"].as_i64().filter(|n| *n > 0).ok_or("number is required")?;
+    let n = match number_of(&args["number"]).ok_or("number is required")? {
+        TicketNumber::GitHub(n) => n,
+        TicketNumber::Loft(id) => {
+            let slug = local_repo(&me.project);
+            let held = state.publish_locks.of(&slug).lock_owned().await;
+            let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.spec_id == id);
+            return Ok((slug, format!("Loft issue {id}"), d, held));
+        }
+    };
     let slug = crate::planning::github_home(state, me).await?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
     let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.pr == Some(n) || d.spec == n).filter(|d| d.tickets.iter().all(|t| t.number != n) || d.pr == Some(n));
@@ -1247,5 +1272,21 @@ mod tests {
         d.local = true;
         d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
+    }
+
+    /// Agents send `number` as an integer or a string; digits name a GitHub issue either way (#312).
+    #[test]
+    fn a_numeric_string_names_a_github_issue() {
+        use serde_json::json;
+        assert_eq!(number_of(&json!(310)), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!("310")), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!("#310")), Some(TicketNumber::GitHub(310)));
+        assert_eq!(number_of(&json!(" # 310 ")), Some(TicketNumber::GitHub(310)));
+        let id = "0b9c7a3e-5f1d-4c2b-9e8a-7d6f5e4c3b2a";
+        assert_eq!(number_of(&json!(id)), Some(TicketNumber::Loft(id.into())), "a Loft issue id keeps the Loft path");
+        assert_eq!(number_of(&json!("loft-issue-1")), Some(TicketNumber::Loft("loft-issue-1".into())));
+        for bad in [json!(0), json!(-3), json!("0"), json!("#"), json!(""), json!("  "), json!(null), json!(true)] {
+            assert_eq!(number_of(&bad), None, "{bad} names no ticket");
+        }
     }
 }
