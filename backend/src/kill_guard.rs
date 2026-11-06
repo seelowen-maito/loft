@@ -144,7 +144,13 @@ fn fed(cmds: &[Cmd], each: &[Scan]) -> Vec<bool> {
         let before = (fed.iter().filter(|f| **f).count(), vars.len(), files.len());
         let carries: Vec<bool> = fed.iter().zip(each).map(|(f, e)| *f || e.lookup).collect();
         for (i, c) in cmds.iter().enumerate() {
-            let from = |j: usize| carries[j] && (cmds[j].parent == Some(i) || piped(&cmds[j], c));
+            // A `$(...)`/`<(...)` feeds its parent; a `>(...)` reads it.
+            let from = |j: usize| {
+                carries[j]
+                    && ((cmds[j].parent == Some(i) && !cmds[j].reads_parent)
+                        || (c.parent == Some(j) && c.reads_parent)
+                        || piped(&cmds[j], c))
+            };
             // What a compound command reads (`done < <(pgrep x)`) reaches every command inside it.
             let into = |j: usize| fed[j] && closes(&cmds[j]) && cmds[j].pipes.last().is_some_and(|at| c.pipes.len() > cmds[j].pipes.len() && c.pipes.contains(at));
             let now = (0..cmds.len()).any(|j| from(j) || into(j))
@@ -274,7 +280,7 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
             return rest.first().cloned();
         }
         stdin |= a.starts_with('-') && flags.contains('s');
-        if flags == "o" || flags == "O" {
+        if flags.ends_with(['o', 'O']) {
             rest = rest.get(1..).unwrap_or_default();
         }
     }
@@ -309,6 +315,16 @@ fn assignment(w: &str) -> Option<&str> {
 
 const KEYWORDS: &[&str] = &["!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac"];
 
+/// Whether the next word after `words` is in command position, where a keyword counts: past keywords and a
+/// `function NAME`.
+fn command_position(words: &[String]) -> bool {
+    let words = match words {
+        [f, _, rest @ ..] if f == "function" => rest,
+        _ => words,
+    };
+    words.iter().all(|w| KEYWORDS.contains(&w.as_str()))
+}
+
 /// What a simple command runs once its wrappers are peeled off.
 enum Run<'a> {
     Words(&'a [String]),
@@ -324,6 +340,10 @@ fn unwrap(words: &[String]) -> Run<'_> {
     while let Some(w) = words.get(i) {
         if assignment(w).is_some() || KEYWORDS.contains(&w.as_str()) {
             i += 1;
+            continue;
+        }
+        if w == "function" {
+            i += 2; // and the function's name: `function f { pkill x; }`
             continue;
         }
         // Each wrapper with its options that take a value.
@@ -376,8 +396,10 @@ fn unwrap(words: &[String]) -> Run<'_> {
 struct Cmd {
     /// Its words with quotes removed. Redirections aren't words.
     words: Vec<String>,
-    /// The command whose word holds this one in a `$(...)`, backticks or `<(...)`: it gets this one's output.
+    /// The command whose word holds this one in a `$(...)`, backticks, `<(...)` or `>(...)`.
     parent: Option<usize>,
+    /// In a `>(...)`: it reads the parent's output, where a `$(...)` gives the parent its own.
+    reads_parent: bool,
     /// Each pipeline it sits in, from the outermost (one a compound command it's in sits in) in: the pipeline and
     /// its place there.
     pipes: Vec<(usize, usize)>,
@@ -418,13 +440,14 @@ struct Parse {
 fn parse(text: &str) -> Vec<Cmd> {
     let c: Vec<char> = text.chars().collect();
     let mut p = Parse::default();
-    lex(&mut p, &c, 0, None, None);
+    lex(&mut p, &c, 0, None, None, false);
     p.cmds
 }
 
 /// The state of one `lex`: the top level or one substitution.
 struct Level {
     parent: Option<usize>,
+    reads_parent: bool,
     /// The command being lexed.
     cur: Option<usize>,
     word: String,
@@ -437,8 +460,8 @@ struct Level {
 }
 
 impl Level {
-    fn new(parent: Option<usize>) -> Self {
-        Level { parent, cur: None, word: String::new(), in_word: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
+    fn new(parent: Option<usize>, reads_parent: bool) -> Self {
+        Level { parent, reads_parent, cur: None, word: String::new(), in_word: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -447,9 +470,9 @@ impl Level {
 
     /// The command being lexed, started if need be.
     fn cmd(&mut self, p: &mut Parse) -> usize {
-        let parent = self.parent;
+        let (parent, reads_parent) = (self.parent, self.reads_parent);
         *self.cur.get_or_insert_with(|| {
-            p.cmds.push(Cmd { parent, ..Default::default() });
+            p.cmds.push(Cmd { parent, reads_parent, ..Default::default() });
             p.cmds.len() - 1
         })
     }
@@ -480,8 +503,8 @@ impl Level {
             return; // a `case` pattern
         }
         let words = &mut p.cmds[id].words;
-        let first = words.iter().all(|w| KEYWORDS.contains(&w.as_str()));
-        let opens_case = word == "in" && words.len() >= 2 && words[words.len() - 2] == "case";
+        let first = command_position(words);
+        let opens_case = word == "in" && words.len() >= 2 && words[words.len() - 2] == "case" && command_position(&words[..words.len() - 2]);
         if first {
             match word.as_str() {
                 "{" | "while" | "until" | "if" | "for" | "select" => self.frames.push(Frame::default()),
@@ -526,12 +549,23 @@ impl Level {
 
 /// Lexes from `i` to the end, or past the `stop` (`)` or a backtick) that closes a substitution, adding the
 /// commands it finds to `p`. Returns the index it stopped at.
-fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Option<usize>) -> usize {
-    let mut l = Level::new(parent);
+fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Option<usize>, reads_parent: bool) -> usize {
+    let mut l = Level::new(parent, reads_parent);
     let mut depth = 0; // subshell parens open inside a `$(`
+    let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
     while let Some(&ch) = c.get(i) {
         let next = c.get(i + 1).copied();
         i += 1;
+        let opens_array = ch == '(' && l.in_word && l.word.ends_with('=') && assignment(&l.word).is_some();
+        if opens_array || (array > 0 && matches!(ch, '(' | ')' | ' ' | '\t' | '\n')) {
+            match ch {
+                '(' => array += 1,
+                ')' => array -= 1,
+                _ => {}
+            }
+            l.word.push(ch);
+            continue;
+        }
         // In a `case` pattern (`pkill|killall)`), `|` and `(` are part of it and `)` ends it.
         if l.frame().pattern == Some(true) && matches!(ch, '|' | '(' | ')') {
             l.end_word(p);
@@ -572,11 +606,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
                         }
                         '$' if c.get(i) == Some(&'(') => {
                             let id = l.cmd(p);
-                            i = lex(p, c, i + 1, Some(')'), Some(id));
+                            i = lex(p, c, i + 1, Some(')'), Some(id), false);
                         }
                         '`' => {
                             let id = l.cmd(p);
-                            i = lex(p, c, i, Some('`'), Some(id));
+                            i = lex(p, c, i, Some('`'), Some(id), false);
                         }
                         _ => l.word.push(q),
                     }
@@ -586,12 +620,12 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
             '`' => {
                 l.in_word = true;
                 let id = l.cmd(p);
-                i = lex(p, c, i, Some('`'), Some(id));
+                i = lex(p, c, i, Some('`'), Some(id), false);
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
                 let id = l.cmd(p);
-                i = lex(p, c, i + 1, Some(')'), Some(id));
+                i = lex(p, c, i + 1, Some(')'), Some(id), ch == '>');
             }
             '$' if next == Some('{') => {
                 l.in_word = true;
@@ -819,6 +853,13 @@ mod tests {
             "pgrep x > p; while read q; do kill $q; done < p",
             "xargs kill < <(pgrep x)",
             "pgrep x > p; kill $(<p)",
+            "pids=($(pgrep x)); kill ${pids[@]}",
+            "f() { local pids=($(pgrep -f vite)); kill \"${pids[@]}\"; }",
+            "declare -a pids=($(pgrep x)); kill ${pids[*]}",
+            "pids=(`pgrep x`)\nkill $pids",
+            "pids+=( $(pidof node) ); kill -9 ${pids[0]}",
+            "pgrep x > >(xargs kill)",
+            "pgrep x | tee >(xargs kill)",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
         }
@@ -839,6 +880,10 @@ mod tests {
             "type killall",
             "case $1 in killall) echo nope;; esac",
             "case \"$x\" in\n  pkill|killall) echo no ;;\n  *) kill 12 ;;\nesac",
+            "pids=(12 34); kill ${pids[@]}; pgrep -fl vite",
+            "files=(a b); pgrep -fl x > procs.txt",
+            "diff <(pgrep -fl x) >(cat); kill 12",
+            "function f { echo hi; }; f",
         ] {
             assert!(!kills_by_name(cmd), "should allow: {cmd}");
         }
@@ -876,6 +921,13 @@ mod tests {
             "lsof -tc node | xargs kill",
             "lsof -ct node | xargs kill",
             "kill $(lsof -t -cnode)",
+            "echo edge case covered in tests && pkill x",
+            "echo case x in y; killall node",
+            "bash -eo pipefail -c 'pkill x'",
+            "bash -euo pipefail -c 'pkill x'",
+            "zsh -o errexit -c 'killall node'",
+            "function f { pkill x; }; f",
+            "function f() { pkill x; }",
         ] {
             assert!(kills_by_name(cmd), "should refuse: {cmd}");
         }
