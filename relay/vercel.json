@@ -9,6 +9,7 @@
     { "source": "/auth/callback", "destination": "/api/auth-callback" },
     { "source": "/keys", "destination": "/api/keys" },
     { "source": "/connect", "destination": "/api/connect" },
-    { "source": "/keys/revoke", "destination": "/api/revoke" }
+    { "source": "/keys/revoke", "destination": "/api/revoke" },
+    { "source": "/account/delete", "destination": "/api/account-delete" }
   ]
 }

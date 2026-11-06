@@ -2,7 +2,7 @@
 // Apple's stable user id and hashed keys; no email or name is asked for. The functions in api/ call one handler each.
 // Every Apple value comes from the environment (a self-hoster sets their own); with any missing the portal says so.
 
-import { createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
 import { newKey, MAX_KEYS, USED_SECONDS } from "./relay.js";
 
@@ -10,6 +10,8 @@ export const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY
 const APPLE = "https://appleid.apple.com";
 const SESSION_SECONDS = 7 * 86400;
 const STATE_SECONDS = 600;
+/** Sign-ins, and key creations, one IP can make per hour. */
+export const PER_HOUR = 5;
 
 /** Apple's sign-in host; APPLE_ID_HOST replaces it for the tests' fake Apple, never in production. */
 const appleHost = (env) => (env.VERCEL_ENV !== "production" && env.APPLE_ID_HOST) || APPLE;
@@ -99,25 +101,52 @@ export async function home(request, env = process.env, now = Date.now()) {
     keys.length < MAX_KEYS
       ? '<form method="post" action="/keys"><p><label>Key name <input name="name" maxlength="60" required placeholder="My Mac"></label></p><button>Create key</button></form>'
       : "<p>Revoke a key to make room for a new one.</p>";
-  return page("Your keys", `${list}<p>${keys.length} of ${MAX_KEYS} keys. A key is shown once, when you create it. Revoke one and its Loft stops pushing at once.</p>${create}`);
+  return page("Your keys", `${list}<p>${keys.length} of ${MAX_KEYS} keys. A key is shown once, when you create it. Revoke one and its Loft stops pushing at once.</p>${create}<p><a href="/account/delete">Delete my account</a></p>`);
 }
 
-/** GET /auth/start: sends the user to Apple, with a state that comes back only to this browser. */
-export async function start(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+/**
+ * Sends the user to Apple, with a state that comes back only to this browser. With `deleting` (an account), this
+ * sign-in confirms deleting it: the intent is sealed with this state, so it never applies to a later sign-in.
+ */
+const toApple = (env, now, deleting) => {
   const state = randomBytes(16).toString("base64url");
   const query = new URLSearchParams({ client_id: env.APPLE_SERVICES_ID, redirect_uri: `${origin(env)}/auth/callback`, response_type: "code", state });
-  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS));
+  const intent = deleting ? cookie("delete", seal(env, "delete", `${state}.${deleting}`, STATE_SECONDS, now), STATE_SECONDS) : cookie("delete", "", 0);
+  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS), intent);
+};
+
+/**
+ * Counts one `what` ("sign-in", "callback" or "key") from the request's IP this hour: null within PER_HOUR, else a 429
+ * page saying when to try again. Vercel sets the first x-forwarded-for address; the store holds only its hash.
+ */
+export async function limited(store, request, what, now) {
+  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  const hour = Math.floor(now / 3600000);
+  if ((await store.hit(`limit:${what}:${createHash("sha256").update(ip).digest("hex")}:${hour}`, 3600)) <= PER_HOUR) return null;
+  const retry = (hour + 1) * 3600 - Math.floor(now / 1000);
+  const tries = what === "key" ? "key creations" : "sign-ins";
+  return page("Too many tries", `<p>At most ${PER_HOUR} ${tries} an hour from one network. Try again in ${Math.ceil(retry / 60)} minutes.</p>`, 429, { "retry-after": String(retry) });
+}
+
+/** GET /auth/start: Sign in with Apple. */
+export async function start(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now);
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
 export async function callback(request, env = process.env, now = Date.now()) {
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const limit = await limited(makeKv(env), request, "callback", now);
+  if (limit) return limit;
   const params = new URL(request.url).searchParams;
   const state = unseal(env, "state", cookieOf(request, "state"), now);
   const clear = cookie("state", "", 0);
   if (!state || state !== params.get("state") || !params.get("code")) return page("Sign-in failed", '<p>That sign-in didn\'t check out. <a href="/">Try again</a>.</p>', 400, { "set-cookie": clear });
-  let sub;
+  // `state.account` from `toApple`: only for the sign-in it was made with.
+  const intent = unseal(env, "delete", cookieOf(request, "delete"), now) ?? "";
+  const deleting = intent.startsWith(`${state}.`) ? intent.slice(state.length + 1) : null;
+  let sub, tokens;
   try {
     const res = await fetch(`${appleHost(env)}/auth/token`, {
       method: "POST",
@@ -126,15 +155,97 @@ export async function callback(request, env = process.env, now = Date.now()) {
     });
     if (!res.ok) throw new Error(`Apple answered ${res.status}`);
     // The id token came from Apple over TLS in answer to our own request, so its signature isn't checked again.
-    const claims = JSON.parse(Buffer.from((await res.json()).id_token.split(".")[1], "base64url"));
+    tokens = await res.json();
+    const claims = JSON.parse(Buffer.from(tokens.id_token.split(".")[1], "base64url"));
     if (claims.iss !== APPLE || claims.aud !== env.APPLE_SERVICES_ID || claims.exp * 1000 < now || !claims.sub) throw new Error("unexpected id token");
     sub = String(claims.sub);
   } catch (e) {
     console.error(`push portal: sign-in failed (${e.message})`);
     return page("Sign-in failed", '<p>Apple didn\'t confirm the sign-in. <a href="/">Try again</a>.</p>', 502, { "set-cookie": clear });
   }
+  if (deleting) return finishDelete(env, now, deleting, sub, tokens);
   await makeKv(env).setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
   return redirect("/", clear, cookie("session", seal(env, "session", sub, SESSION_SECONDS, now), SESSION_SECONDS));
+}
+
+/** GET /account/delete: what deleting does, and the button. */
+export async function confirmDelete(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const account = accountOf(request, env, now);
+  if (!account) return redirect("/");
+  const n = (await keysOf(makeKv(env), account)).length;
+  const what = n === 1 ? "your account and its key, so its Loft stops pushing" : n ? `your account and all ${n} keys, so those Lofts stop pushing` : "your account";
+  return page(
+    "Delete your account?",
+    `<p>This deletes ${what}, and ends Sign in with Apple for this portal. It can't be undone. You can sign in again later and start fresh.</p>` +
+      '<p>Apple asks you to sign in once more to confirm.</p><form method="post" action="/account/delete"><button>Delete my account</button> <a href="/">Cancel</a></form>',
+  );
+}
+
+/** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
+export async function startDelete(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const account = accountOf(request, env, now);
+  if (!account) return redirect("/");
+  return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
+}
+
+/**
+ * Deletes `account` and its keys. The account and every key read beforehand go in one transaction, which also reads
+ * any key made since; once the account is gone `makeAccountKey` undoes its own key, so those are the last ones.
+ * A failure part way leaves the set holding whatever is left, so signing in again shows those keys and deleting
+ * again finishes the job.
+ */
+export async function deleteAccount(store, account) {
+  const set = `account-keys:${account}`;
+  const records = (ids) => (ids ?? []).flatMap((id) => [`relay-key:${id}`, `relay-key-used:${id}`]);
+  const [ids] = await store.pipeline([["SMEMBERS", set]]);
+  const drop = ids?.length ? [["SREM", set, ...ids]] : [];
+  const answers = await store.transaction([["DEL", `account:${account}`, ...records(ids)], ...drop, ["SMEMBERS", set]]);
+  await store.transaction([["DEL", set, ...records(answers.at(-1))]]);
+}
+
+/** Back from Apple on the way to deleting: only the account that asked can be deleted. */
+async function finishDelete(env, now, account, sub, tokens) {
+  const signedOut = [cookie("state", "", 0), cookie("delete", "", 0)];
+  if (account !== sub) {
+    const res = page("Not deleted", '<p>That was a different Apple ID from this account\'s, so nothing was deleted. <a href="/">Back</a></p>', 403);
+    signedOut.forEach((c) => res.headers.append("set-cookie", c));
+    return res;
+  }
+  try {
+    await deleteAccount(makeKv(env), account);
+  } catch (e) {
+    console.error(`push portal: deleting an account failed (${e.message})`);
+    const res = page("Not deleted yet", '<p>Your account couldn\'t be deleted completely. <a href="/account/delete">Try again</a>.</p>', 502);
+    signedOut.forEach((c) => res.headers.append("set-cookie", c));
+    return res;
+  }
+  const revoked = await revokeApple(env, tokens, now);
+  const res = page(
+    "Account deleted",
+    `<p>Your account and its keys are gone, and Lofts using them no longer push.${revoked ? "" : " Apple didn't confirm ending the sign-in: you can remove this portal under Sign in with Apple in your Apple ID settings."}</p>`,
+  );
+  [...signedOut, cookie("session", "", 0)].forEach((c) => res.headers.append("set-cookie", c));
+  return res;
+}
+
+/** Ends the Sign in with Apple link for this portal by revoking the token Apple just gave. True when Apple accepted it. */
+async function revokeApple(env, tokens, now) {
+  const [token, hint] = tokens.refresh_token ? [tokens.refresh_token, "refresh_token"] : [tokens.access_token, "access_token"];
+  if (!token) return false;
+  try {
+    const res = await fetch(`${appleHost(env)}/auth/revoke`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: env.APPLE_SERVICES_ID, client_secret: clientSecret(env, now), token, token_type_hint: hint }),
+    });
+    if (!res.ok) throw new Error(`Apple answered ${res.status}`);
+    return true;
+  } catch (e) {
+    console.error(`push portal: token revocation failed (${e.message})`);
+    return false;
+  }
 }
 
 /**
@@ -158,7 +269,10 @@ export async function createAccountKey(request, env = process.env, now = Date.no
   if (!account) return redirect("/");
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. <a href="/">Back</a></p>', 400);
-  const made = await makeAccountKey(makeKv(env), account, name, now);
+  const store = makeKv(env);
+  const limit = await limited(store, request, "key", now);
+  if (limit) return limit;
+  const made = await makeAccountKey(store, account, name, now);
   // A session can outlive its account (deleted since): it's signed out rather than given a key nobody owns.
   if (made.error === "gone") return redirect("/", cookie("session", "", 0));
   if (made.error === "capped") return capped();

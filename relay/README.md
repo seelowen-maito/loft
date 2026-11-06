@@ -53,7 +53,15 @@ the account is Apple's user id (`account:<id>` in the store) and nothing else: n
 in, the user names a key and gets it once on the next page; only its hash is stored (with the name, the date and the
 account), and the relay accepts it like one made by the script. The page lists the account's keys by name, with
 their created and last-used dates (`relay-key-used:<hash>`, set on each authorized push and kept for a year), never the key. **Revoke**
-deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked. Without the portal's settings below, the page says
+deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked.
+From one address (the first `x-forwarded-for` entry, stored only as a hash), at most 5 sign-ins (`/auth/start` and
+Delete my account), 5 returns from Apple (`/auth/callback`) and 5 key creations (`/keys` and Allow on `/connect`) are
+taken per hour: the 6th gets `429` with `Retry-After` until the next hour.
+**Delete my account** (`/account/delete`) asks the user to sign in with Apple once more: only the account's own Apple
+ID confirms it. Then the account, its keys and their last-used dates are deleted, and the token Apple just gave is
+revoked (`/auth/revoke`), which ends Sign in with Apple for the portal. No Apple token is ever stored. If Apple
+refuses the revocation, the account is still deleted and the page says how to remove the portal in the Apple ID
+settings. Without the portal's settings below, the page says
 "The push portal isn't configured" and the relay works as before: the portal is optional.
 
 **Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, expires_in: 600}`, at most 5 per IP per

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
-import { home, start, callback, createAccountKey, revokeAccountKey } from "../lib/portal.js";
+import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { kv as makeKv } from "../lib/kv.js";
 import { push } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
@@ -25,7 +26,7 @@ const run = ([cmd, key, ...args]) => {
   if (cmd === "SET" && args[1] === "EX") expiries.set(key, args[2]);
   if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
   if (cmd === "GET") return store.get(key) ?? null;
-  if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k)).length;
+  if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k) || sets.delete(k)).length;
   if (cmd === "SADD") return (sets.set(key, members(key).add(args[0])), 1);
   if (cmd === "SREM") return args.filter((m) => members(key).delete(m)).length;
   if (cmd === "SMEMBERS") return [...members(key)];
@@ -47,18 +48,23 @@ const kvServer = createServer((req, res) => {
   });
 });
 
-// Apple's sign-in service: answers the token request with an id token for whoever the test says signed in.
+// Apple's sign-in service: answers the token request with tokens for whoever the test says signed in, and takes
+// revocations (`/auth/revoke`), answering `idp.revokeStatus`.
 let idp = { sub: "001234.abcdef", status: 200 };
 const tokenRequests = [];
+const revoked = [];
+let signIns = 0;
 const idpServer = createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
   req.on("end", () => {
+    if (req.url === "/auth/revoke") return (revoked.push(new URLSearchParams(body)), res.writeHead(idp.revokeStatus ?? 200).end());
     tokenRequests.push({ url: req.url, form: new URLSearchParams(body) });
     if (idp.status !== 200) return res.writeHead(idp.status).end("{}");
+    signIns += 1;
     const claims = { iss: "https://appleid.apple.com", aud: SERVICES_ID, exp: Math.floor(Date.now() / 1000) + 600, sub: idp.sub, ...idp.claims };
     const idToken = ["{}", JSON.stringify(claims), "sig"].map((p) => Buffer.from(p).toString("base64url")).join(".");
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id_token: idToken }));
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id_token: idToken, access_token: `at-${signIns}`, refresh_token: `rt-${signIns}` }));
   });
 });
 
@@ -97,13 +103,19 @@ beforeEach(() => {
   expiries.clear();
   failing = null;
   tokenRequests.length = 0;
+  revoked.length = 0;
   pushed.length = 0;
   idp = { sub: "001234.abcdef", status: 200 };
 });
 
-const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
+// Each request comes from its own address unless a test gives one, so only the limits' own tests reach them.
+let addresses = 0;
+const fresh = () => `198.51.100.${addresses++ % 250}, 10.0.0.1`;
+const get = (path, cookies = "", ip = fresh()) => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies, "x-forwarded-for": ip } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
-const post = (path, form, cookies) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies }, body: new URLSearchParams(form) });
+const post = (path, form, cookies, ip = fresh()) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
+/** The store's keys but the limits' counters (which hold hashes of addresses only). */
+const kept = () => [...store.keys()].filter((k) => !k.startsWith("limit:"));
 
 /** Starts a sign-in and comes back from Apple: the session cookie. */
 async function signInAs(sub = "001234.abcdef") {
@@ -138,7 +150,7 @@ test("signed out, the page offers Sign in with Apple, which asks Apple for no em
 
 test("signing in creates an account holding only Apple's user id", async () => {
   const session = await signInAs("001234.abcdef");
-  assert.deepEqual([...store.keys()], ["account:001234.abcdef"]);
+  assert.deepEqual(kept(), ["account:001234.abcdef"]);
   assert.deepEqual(Object.keys(JSON.parse(store.get("account:001234.abcdef"))), ["created"]);
   assert.match(await (await home(get("/", session), env)).text(), /Create key/);
   // Apple got the code and a client secret signed with the sign-in key.
@@ -169,7 +181,7 @@ test("a sign-in that Apple didn't start for this browser, or can't confirm, crea
     idp = { sub: "x", status: 200, ...bad };
     assert.equal((await callback(get(`/auth/callback?code=x&state=${state}`, mine), env)).status, 502, JSON.stringify(bad));
   }
-  assert.equal(store.size, 0);
+  assert.deepEqual(kept(), []);
 });
 
 test("the sign-in state cookie is not a session", async () => {
@@ -179,7 +191,7 @@ test("the sign-in state cookie is not a session", async () => {
   const res = await createAccountKey(post("/keys", { name: "x" }, asSession), env);
   assert.equal(res.status, 303);
   assert.equal(res.headers.get("location"), "/");
-  assert.equal(store.size, 0);
+  assert.deepEqual(kept(), []);
 });
 
 test("a forged or expired session is signed out", async () => {
@@ -318,4 +330,149 @@ test("a store error is an error, not an empty answer", async () => {
   await assert.rejects(createAccountKey(post("/keys", { name: "Mac" }, session), env), /store refused a command/);
   failing = "SISMEMBER";
   await assert.rejects(revokeAccountKey(post("/keys/revoke", { id: "a".repeat(64) }, session), env), /store refused a command/);
+});
+
+/** Presses Delete my account and comes back from Apple signed in as `sub`. */
+async function deleteAs(session, sub = "001234.abcdef") {
+  const started = await startDelete(post("/account/delete", {}, session), env);
+  assert.equal(started.status, 303);
+  idp.sub = sub;
+  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  return callback(get(`/auth/callback?code=c0de&state=${state}`, [session, ...cookiesOf(started)].join("; ")), env);
+}
+
+test("Delete my account deletes the keys and the account and revokes Apple's token", async () => {
+  const session = await signInAs();
+  const keys = [];
+  for (const name of ["Mac", "MacBook", "iMac"]) keys.push(await keyFrom(await createAccountKey(post("/keys", { name }, session), env)));
+  await pushWith(keys[0]);
+  const other = await signInAs("999.other");
+  const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, other), env));
+  assert.match(await (await home(get("/", session), env)).text(), /href="\/account\/delete"/);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all 3 keys, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
+
+  const res = await deleteAs(session);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Account deleted/);
+  assert.match(res.headers.getSetCookie().join(), /session=; Max-Age=0/);
+  for (const key of keys) assert.equal((await pushWith(key)).status, 401);
+  assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.includes("001234.abcdef")), "nothing of the account is left");
+  assert.ok(!keys.some((k) => store.has(`relay-key:${sha256(k)}`) || store.has(`relay-key-used:${sha256(k)}`)));
+  // Apple was asked to revoke the token from the confirming sign-in, with the portal's client secret.
+  assert.equal(revoked.length, 1);
+  assert.equal(revoked[0].get("token"), `rt-${signIns}`);
+  assert.equal(revoked[0].get("token_type_hint"), "refresh_token");
+  assert.equal(revoked[0].get("client_id"), SERVICES_ID);
+  assert.ok(revoked[0].get("client_secret"));
+  // The other account is untouched, and the session left over is signed out of making keys.
+  assert.equal((await pushWith(theirs)).status, 200);
+  assert.equal((await createAccountKey(post("/keys", { name: "Again" }, session), env)).status, 303);
+});
+
+test("only the account's own Apple ID can confirm deleting it", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const res = await deleteAs(session, "999.someone-else");
+  assert.equal(res.status, 403);
+  assert.equal((await pushWith(key)).status, 200);
+  assert.ok(store.has("account:001234.abcdef"));
+  assert.ok(!store.has("account:999.someone-else"), "and the other Apple ID isn't signed up either");
+  assert.equal(revoked.length, 0);
+});
+
+test("deleting needs a signed-in session and a sign-in started for it", async () => {
+  assert.equal((await startDelete(post("/account/delete", {}, ""), env)).headers.get("location"), "/");
+  assert.equal((await confirmDelete(get("/account/delete", ""), env)).headers.get("location"), "/");
+  const session = await signInAs();
+  // Pressed, then abandoned at Apple: the next ordinary sign-in in that browser signs in and deletes nothing.
+  const abandoned = await startDelete(post("/account/delete", {}, session), env);
+  const intent = cookiesOf(abandoned).find((c) => c.startsWith("delete="));
+  const started = await start(get("/auth/start"), env);
+  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  const done = await callback(get(`/auth/callback?code=c0de&state=${state}`, [...cookiesOf(started).filter((c) => c.startsWith("state=")), intent].join("; ")), env);
+  assert.equal(done.headers.get("location"), "/");
+  assert.ok(store.has("account:001234.abcdef"));
+  assert.equal(revoked.length, 0);
+});
+
+test("the delete page reads well with no key and with one", async () => {
+  const session = await signInAs();
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /This deletes your account, and ends Sign in with Apple/);
+  await createAccountKey(post("/keys", { name: "Mac" }, session), env);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /This deletes your account and its key, so its Loft stops pushing, and ends/);
+});
+
+test("a delete that fails part way says so, keeps the keys reachable, and can be tried again", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  failing = "SMEMBERS";
+  const res = await deleteAs(session);
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /couldn't be deleted completely[\s\S]*href="\/account\/delete"/);
+  assert.doesNotMatch(res.headers.getSetCookie().join(), /session=;/, "still signed in, to try again");
+  assert.equal(revoked.length, 0);
+  assert.equal((await pushWith(key)).status, 200);
+  failing = null;
+  assert.equal((await deleteAs(session)).status, 200);
+  assert.equal((await pushWith(key)).status, 401);
+});
+
+test("a key made while the account is being deleted is deleted too", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const kv = makeKv(env);
+  let late = null;
+  // Between reading the keys and deleting them, another tab makes one.
+  const racing = { ...kv, transaction: async (commands) => {
+    if (!late) late = await keyFrom(await createAccountKey(post("/keys", { name: "Late" }, session), env));
+    return kv.transaction(commands);
+  } };
+  await deleteAccount(racing, "001234.abcdef");
+  for (const k of [key, late]) assert.equal((await pushWith(k)).status, 401);
+  assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.includes("001234.abcdef") || k.endsWith(sha256(late))), "nothing is left");
+});
+
+test("the account is deleted even when Apple doesn't confirm the revocation, and the page says so", async () => {
+  const session = await signInAs();
+  idp.revokeStatus = 500;
+  const res = await deleteAs(session);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Apple didn't confirm ending the sign-in/);
+  assert.ok(!store.has("account:001234.abcdef"));
+});
+
+test("the 6th sign-in from one address in an hour is refused, and the next hour it works again", async () => {
+  const ip = "203.0.113.9, 10.0.0.1";
+  const hour = Date.UTC(2026, 10, 6, 14, 20);
+  for (let i = 1; i <= 5; i++) assert.equal((await start(get("/auth/start", "", ip), env, hour)).status, 303, `sign-in ${i}`);
+  const refused = await start(get("/auth/start", "", ip), env, hour);
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get("retry-after"), String(40 * 60));
+  assert.match(await refused.text(), /At most 5 sign-ins an hour from one network\. Try again in 40 minutes/);
+  assert.equal(refused.headers.get("location"), null, "not sent to Apple");
+  assert.equal((await start(get("/auth/start", "", "203.0.113.10"), env, hour)).status, 303, "another address");
+  assert.equal((await start(get("/auth/start", "", ip), env, hour + 3600_000)).status, 303, "the next hour");
+  // Pressing Delete my account is a sign-in too.
+  const session = await signInAs();
+  assert.equal((await startDelete(post("/account/delete", {}, session, ip), env, hour)).status, 429);
+  assert.ok(![...store.keys()].some((k) => k.includes("203.0.113")), "the store holds hashes of addresses only");
+});
+
+test("the 6th sign-in coming back from Apple to one address in an hour is refused before Apple is asked", async () => {
+  const ip = "203.0.113.11";
+  for (let i = 1; i <= 5; i++) assert.equal((await callback(get("/auth/callback?code=x&state=y", "", ip), env)).status, 400);
+  const asked = tokenRequests.length;
+  assert.equal((await callback(get("/auth/callback?code=x&state=y", "", ip), env)).status, 429);
+  assert.equal(tokenRequests.length, asked);
+});
+
+test("the 6th key creation from one address in an hour is refused, across accounts", async () => {
+  const ip = "203.0.113.12";
+  const [a, b] = [await signInAs("111.a"), await signInAs("222.b")];
+  for (const [i, session] of [a, a, a, b, b].entries()) assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: `Mac ${i}` }, session, ip), env)), `key ${i + 1}`);
+  const refused = await createAccountKey(post("/keys", { name: "Mac 6" }, b, ip), env);
+  assert.equal(refused.status, 429);
+  assert.match(await refused.text(), /At most 5 key creations an hour/);
+  assert.equal(sets.get("account-keys:222.b").size, 2);
+  assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: "Mac 6" }, b), env)), "from another address");
 });
