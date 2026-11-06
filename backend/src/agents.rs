@@ -443,7 +443,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti:<port> | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents run on this Mac and a pattern can match them. To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti tcp:<port> -sTCP:LISTEN | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents and their servers run on this Mac and a pattern can match them, so Loft refuses those commands. To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -907,26 +907,39 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
 }
 
-/// Where an agent's system prompt is written for claude to read. Not on claude's command line: every
-/// agent's prompt holds phrases like `vite --host`, so a `pkill -f` with one of them in any agent's
-/// command would match, and stop, every agent at once.
-fn system_prompt_file(state: &AppState, agent_id: &str) -> PathBuf {
-    state.cfg.storage_dir.join(".system-prompts").join(format!("{agent_id}.md"))
+/// Where claude reads one of an agent's files from: its system prompt (`md`), MCP config (`mcp.json`) and
+/// settings (`settings.json`). None of them is on claude's command line: every agent's prompt holds phrases like
+/// `vite --host` and its MCP config the user's servers (`npx @playwright/mcp`), so a `pkill -f` with one of them in
+/// any agent's command would match, and stop, every agent at once.
+fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
+    state.cfg.storage_dir.join(AGENT_FILES).join(format!("{agent_id}.{kind}"))
 }
 
-/// Writes the agent's system prompt owner-only and returns its path.
-fn write_system_prompt(state: &AppState, a: &Agent) -> Result<PathBuf> {
+const AGENT_FILES: &str = ".system-prompts";
+const AGENT_FILE_KINDS: [&str; 3] = ["md", "mcp.json", "settings.json"];
+
+/// Writes one of the agent's files owner-only (it may hold MCP tokens) and returns the path claude reads it at
+/// from the workspace, `../.system-prompts/<id>.<kind>`: an absolute one would put the user's folders on argv.
+fn write_agent_file(state: &AppState, agent_id: &str, kind: &str, text: &str) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path = system_prompt_file(state, &a.id);
+    let path = agent_file(state, agent_id, kind);
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(&path, system_prompt(state, a))?;
+    std::fs::write(&path, text)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(path)
+    Ok(PathBuf::from("..").join(AGENT_FILES).join(path.file_name().unwrap()))
 }
 
-fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::path::Path) -> Command {
+/// Removes the files claude was started with, when the agent is deleted.
+pub fn remove_agent_files(state: &AppState, agent_id: &str) {
+    for kind in AGENT_FILE_KINDS {
+        let _ = std::fs::remove_file(agent_file(state, agent_id, kind));
+    }
+}
+
+/// The claude command for a run. Writing its files fails the run rather than putting them on argv.
+fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -941,21 +954,35 @@ fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::p
 
     let mut allowed: Vec<String> = a.allowed_tools.clone();
     allowed.push("mcp__loft".into());
+    let mut disallowed = a.disallowed_tools.clone();
+    if a.max_subagents == Some(0) {
+        disallowed.push("Agent".into());
+    }
+    // The tool lists hold the user's own rules (`Bash(npm *)`), so they go in the settings file too; `--settings`
+    // applies despite `--setting-sources ""`. So does the hook that refuses kills by name (`pkill -f`, `killall`),
+    // which also hit other agents' running commands and the user's MCP servers.
+    let settings = json!({
+        "permissions": { "allow": allowed, "deny": disallowed },
+        "hooks": crate::kill_guard::hooks(&std::env::current_exe()?),
+    });
 
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
         .arg("--append-system-prompt-file")
-        .arg(prompt_file)
+        .arg(write_agent_file(state, &a.id, "md", &system_prompt(state, a))?)
         .args(["--system-prompt-snapshot", "off"])
-        .args(["--mcp-config", &mcp_config])
+        .arg("--mcp-config")
+        .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
         // Isolate agents from the user's own Claude Code settings, hooks and plugins.
         .args(["--setting-sources", ""])
+        .arg("--settings")
+        .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
-        .args(["--name", &format!("loft · {}", a.name)])
+        .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
@@ -970,28 +997,19 @@ fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::p
     if !a.effort.is_empty() {
         cmd.args(["--effort", &a.effort]);
     }
-    cmd.arg("--allowedTools").arg(allowed.join(","));
     if !a.subagent_model.is_empty() {
         // FORCE makes the built-in Explore and Plan subagents follow it too.
         cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", &a.subagent_model).env("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "1");
     }
-    let mut disallowed = a.disallowed_tools.clone();
-    match a.max_subagents {
-        Some(0) => disallowed.push("Agent".into()),
-        Some(n) => {
-            cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
-        }
-        None => {}
-    }
-    if !disallowed.is_empty() {
-        cmd.arg("--disallowedTools").arg(disallowed.join(","));
+    if let Some(n @ 1..) = a.max_subagents {
+        cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
     }
     if resume {
         if let Some(sid) = &a.session_id {
             cmd.args(["--resume", sid]);
         }
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Points the agent at Claude session `sid`. A different session than its last one brings the running
@@ -1088,8 +1106,7 @@ async fn run_process(
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
-    let prompt_file = write_system_prompt(state, &agent)?;
-    let mut cmd = build_command(state, &agent, resume, &prompt_file);
+    let mut cmd = build_command(state, &agent, resume)?;
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
     }
@@ -1117,6 +1134,8 @@ async fn run_process(
     // tool_use id -> (name, input), to recognise PR-opening calls when their results arrive
     let mut tool_calls: std::collections::HashMap<String, (String, Value)> = Default::default();
     let mut killed = false;
+    // Loft sent claude a SIGTERM itself (stop, new work over background tasks, or a claude that wouldn't exit).
+    let mut loft_stopped = false;
     // Claude Code background tasks (shells, monitors, background subagents) still running: id -> description.
     // claude -p stays alive for them and starts another turn when one finishes.
     let mut bg: Vec<(String, String)> = Vec::new();
@@ -1136,6 +1155,7 @@ async fn run_process(
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 killed = true;
                 None
             }
@@ -1158,12 +1178,14 @@ async fn run_process(
                 }
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
                 tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 None
             }
         };
@@ -1444,6 +1466,7 @@ async fn run_process(
         Err(_) => {
             tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
             terminate(&mut child).await;
+            loft_stopped = true;
             child.wait().await?
         }
     };
@@ -1454,9 +1477,9 @@ async fn run_process(
         }
         if !killed {
             let tail: String = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            // Loft logs every stop of its own above; a signal it didn't send came from another process.
+            // A SIGTERM Loft didn't send came from another process. Not SIGKILL: macOS ends a process out of memory with it.
             use std::os::unix::process::ExitStatusExt;
-            let outside = if matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)) || matches!(status.code(), Some(143 | 137)) {
+            let outside = if !loft_stopped && (status.signal() == Some(libc::SIGTERM) || status.code() == Some(143)) {
                 " It was stopped by a signal from outside Loft, for example a `pkill` or `kill` in some agent's command."
             } else {
                 ""
@@ -1709,7 +1732,10 @@ case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
 esac;;
 esac
 while [ $# -gt 0 ]; do
+  case "$1" in --append-system-prompt|--allowedTools|--disallowedTools) echo "$1 on argv" >&2; exit 1;; esac
+  [ "$1" = --mcp-config ] && [ ! -f "$2" ] && echo 'mcp config on argv' >&2 && exit 1
   [ "$1" = --append-system-prompt-file ] && { cat "$2"; printf '\n---\n'; } >> system.log
+  [ "$1" = --settings ] && cat "$2" > settings.log
   printf '%s\n' "$1" >> argv.log
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
@@ -1722,6 +1748,9 @@ case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
 case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *sigterm*) kill -TERM $$;; esac
+case "$prompt" in *exit-143*) exit 143;; esac
+case "$prompt" in *stuck-pipes*) exec >&-; sleep 3; exit 0;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *chatty*)
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"On it."}]}}';;
@@ -1847,8 +1876,84 @@ esac
         let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
         assert!(system.contains("# Identity") && system.contains("vite --host"), "{system}");
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(system_prompt_file(&st, &a.id)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(agent_file(&st, &a.id, "md")).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(system.contains("never with `pkill -f` or `killall`"), "agents are told to stop processes by PID");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claude_s_files_are_private_relative_and_hold_the_tool_lists_and_the_kill_guard() {
+        let (st, mut a) = fake_claude_state();
+        a = st.db.update_agent(&a.id, |a| {
+            a.allowed_tools = vec!["Bash(npm *)".into()];
+            a.disallowed_tools = vec!["WebFetch".into()];
+            a.max_subagents = Some(0);
+        }).unwrap().unwrap();
+        run(&st, &a.id, "hello", 1).await;
+        // No path into the user's folders, and none of the user's rules, for a `pkill -f` to match.
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        let storage = st.cfg.storage_dir.to_string_lossy().to_string();
+        for text in [storage.as_str(), "agent-local-storage", "npm", "WebFetch", "loft ·"] {
+            assert!(!argv.contains(text), "{text:?} is on claude's command line:\n{argv}");
+        }
+        assert!(argv.contains(&format!("../.system-prompts/{}.settings.json", a.id)), "{argv}");
+        // The fake read the settings file from that relative path.
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(workspace(&st, &a.id).join("settings.log")).unwrap()).unwrap();
+        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "Agent"] }));
+        let hook = &settings["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["matcher"], "Bash");
+        assert!(hook["hooks"][0]["command"].as_str().unwrap().ends_with("' kill-guard"), "{settings}");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for kind in AGENT_FILE_KINDS {
+            assert_eq!(mode(&agent_file(&st, &a.id, kind)), 0o600, "{kind}");
+        }
+        assert_eq!(mode(agent_file(&st, &a.id, "md").parent().unwrap()), 0o700);
+
+        // Deleting the agent removes them, even when its workspace stays.
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        for kind in AGENT_FILE_KINDS {
+            assert!(!agent_file(&st, &a.id, kind).exists(), "{kind} is left behind");
+        }
+        assert!(workspace(&st, &a.id).exists());
+    }
+
+    fn error_text(st: &AppState, id: &str) -> Option<String> {
+        st.db.list_messages(id, 50, None).unwrap().into_iter().find(|m| m.kind == "error").map(|m| m.content)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sigterm_from_outside_loft_is_named_in_the_error() {
+        for prompt in ["sigterm", "exit-143"] {
+            let (st, a) = fake_claude_state();
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            assert!(error_text(&st, &a.id).unwrap().contains("from outside Loft"), "{prompt}: {:?}", error_text(&st, &a.id));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_s_own_stops_are_not_blamed_on_the_outside() {
+        let (st, a) = fake_claude_state();
+        // claude closed its output without a result and stayed alive: Loft stops it.
+        enqueue(&st, &a.id, Some("stuck-pipes".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        let err = error_text(&st, &a.id).unwrap();
+        assert!(err.contains("without a result") && !err.contains("outside Loft"), "{err}");
+
+        // Stop and restart.
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("busy".into()), "user");
+        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        stop(&st, &a.id);
+        until("the stop", 10, || !is_running(&st, &a.id)).await;
+        enqueue(&st, &a.id, Some("busy".into()), "user");
+        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        restart(&st, &a.id).await;
+        until("the restart", 10, || !is_running(&st, &a.id)).await;
+        let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
+        assert!(msgs.iter().all(|m| !m.content.contains("outside Loft")), "{msgs:?}");
     }
 
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {

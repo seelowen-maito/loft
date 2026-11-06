@@ -90,7 +90,7 @@ The `ios/` folder has a native iPhone app for agent status, approvals, issues an
 
 ## How agents run
 
-Each agent runs headless Claude Code in its own folder under `agent-local-storage/`. Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
+Each agent runs headless Claude Code in its own folder under `agent-local-storage/`. Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft does give them one hook of its own: it refuses Bash commands that kill processes by name or pattern (`pkill`, `killall`, `pgrep … | xargs kill`), which would also stop other agents and your MCP servers. Kills by PID or port still run. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
 ## Development
 

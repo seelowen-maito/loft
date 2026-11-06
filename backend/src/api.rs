@@ -452,6 +452,7 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     agents::stop(&state, &id);
     state.db.delete_agent(&id)?;
     crate::uploads::remove_all(&state, &id);
+    agents::remove_agent_files(&state, &id);
     if q.purge_files {
         let _ = std::fs::remove_dir_all(workspace(&state, &id));
     }

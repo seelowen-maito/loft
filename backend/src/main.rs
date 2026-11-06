@@ -13,6 +13,7 @@ mod grill;
 mod needs_you;
 mod planning;
 mod guard;
+mod kill_guard;
 mod mac_access;
 mod mcp;
 mod mentions;
@@ -47,8 +48,16 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::{AppState, Config, Runtime};
 
+fn main() -> anyhow::Result<()> {
+    // As the agents' Bash hook, claude runs this binary before every Bash call: answer before any setup.
+    if std::env::args().nth(1).as_deref() == Some(kill_guard::ARG) {
+        kill_guard::hook();
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     signing::ensure();
 
