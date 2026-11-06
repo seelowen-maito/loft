@@ -365,7 +365,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
-        .fullScreenCover(isPresented: $showingInterview) { InterviewView(agent: agent, command: grillCommand) }
+        .fullScreenCover(isPresented: $showingInterview) { InterviewView(agent: agent) }
         .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }

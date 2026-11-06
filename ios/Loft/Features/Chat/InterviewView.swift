@@ -2,12 +2,13 @@ import SwiftUI
 
 /// The open interview on its own, full screen over the chat: the question the voice is on as one big card, the
 /// same card the chat shows. The chat underneath keeps reading each new question aloud. It closes by itself when
-/// the interview ends; Close goes back to the chat with the interview still open.
+/// the interview ends; Close goes back to the chat with the interview still open. Commands are sent from here, so a
+/// failure shows here and not in the chat's alert under the cover.
 struct InterviewView: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let agent: Agent
-    let command: (GrillCommand) -> Void
+    @State private var error: APIError?
 
     private var session: GrillSession? { store.openGrill(for: agent.id) }
 
@@ -32,6 +33,8 @@ struct InterviewView: View {
                 }
             }
         }
+        .errorAlert($error)
+        // The chat underneath turns the mic off when the interview closes, however it ended.
         .onChange(of: session == nil) { _, ended in if ended { dismiss() } }
     }
 
@@ -57,6 +60,12 @@ struct InterviewView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("interviewWaiting")
+        }
+    }
+
+    private func command(_ c: GrillCommand) {
+        Task {
+            do { try await store.sendGrillCommand(c, agentId: agent.id) } catch { self.error = APIError.from(error) }
         }
     }
 }
