@@ -113,7 +113,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
           <button
             className="btn btn-primary text-[12.5px]"
             disabled={busy !== null}
-            title={`Merges ${stage.branch} into ${stage.base} in the project's folder, when ${stage.base} is checked out and nothing is uncommitted.`}
+            title={`Merges ${stage.branch} into ${stage.base} in the Dev's clone. Your copy of the project isn't touched.`}
             onClick={() => run("merge", async () => setMerged((await api.mergeDelivery(delivery.repo, delivery.spec)).message))}
           >
             {busy === "merge" ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />} Merge
