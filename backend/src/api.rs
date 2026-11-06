@@ -785,7 +785,7 @@ pub struct FindQuery {
 /// for `@` followed by a name rather than a path. Each is `{ path, dir }`, with `path` relative to the base.
 pub async fn find_files(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<FindQuery>) -> ApiResult<Value> {
     let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    Ok(Json(json!(crate::file_search::search(&agents::at_base(&state, &a), q.q.as_deref().unwrap_or("")).await)))
+    Ok(Json(json!(crate::file_search::search(&state.listings, &agents::at_base(&state, &a), q.q.as_deref().unwrap_or("")).await)))
 }
 
 fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBuf, Vec<Value>), String> {

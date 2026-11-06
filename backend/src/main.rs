@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         publish_locks: Arc::new(planning::Locks::default()),
         publish_known: Arc::new(planning::Known::default()),
         mirror: Arc::new(Default::default()),
+        listings: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     {
