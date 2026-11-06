@@ -443,20 +443,38 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
 
 /// The repo, number and Delivery of the ticket a Delivery tool names, with the repo's publish lock held.
 async fn ticket_of(state: &AppState, me: &crate::db::Agent, args: &Value, tool: &str) -> Result<(String, i64, Delivery, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = args["number"].as_str().map(str::trim) {
+    if let Some(id) = loft_id(args) {
         // A plan kept in Loft names its tickets by their Loft issue ids.
         let slug = local_repo(&me.project);
         let held = state.publish_locks.of(&slug).lock_owned().await;
         let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
-        let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in your project: only tickets started with Start delivery go through {tool}."))?;
+        let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in project {}: only tickets started with Start delivery go through {tool}. {}", me.project.trim(), in_progress(state, &slug)))?;
         let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
         return Ok((slug, n, d, held));
     }
-    let n = args["number"].as_i64().filter(|n| *n > 0).ok_or("number is required: the ticket's GitHub issue number")?;
+    let n = github_number(args).ok_or("number is required: the ticket's GitHub issue number (85), or a Loft issue id in a plan kept in Loft")?;
     let slug = crate::planning::github_home(state, me).await.map_err(|why| format!("{tool} works on tickets on GitHub, and {why}."))?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
-    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery: only tickets started with Start delivery go through {tool}."))?;
+    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery: only tickets started with Start delivery go through {tool}. {}", in_progress(state, &slug)))?;
     Ok((slug, n, d, held))
+}
+
+/// `number` as a Loft issue id: text that isn't all digits. Agents often send a GitHub number as text ("85").
+fn loft_id(args: &Value) -> Option<&str> {
+    args["number"].as_str().map(str::trim).filter(|s| !s.is_empty() && !s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `number` as a GitHub issue or PR number: an integer, or all digits as text ("85").
+fn github_number(args: &Value) -> Option<i64> {
+    let n = &args["number"];
+    n.as_i64().or_else(|| n.as_str().map(str::trim).filter(|s| s.bytes().all(|b| b.is_ascii_digit())).and_then(|s| s.parse().ok())).filter(|n| *n > 0)
+}
+
+/// The tickets being built or in review on `slug`, for a refusal.
+fn in_progress(state: &AppState, slug: &str) -> String {
+    let ds = state.db.deliveries(slug, true).unwrap_or_default();
+    let names: Vec<String> = ds.iter().flat_map(|d| d.tickets.iter().filter(|t| ["started", "review"].contains(&t.state.as_str())).map(move |t| tag(d, t))).collect();
+    if names.is_empty() { "No ticket is being built there now.".into() } else { format!("Being built there now: {}.", names.join(", ")) }
 }
 
 /// `submit_ticket`: the Dev hands in its commits, and Loft wakes the team's reviewers (or closes the ticket
@@ -1000,13 +1018,13 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
 /// The Delivery whose spec PR (or spec) is #n on `slug`, or in a plan kept in Loft whose spec is the Loft
 /// issue named, with the repo's publish lock held. The name to use in replies.
 async fn final_of(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result<(String, String, Option<Delivery>, tokio::sync::OwnedMutexGuard<()>), String> {
-    if let Some(id) = args["number"].as_str().map(str::trim) {
+    if let Some(id) = loft_id(args) {
         let slug = local_repo(&me.project);
         let held = state.publish_locks.of(&slug).lock_owned().await;
         let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.spec_id == id);
         return Ok((slug, format!("Loft issue {id}"), d, held));
     }
-    let n = args["number"].as_i64().filter(|n| *n > 0).ok_or("number is required")?;
+    let n = github_number(args).ok_or("number is required")?;
     let slug = crate::planning::github_home(state, me).await?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
     let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.pr == Some(n) || d.spec == n).filter(|d| d.tickets.iter().all(|t| t.number != n) || d.pr == Some(n));
@@ -1247,5 +1265,41 @@ mod tests {
         d.local = true;
         d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
+    }
+
+    fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
+        DeliveryTicket { number, title: format!("T{number}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new() }
+    }
+
+    /// Agents often send a GitHub number as text ("85"): both tools take it like 85, a Loft issue id still
+    /// picks a ticket of a plan kept in Loft, and a refusal names the repo, the number and what's being built.
+    #[tokio::test]
+    async fn ticket_number_as_integer_text_or_loft_issue_id() {
+        let st = crate::planning::tests::state();
+        let me = crate::planning::tests::planner_on(&st, "web", Some("https://github.com/o/r.git"));
+        let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
+        d.tickets = vec![ticket(85, "", "started"), ticket(86, "", "open")];
+        st.db.save_delivery(&d).unwrap();
+        let mut l: Delivery = serde_json::from_value(serde_json::json!({ "repo": local_repo("web"), "spec": 1, "state": "running", "created_at": "", "local": true })).unwrap();
+        let id = "0b9c6a52-0c5e-4f43-9a8e-3f1e2b7c4d10";
+        l.tickets = vec![ticket(1, id, "started")];
+        st.db.save_delivery(&l).unwrap();
+
+        for tool in ["submit_ticket", "review_ticket"] {
+            for number in [serde_json::json!(85), serde_json::json!("85"), serde_json::json!(" 85 ")] {
+                let (slug, n, d, _) = ticket_of(&st, &me, &serde_json::json!({ "number": number }), tool).await.unwrap();
+                assert_eq!((slug.as_str(), n, d.spec), ("o/r", 85, 9), "{tool} {number}");
+            }
+            let (slug, n, _, _) = ticket_of(&st, &me, &serde_json::json!({ "number": id }), tool).await.unwrap();
+            assert_eq!((slug, n), (local_repo("web"), 1), "{tool}: a Loft issue id");
+
+            let no = ticket_of(&st, &me, &serde_json::json!({ "number": "87" }), tool).await.err().unwrap();
+            assert!(no.contains("#87 on o/r") && no.contains(tool) && no.contains("Being built there now: #85."), "{no}");
+            let no = ticket_of(&st, &me, &serde_json::json!({ "number": "not-a-ticket" }), tool).await.err().unwrap();
+            assert!(no.contains("Loft issue not-a-ticket") && no.contains("project web") && no.contains("\"T1\""), "{no}");
+            for empty in [serde_json::json!(""), serde_json::json!(0), serde_json::json!(null)] {
+                assert!(ticket_of(&st, &me, &serde_json::json!({ "number": empty }), tool).await.err().unwrap().starts_with("number is required"));
+            }
+        }
     }
 }
