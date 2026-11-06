@@ -4,7 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { REQUIRED, accountOf, capped, cookie, cookieOf, esc, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
+import { REQUIRED, accountOf, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
@@ -77,6 +77,8 @@ export async function approve(request, env = process.env, now = Date.now()) {
   const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
   const marker = CODE.test(code) ? await store.get(waiting(code)) : null;
   if (!marker) return expired();
+  const limit = await limited(store, request, "key", now);
+  if (limit) return limit;
   if ((await store.hit(claimed(code), CODE_SECONDS)) > 1) return expired();
   const [secretHash, ends] = marker.split(".");
   // The key waits no longer than the code would have.
