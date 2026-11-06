@@ -51,7 +51,9 @@ counted in the store under the key's hash. Every authorized request counts, whet
 A web page in the same project. `/` offers **Sign in with Apple**; Apple's answer comes back to `/auth/callback`, and
 the account is Apple's user id (`account:<id>` in the store) and nothing else: no email or name is requested. Signed
 in, the user names a key and gets it once on the next page; only its hash is stored (with the name, the date and the
-account), and the relay accepts it like one made by the script. Without the portal's settings below, the page says
+account), and the relay accepts it like one made by the script. The page lists the account's keys by name, with
+their created and last-used dates (`relay-key-used:<hash>`, set on each authorized push and kept for a year), never the key. **Revoke**
+deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked. Without the portal's settings below, the page says
 "The push portal isn't configured" and the relay works as before: the portal is optional.
 
 **Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, expires_in: 600}`, at most 5 per IP per
@@ -113,7 +115,7 @@ They paste it in Loft → Settings → Push notifications.
 
 ## Runbook: revoke a relay key
 
-The store holds `relay-key:<sha256 of the key>` with its label, never the key itself. To stop one:
+A key made on the portal is revoked there by its owner. For one made with the script, the store holds `relay-key:<sha256 of the key>` with its label, never the key itself. To stop one:
 
 1. **Find it.** In the store's Data Browser, search `relay-key:*` and open them: the value has the label it was made
    for. Or, from the key itself: `printf %s 'lrk_…' | shasum -a 256`. For a busy one, the counters

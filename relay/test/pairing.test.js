@@ -13,6 +13,7 @@ const pem = (k) => k.privateKey.export({ type: "pkcs8", format: "pem" });
 // The store, with expiry on a clock the tests move.
 let clock = 0;
 const store = new Map();
+const sets = new Map();
 const live = (k) => store.has(k) && !(store.get(k).until <= clock);
 const run = ([cmd, key, value, opt, secs]) => {
   if (cmd === "SET") {
@@ -24,6 +25,11 @@ const run = ([cmd, key, value, opt, secs]) => {
   if (cmd === "GETDEL") return live(key) ? (({ value }) => (store.delete(key), value))(store.get(key)) : null;
   if (cmd === "EXISTS") return live(key) ? 1 : 0;
   if (cmd === "INCR") return (store.set(key, { value: String(Number(store.get(key)?.value ?? 0) + 1), until: Infinity }), Number(store.get(key).value));
+  if (cmd === "DEL") return store.delete(key) ? 1 : 0;
+  if (cmd === "SADD") return (sets.get(key) ?? sets.set(key, new Set()).get(key)).add(value) && sets.get(key).size;
+  if (cmd === "SCARD") return sets.get(key)?.size ?? 0;
+  if (cmd === "SMEMBERS") return [...(sets.get(key) ?? [])];
+  if (cmd === "SREM") return sets.get(key)?.delete(value) ? 1 : 0;
   return 1;
 };
 // Milliseconds the store takes to save a relay key, so a test can poll while a key is being made.
@@ -33,8 +39,8 @@ const kvServer = createServer((req, res) => {
   req.on("data", (d) => (body += d));
   req.on("end", async () => {
     const parsed = JSON.parse(body);
-    if (slowKeySave && String(parsed[1]).startsWith("relay-key:")) await new Promise((r) => setTimeout(r, slowKeySave));
-    const out = req.url === "/pipeline" ? parsed.map((c) => ({ result: run(c) })) : { result: run(parsed) };
+    if (slowKeySave && body.includes('"relay-key:')) await new Promise((r) => setTimeout(r, slowKeySave));
+    const out = req.url === "/pipeline" || req.url === "/multi-exec" ? parsed.map((c) => ({ result: run(c) })) : { result: run(parsed) };
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
   });
 });
@@ -68,6 +74,7 @@ before(async () => {
 after(() => [kvServer, idpServer].forEach((s) => s.close()));
 beforeEach(() => {
   store.clear();
+  sets.clear();
   clock = 0;
   slowKeySave = 0;
   sub = "001234.abcdef";
@@ -144,6 +151,19 @@ test("approving needs a signed-in user and a name; two approvals make one key", 
   const both = await Promise.all([approve(post("/connect", { code, name: "A" }, cookies), env), approve(post("/connect", { code, name: "B" }, cookies), env)]);
   assert.deepEqual(both.map((r) => r.status).sort(), [200, 404]);
   assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 1);
+});
+
+test("an account at its key cap gets no key from a code, and the code stays good for a retry", async () => {
+  const { cookies } = await signInAs();
+  for (let i = 0; i < 5; i++) assert.equal((await approve(post("/connect", { code: await newCode(`10.0.0.${i}`), name: `K${i}` }, cookies), env)).status, 200);
+  const code = await newCode("10.0.0.9");
+  assert.equal((await approve(post("/connect", { code, name: "Sixth" }, cookies), env)).status, 409);
+  assert.equal((await pollFor(code)).status, 202, "still waiting, not given a key");
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 5);
+  const [id] = sets.get("account-keys:001234.abcdef");
+  store.delete(`relay-key:${id}`);
+  sets.get("account-keys:001234.abcdef").delete(id);
+  assert.equal((await approve(post("/connect", { code, name: "Sixth" }, cookies), env)).status, 200, "after a revoke it goes through");
 });
 
 test("a poll while the key is being made waits; it doesn't lose the code", async () => {

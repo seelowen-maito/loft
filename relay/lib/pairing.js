@@ -4,8 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { createKey } from "./relay.js";
-import { REQUIRED, accountOf, cookie, cookieOf, esc, notConfigured, page, redirect } from "./portal.js";
+import { REQUIRED, accountOf, capped, cookie, cookieOf, esc, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
@@ -82,7 +81,13 @@ export async function approve(request, env = process.env, now = Date.now()) {
   const [secretHash, ends] = marker.split(".");
   // The key waits no longer than the code would have.
   const left = Math.max(1, Number(ends) - Math.floor(now / 1000));
-  await store.setEx(approved(secretHash), await createKey(env, name, now, account), left);
+  const made = await makeAccountKey(store, account, name, now);
+  if (made.error === "gone") return redirect("/", cookie("session", "", 0));
+  if (made.error === "capped") {
+    await store.del(claimed(code)); // the code is still good once the user has revoked a key
+    return capped();
+  }
+  await store.setEx(approved(secretHash), made.key, left);
   await store.getdel(waiting(code));
   return page("Loft is signed in", "<p>Your Loft has its key. You can close this page.</p>");
 }

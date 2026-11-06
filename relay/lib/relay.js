@@ -19,6 +19,9 @@ const json = (status, body, headers) => Response.json(body, { status, headers })
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const hashed = (key) => `relay-key:${sha256(key)}`;
 
+/** The most keys one portal account can hold. */
+export const MAX_KEYS = 5;
+
 /**
  * Counts one request against a fixed-window limit: null when it's within it, else a 429 saying when to try again.
  * `who` is already a hash, so the store never holds an IP or a token.
@@ -35,15 +38,19 @@ async function overLimit(store, name, who, now) {
 const REQUIRED = ["APNS_KEY_P8", "APNS_KEY_ID", "APNS_TEAM_ID", "LOFT_BUNDLE_ID", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
 const unconfigured = (env) => (REQUIRED.some((k) => !env[k]) ? json(500, { error: "the relay isn't configured" }) : null);
 
-/**
- * A new relay key for `label` (who it's for), stored as its hash only. For the operator's script: the key is
- * returned once and can't be read back. The portal passes the Apple user id it belongs to as `account`.
- */
-export async function createKey(env, label, now = Date.now(), account = undefined) {
+/** How long a key's last-used date is kept after its last push. It expires, so a push racing a revoke can't leave one forever. */
+export const USED_SECONDS = 365 * 86400;
+
+/** A new relay key for `label` (who it's for): the key, its hash (`id`, which names it without being it) and its record. */
+export function newKey(label, now = Date.now(), account = undefined) {
   const key = `lrk_${randomBytes(32).toString("base64url")}`;
-  const store = makeKv(env);
-  await store.set(hashed(key), JSON.stringify({ label, created: new Date(now).toISOString(), ...(account && { account }) }));
-  if (account) await store.sadd(`account-keys:${account}`, sha256(key));
+  return { key, id: sha256(key), record: JSON.stringify({ label, created: new Date(now).toISOString(), ...(account && { account }) }) };
+}
+
+/** For the operator's script: a new key, stored as its hash only. It's returned once and can't be read back. */
+export async function createKey(env, label, now = Date.now()) {
+  const { key, id, record } = newKey(label, now);
+  await makeKv(env).set(`relay-key:${id}`, record);
   return key;
 }
 
@@ -76,6 +83,7 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
+  await store.set(`relay-key-used:${who}`, new Date(now).toISOString(), USED_SECONDS);
   const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
   // The whole request (payload plus a few small fields) can't be much over the payload's cap.
   if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
