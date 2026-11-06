@@ -16,19 +16,20 @@ test("each template sets its role", () => {
   });
 });
 
-test("clearing both the group and the projects drops a Lead to Custom", () => {
-  const lead = { ...EMPTY_FORM, projects: ["loft"], role: "lead" };
-  assert.equal(withTeam(lead, { projects: [] }).role, "custom");
-  assert.equal(withTeam(lead, { projects: [], group: "  " }).role, "custom", "a blank group counts as none");
+test("clearing the group drops a Lead to Custom, projects or not", () => {
+  const lead = { ...EMPTY_FORM, group: "Acme", projects: ["loft"], role: "lead" };
+  assert.equal(withTeam(lead, { group: "" }).role, "custom");
+  assert.equal(withTeam(lead, { group: "  " }).role, "custom", "a blank group counts as none");
   assert.equal(withTeam(lead, { projects: ["web", "api"] }).role, "lead", "other projects keep it Lead");
-  assert.equal(withTeam({ ...lead, group: "Acme" }, { projects: [] }).role, "lead", "a group alone is a team");
+  assert.equal(withTeam(lead, { projects: [] }).role, "lead", "a group alone is a team");
   assert.equal(withTeam({ ...EMPTY_FORM, projects: ["loft"], role: "qa" }, { projects: [] }).role, "qa", "other roles stay");
 });
 
 test("Fresh context is hidden only for a Lead whose team has a Dev", () => {
   const agents = [{ role: "dev", project: "api", group: "Acme" }, { role: "qa", project: "notes" }];
   assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Acme", projects: ["web"], role: "lead" }, agents), false, "its group has a Dev, in another project");
-  assert.equal(offersFreshContext({ ...EMPTY_FORM, projects: ["notes"], role: "lead" }, agents), true, "no Dev: builds the tickets");
+  assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Notes", projects: ["notes"], role: "lead" }, agents), true, "no Dev: builds the tickets");
+  assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Api", projects: ["api"], role: "lead" }, agents), true, "a Dev in its project but another group isn't its team's");
   for (const role of ["dev", "code_reviewer", "qa", "security", "custom"]) {
     assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Acme", role }, agents), true, role);
   }

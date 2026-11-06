@@ -15,7 +15,7 @@ test("an issue is in the group of the agents that work in its project, or of its
   assert.ok(inGroup({ project: "dine/pos", agent_id: null }, "Dineout", agents));
   assert.ok(!inGroup({ project: "loft", agent_id: null }, "Dineout", agents));
   assert.ok(inGroup({ project: "elsewhere", agent_id: "dev" }, "Dineout", agents), "assigned to one of its agents");
-  assert.ok(inGroup({ project: "notes", agent_id: null }, "notes", agents), "no group label: its main project is its group");
+  assert.ok(!inGroup({ project: "notes", agent_id: null }, "notes", agents), "no group label: its project is not a group");
   assert.ok(!inGroup({ project: "", agent_id: null }, "Dineout", agents));
 });
 

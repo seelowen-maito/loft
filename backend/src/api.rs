@@ -318,7 +318,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
     }
     if a.role == "lead" {
         if a.team().is_empty() {
-            return Err(bad("Only an agent with a group or a project can be Lead: a Lead leads the agents that share its group."));
+            return Err(bad("Only an agent with a group can be Lead: a Lead leads the agents that share its group."));
         }
     }
     Ok(())
@@ -401,10 +401,6 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_by,
     };
     apply_patch(state, &mut a, p)?;
-    // A client that doesn't know groups puts it in its project's group, as the migration did.
-    if p.get("group").is_none() {
-        a.group = a.project.clone();
-    }
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),
@@ -1182,14 +1178,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn one_lead_per_project() {
+    async fn one_lead_per_group() {
         use crate::tasks::tests::{agent, state};
         let st = state();
-        std::fs::create_dir_all(st.settings.boot().projects_dir.join("imole")).unwrap();
         let mut ids = vec![];
-        for (name, project) in [("Dev", "homebase"), ("Lead", "homebase"), ("Other", "imole"), ("Loose", "")] {
+        for (name, group) in [("Dev", "homebase"), ("Lead", "homebase"), ("Other", "imole"), ("Loose", "")] {
             let mut a = agent(&st, name);
-            a.project = project.into();
+            (a.group, a.project) = (group.into(), group.into());
             st.db.save_agent(&a).unwrap();
             ids.push(a.id);
         }
@@ -1200,24 +1195,24 @@ pub(crate) mod tests {
         assert_eq!((v["role"].clone(), v.get("notice")), ("lead".into(), None));
         patch(&st, &ids[2], lead.clone()).await.unwrap();
 
-        // A second Lead in the same project takes the role: the first becomes Custom. Other projects keep theirs.
+        // A second Lead in the same group takes the role: the first becomes Custom. Other groups keep theirs.
         let v = patch(&st, &ids[1], lead.clone()).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
         assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
         assert_eq!(get(0).role, "custom");
         assert_eq!((get(1).role.as_str(), get(2).role.as_str()), ("lead", "lead"));
 
-        // No project, no Lead: neither setting it nor clearing the Lead's project.
+        // No group, no Lead: neither setting it nor clearing the Lead's group.
         let err = patch(&st, &ids[3], lead.clone()).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.1.starts_with("Only an agent with a group or a project can be Lead"), "{}", err.1);
+        assert!(err.1.starts_with("Only an agent with a group can be Lead"), "{}", err.1);
         assert_eq!(get(3).role, "custom");
-        assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
-        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "project": "" })).await.unwrap();
+        assert!(patch(&st, &ids[1], serde_json::json!({ "group": "" })).await.is_err());
+        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "group": "" })).await.unwrap();
         assert_eq!(get(1).role, "dev");
 
-        // Moving the Lead to another project takes that project's Lead role.
-        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "imole" })).await.unwrap();
+        // Moving the Lead to another group takes that group's Lead role.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "group": "imole" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Other to Dev.");
         assert_eq!(get(2).role, "custom");
     }
@@ -1234,11 +1229,10 @@ pub(crate) mod tests {
             ids.push(a.id);
         }
         patch(&st, &ids[0], serde_json::json!({ "role": "lead" })).await.unwrap();
-        // Same group, another project: the mark moves. No group: its project is its team.
+        // Same group, another project: the mark moves. No group: a project alone makes no team.
         let v = patch(&st, &ids[1], serde_json::json!({ "role": "lead" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Api Dev to Web Dev.");
-        let v = patch(&st, &ids[2], serde_json::json!({ "role": "lead" })).await.unwrap();
-        assert_eq!(v.get("notice"), None);
+        assert!(patch(&st, &ids[2], serde_json::json!({ "role": "lead" })).await.is_err());
         // A group alone is enough to lead.
         let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "", "group": "Imole" })).await.unwrap();
         assert_eq!((v["role"].clone(), v["group"].clone(), v["projects"].clone()), ("lead".into(), "Imole".into(), serde_json::json!([])));
@@ -1254,7 +1248,7 @@ pub(crate) mod tests {
         assert_eq!((a.group.as_str(), a.project.as_str()), ("Acme", "b2c"));
         assert_eq!(a.projects, ["b2c", "b2b", "work/notes"], "trimmed, each once, main first");
         let (old, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Old", "project": "api" }), None).unwrap();
-        assert_eq!((old.group.as_str(), old.projects.as_slice()), ("api", &["api".to_string()][..]), "a client without groups");
+        assert_eq!((old.group.as_str(), old.projects.as_slice()), ("", &["api".to_string()][..]), "a client without groups: no group, so no team");
 
         // The star moves the main project to the front.
         apply_patch(&st, &mut a, &serde_json::json!({ "projects": ["b2b", "b2c"] })).unwrap();

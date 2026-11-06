@@ -161,7 +161,7 @@ pub async fn send_team_setup(State(state): State<AppState>, Path((id, mid)): Pat
     Ok(Json(json!({ "ok": true, "message": m })))
 }
 
-/// The team check: the roles no agent of `team` (a group, else a main project) fills, going by their stored roles.
+/// The team check: the roles no agent of `team` (a group) fills, going by their stored roles.
 pub fn missing_roles(state: &AppState, team: &str) -> Vec<&'static str> {
     let name = team.trim();
     let team: Vec<String> = state.db.list_agents().unwrap_or_default().into_iter().filter(|a| !name.is_empty() && a.team() == name).map(|a| a.role).collect();
@@ -1098,7 +1098,7 @@ pub(crate) mod tests {
     /// A planner whose project folder is a git repo with this `origin`.
     fn planner_on(st: &AppState, name: &str, origin: Option<&str>) -> Agent {
         let mut a = planner(st, name);
-        a.project = name.into();
+        (a.project, a.group) = (name.into(), name.into());
         st.db.save_agent(&a).unwrap();
         let dir = st.settings.boot().projects_dir.join(name);
         assert!(dir.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
@@ -2420,7 +2420,7 @@ pub(crate) mod tests {
         // The team has reviewers but no developer.
         for (name, role) in [("Checker", "code_reviewer"), ("Tester", "qa"), ("Guard", "security")] {
             let mut rev = crate::tasks::tests::agent(&st, name);
-            (rev.project, rev.role) = ("card-team".into(), role.into());
+            (rev.group, rev.role) = ("card-team".into(), role.into());
             st.db.save_agent(&rev).unwrap();
         }
 
@@ -2448,7 +2448,7 @@ pub(crate) mod tests {
             "missing_roles": ["dev"],
             "setup": {
                 "agent_id": "loft",
-                "message": format!("Set up the team for the card-team project: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
+                "message": format!("Set up the team for the card-team group: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
             },
         }));
     }
@@ -2541,7 +2541,7 @@ pub(crate) mod tests {
             tickets_repo(&fake, &format!("octo/{project}"), n, &[n]);
             for role in team {
                 let mut x = crate::tasks::tests::agent(&st, role);
-                (x.project, x.role) = (project.into(), role.to_string());
+                (x.group, x.role) = (project.into(), role.to_string());
                 st.db.save_agent(&x).unwrap();
             }
             crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
@@ -2552,7 +2552,7 @@ pub(crate) mod tests {
             assert_eq!(card["missing_roles"], roles, "{project}");
             assert_eq!(
                 card["setup"]["message"],
-                format!("Set up the team for the {project} project: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve.", a.name),
+                format!("Set up the team for the {project} group: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve.", a.name),
             );
         }
     }
@@ -3875,7 +3875,7 @@ pub(crate) mod tests {
         tickets_repo(&fake, "octo/card-full", 7, &[7]);
         for (name, role) in [("Builder", "dev"), ("Checker", "code_reviewer"), ("Tester", "qa"), ("Guard", "security")] {
             let mut x = crate::tasks::tests::agent(&st, name);
-            x.project = " card-full ".into();
+            x.group = " card-full ".into();
             x.role = role.into();
             st.db.save_agent(&x).unwrap();
         }
@@ -3899,7 +3899,7 @@ pub(crate) mod tests {
         let st = state();
         let add = |name: &str, title: &str, role: &str, project: &str| {
             let mut x = crate::tasks::tests::agent(&st, name);
-            (x.title, x.role, x.project) = (title.into(), role.into(), project.into());
+            (x.title, x.role, x.group) = (title.into(), role.into(), project.into());
             st.db.save_agent(&x).unwrap();
             x
         };

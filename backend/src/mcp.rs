@@ -1056,9 +1056,9 @@ mod tests {
     async fn a_coordinating_lead_is_never_cleared_by_a_ticket_message() {
         let (st, lead) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Reviewer");
-        st.db.update_agent(&lead.id, |a| (a.role, a.project, a.fresh_context, a.session_id) = ("lead".into(), "team".into(), "always".into(), Some("s0".into()))).unwrap();
+        st.db.update_agent(&lead.id, |a| (a.role, a.group, a.fresh_context, a.session_id) = ("lead".into(), "team".into(), "always".into(), Some("s0".into()))).unwrap();
         let dev = crate::tasks::tests::agent(&st, "Dev");
-        st.db.update_agent(&dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into())).unwrap();
+        st.db.update_agent(&dev.id, |d| (d.role, d.group) = ("dev".into(), "team".into())).unwrap();
         let clears = || st.db.list_messages(&lead.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
         for (i, t) in ["#1", "#2"].into_iter().enumerate() {
             message(&st, &from, json!({ "agent": lead.id, "text": format!("#{i} passed"), "kind": "needs_action", "ticket": t })).await;

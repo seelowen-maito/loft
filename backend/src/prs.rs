@@ -692,10 +692,10 @@ mod tests {
     /// A dev that opened the PR, and a reviewer of the same project.
     fn team(st: &AppState, project: &str) -> (crate::db::Agent, crate::db::Agent) {
         let mut dev = crate::tasks::tests::agent(st, &format!("Dev {project}"));
-        dev.project = project.into();
+        (dev.project, dev.group) = (project.into(), project.into());
         st.db.save_agent(&dev).unwrap();
         let mut qa = crate::tasks::tests::agent(st, &format!("Tester {project}"));
-        qa.project = project.into();
+        (qa.project, qa.group) = (project.into(), project.into());
         qa.role = "qa".into();
         st.db.save_agent(&qa).unwrap();
         (dev, qa)

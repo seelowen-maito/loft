@@ -4,9 +4,9 @@ import { groupByTeam, teamBadge, outsideWarning, projectChoices, projectsOf, tea
 
 const a = (name: string, group: string | undefined, project: string, projects?: string[]) => ({ name, group, project, projects });
 
-test("an agent's team is its group, else its main project", () => {
+test("an agent's team is its group; a project alone makes none", () => {
   assert.equal(teamOf(a("Web", "Acme", "b2c")), "Acme");
-  assert.equal(teamOf(a("Old", undefined, " api ")), "api", "a server without groups");
+  assert.equal(teamOf(a("Old", undefined, " api ")), "", "a server without groups");
   assert.equal(teamOf(a("Loose", " ", "")), "");
 });
 
@@ -21,8 +21,7 @@ test("the list is grouped by team, A–Z, those without one last", () => {
   assert.deepEqual(groupByTeam(list).map((g) => [g.team, g.agents.map((x) => x.name)]), [
     ["acme", ["Web"]],
     ["Acme", ["Api", "App"]],
-    ["notes", ["Ida"]],
-    ["", ["Loose"]],
+    ["", ["Loose", "Ida"]],
   ]);
 });
 

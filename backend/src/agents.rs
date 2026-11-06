@@ -2720,7 +2720,7 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_is_cleared_by_delivery_only_as_the_builder() {
         let (st, a) = fake_claude_state();
-        set(&st, &a.id, |a| (a.role, a.project, a.fresh_context) = ("lead".into(), "team".into(), "always".into()));
+        set(&st, &a.id, |a| (a.role, a.group, a.fresh_context) = ("lead".into(), "team".into(), "always".into()));
         let lead = st.db.get_agent(&a.id).unwrap().unwrap();
         assert!(crate::delivery::fresh_context_applies(&st, &lead), "no Dev: the Lead builds the tickets");
         on_ticket(&st, &a.id, "o/r#1/2", true).await;
@@ -2731,7 +2731,7 @@ esac
         assert_eq!(count(&st, &a.id, "clear"), 1, "building a new ticket");
 
         let dev = crate::tasks::tests::agent(&st, "Dev");
-        set(&st, &dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into()));
+        set(&st, &dev.id, |d| (d.role, d.group) = ("dev".into(), "team".into()));
         assert!(!crate::delivery::fresh_context_applies(&st, &lead), "a Lead that only coordinates");
         assert!(crate::delivery::fresh_context_applies(&st, &st.db.get_agent(&dev.id).unwrap().unwrap()));
     }

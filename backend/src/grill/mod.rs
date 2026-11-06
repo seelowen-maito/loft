@@ -245,7 +245,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         };
         json!({
             "agent_id": crate::setup::LOFT_ID,
-            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.team(), me.name),
+            "message": format!("Set up the team for the {} group: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.team(), me.name),
         })
     });
     Some(json!({
