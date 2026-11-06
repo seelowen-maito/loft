@@ -1,9 +1,51 @@
 # Push notifications (APNs)
 
 Alerts reach the iPhone app when it's closed. The backend sends them through Apple's Push Notification
-service with token-based auth (an APNs auth key, `.p8`).
+service, by one of two paths (ADR 0002):
 
-## Setting it up (by hand, once)
+| | **Your own key** | **The Loft relay** |
+|---|---|---|
+| When | A `.p8` key, key id and team id in Settings | A relay key in Settings, and no key of your own |
+| Setup | The steps below (an Apple developer account) | **Sign in** with Apple on the push portal, or paste a relay key |
+| Path | Loft → Apple | Loft → push relay → Apple |
+| Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
+| Apps | Any bundle id (your own build) | The official Loft app only |
+
+Your own key wins when both are set. A relay key only counts when Loft knows the relay's address: Settings → Push
+notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (empty until the operator's relay is
+deployed). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
+off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
+paths: which phones, which kinds, quiet hours, the rate limit and the payload.
+
+## The Loft relay
+
+The relay's and portal's addresses are push settings: https only, no user name or password in them, and set only
+through `PUT /api/push` (Settings), never through the general settings or an agent tool. A saved address wins over
+`LOFT_RELAY_URL` / `LOFT_PORTAL_URL`, which stay as a fallback for scripted installs.
+
+The relay is login-only. With the relay and portal addresses set, Settings → Push notifications → **Sign in** asks the
+relay for a one-time code (10 minutes, at most 5 per IP per hour) and opens the portal with it. After signing in with Apple and pressing
+Allow there, this backend, polling the relay, receives a new relay key once and stores it: the key never passes
+through the browser, and the code stops working. Approving from a phone works too. Until the portal is live the operator makes
+keys with `relay/scripts/create-key.js`. When the portal's address is known (Settings → Portal address, else `LOFT_PORTAL_URL`, else `PORTAL_URL`
+in `backend/src/apns.rs`, empty until it's live), Settings shows **Sign in** and, with a key stored, "Manage keys"; without it, only the text. Pasting a key in Settings → Push notifications → Loft relay stays as a fallback. Either way it is kept owner-only in
+the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
+phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
+answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its
+limits are 20 a minute and 1,000 a day per key), the push is logged and dropped, and the next one is tried. A revoked
+key gets `401`: pushes stop until a new key is pasted.
+
+On the portal a user sees their keys (name, created, last used; never the key), creates up to 5 and revokes them.
+**Delete my account** asks them to sign in with Apple once more, then deletes the account (Apple's user id, the only
+thing stored about a person) and every key, and revokes the Sign in with Apple token: the Lofts using those keys
+stop pushing. From one network, at most 5 sign-ins and 5 key creations are taken an hour.
+
+The relay itself, its API, deploying it and the portal (the Apple and Vercel setup, step by step), running it
+without the portal, and making and revoking keys by hand are in [`relay/README.md`](../relay/README.md). To keep push
+entirely between your Mac and Apple, use your own key (below) instead: the relay is then never called.
+
+## Setting up your own key (by hand, once)
 
 1. **App id:** developer.apple.com → Certificates, IDs & Profiles → Identifiers → your app id (`LOFT_BUNDLE_ID`) → tick **Push Notifications** → Save. (The app project adds the matching *Push Notifications* capability and the `aps-environment` entitlement.)
 2. **Auth key:** same portal → **Keys** → **+** → name it "Loft push", tick **Apple Push Notifications service (APNs)** → Continue → Register.
@@ -14,7 +56,8 @@ service with token-based auth (an APNs auth key, `.p8`).
 
 ## Where the key lives
 
-`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. That's outside the repo
+`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. The relay key, when
+one is set, is `relay-key` in the same folder, with the same modes. That's outside the repo
 and outside Loft's data folder (`.loft/`), so the backup plan (#79) only includes it encrypted.
 
 - It's checked to be a P-256 private key before it's stored.
@@ -42,8 +85,8 @@ uses the right host per device. The same auth key works for both.
 | `PATCH /api/devices/{token}` | `{kinds?, quiet_hours? (null clears), name?}` |
 | `DELETE /api/devices/{token}` | Stop pushing to this phone. |
 | `POST /api/devices/{token}/test` | Sends a test push. 410 if Apple says the token is gone (the device is then removed). |
-| `GET /api/push` | `{configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key. |
-| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?}` |
+| `GET /api/push` | `{path: "own_key"\|"relay"\|"none", relay_key (whether one is stored), relay_url and portal_url (in use), relay_address and portal_address (saved), configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay key. |
+| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?, relay_url?, portal_url?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
 `grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
@@ -89,12 +132,12 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 | type | title | body |
 |---|---|---|
 | permission | "<agent> needs your approval" | "Wants to use <tool name>" |
-| task_approval | "<agent> needs your approval" | task title |
-| task_blocked | "<agent> is blocked" | task title |
+| task_approval | "<agent> needs your approval" | issue title |
+| task_blocked | "<agent> is blocked" | issue title |
 | question | "<agent> asked you something" | "Open the chat to answer" |
 | grill_round | "<agent>: round <n>" | "Interview: <topic>" |
 | stuck | "<agent> may be stuck" | "No activity for N min" / "Waiting on a background task" |
-| task_failed | "A task failed" | task title |
+| task_failed | "An issue failed" | issue title |
 | pr_ready | "Ready to merge" | "<repo>#<n>: <title>" |
 | pr_review | "Review requested" | "<repo>#<n>: <title>" |
 

@@ -123,6 +123,16 @@ fn base_tools() -> Value {
             }, "required": ["url"] }
         },
         {
+            "name": "set_pr_verdict",
+            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
+            "inputSchema": { "type": "object", "properties": {
+                "pr": { "type": "string", "description": "https://github.com/<owner>/<repo>/pull/<number>" },
+                "kind": { "type": "string", "enum": ["tests", "qa", "security"] },
+                "verdict": { "type": "string", "enum": ["pass", "fail"] },
+                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." }
+            }, "required": ["pr", "kind", "verdict", "sha"] }
+        },
+        {
             "name": "get_avatar",
             "description": "Return your current sticker avatar as SVG.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -136,7 +146,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, project, role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
+            "description": "List the other Loft agents: id, name, title, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -169,16 +179,22 @@ fn base_tools() -> Value {
     ])
 }
 
-/// An agent by id, or by name ignoring case.
-fn find_agent(state: &AppState, key: &str) -> Result<Agent, Value> {
+/// An agent by id, or by name ignoring case; where two share a name, the one in `team` (the caller's) wins, as with @mentions.
+fn find_agent(state: &AppState, team: &str, key: &str) -> Result<Agent, Value> {
     let key = key.trim();
     if key.is_empty() {
         return Err(tool_error("agent is required"));
     }
-    let all = state.db.list_agents().map_err(|e| tool_error(e.to_string()))?;
+    let mut all = state.db.list_agents().map_err(|e| tool_error(e.to_string()))?;
+    all.sort_by_key(|a| a.team() != team);
     let i = all.iter().position(|a| a.id == key).or_else(|| all.iter().position(|a| a.name.eq_ignore_ascii_case(key)));
     i.map(|i| all[i].clone())
         .ok_or_else(|| tool_error(format!("No agent called {key}. Call list_agents to see who exists.")))
+}
+
+/// The team of the agent calling a tool; "" when it's gone.
+fn team(state: &AppState, agent_id: &str) -> String {
+    state.db.get_agent(agent_id).ok().flatten().map(|a| a.team().to_string()).unwrap_or_default()
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -213,7 +229,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Err(e) => tool_error(e),
             };
         }
-        let find = |k: &str| find_agent(state, k).map_err(|e| e["content"][0]["text"].as_str().unwrap_or("").to_string());
+        let find = |k: &str| find_agent(state, me.team(), k).map_err(|e| e["content"][0]["text"].as_str().unwrap_or("").to_string());
         if let Some(r) = crate::tasks::mcp_call(state, &me, name, &args, find).or_else(|| crate::grill::mcp_call(state, &me, name, &args)) {
             return match r {
                 Ok(t) => text(t),
@@ -318,6 +334,16 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Err(e) => tool_error(format!("Couldn't read that pull request: {e}")),
             }
         }
+        "set_pr_verdict" => match state.db.get_agent(agent_id) {
+            Ok(Some(me)) => match s("verdict").as_str() {
+                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {
+                    Ok(t) => text(t),
+                    Err(e) => tool_error(e),
+                },
+                _ => tool_error("verdict must be pass or fail"),
+            },
+            _ => tool_error("agent not found"),
+        },
         "get_avatar" => match state.db.get_agent(agent_id) {
             Ok(Some(a)) => text(a.avatar.svg),
             _ => tool_error("agent not found"),
@@ -354,14 +380,19 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
                         let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
-                        let project = if a.project.trim().is_empty() { String::new() } else { format!(" · project {}", a.project.trim()) };
+                        let group = if a.group.trim().is_empty() { String::new() } else { format!(" · group {}", a.group.trim()) };
+                        let project = match a.projects.as_slice() {
+                            [] if a.project.trim().is_empty() => String::new(),
+                            [] | [_] => format!(" · project {}", a.project.trim()),
+                            ps => format!(" · projects {} (main {})", ps.join(", "), a.project.trim()),
+                        };
                         let role = if a.role.is_empty() { String::new() } else { format!(" · role {}", crate::planning::role_label(&a.role)) };
                         let doing = if agents::is_running(state, &a.id) {
                             format!("working: {}", if a.status_text.is_empty() { "…" } else { &a.status_text })
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{project}{role} · {}", a.name, title, a.id, doing)
+                        format!("- {}{} · id {}{group}{project}{role} · {}", a.name, title, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -369,7 +400,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             Err(e) => tool_error(e.to_string()),
         },
         "read_agent_chat" => {
-            let a = match find_agent(state, &s("agent")) {
+            let a = match find_agent(state, &team(state, agent_id), &s("agent")) {
                 Ok(a) => a,
                 Err(e) => return e,
             };
@@ -399,7 +430,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             if lines.is_empty() { text(format!("{}'s chat is empty.", a.name)) } else { text(lines.join("\n")) }
         }
         "message_agent" => {
-            let to = match find_agent(state, &s("agent")) {
+            let to = match find_agent(state, &team(state, agent_id), &s("agent")) {
                 Ok(a) => a,
                 Err(e) => return e,
             };
@@ -524,6 +555,24 @@ mod tests {
 
     fn said(r: &Value) -> (&str, bool) {
         (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[test]
+    fn a_name_two_agents_share_finds_the_one_in_the_caller_s_group() {
+        let st = crate::tasks::tests::state();
+        let mk = |name: &str, group: &str| {
+            let mut a = crate::tasks::tests::agent(&st, name);
+            a.group = group.into();
+            st.db.save_agent(&a).unwrap();
+            a
+        };
+        let far = mk("Dev", "Imole");
+        let near = mk("Dev", "Dineout");
+        let me = mk("Lead", "Dineout");
+        let other = mk("Isa", "Imole");
+        assert_eq!(find_agent(&st, &team(&st, &me.id), "dev").unwrap().id, near.id);
+        assert_eq!(find_agent(&st, &team(&st, &other.id), "Dev").unwrap().id, far.id);
+        assert_eq!(find_agent(&st, &team(&st, &me.id), &far.id).unwrap().id, far.id, "an id is exact");
     }
 
     #[tokio::test]
@@ -1007,9 +1056,9 @@ mod tests {
     async fn a_coordinating_lead_is_never_cleared_by_a_ticket_message() {
         let (st, lead) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Reviewer");
-        st.db.update_agent(&lead.id, |a| (a.role, a.project, a.fresh_context, a.session_id) = ("lead".into(), "team".into(), "always".into(), Some("s0".into()))).unwrap();
+        st.db.update_agent(&lead.id, |a| (a.role, a.group, a.fresh_context, a.session_id) = ("lead".into(), "team".into(), "always".into(), Some("s0".into()))).unwrap();
         let dev = crate::tasks::tests::agent(&st, "Dev");
-        st.db.update_agent(&dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into())).unwrap();
+        st.db.update_agent(&dev.id, |d| (d.role, d.group) = ("dev".into(), "team".into())).unwrap();
         let clears = || st.db.list_messages(&lead.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
         for (i, t) in ["#1", "#2"].into_iter().enumerate() {
             message(&st, &from, json!({ "agent": lead.id, "text": format!("#{i} passed"), "kind": "needs_action", "ticket": t })).await;

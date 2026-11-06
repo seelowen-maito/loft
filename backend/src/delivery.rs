@@ -11,6 +11,32 @@ use crate::api::{ApiResult, bad, not_found};
 use crate::db::{Delivery, DeliveryTicket};
 use crate::state::AppState;
 
+/// Has Loft track the Delivery's PR, owned by its Dev or else its planner, so its card shows and checkers can
+/// set verdicts on it. A PR Loft already tracks keeps its owner and is read again: the planner, when it was
+/// opened before a Dev was assigned, which is the same team.
+pub async fn track_pr(state: &AppState, d: &Delivery) {
+    let Some(pr) = d.pr else { return };
+    if let Some(known) = state.db.list_pull_requests(None).ok().and_then(|ps| ps.into_iter().find(|p| p.slug == d.repo && p.number == pr)) {
+        let _ = crate::prs::refresh(state, &known.id).await;
+        return;
+    }
+    let owner = [&d.dev, &d.planner].into_iter().find(|id| !id.is_empty() && matches!(state.db.get_agent(id), Ok(Some(_))));
+    if let Some(owner) = owner
+        && let Err(e) = crate::prs::register(state, owner, &d.repo, pr, None).await
+    {
+        tracing::warn!("delivery {}#{}: couldn't track PR #{pr}: {e}", d.repo, d.spec);
+    }
+}
+
+/// On start-up: tracks the PRs of Deliveries not yet settled, opened before Loft tracked them.
+pub async fn track_open_prs(state: AppState) {
+    for s in ["planned", "running", "final_review", "final_fixes", "needs_human"] {
+        for d in state.db.deliveries_in_state(s).unwrap_or_default() {
+            track_pr(&state, &d).await;
+        }
+    }
+}
+
 /// The Delivery of spec #spec on `repo`, made when the spec is published, with its branch. A record
 /// already there keeps what it has, and gets the branch if it had none.
 pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, planner: &str, branch: &str) {
@@ -152,9 +178,9 @@ fn ticket_key(d: &Delivery, n: Option<i64>) -> String {
 }
 
 /// Whether the Fresh context setting applies to `a`: to every agent but a Lead that only coordinates. A
-/// Lead builds the tickets when its team has no Dev (`builder`).
+/// Lead builds the tickets when its team (its group) has no Dev (`builder`).
 pub fn fresh_context_applies(state: &AppState, a: &crate::db::Agent) -> bool {
-    a.role != "lead" || state.db.agent_with_role(&a.project, "dev").ok().flatten().is_none()
+    a.role != "lead" || !state.db.list_agents().unwrap_or_default().iter().any(|o| o.role == "dev" && !a.team().is_empty() && o.team() == a.team())
 }
 
 /// What a Delivery delivers: "spec #40", "ticket #7" for a standalone ticket, or `spec "Title"` for a
@@ -258,7 +284,7 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
 fn builder(state: &AppState, d: &Delivery, fallback: &str) -> Option<crate::db::Agent> {
     let all = state.db.list_agents().ok()?;
     let project = d.project.trim();
-    let dev = all.iter().find(|a| !project.is_empty() && a.project.trim() == project && a.role == "dev");
+    let dev = all.iter().find(|a| !project.is_empty() && a.role == "dev" && (a.project.trim() == project || a.has_project(project)));
     let planner = || all.iter().find(|a| a.id == d.planner).or_else(|| all.iter().find(|a| a.id == fallback));
     dev.or_else(planner).cloned()
 }
@@ -374,7 +400,7 @@ async fn start_next(state: &AppState, repo: &str, spec: i64) -> String {
 /// The roles that review each ticket, in the order they are woken.
 const TICKET_REVIEWERS: &[&str] = &["qa", "security"];
 
-/// The team's agent with `role` in the Delivery's project, if it has one.
+/// The agent with `role` that works in the Delivery's project (its main project or one of its projects), if any.
 fn with_role(state: &AppState, d: &Delivery, role: &str) -> Option<crate::db::Agent> {
     state.db.agent_with_role(&d.project, role).ok()?
 }
@@ -464,22 +490,29 @@ fn number_of(number: &Value) -> Option<TicketNumber> {
 
 /// The repo, number and Delivery of the ticket a Delivery tool names, with the repo's publish lock held.
 async fn ticket_of(state: &AppState, me: &crate::db::Agent, args: &Value, tool: &str) -> Result<(String, i64, Delivery, tokio::sync::OwnedMutexGuard<()>), String> {
-    let n = match number_of(&args["number"]).ok_or("number is required: the ticket's GitHub issue number")? {
+    let n = match number_of(&args["number"]).ok_or("number is required: the ticket's GitHub issue number (85), or a Loft issue id in a plan kept in Loft")? {
         TicketNumber::GitHub(n) => n,
         TicketNumber::Loft(id) => {
             // A plan kept in Loft names its tickets by their Loft issue ids.
             let slug = local_repo(&me.project);
             let held = state.publish_locks.of(&slug).lock_owned().await;
             let d = state.db.deliveries(&slug, false).map_err(|e| e.to_string())?.into_iter().find(|d| d.tickets.iter().any(|t| t.id == id));
-            let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in your project (read as a Loft issue id: a GitHub issue number is only digits): only tickets started with Start delivery go through {tool}."))?;
+            let d = d.ok_or_else(|| format!("Loft issue {id} isn't a ticket of a Delivery in project {} (read as a Loft issue id: a GitHub issue number is only digits): only tickets started with Start delivery go through {tool}. {}", me.project.trim(), in_progress(state, &slug)))?;
             let n = d.tickets.iter().find(|t| t.id == id).map(|t| t.number).expect("just found");
             return Ok((slug, n, d, held));
         }
     };
     let slug = crate::planning::github_home(state, me).await.map_err(|why| format!("{tool} works on tickets on GitHub, and {why}."))?;
     let held = state.publish_locks.of(&slug).lock_owned().await;
-    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery (read as a GitHub issue number): only tickets started with Start delivery go through {tool}."))?;
+    let d = of_ticket(state, &slug, n).ok_or_else(|| format!("#{n} on {slug} isn't a ticket of a Delivery (read as a GitHub issue number): only tickets started with Start delivery go through {tool}. {}", in_progress(state, &slug)))?;
     Ok((slug, n, d, held))
+}
+
+/// The tickets being built or in review on `slug`, for a refusal.
+fn in_progress(state: &AppState, slug: &str) -> String {
+    let ds = state.db.deliveries(slug, true).unwrap_or_default();
+    let names: Vec<String> = ds.iter().flat_map(|d| d.tickets.iter().filter(|t| ["started", "review"].contains(&t.state.as_str())).map(move |t| tag(d, t))).collect();
+    if names.is_empty() { "No ticket is being built there now.".into() } else { format!("Being built there now: {}.", names.join(", ")) }
 }
 
 /// `submit_ticket`: the Dev hands in its commits, and Loft wakes the team's reviewers (or closes the ticket
@@ -1331,6 +1364,42 @@ mod tests {
         d.local = true;
         d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
+    }
+
+    fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
+        DeliveryTicket { number, title: format!("T{number}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new() }
+    }
+
+    /// Agents often send a GitHub number as text ("85"): both tools take it like 85, a Loft issue id still
+    /// picks a ticket of a plan kept in Loft, and a refusal names the repo, the number and what's being built.
+    #[tokio::test]
+    async fn ticket_number_as_integer_text_or_loft_issue_id() {
+        let st = crate::planning::tests::state();
+        let me = crate::planning::tests::planner_on(&st, "web", Some("https://github.com/o/r.git"));
+        let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
+        d.tickets = vec![ticket(85, "", "started"), ticket(86, "", "open")];
+        st.db.save_delivery(&d).unwrap();
+        let mut l: Delivery = serde_json::from_value(serde_json::json!({ "repo": local_repo("web"), "spec": 1, "state": "running", "created_at": "", "local": true })).unwrap();
+        let id = "0b9c6a52-0c5e-4f43-9a8e-3f1e2b7c4d10";
+        l.tickets = vec![ticket(1, id, "started")];
+        st.db.save_delivery(&l).unwrap();
+
+        for tool in ["submit_ticket", "review_ticket"] {
+            for number in [serde_json::json!(85), serde_json::json!("85"), serde_json::json!(" 85 ")] {
+                let (slug, n, d, _) = ticket_of(&st, &me, &serde_json::json!({ "number": number }), tool).await.unwrap();
+                assert_eq!((slug.as_str(), n, d.spec), ("o/r", 85, 9), "{tool} {number}");
+            }
+            let (slug, n, _, _) = ticket_of(&st, &me, &serde_json::json!({ "number": id }), tool).await.unwrap();
+            assert_eq!((slug, n), (local_repo("web"), 1), "{tool}: a Loft issue id");
+
+            let no = ticket_of(&st, &me, &serde_json::json!({ "number": "87" }), tool).await.err().unwrap();
+            assert!(no.contains("#87 on o/r") && no.contains(tool) && no.contains("Being built there now: #85."), "{no}");
+            let no = ticket_of(&st, &me, &serde_json::json!({ "number": "not-a-ticket" }), tool).await.err().unwrap();
+            assert!(no.contains("Loft issue not-a-ticket") && no.contains("project web") && no.contains("\"T1\""), "{no}");
+            for empty in [serde_json::json!(""), serde_json::json!(0), serde_json::json!(null)] {
+                assert!(ticket_of(&st, &me, &serde_json::json!({ "number": empty }), tool).await.err().unwrap().starts_with("number is required"));
+            }
+        }
     }
 
     /// Agents send `number` as an integer or a string; digits name a GitHub issue either way (#312).

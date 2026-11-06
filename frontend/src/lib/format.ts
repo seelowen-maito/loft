@@ -55,18 +55,6 @@ export function fmtSchedule(a: Pick<Agent, "interval_minutes" | "quiet_hours">):
   return a.interval_minutes && a.quiet_hours?.length ? `${fmtInterval(a.interval_minutes)} · custom` : fmtInterval(a.interval_minutes);
 }
 
-/** Agents grouped by project, named groups A–Z, then those without one. */
-export function groupByProject<T extends Pick<Agent, "project">>(agents: T[]): { project: string; agents: T[] }[] {
-  const m = new Map<string, T[]>();
-  agents.forEach((a) => {
-    const p = a.project?.trim() ?? "";
-    m.set(p, [...(m.get(p) ?? []), a]);
-  });
-  return [...m.entries()]
-    .sort(([a], [b]) => (!a ? 1 : !b ? -1 : a.localeCompare(b, undefined, { sensitivity: "base" })))
-    .map(([project, agents]) => ({ project, agents }));
-}
-
 const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
 /** Whether `minute` (since midnight) on `day` falls in a window. Mirrors backend/src/schedule.rs. */

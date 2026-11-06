@@ -50,6 +50,8 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     v["unread_reply"] = json!(a.unread_reply());
     v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
+    // Projects that aren't one folder of one repo any more (or never were): the user picks again.
+    v["project_problems"] = crate::repos::project_problems(state, a);
     v
 }
 
@@ -107,6 +109,10 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
     if keep_push {
         s.push = state.settings.get().push;
+    } else {
+        // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
+        let saved = state.settings.get().push;
+        (s.push.relay_url, s.push.portal_url) = (saved.relay_url, saved.portal_url);
     }
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
@@ -182,13 +188,29 @@ pub async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) ->
     Ok(Json(agent_json(&state, &a)))
 }
 
+/// The most projects one agent can work in.
+const MAX_PROJECTS: usize = 20;
+
 pub const DEFAULT_TOOLS: &[&str] = &[
     "Read", "Glob", "Grep", "Edit", "Write", "TodoWrite",
     "Bash(git *)", "Bash(ls *)", "Bash(cat *)", "Bash(mkdir *)", "WebSearch",
 ];
 
+/// Refuses a project the agent doesn't have yet when it isn't one folder that is, or will become, one repo.
+/// Projects it already has stay, however they look: they are flagged instead (`project_problems`), from the
+/// disk as it is now, so a folder fixed before this save clears its flag in the reply.
+fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), ApiError> {
+    crate::repos::forget_project_problems(state, ps);
+    for p in ps.iter().filter(|p| !p.is_empty() && !a.projects.contains(p) && **p != a.project) {
+        if let Some(why) = crate::repos::project_problem(state, p) {
+            return Err(bad(why));
+        }
+    }
+    Ok(())
+}
+
 /// Apply editable fields from a JSON patch onto an agent.
-fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
+fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     let str_field = |k: &str| p.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
     if let Some(v) = str_field("name") {
         if v.trim().is_empty() {
@@ -197,7 +219,40 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         a.name = v.trim().into();
     }
     if let Some(v) = str_field("title") { a.title = v; }
-    if let Some(v) = str_field("project") { a.project = crate::repos::project_name(&v).map_err(bad)?; }
+    if let Some(v) = str_field("group") {
+        let g = v.trim();
+        if g.chars().count() > 100 || g.chars().any(char::is_control) {
+            return Err(bad("group must be at most 100 characters, with no control characters"));
+        }
+        a.group = g.into();
+    }
+    if let Some(v) = p.get("projects") {
+        let raw: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| bad("projects must be a list of strings"))?;
+        let mut ps: Vec<String> = vec![];
+        for r in raw {
+            let n = crate::repos::project_name(&r).map_err(bad)?;
+            if !n.is_empty() && !ps.contains(&n) {
+                ps.push(n);
+            }
+        }
+        if ps.len() > MAX_PROJECTS {
+            return Err(bad(format!("an agent can have at most {MAX_PROJECTS} projects")));
+        }
+        check_new_projects(state, a, &ps)?;
+        a.project = ps.first().cloned().unwrap_or_default();
+        a.projects = ps;
+    } else if let Some(v) = str_field("project") {
+        // A client that knows one project sets the main one; the others stay.
+        let name = crate::repos::project_name(&v).map_err(bad)?;
+        check_new_projects(state, a, std::slice::from_ref(&name))?;
+        a.project = name;
+        a.projects.retain(|p| *p != a.project);
+        if a.project.is_empty() {
+            a.projects.clear();
+        } else {
+            a.projects.insert(0, a.project.clone());
+        }
+    }
     if let Some(v) = str_field("personality") { a.personality = v; }
     if let Some(v) = str_field("prompt") { a.prompt = v; }
     if let Some(v) = str_field("model") { a.model = v; }
@@ -264,22 +319,22 @@ fn apply_patch(a: &mut Agent, p: &Value) -> Result<(), ApiError> {
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
     if a.role == "lead" {
-        if a.project.trim().is_empty() {
-            return Err(bad("Only an agent with a project can be Lead: a Lead leads the agents that share its project."));
+        if a.team().is_empty() {
+            return Err(bad("Only an agent with a group can be Lead: a Lead leads the agents that share its group."));
         }
     }
     Ok(())
 }
 
-/// Makes `a` its project's only Lead: any other Lead in the project becomes Custom. Returns the agent
-/// the role moved from.
+/// Makes `a` its group's only Lead (its team: `Agent::team`): any other Lead in the group becomes Custom.
+/// Returns the agent the role moved from.
 fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     if a.role != "lead" {
         return Ok(None);
     }
     let mut moved = None;
     for mut o in state.db.list_agents()? {
-        if o.role == "lead" && o.id != a.id && o.project.trim() == a.project.trim() {
+        if o.role == "lead" && o.id != a.id && o.team() == a.team() {
             o.role = "custom".into();
             state.db.save_agent(&o)?;
             emit_agent(state, &o);
@@ -311,6 +366,8 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         name: "New agent".into(),
         title: String::new(),
         project: String::new(),
+        group: String::new(),
+        projects: vec![],
         personality: String::new(),
         prompt: String::new(),
         model: "sonnet".into(),
@@ -345,7 +402,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         builtin: false,
         created_by,
     };
-    apply_patch(&mut a, p)?;
+    apply_patch(state, &mut a, p)?;
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),
@@ -365,7 +422,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
 
 pub async fn update_agent(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<Value>) -> ApiResult<Value> {
     let mut a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    apply_patch(&mut a, &p)?;
+    apply_patch(&state, &mut a, &p)?;
     state.db.save_agent(&a)?;
     emit_agent(&state, &a);
     let moved = take_lead(&state, &a)?;
@@ -469,8 +526,9 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    // Only agents in the same project: another project's "Dev" isn't this one's.
-    let all: Vec<_> = state.db.list_agents()?.into_iter().filter(|a| a.project.trim() == agent.project.trim()).collect();
+    // Any agent, its own group's first: where two share a name, the "Dev" of this group wins.
+    let mut all = state.db.list_agents()?;
+    all.sort_by_key(|a| a.team() != agent.team());
     let (mentioned, leading) = crate::mentions::parse(&text, &all, &id);
     if !mentioned.is_empty() {
         meta["mentions"] = crate::mentions::meta(&mentioned);
@@ -514,6 +572,11 @@ pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -
 /// Unstick a run that waits on background work or has gone quiet: stop it, keeping the queue. With nothing
 /// queued, the agent is told it was restarted and picks up where it left off.
 pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    restart_run(state, id, "user").await
+}
+
+/// Restart as `by`: "user" (the Restart button) or "Loft" (a run gone quiet, agents::restart_quiet).
+pub(crate) async fn restart_run(state: AppState, id: String, by: &'static str) -> ApiResult<Value> {
     {
         let mut rt = state.rt.lock().unwrap();
         if !rt.running.contains_key(&id) {
@@ -528,7 +591,8 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
         };
         if rt.queued.get(&id).is_none_or(|q| q.is_empty()) {
             rt.queued.entry(id.clone()).or_default().push(format!(
-                "[Loft: the user restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]"
+                "[Loft: {} restarted your last run ({why}); anything it still had running was stopped. Pick up where you left off: finish the work, or say what's left.]",
+                if by == "user" { "the user" } else { "Loft" }
             ));
             // The restarted run picks up the same work: if it was answering the user, so is this one.
             // A queue already waiting runs next instead, and counts only if its own messages came from the user.
@@ -536,7 +600,7 @@ pub async fn restart_agent(State(state): State<AppState>, Path(id): Path<String>
                 rt.queued_for_user.insert(id.clone());
             }
         }
-        rt.restarting.insert(id.clone());
+        rt.restarting.insert(id.clone(), by);
     }
     stop_agent(State(state), Path(id)).await
 }
@@ -808,7 +872,7 @@ fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBu
 
 #[derive(Deserialize)]
 pub struct PrQuery {
-    agent_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 pub async fn list_pull_requests(State(state): State<AppState>, Query(q): Query<PrQuery>) -> ApiResult<Value> {
@@ -971,8 +1035,8 @@ pub async fn open_editor(
 #[cfg(test)]
 pub(crate) mod tests {
     /// An agent PATCH of just its project, for other modules' tests.
-    pub(crate) fn apply_project(a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
-        apply_patch(a, &serde_json::json!({ "project": project }))
+    pub(crate) fn apply_project(st: &crate::state::AppState, a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
+        apply_patch(st, a, &serde_json::json!({ "project": project }))
     }
 
     use super::{apply_patch, is_plain_id};
@@ -1114,11 +1178,11 @@ pub(crate) mod tests {
         let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Planner" }), None).unwrap();
         assert_eq!(a.role, "custom", "a new agent is Custom");
         for role in ["dev", "code_reviewer", "qa", "security", "custom"] {
-            apply_patch(&mut a, &serde_json::json!({ "role": role })).unwrap();
+            apply_patch(&st, &mut a, &serde_json::json!({ "role": role })).unwrap();
             assert_eq!(a.role, role);
         }
         for role in ["reviewer", "", "Lead"] {
-            assert!(apply_patch(&mut a, &serde_json::json!({ "role": role })).is_err(), "{role:?}");
+            assert!(apply_patch(&st, &mut a, &serde_json::json!({ "role": role })).is_err(), "{role:?}");
         }
     }
 
@@ -1128,13 +1192,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn one_lead_per_project() {
+    async fn one_lead_per_group() {
         use crate::tasks::tests::{agent, state};
         let st = state();
         let mut ids = vec![];
-        for (name, project) in [("Dev", "homebase"), ("Lead", "homebase"), ("Other", "imole"), ("Loose", "")] {
+        for (name, group) in [("Dev", "homebase"), ("Lead", "homebase"), ("Other", "imole"), ("Loose", "")] {
             let mut a = agent(&st, name);
-            a.project = project.into();
+            (a.group, a.project) = (group.into(), group.into());
             st.db.save_agent(&a).unwrap();
             ids.push(a.id);
         }
@@ -1145,26 +1209,162 @@ pub(crate) mod tests {
         assert_eq!((v["role"].clone(), v.get("notice")), ("lead".into(), None));
         patch(&st, &ids[2], lead.clone()).await.unwrap();
 
-        // A second Lead in the same project takes the role: the first becomes Custom. Other projects keep theirs.
+        // A second Lead in the same group takes the role: the first becomes Custom. Other groups keep theirs.
         let v = patch(&st, &ids[1], lead.clone()).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Dev to Lead.");
         assert_eq!(v["lead_moved_from"]["id"], ids[0].as_str());
         assert_eq!(get(0).role, "custom");
         assert_eq!((get(1).role.as_str(), get(2).role.as_str()), ("lead", "lead"));
 
-        // No project, no Lead: neither setting it nor clearing the Lead's project.
+        // No group, no Lead: neither setting it nor clearing the Lead's group.
         let err = patch(&st, &ids[3], lead.clone()).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.1.starts_with("Only an agent with a project can be Lead"), "{}", err.1);
+        assert!(err.1.starts_with("Only an agent with a group can be Lead"), "{}", err.1);
         assert_eq!(get(3).role, "custom");
-        assert!(patch(&st, &ids[1], serde_json::json!({ "project": "" })).await.is_err());
-        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "project": "" })).await.unwrap();
+        assert!(patch(&st, &ids[1], serde_json::json!({ "group": "" })).await.is_err());
+        patch(&st, &ids[1], serde_json::json!({ "role": "dev", "group": "" })).await.unwrap();
         assert_eq!(get(1).role, "dev");
 
-        // Moving the Lead to another project takes that project's Lead role.
-        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "imole" })).await.unwrap();
+        // Moving the Lead to another group takes that group's Lead role.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "group": "imole" })).await.unwrap();
         assert_eq!(v["notice"], "Lead moved from Other to Dev.");
         assert_eq!(get(2).role, "custom");
+    }
+
+    #[tokio::test]
+    async fn one_lead_per_group_across_its_projects() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut ids = vec![];
+        for (name, group, project) in [("Api Dev", "Acme", "api"), ("Web Dev", "Acme", "b2c"), ("Ida", "", "b2c")] {
+            let mut a = agent(&st, name);
+            (a.group, a.project) = (group.into(), project.into());
+            st.db.save_agent(&a).unwrap();
+            ids.push(a.id);
+        }
+        patch(&st, &ids[0], serde_json::json!({ "role": "lead" })).await.unwrap();
+        // Same group, another project: the mark moves. No group: a project alone makes no team.
+        let v = patch(&st, &ids[1], serde_json::json!({ "role": "lead" })).await.unwrap();
+        assert_eq!(v["notice"], "Lead moved from Api Dev to Web Dev.");
+        assert!(patch(&st, &ids[2], serde_json::json!({ "role": "lead" })).await.is_err());
+        // A group alone is enough to lead.
+        let v = patch(&st, &ids[0], serde_json::json!({ "role": "lead", "project": "", "group": "Imole" })).await.unwrap();
+        assert_eq!((v["role"].clone(), v["group"].clone(), v["projects"].clone()), ("lead".into(), "Imole".into(), serde_json::json!([])));
+    }
+
+    #[test]
+    fn group_and_projects_are_validated_and_the_main_project_follows_them() {
+        let st = crate::tasks::tests::state();
+        for d in ["b2c", "b2b", "apps", "api", "work/notes"] {
+            std::fs::create_dir_all(st.settings.boot().projects_dir.join(d)).unwrap();
+        }
+        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Web", "group": " Acme ", "projects": ["b2c", " b2b ", "b2c", "", "work/notes"] }), None).unwrap();
+        assert_eq!((a.group.as_str(), a.project.as_str()), ("Acme", "b2c"));
+        assert_eq!(a.projects, ["b2c", "b2b", "work/notes"], "trimmed, each once, main first");
+        let (old, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Old", "project": "api" }), None).unwrap();
+        assert_eq!((old.group.as_str(), old.projects.as_slice()), ("", &["api".to_string()][..]), "a client without groups: no group, so no team");
+
+        // The star moves the main project to the front.
+        apply_patch(&st, &mut a, &serde_json::json!({ "projects": ["b2b", "b2c"] })).unwrap();
+        assert_eq!((a.project.as_str(), a.projects.as_slice()), ("b2b", &["b2b".to_string(), "b2c".into()][..]));
+
+        // A client that only knows `project` changes the main one and keeps the rest.
+        apply_patch(&st, &mut a, &serde_json::json!({ "project": "b2c" })).unwrap();
+        assert_eq!(a.projects, ["b2c", "b2b"]);
+        apply_patch(&st, &mut a, &serde_json::json!({ "project": "apps" })).unwrap();
+        assert_eq!(a.projects, ["apps", "b2c", "b2b"]);
+
+        // Paths, long lists and odd groups are refused, and change nothing.
+        let before = (a.group.clone(), a.projects.clone());
+        for bad in [
+            serde_json::json!({ "projects": ["../etc"] }),
+            serde_json::json!({ "projects": ["/Users/x"] }),
+            serde_json::json!({ "projects": ["~/dev"] }),
+            serde_json::json!({ "projects": ["api", "a/../../b"] }),
+            serde_json::json!({ "projects": "api" }),
+            serde_json::json!({ "projects": (0..21).map(|i| format!("p{i}")).collect::<Vec<_>>() }),
+            serde_json::json!({ "project": "../x" }),
+            serde_json::json!({ "group": "x".repeat(101) }),
+            serde_json::json!({ "group": "Dine\nout" }),
+        ] {
+            let mut b = a.clone();
+            assert!(apply_patch(&st, &mut b, &bad).is_err(), "accepted {bad}");
+        }
+        assert_eq!((a.group.clone(), a.projects.clone()), before);
+
+        apply_patch(&st, &mut a, &serde_json::json!({ "projects": [] })).unwrap();
+        assert_eq!((a.project.as_str(), a.projects.len()), ("", 0));
+    }
+
+    #[tokio::test]
+    async fn a_folder_of_repos_or_a_missing_folder_is_refused_and_existing_ones_are_flagged() {
+        let st = crate::tasks::tests::state();
+        let root = st.settings.boot().projects_dir.clone();
+        std::fs::create_dir_all(root.join("Dineout/api/.git")).unwrap();
+        std::fs::create_dir_all(root.join("Dineout/web/.git")).unwrap();
+        std::fs::create_dir_all(root.join("fresh")).unwrap();
+        std::fs::create_dir_all(root.join("solo/.git")).unwrap();
+
+        // A new agent and a patch: refused, naming the project.
+        for bad in [serde_json::json!({ "projects": ["Dineout"] }), serde_json::json!({ "project": "Passora" })] {
+            let e = super::new_agent(&st, "x".into(), &serde_json::json!({ "name": "A" }).as_object().unwrap().iter().chain(bad.as_object().unwrap()).map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Value>(), None).unwrap_err();
+            assert!(e.1 == "Dineout holds several repos: pick one of them" || e.1 == "There's no folder Passora in the projects folder", "{}", e.1);
+        }
+        let (mut a, _) = super::new_agent(&st, "a1".into(), &serde_json::json!({ "name": "A", "projects": ["solo", "fresh"] }), None).unwrap();
+        assert!(apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Dineout"] })).is_err());
+        assert_eq!(super::agent_json(&st, &a)["project_problems"], serde_json::json!([]));
+
+        // An agent that already has them keeps them, flagged; saving its other fields still works.
+        a.projects = vec!["Dineout".into(), "Passora".into(), "solo".into()];
+        a.project = "Dineout".into();
+        apply_patch(&st, &mut a, &serde_json::json!({ "title": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
+        assert_eq!(a.projects, ["Dineout", "Passora", "solo"]);
+        let flags = super::agent_json(&st, &a)["project_problems"].clone();
+        let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| f["project"].as_str().unwrap()).collect();
+        assert_eq!(flagged, ["Dineout", "Passora"]);
+    }
+
+    #[tokio::test]
+    async fn the_live_agent_update_carries_its_project_problems() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let root = st.settings.boot().projects_dir.clone();
+        for d in ["web", "dine/api/.git", "dine/pos/.git"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let mut a = agent(&st, "Old");
+        (a.project, a.projects) = ("dine".into(), vec!["dine".into(), "gone".into()]);
+        st.db.save_agent(&a).unwrap();
+        let problems = super::agent_json(&st, &a)["project_problems"].clone();
+        assert_eq!(problems, serde_json::json!([
+            { "project": "dine", "problem": "dine holds several repos: pick one of them" },
+            { "project": "gone", "problem": "There's no folder gone in the projects folder" },
+        ]), "short, without the Mac's paths");
+
+        // The settings panel takes the saved agent from the live event: fixing the projects clears the flag there.
+        let mut rx = st.events.subscribe();
+        patch(&st, &a.id, serde_json::json!({ "projects": ["web"] })).await.unwrap();
+        let agent = loop {
+            if let crate::state::Event::AgentUpdated { agent } = rx.try_recv().unwrap() {
+                break agent;
+            }
+        };
+        assert_eq!(agent["project_problems"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn project_problems_read_each_folder_once_in_a_while() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut a = agent(&st, "Busy");
+        a.projects = vec!["late".into()];
+        let flagged = |a: &crate::db::Agent| super::agent_json(&st, a)["project_problems"].as_array().unwrap().len();
+        assert_eq!(flagged(&a), 1, "no folder yet");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("late")).unwrap();
+        assert_eq!(flagged(&a), 1, "the next events reuse the answer instead of reading the disk");
+        // Saving still checks the disk itself, and the saved agent's flags are read from it again.
+        assert!(apply_patch(&st, &mut a, &serde_json::json!({ "projects": ["late"] })).is_ok());
+        assert_eq!(flagged(&a), 0, "re-saving the same project after fixing its folder clears the flag");
     }
 
     #[test]
@@ -1189,7 +1389,7 @@ mod ls_tests {
         std::fs::create_dir_all(projects.join("imole/brand_docs")).unwrap();
         std::fs::write(projects.join("imole/proposta.md"), "").unwrap();
         std::fs::write(root.join("secret.txt"), "").unwrap();
-        let base = projects.join("work/isa");
+        let base = projects.join("work/notes");
         std::fs::create_dir_all(base.join("docs")).unwrap();
         let names = |p: &str| ls(&base, &[&ws, &projects], p).map(|(_, v)| v.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>());
         assert_eq!(names("").unwrap(), vec!["docs"], "starts at the project's folder");

@@ -8,13 +8,17 @@ A local command center where a team of Claude Code agents works on the user's pr
 A long-lived Claude Code worker with its own name, instructions, memory and workspace.
 _Avoid_: Bot, assistant
 
+**Group**:
+A label that keeps agents together, such as Dineout or Loft. It owns no projects, folder or main project, and is never a repo or a place to publish: projects belong to each agent.
+_Avoid_: Workspace, organisation
+
 **Team**:
-The agents that share a project.
-_Avoid_: Group, squad
+The agents of one group. A team has at most one Lead.
+_Avoid_: Squad, crew
 
 **Project**:
-A folder under the user's projects directory. Its git `origin`, once it has one, is the project's repo; Loft can create the repo for a project that has none.
-_Avoid_: Workspace (that is the agent's private folder)
+One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is never a project.
+_Avoid_: Workspace (that is the agent's private folder), group
 
 **Lead**:
 The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
@@ -33,7 +37,7 @@ The fixed instructions Loft writes for a role and sends with that role's wake in
 _Avoid_: Role prompt, template
 
 **Run**:
-One stretch of an agent working, from what woke it (a message, a task, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
+One stretch of an agent working, from what woke it (a message, an issue, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
 **Session**:
@@ -61,12 +65,20 @@ An `@` reference in a message: `@name` points at an agent, `@path` at a file or 
 _Avoid_: Tag, reference
 
 **Draft**:
-A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached task. Each agent keeps its own until it is sent or the agent's context is cleared.
+A message typed in an agent's composer or a grill answer but not sent yet, with its pasted images and attached issue. Each agent keeps its own until it is sent or the agent's context is cleared.
 _Avoid_: Unsent message, pending message
 
-**Task**:
-An assignment of work to an agent, tracked in Loft's shared list. A task may point at a ticket.
-_Avoid_: Ticket, job, issue
+**Issue**:
+A work item in Loft's list. It belongs to exactly one project; lists filter issues by group, but an issue never belongs to a group. An issue is either a GitHub issue or a Loft issue.
+_Avoid_: Task (kept only in old API names), job, card
+
+**GitHub issue**:
+An issue mirrored two-way with its project's repo on GitHub: title, description, labels, owner and open or closed.
+_Avoid_: Remote issue, synced task
+
+**Loft issue**:
+An issue that lives only in Loft, because its project has no repo yet or it isn't published; it can be published to GitHub later.
+_Avoid_: Local task, draft issue
 
 ## Planning
 
@@ -111,6 +123,20 @@ _Avoid_: Billing week, 7 days, week
 **All-time spend**:
 The runs and estimated cost of every agent run since Loft started counting, kept as a stored running total: it never goes down, even when an agent is deleted or its history is cleared.
 _Avoid_: Total cost, lifetime cost
+
+## Push
+
+**Push relay**:
+A hosted service that holds Loft's Apple push key and forwards a Loft install's pushes to Apple, so installs run by other people never hold the key. It only forwards: which alerts a phone wants, quiet hours and rate limits stay in the install.
+_Avoid_: Push server, push proxy, gateway
+
+**Relay key**:
+The secret an install uses to push through the push relay. The user gets it by signing in to the push portal with Apple; it belongs to that Apple ID and can be revoked there. There are no anonymous keys: without one, the install does not push through the relay.
+_Avoid_: Relay token, account, login
+
+**Push portal**:
+A small web page on the relay's Vercel project where a user signs in with Apple to create, name and revoke relay keys. It stores only Apple's user id and hashed keys.
+_Avoid_: Dashboard, account page
 
 ## Threads
 

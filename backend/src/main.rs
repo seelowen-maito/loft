@@ -19,6 +19,7 @@ mod mentions;
 mod mirror;
 mod prs;
 mod push;
+mod signin;
 mod repos;
 mod schedule;
 mod sessions;
@@ -95,11 +96,14 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));
+    tokio::spawn(delivery::track_open_prs(state.clone()));
     tokio::spawn(agents::backfill_context(state.clone()));
     tokio::spawn(updater::updater(state.clone(), root.clone()));
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
+    tokio::spawn(agents::quiet_watcher(state.clone()));
+    tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
 
     let api = Router::new()
@@ -160,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/devices/{token}", axum::routing::patch(devices::update).delete(devices::remove))
         .route("/devices/{token}/test", post(devices::test))
         .route("/push", get(devices::status).put(devices::configure))
+        .route("/push/signin", post(signin::start))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))

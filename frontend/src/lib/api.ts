@@ -7,8 +7,14 @@ export type Agent = {
   id: string;
   name: string;
   title: string;
-  /** Free-form project or tag; agents sharing one are grouped. */
+  /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
+  /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
+  group?: string;
+  /** The projects it works in, main first. Missing from servers before groups. */
+  projects?: string[];
+  /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
+  project_problems?: { project: string; problem: string }[];
   personality: string;
   prompt: string;
   model: string;
@@ -23,7 +29,7 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
+  /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
   /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
   fresh_context?: string;
@@ -245,8 +251,27 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
-/** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
-export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
+/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
+export type PushStatus = {
+  path: "own_key" | "relay" | "none";
+  /** Whether a relay key is stored. */
+  relay_key: boolean;
+  /** Sign in was pressed and the code isn't allowed on the portal yet. */
+  signing_in: boolean;
+  /** The push portal, where the user signs in for a relay key; null until it's live. */
+  portal_url: string | null;
+  /** The relay address in use (saved, else LOFT_RELAY_URL); null when there is none. */
+  relay_url: string | null;
+  /** The addresses saved in Settings ("" when none: the environment's, if any, is used). */
+  relay_address: string;
+  portal_address: string;
+  configured: boolean;
+  key_present: boolean;
+  key_id: string;
+  team_id: string;
+  bundle_id: string;
+  devices: number;
+};
 
 export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 
@@ -355,6 +380,8 @@ export type PullRequest = {
   error: string | null;
   checked_at: string | null;
   created_at: string;
+  /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
+  labels?: string[];
 };
 
 export type AgentSummary = {
@@ -519,6 +546,8 @@ export const api = {
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
+  /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
+  needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
@@ -558,7 +587,10 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string; portal_url?: string }) =>
+    req<PushStatus>("PUT", "/push", b),
+  /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
+  pushSignIn: () => req<{ url: string }>("POST", "/push/signin"),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),

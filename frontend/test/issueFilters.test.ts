@@ -7,7 +7,7 @@ const url = (f: IssueFilters) => filtersToParams(f).toString();
 const back = (s: string) => parseFilters(new URLSearchParams(s));
 
 test("every filter survives a round trip through the URL", () => {
-  const f: IssueFilters = { q: "#42", source: "github", project: "Laufey & Gustavo", agent: "a1", mine: true, closed: true };
+  const f: IssueFilters = { q: "#42", source: "github", group: "Dineout", project: "Laufey & Gustavo", agent: "a1", mine: true, closed: true };
   assert.deepEqual(back(url(f)), f);
   const words: IssueFilters = { ...DEFAULT_FILTERS, q: "retry cap @octo-dev", source: "loft" };
   assert.deepEqual(back(url(words)), words);
@@ -18,6 +18,7 @@ test("filters at their default are left out of the URL", () => {
   assert.equal(url({ ...DEFAULT_FILTERS, source: "github" }), "source=github");
   assert.equal(url({ ...DEFAULT_FILTERS, q: "   " }), "");
   assert.equal(url({ ...DEFAULT_FILTERS, project: "api", mine: true }), "project=api&mine=1");
+  assert.equal(url({ ...DEFAULT_FILTERS, group: "Dineout", project: "dineout/api" }), "group=Dineout&project=dineout%2Fapi");
   assert.deepEqual(back(""), DEFAULT_FILTERS);
 });
 

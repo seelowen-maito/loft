@@ -57,11 +57,11 @@ struct AgentDetailView: View {
             }
 
             if store.supportsTasks {
-                Section("Tasks") {
+                Section("Issues") {
                     if let current {
                         NavigationLink(value: TaskRoute(id: current.id)) { TaskRow(task: current) }
                     } else {
-                        Text(state == .working ? "Working outside a tracked task." : "No task assigned right now.")
+                        Text(state == .working ? "Working outside a tracked issue." : "No issue assigned right now.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(assigned) { t in
@@ -128,7 +128,12 @@ struct AgentDetailView: View {
                 LabeledContent("Agent ID") {
                     Text(agent.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                 }
-                if let p = agent.project, !p.isEmpty { LabeledContent("Project", value: p) }
+                if let g = agent.group, !g.trimmingCharacters(in: .whitespaces).isEmpty { LabeledContent("Group", value: g) }
+                if agent.allProjects.count > 1 {
+                    LabeledContent("Projects", value: agent.allProjects.enumerated().map { $0.offset == 0 ? "\($0.element) (main)" : $0.element }.joined(separator: ", "))
+                } else if let p = agent.allProjects.first {
+                    LabeledContent("Project", value: p)
+                }
                 if let m = agent.model, !m.isEmpty { LabeledContent("Model", value: [m, agent.effort ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")) }
                 if let mode = agent.permissionMode { LabeledContent("Permissions", value: Self.describe(mode: mode)) }
                 LabeledContent("Schedule", value: (agent.intervalMinutes ?? 0) > 0 ? "Every \(Self.describe(minutes: agent.intervalMinutes!))" : "Only when messaged")
@@ -146,7 +151,7 @@ struct AgentDetailView: View {
         .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
         } message: {
-            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its tasks stay as they are; cancel them separately.")
+            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
         }
         .errorAlert($error)
     }
@@ -155,7 +160,7 @@ struct AgentDetailView: View {
         Button { router.openChat(agent.id) } label: { Label("Chat with \(agent.name)", systemImage: "bubble.left.and.bubble.right") }
             .accessibilityIdentifier("chatWithAgent")
         if store.supportsTasks {
-            Button { router.composer = .newTask(agentId: agent.id, parentId: nil) } label: { Label("Assign a task", systemImage: "checklist") }
+            Button { router.composer = .newTask(agentId: agent.id, parentId: nil) } label: { Label("Assign an issue", systemImage: "checklist") }
                 .disabled(!store.canWrite)
         }
         Button { router.openChat(agent.id, draft: "What's your status? Summarize what you're working on and anything blocking you.") } label: {
@@ -272,7 +277,7 @@ private struct DelegationSection: View {
             } header: {
                 Text("Works with")
             } footer: {
-                Text("From delegated tasks and agent-to-agent messages.")
+                Text("From delegated issues and agent-to-agent messages.")
             }
         }
     }

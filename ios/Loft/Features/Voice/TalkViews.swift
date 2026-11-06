@@ -62,7 +62,6 @@ struct CaptionTranscript: View {
 struct VoiceStatusView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
-    @Environment(Router.self) private var router
     let status: VoiceStatus
     let dismiss: () -> Void
 
@@ -113,7 +112,7 @@ struct VoiceStatusView: View {
                 if failed {
                     Image(systemName: "xmark").font(.callout.weight(.bold)).foregroundStyle(.white)
                 } else if done {
-                    Image(systemName: "checkmark").font(.callout.weight(.bold)).foregroundStyle(.white)
+                    Image(systemName: "checkmark").font(.callout.weight(.bold)).foregroundStyle(Theme.onAccent)
                 } else if active && status == .speaking {
                     Image(systemName: "waveform").font(.callout.weight(.bold)).foregroundStyle(Theme.working)
                         .symbolEffect(.variableColor.iterative, isActive: !TestMode.noAnimations)
@@ -207,7 +206,7 @@ struct VoiceStatusView: View {
 
     private func big(_ title: String, _ symbol: String, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Label(title, systemImage: symbol).frame(maxWidth: .infinity, minHeight: 30) }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.accent)
             .accessibilityIdentifier(id)
     }
 
@@ -227,7 +226,7 @@ struct VoiceStatusView: View {
         // Sending it again from the box brings the status back.
         VoicePresentation.shared.statusAgentId = agentId
         VoicePresentation.shared.returnedText = text
-        router.openChat(agentId, draft: text)
+        VoicePresentation.shared.closeThenOpen(agentId, draft: text)
         dismiss()
     }
 
@@ -241,39 +240,114 @@ struct VoiceStatusView: View {
         }
         voice.speaker.stop()
         voice.discard()
-        router.openChat(id)
+        VoicePresentation.shared.closeThenOpen(id)
         dismiss()
     }
 }
 
 // MARK: - E: dictate
 
-/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches.
+/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches; More lists
+/// every agent.
 struct RecentAgentsRow: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
+    @State private var picking = false
 
     var body: some View {
         let current = voice.agentId
         let recent = store.agents.sorted { ($0.lastRunAt ?? .distantPast) > ($1.lastRunAt ?? .distantPast) }
         let shown = (recent.filter { $0.id == current } + recent.filter { $0.id != current }).prefix(5)
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                Text("To").font(.subheadline).foregroundStyle(.secondary)
-                ForEach(Array(shown)) { a in
-                    Button { voice.switchAgent(a.id) } label: {
-                        Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
+        // More stays at the end of the row, outside the scrolling chips, so it's always on screen.
+        HStack(spacing: 8) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    Text("To").font(.subheadline).foregroundStyle(.secondary)
+                    ForEach(Array(shown)) { a in
+                        Button { voice.switchAgent(a.id) } label: {
+                            Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(a.id == current ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(a.id == current ? .isSelected : [])
+                }
+                .padding(.leading, Theme.gutter)
+            }
+            .scrollIndicators(.hidden)
+            .accessibilityIdentifier("voiceRecentAgents")
+            Button { picking = true } label: {
+                Label("More", systemImage: "ellipsis").font(.subheadline)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .accessibilityLabel("More agents")
+            .accessibilityHint("Lists every agent, to pick who this goes to.")
+            .accessibilityIdentifier("voiceMoreAgents")
+        }
+        .padding(.trailing, Theme.gutter)
+        .sheet(isPresented: $picking) {
+            TalkAgentPicker().presentationDetents([.medium, .large])
+        }
+    }
+}
+
+/// Talk's More: every agent, by group, searchable by name, title, group or project. Picking one switches Talk to it.
+struct TalkAgentPicker: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(VoiceSession.self) private var voice
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    /// The agents matching `query`, in sections by group (A to Z, agents without one last), names A to Z.
+    static func sections(_ agents: [Agent], query: String) -> [(title: String, agents: [Agent])] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let hits = agents.filter { a in
+            q.isEmpty || ([a.name, a.title ?? "", a.group ?? ""] + a.allProjects).contains { $0.localizedCaseInsensitiveContains(q) }
+        }
+        let byGroup = Dictionary(grouping: hits) { ($0.group ?? "").trimmingCharacters(in: .whitespaces) }
+        return byGroup.keys
+            .sorted { ($0.isEmpty ? 1 : 0, $0.lowercased()) < ($1.isEmpty ? 1 : 0, $1.lowercased()) }
+            .map { g in
+                (g.isEmpty ? "No group" : g, byGroup[g]!.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
+            }
+    }
+
+    var body: some View {
+        NavigationStack {
+            let sections = Self.sections(store.agents, query: query)
+            List {
+                ForEach(sections, id: \.title) { section in
+                    Section(section.title) {
+                        ForEach(section.agents) { a in
+                            let current = a.id == voice.agentId
+                            Button {
+                                voice.switchAgent(a.id)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    AgentRow(agent: a)
+                                    if current { Image(systemName: "checkmark").foregroundStyle(Theme.accent).accessibilityHidden(true) }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(current ? .isSelected : [])
+                            .accessibilityHint(current ? "Talk goes to this agent now." : "Talk goes to this agent.")
+                            .accessibilityIdentifier("talkPick-\(a.name)")
+                        }
+                    }
                 }
             }
-            .padding(.horizontal, Theme.gutter)
+            .overlay { if sections.isEmpty { ContentUnavailableView.search(text: query) } }
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Name, title, group or project")
+            .navigationTitle("Talk to…")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
-        .scrollIndicators(.hidden)
-        .accessibilityIdentifier("voiceRecentAgents")
     }
 }
 
@@ -286,7 +360,7 @@ struct HoldToTalkButton: View {
     var body: some View {
         Image(systemName: listening ? "waveform" : "mic.fill")
             .font(.system(size: 34, weight: .semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(Theme.onAccent)
             .frame(width: 96, height: 96)
             .background(Theme.accent.gradient, in: Circle())
             .scaleEffect(pressed ? 1.12 : 1)

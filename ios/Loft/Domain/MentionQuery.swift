@@ -13,20 +13,18 @@ enum MentionQuery {
         return String(q).lowercased()
     }
 
-    /// Agents whose name starts with the query (any word of it, so "dev" finds "Web Dev"), not the chat's own.
-    /// All of them: the picker scrolls, so no agent is left out however many there are. Only agents in the chat
-    /// agent's project: the backend delivers a mention to no one else (as the web composer, Chat.tsx).
-    static func matches(_ q: String, in agents: [Agent], excluding name: String) -> [Agent] {
-        let project = agents.first { $0.name == name }.map(projectKey)
-        return agents.filter { a in
-            a.name != name && (project == nil || projectKey(a) == project) && (q.isEmpty || a.name.lowercased().hasPrefix(q)
-                               || a.name.lowercased().split(separator: " ").contains { $0.hasPrefix(q) })
+    /// Agents whose name starts with the query (any word of it, so "dev" finds "Web Dev"), not the chat's own, in
+    /// sections: the chat agent's team first, then every other agent. All of them: the picker scrolls, so no agent
+    /// is left out however many there are. The backend delivers a mention to any agent, its own team's first.
+    static func sections(_ q: String, in agents: [Agent], excluding name: String) -> [(title: String, agents: [Agent])] {
+        let team = agents.first { $0.name == name }?.team
+        let hits = agents.filter { a in
+            a.name != name && (q.isEmpty || a.name.lowercased().hasPrefix(q) || a.name.lowercased().split(separator: " ").contains { $0.hasPrefix(q) })
         }
         .sorted { ($0.name.lowercased().hasPrefix(q) ? 0 : 1, $0.name) < ($1.name.lowercased().hasPrefix(q) ? 0 : 1, $1.name) }
-    }
-
-    private static func projectKey(_ a: Agent) -> String {
-        (a.project ?? "").trimmingCharacters(in: .whitespaces)
+        guard let team else { return hits.isEmpty ? [] : [("Agents", hits)] }
+        let ours = team.isEmpty ? [] : hits.filter { $0.team == team }, rest = hits.filter { team.isEmpty || $0.team != team }
+        return [(team, ours), ("Other agents", rest)].filter { !$0.agents.isEmpty }
     }
 
     /// `text` with the `@…` being typed replaced by the agent's exact name and a space.

@@ -36,7 +36,7 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
 }
 
 /// Where `@path` in this agent's chat starts: its project's folder when the project names one inside the
-/// projects folder (`work/isa`), else its workspace (no project, or a project that's just a tag).
+/// projects folder (`work/notes`), else its workspace (no project, or a project that's just a tag).
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
     let projects = &state.settings.boot().projects_dir;
     let project = projects.join(a.project.trim());
@@ -51,6 +51,8 @@ pub fn emit_agent(state: &AppState, a: &Agent) {
     run_fields(state, &a.id, &mut v);
     v["unread_reply"] = json!(a.unread_reply());
     v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
+    // The settings panel takes the saved agent from this event: a fixed project clears its flag.
+    v["project_problems"] = crate::repos::project_problems(state, a);
     state.emit(Event::AgentUpdated { agent: v });
 }
 
@@ -111,6 +113,46 @@ pub fn mark_read(state: &AppState, agent_id: &str) -> Result<Option<Agent>> {
         emit_agent(state, a);
     }
     Ok(a)
+}
+
+/// A run quiet this long with nothing to wait on is restarted, as if the user pressed Restart.
+const RESTART_QUIET: Duration = Duration::from_secs(20 * 60);
+/// Automatic restarts in a row with no output between; then it's left to the user (Needs you says why).
+pub(crate) const MAX_AUTO_RESTARTS: u32 = 2;
+
+/// Restarts runs that went quiet with nothing to wait on: no tool call, background work or subagent still
+/// going, no permission or interview question waiting on the user. A dropped API connection looks like this.
+pub(crate) async fn restart_quiet(state: &AppState) {
+    let due: Vec<(String, i64)> = {
+        let rt = state.rt.lock().unwrap();
+        rt.running
+            .keys()
+            .filter_map(|id| {
+                let i = rt.runs.get(id)?;
+                let quiet = DateTime::parse_from_rfc3339(&i.last_output_at).ok().map(|t| (Utc::now() - t.with_timezone(&Utc)).num_seconds())?;
+                let idle = i.waiting_on.is_empty() && i.subagents.is_empty() && i.tools_open.is_empty() && quiet >= RESTART_QUIET.as_secs() as i64;
+                (idle && rt.auto_restarts.get(id).copied().unwrap_or(0) < MAX_AUTO_RESTARTS).then(|| (id.clone(), quiet / 60))
+            })
+            .collect()
+    };
+    for (id, minutes) in due {
+        let asking = state.db.list_permissions(Some(&id)).map_or(true, |ps| ps.iter().any(|p| p.status == "pending"));
+        let interviewing = crate::grill::active(state, &id).is_some_and(|s| crate::grill::open_round(&s).is_some());
+        if asking || interviewing {
+            continue;
+        }
+        *state.rt.lock().unwrap().auto_restarts.entry(id.clone()).or_default() += 1;
+        tracing::info!("restarting {id}: no output for {minutes} min");
+        let _ = crate::api::restart_run(state.clone(), id, "Loft").await;
+    }
+}
+
+/// Checks for quiet runs once a minute.
+pub async fn quiet_watcher(state: AppState) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        restart_quiet(&state).await;
+    }
 }
 
 pub fn is_running(state: &AppState, agent_id: &str) -> bool {
@@ -395,18 +437,18 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 # Workspace
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
-- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
+{team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
 - Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti:<port> | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents run on this Mac and a pattern can match them. To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
 - Dev servers (web apps, APIs, docs sites): start them detached (see Runs), listening on all interfaces (`vite --host`, `next dev -H 0.0.0.0`, `python3 -m http.server --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath build`, then `xcrun simctl install booted <path to .app>` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
+- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install booted "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -420,7 +462,7 @@ Read a memory's full body with `mcp__loft__recall` when its title looks relevant
 - Other agents: `mcp__loft__list_agents` lists the other Loft agents, `mcp__loft__read_agent_chat` reads any agent's chat with the user, and `mcp__loft__message_agent` sends an agent a message. Sending returns right away; the other agent answers later with a message of its own, which arrives here as a new turn. Messages from agents are marked as such; a message without that mark is from the user.
 - Loft issues: Loft keeps a shared list of Loft issues (the work items, once called tasks) that the user follows from their phone. `mcp__loft__list_issues` shows it. When you work on one (a message starting with `[Task <id>]`), report progress with `mcp__loft__update_issue`: a short `note` as you go, then `done` with a `summary`, or `failed`/`blocked` with an `error`. A message starting with `[Comment on task <id>` is the user commenting on it: answer with `mcp__loft__comment_issue` so the answer stays with the issue. To delegate part of one, call `mcp__loft__create_issue` with `parent_id`, the `agent` to do it and `start: true`; you're told when it finishes. The old `*_task` tool names still work.
 - New agents: `mcp__loft__list_projects` lists the user's repos by activity, `mcp__loft__list_agent_templates` the ready-made agents, and `mcp__loft__create_agent` creates one. Only create agents the user asked for or agreed to; the user may be asked to approve each one. You can't delete agents, and must never try: only the user deletes agents.
-- Pull requests: when you open one with `gh pr create`, Loft shows the user a live PR card (status, checks, a merge button) automatically. If you opened a PR some other way, call `mcp__loft__share_pull_request` with its URL so the card appears. Always include the PR link in your reply.
+- Pull requests: when you open one with `gh pr create`, Loft shows the user a live PR card (status, checks, a merge button) automatically. If you opened a PR some other way, call `mcp__loft__share_pull_request` with its URL so the card appears. Always include the PR link in your reply. If you check pull requests (tests, QA or security) and are a reviewer, set your verdict with `mcp__loft__set_pr_verdict` (the PR url, `kind`, `pass` or `fail`, and the head `sha` you checked) instead of editing labels by hand.
 - `mcp__loft__get_avatar` / `mcp__loft__set_avatar`: your face is a vector sticker. When the user asks you to change your look, design a new one and call `set_avatar` with an `svg` string: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` drawn only with path, circle, ellipse, rect, polygon, line, g, gradients and clipPath (no text, images, styles or scripts). Loft cuts a white die-cut border around your silhouette and adds the shadow, so don't draw a border or a background. The style is bold and friendly, like a sheet of stickers:
   - Your body is your face: one chunky, flat-colored shape (a blob, star, drop, cloud, or an object that fits your job like a note or a map pin) filling most of the canvas, roughly from 8 to 92 on both axes.
   - Big googly eyes are the focus: white ovals about 22 wide and 25 tall, set close together, each with a dark (#17171c) oval pupil about 9x13, tilted slightly and glancing up or to the side. Add a small mouth as a dark stroke about 4 wide with round caps (a smile, smirk or open mouth). Winks and blush are fine.
@@ -433,6 +475,7 @@ Read a memory's full body with `mcp__loft__recall` when its title looks relevant
 # Style
 Be concise in chat. Lead with the answer or the result. When you finish a task, say what you did and where the output lives."#,
         name = a.name,
+        team = team_lines(a),
         subagents = subagents,
         grill = crate::grill::prompt_section(),
         messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
@@ -447,6 +490,23 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
             .unwrap_or_default(),
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
     )
+}
+
+/// The Workspace lines naming its group and projects, main first; none when it has neither.
+fn team_lines(a: &Agent) -> String {
+    let mut s = String::new();
+    if !a.group.trim().is_empty() {
+        s += &format!("- You belong to the group **{}**. `mcp__loft__list_agents` shows its other agents and their projects.\n", a.group.trim());
+    }
+    if let Some((main, rest)) = a.projects.split_first() {
+        let rest = rest.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+        s += &format!("- Your main project is `{main}`: the issues you create go there unless you pass another `project`.");
+        if !rest.is_empty() {
+            s += &format!(" You also work in {rest}. You can only create issues in your own projects; when you plan (grill, spec, tickets), say which one with `project`.");
+        }
+        s += "\n";
+    }
+    s
 }
 
 // ---- running ----------------------------------------------------------
@@ -847,7 +907,26 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
 }
 
-fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
+/// Where an agent's system prompt is written for claude to read. Not on claude's command line: every
+/// agent's prompt holds phrases like `vite --host`, so a `pkill -f` with one of them in any agent's
+/// command would match, and stop, every agent at once.
+fn system_prompt_file(state: &AppState, agent_id: &str) -> PathBuf {
+    state.cfg.storage_dir.join(".system-prompts").join(format!("{agent_id}.md"))
+}
+
+/// Writes the agent's system prompt owner-only and returns its path.
+fn write_system_prompt(state: &AppState, a: &Agent) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = system_prompt_file(state, &a.id);
+    let dir = path.parent().unwrap();
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(&path, system_prompt(state, a))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(path)
+}
+
+fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::path::Path) -> Command {
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -867,7 +946,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Command {
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
-        .args(["--append-system-prompt", &system_prompt(state, a)])
+        .arg("--append-system-prompt-file")
+        .arg(prompt_file)
         .args(["--system-prompt-snapshot", "off"])
         .args(["--mcp-config", &mcp_config])
         .arg("--strict-mcp-config")
@@ -1008,7 +1088,8 @@ async fn run_process(
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
-    let mut cmd = build_command(state, &agent, resume);
+    let prompt_file = write_system_prompt(state, &agent)?;
+    let mut cmd = build_command(state, &agent, resume, &prompt_file);
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
     }
@@ -1053,6 +1134,7 @@ async fn run_process(
         let line = tokio::select! {
             l = lines.next_line() => l?,
             _ = kill.notified() => {
+                tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
                 killed = true;
                 None
@@ -1074,11 +1156,13 @@ async fn run_process(
                         _ => rt.queued.entry(agent_id.to_string()).or_default().insert(0, note),
                     }
                 }
+                tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
+                tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
                 terminate(&mut child).await;
                 None
             }
@@ -1086,8 +1170,24 @@ async fn run_process(
         let Some(line) = line else { break };
         let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
         got_any = true;
-        if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
-            i.last_output_at = now();
+        {
+            let mut rt = state.rt.lock().unwrap();
+            if let Some(i) = rt.runs.get_mut(agent_id) {
+                i.last_output_at = now();
+                // Tool calls still waiting on their result: a long build in the foreground is quiet, not stuck.
+                for b in ev["message"]["content"].as_array().into_iter().flatten() {
+                    match (ev["type"].as_str(), b["type"].as_str()) {
+                        (Some("assistant"), Some("tool_use")) => i.tools_open.extend(b["id"].as_str().map(String::from)),
+                        (Some("user"), Some("tool_result")) => i.tools_open.retain(|t| Some(t.as_str()) != b["tool_use_id"].as_str()),
+                        _ => {}
+                    }
+                }
+            }
+            // A finished turn is real progress: automatic restarts start over. (Any output isn't: a restarted
+            // run always says something, and one that then hangs the same way must still reach the limit.)
+            if ev["type"] == "result" && ev["num_turns"].as_u64() != Some(0) {
+                rt.auto_restarts.remove(agent_id);
+            }
         }
         let sub = ev["parent_tool_use_id"].as_str().map(|s| s.to_string());
         match ev["type"].as_str() {
@@ -1342,6 +1442,7 @@ async fn run_process(
     let status = match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
         Ok(s) => s?,
         Err(_) => {
+            tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
             terminate(&mut child).await;
             child.wait().await?
         }
@@ -1353,7 +1454,15 @@ async fn run_process(
         }
         if !killed {
             let tail: String = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            let text = format!("claude exited ({status}) without a result.\n{tail}");
+            // Loft logs every stop of its own above; a signal it didn't send came from another process.
+            use std::os::unix::process::ExitStatusExt;
+            let outside = if matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)) || matches!(status.code(), Some(143 | 137)) {
+                " It was stopped by a signal from outside Loft, for example a `pkill` or `kill` in some agent's command."
+            } else {
+                ""
+            };
+            tracing::warn!("agent {agent_id}: run {run_id}: claude exited ({status}) without a result{outside}");
+            let text = format!("claude exited ({status}) without a result.{outside}\n{tail}");
             run_msg(quiet, state, agent_id, rid, "system", "error", &text, json!({}));
             run_error = Some(text);
         }
@@ -1366,7 +1475,11 @@ async fn run_process(
             let n = rt.queued.get(agent_id).map_or(0, |q| q.iter().filter(|p| !p.starts_with("[Loft:")).count());
             (n, rt.restarting.remove(agent_id))
         };
-        let what = if restarted { "Restarted by user." } else { "Stopped by user." };
+        let what = match restarted {
+            Some("user") => "Restarted by user.",
+            Some(_) => "Restarted by Loft: no output for a while.",
+            None => "Stopped by user.",
+        };
         let text = match n {
             0 => what.to_string(),
             1 => format!("{what} The queued message runs next."),
@@ -1457,6 +1570,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("-showBuildSettings") && p.contains("-IDEBuildLocationStyle=Unique") && p.contains("$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"));
+        assert!(!p.contains("-derivedDataPath build"));
+    }
+
+    #[test]
     fn every_agent_is_told_to_use_the_project_s_glossary_and_adrs() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
@@ -1476,6 +1597,19 @@ pub(crate) mod tests {
         let start = p.find("# Messaging rules\n")?;
         let end = start + p[start..].find("\n\n# ").unwrap();
         Some(&p[start..end])
+    }
+
+    #[test]
+    fn the_prompt_names_the_agent_s_group_and_every_project_main_first() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Web");
+        (a.group, a.project, a.projects) = ("Acme".into(), "b2c".into(), vec!["b2c".into(), "b2b".into(), "apps".into()]);
+        let p = system_prompt(&st, &a);
+        assert!(p.contains("- You belong to the group **Acme**."), "{p}");
+        assert!(p.contains("- Your main project is `b2c`: the issues you create go there unless you pass another `project`. You also work in `b2b`, `apps`. You can only create issues in your own projects; when you plan (grill, spec, tickets), say which one with `project`."), "{p}");
+        (a.group, a.project, a.projects) = (String::new(), String::new(), vec![]);
+        let p = system_prompt(&st, &a);
+        assert!(!p.contains("You belong to the group") && !p.contains("Your main project"));
     }
 
     #[test]
@@ -1575,7 +1709,8 @@ case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
 esac;;
 esac
 while [ $# -gt 0 ]; do
-  [ "$1" = --append-system-prompt ] && printf '%s\n---\n' "$2" >> system.log
+  [ "$1" = --append-system-prompt-file ] && { cat "$2"; printf '\n---\n'; } >> system.log
+  printf '%s\n' "$1" >> argv.log
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
@@ -1588,6 +1723,9 @@ case "$prompt" in /compact*)
 esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
+case "$prompt" in *chatty*)
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"On it."}]}}';;
+esac
 case "$prompt" in *busy*)
   trap 'kill $!; exit 143' TERM
   sleep 600 &
@@ -1600,6 +1738,10 @@ esac
 case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
   exit 1;;
+esac
+case "$prompt" in *sharepr*)
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"mcp__loft__share_pull_request","input":{"url":"https://github.com/octo/share-run/pull/84"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"The user can now see a card for https://github.com/octo/share-run/pull/84."}]}]}}';;
 esac
 case "$prompt" in *delegate*|*orphan*)
   echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Find the parser","subagent_type":"Explore","prompt":"x"}}]}}'
@@ -1691,9 +1833,38 @@ esac
             .collect()
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_system_prompt_is_read_from_a_file_not_claude_s_command_line() {
+        let (st, a) = fake_claude_state();
+        run(&st, &a.id, "hello", 1).await;
+        // A `pkill -f "vite --host"` (or any phrase of the prompt) in some agent's command must not match claude.
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.contains("--append-system-prompt-file"), "{argv}");
+        for phrase in ["vite --host", "# Identity", "Standing instructions"] {
+            assert!(!argv.contains(phrase), "{phrase:?} is on claude's command line");
+        }
+        // Claude still gets the whole prompt, from an owner-only file.
+        let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
+        assert!(system.contains("# Identity") && system.contains("vite --host"), "{system}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(system_prompt_file(&st, &a.id)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(system.contains("never with `pkill -f` or `killall`"), "agents are told to stop processes by PID");
+    }
+
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
         enqueue(st, id, Some(text.into()), "user");
         until("the run", 10, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pr_shared_in_a_run_is_tracked_for_the_agent_that_shared_it() {
+        let (st, a) = fake_claude_state();
+        let fake = crate::github::tests::own_fake(&st);
+        fake.route("GET", "/repos/octo/share-run/pulls/84", 200, json!({ "number": 84 }));
+        run(&st, &a.id, "sharepr", 1).await;
+        until("the PR is tracked", 10, || st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().is_some()).await;
+        let pr = st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().unwrap();
+        assert_eq!(pr.tool_use_id.as_deref(), Some("s1"), "its card sits on the tool call");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2183,12 +2354,17 @@ esac
         let _ = send("Please plan it, and @Web Dev take a look too").await.ok().unwrap();
         until("both runs", 10, || !is_running(&st, &dev.id) && !is_running(&st, &orch.id) && workspace(&st, &orch.id).join("prompts.log").exists()).await;
 
-        // Another project's agent isn't reachable, even by name, and doesn't shadow this one's.
+        // Another group's agent is reachable, but doesn't shadow this group's agent of the same name.
         let mut far = crate::tasks::tests::agent(&st, "Web Dev");
-        far.project = "imole".into();
+        far.group = "imole".into();
         st.db.save_agent(&far).unwrap();
         let r = send("@Web Dev again").await.ok().unwrap().0;
         assert_eq!(r["mentioned"], json!([{ "id": dev.id, "name": "Web Dev" }]));
+        let mut isa = crate::tasks::tests::agent(&st, "Ida");
+        isa.group = "imole".into();
+        st.db.save_agent(&isa).unwrap();
+        let r = send("@Ida have a look").await.ok().unwrap().0;
+        assert_eq!(r["mentioned"], json!([{ "id": isa.id, "name": "Ida" }]));
     }
 
     #[test]
@@ -2196,12 +2372,12 @@ esac
         let st = crate::tasks::tests::state();
         let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
         let projects = dir.join("projects");
-        std::fs::create_dir_all(projects.join("work/isa")).unwrap();
+        std::fs::create_dir_all(projects.join("work/notes")).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         let st = AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st };
         let mut a = crate::tasks::tests::agent(&st, "Dev");
-        a.project = "work/isa".into();
-        assert_eq!(at_base(&st, &a), projects.join("work/isa").canonicalize().unwrap());
+        a.project = "work/notes".into();
+        assert_eq!(at_base(&st, &a), projects.join("work/notes").canonicalize().unwrap());
         for tag in ["Marketing", "../..", ""] {
             a.project = tag.into();
             assert_eq!(at_base(&st, &a), workspace(&st, &a.id), "{tag:?} falls back to the workspace");
@@ -2334,7 +2510,8 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_run_keeps_answering_the_user() {
         let (st, a) = fake_claude_state();
-        let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
+        // Running as far as Restart can tell: the run has registered whether it answers the user.
+        let running = |st: &AppState, id: &str| st.rt.lock().unwrap().runs.contains_key(id);
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
         until("the run to start", 10, || running(&st, &a.id)).await;
         restart(&st, &a.id).await;
@@ -2352,6 +2529,92 @@ esac
         idle(&st, &b.id).await;
         assert!(st.db.list_messages(&b.id, 50, None).unwrap().iter().any(|m| m.kind == "error" && m.content.contains("failed to start")));
         assert!(unread(&st, &b.id), "the restarted run's error");
+    }
+
+    /// Makes the agent's current run look quiet for `minutes`, as a dead API connection does.
+    fn go_quiet(st: &AppState, id: &str, minutes: i64) {
+        st.rt.lock().unwrap().runs.get_mut(id).unwrap().last_output_at = (Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+    }
+
+    fn prompts(st: &AppState, id: &str) -> String {
+        std::fs::read_to_string(workspace(st, id).join("prompts.log")).unwrap_or_default()
+    }
+
+    /// The agent's `n`th run has started and its first event (the session) has come in, so the quiet
+    /// clock it sets can be moved back.
+    async fn started(st: &AppState, id: &str, n: usize) {
+        until("the run to start", 10, || prompts(st, id).matches("\n---\n").count() == n && st.rt.lock().unwrap().runs.contains_key(id)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_run_with_nothing_to_wait_on_is_restarted_like_the_restart_button() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+
+        // Waiting on background work (another agent, so its run's own handling of that stays out of the way).
+        let b = crate::tasks::tests::agent(&st, "Builder");
+        let _ = send(&st, &b.id, "busy").await.ok().unwrap();
+        started(&st, &b.id, 1).await;
+        st.rt.lock().unwrap().runs.get_mut(&b.id).unwrap().waiting_on = vec!["npm test".into()];
+        go_quiet(&st, &b.id, 25);
+        // Not quiet long enough, in a tool call that hasn't returned (a long build), or waiting on a
+        // permission: left alone.
+        go_quiet(&st, &a.id, 19);
+        restart_quiet(&st).await;
+        go_quiet(&st, &a.id, 25);
+        st.rt.lock().unwrap().runs.get_mut(&a.id).unwrap().tools_open = vec!["toolu_build".into()];
+        restart_quiet(&st).await;
+        st.rt.lock().unwrap().runs.get_mut(&a.id).unwrap().tools_open.clear();
+        let mut ask = crate::db::PermissionRequest {
+            id: "p-quiet".into(), agent_id: a.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({ "command": "ls" }),
+            reason: String::new(), rule: "Bash(ls)".into(), status: "pending".into(), created_at: crate::db::now(),
+        };
+        st.db.save_permission(&ask).unwrap();
+        restart_quiet(&st).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(is_running(&st, &a.id) && !prompts(&st, &a.id).contains("restarted your last run"), "{}", prompts(&st, &a.id));
+        assert!(!prompts(&st, &b.id).contains("restarted your last run"), "waiting on background work");
+        let _ = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(b.id.clone())).await;
+        ask.status = "allow_once".into();
+        st.db.save_permission(&ask).unwrap();
+
+        // Quiet 20 minutes with nothing to wait on: restarted, told so, and its reply is Unread as before.
+        restart_quiet(&st).await;
+        until("the restarted run", 10, || prompts(&st, &a.id).contains("[Loft: Loft restarted your last run (no output for 25 min)")).await;
+        idle(&st, &a.id).await;
+        assert!(unread(&st, &a.id), "the restarted run's reply");
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.starts_with("Restarted by Loft")));
+        // It answered: the count starts over.
+        assert!(!st.rt.lock().unwrap().auto_restarts.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_stays_quiet_is_restarted_twice_then_left_to_the_user() {
+        let (st, a) = fake_claude_state();
+        let runs = |st: &AppState| prompts(st, &a.id).matches("busy").count();
+        let _ = send(&st, &a.id, "busy 1").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+        // Each restarted run hangs too: it runs what's queued, says something, and never finishes its turn.
+        for n in 2..=3 {
+            let _ = send(&st, &a.id, &format!("chatty busy {n}")).await.ok().unwrap();
+            go_quiet(&st, &a.id, 21);
+            restart_quiet(&st).await;
+            started(&st, &a.id, n).await;
+        }
+        assert_eq!(st.rt.lock().unwrap().auto_restarts.get(&a.id), Some(&2));
+
+        // A third quiet spell: not restarted; Needs you says why.
+        go_quiet(&st, &a.id, 21);
+        restart_quiet(&st).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(runs(&st), 3);
+        assert!(is_running(&st, &a.id));
+        let snap = crate::needs_you::snapshot(&st).unwrap();
+        let stuck = snap["items"].as_array().unwrap().iter().find(|i| i["type"] == "stuck").unwrap();
+        assert!(stuck["reason"].as_str().unwrap().contains("after 2 automatic restarts"), "{stuck}");
+        let _ = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2472,7 +2735,7 @@ esac
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_is_cleared_by_delivery_only_as_the_builder() {
         let (st, a) = fake_claude_state();
-        set(&st, &a.id, |a| (a.role, a.project, a.fresh_context) = ("lead".into(), "team".into(), "always".into()));
+        set(&st, &a.id, |a| (a.role, a.group, a.fresh_context) = ("lead".into(), "team".into(), "always".into()));
         let lead = st.db.get_agent(&a.id).unwrap().unwrap();
         assert!(crate::delivery::fresh_context_applies(&st, &lead), "no Dev: the Lead builds the tickets");
         on_ticket(&st, &a.id, "o/r#1/2", true).await;
@@ -2483,7 +2746,7 @@ esac
         assert_eq!(count(&st, &a.id, "clear"), 1, "building a new ticket");
 
         let dev = crate::tasks::tests::agent(&st, "Dev");
-        set(&st, &dev.id, |d| (d.role, d.project) = ("dev".into(), "team".into()));
+        set(&st, &dev.id, |d| (d.role, d.group) = ("dev".into(), "team".into()));
         assert!(!crate::delivery::fresh_context_applies(&st, &lead), "a Lead that only coordinates");
         assert!(crate::delivery::fresh_context_applies(&st, &st.db.get_agent(&dev.id).unwrap().unwrap()));
     }

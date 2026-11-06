@@ -5,6 +5,8 @@ export type IssueFilters = {
   /** Search text: words, a label, `@owner`, or `#42`. */
   q: string;
   source: Source;
+  /** A group label: the issues of the projects its agents work in. */
+  group: string;
   project: string;
   /** An agent id. */
   agent: string;
@@ -14,7 +16,7 @@ export type IssueFilters = {
   closed: boolean;
 };
 
-export const DEFAULT_FILTERS: IssueFilters = { q: "", source: "all", project: "", agent: "", mine: false, closed: false };
+export const DEFAULT_FILTERS: IssueFilters = { q: "", source: "all", group: "", project: "", agent: "", mine: false, closed: false };
 
 const SOURCES: Source[] = ["all", "loft", "github"];
 const MAX = 200;
@@ -30,6 +32,7 @@ export function parseFilters(params: URLSearchParams): IssueFilters {
   return {
     q: text("q"),
     source: SOURCES.includes(source) ? source : "all",
+    group: text("group"),
     project: text("project"),
     agent: text("agent"),
     mine: flag("mine"),
@@ -37,11 +40,12 @@ export function parseFilters(params: URLSearchParams): IssueFilters {
   };
 }
 
-/** The query string for `f`, without the filters at their default, so a plain list is a plain `/tasks`. */
+/** The query string for `f`, without the filters at their default, so a plain list is a plain `/issues`. */
 export function filtersToParams(f: IssueFilters): URLSearchParams {
   const p = new URLSearchParams();
   if (f.q.trim()) p.set("q", f.q.trim());
   if (f.source !== "all") p.set("source", f.source);
+  if (f.group) p.set("group", f.group);
   if (f.project) p.set("project", f.project);
   if (f.agent) p.set("agent", f.agent);
   if (f.mine) p.set("mine", "1");

@@ -37,7 +37,7 @@ final class NeedsYouTests: XCTestCase {
     /// A comment waiting for GitHub (spec #65): Approve, "Edit and approve" starting from the comment's text, Keep in Loft.
     func testACommentApprovalEditsTheCommentItself() throws {
         let item = try XCTUnwrap(try fixture().items.first { $0.type == "comment_approval" })
-        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open task"])
+        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open issue"])
         let edit = try XCTUnwrap(item.answerAction)
         XCTAssertEqual(edit.draft, item.text, "editing starts from the comment, not an empty box")
         guard case .object(let o)? = edit.body(text: "Edited", clientId: "c1") else { return XCTFail() }

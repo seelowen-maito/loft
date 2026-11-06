@@ -1,10 +1,10 @@
 # Security TODO
 
-Open findings from the Security Agent audit (pass 1, 2026-10-21). Each item links to a Loft task of the same name; the full report with reproduction notes stays on the host Mac and is not published. Items are removed here when the fix merges.
+Open findings from the Security Agent audit (pass 1, 2026-10-21). Each item links to a Loft issue of the same name; the full report with reproduction notes stays on the host Mac and is not published. Items are removed here when the fix merges.
 
 ## Open findings
 
-Short list so the whole picture is visible. Details are in the local report and in the Loft tasks with the same names.
+Short list so the whole picture is visible. Details are in the local report and in the Loft issues with the same names.
 
 | # | Severity | Finding | Status |
 |---|---|---|---|

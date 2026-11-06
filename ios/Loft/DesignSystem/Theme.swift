@@ -1,7 +1,10 @@
 import SwiftUI
 
 enum Theme {
+    /// The web's green: lime on dark, a deeper green on light, where lime is too faint on white.
     static let accent = Color.accentColor
+    /// Text and icons on an accent fill: near-black on the lime, white on the deeper green.
+    static let onAccent = ink(light: .white, dark: Color(red: 0.03, green: 0.04, blue: 0.04))
     static let working = Color(red: 0.30, green: 0.82, blue: 0.52)
     static let attention = Color(red: 1.00, green: 0.72, blue: 0.25)
     static let failure = Color(red: 1.00, green: 0.42, blue: 0.40)
@@ -207,7 +210,7 @@ struct EmptyState: View {
             Text(message)
         } actions: {
             if let actionTitle, let action {
-                Button(actionTitle, action: action).buttonStyle(.borderedProminent)
+                Button(actionTitle, action: action).buttonStyle(.accent)
             }
         }
     }
@@ -311,7 +314,7 @@ extension LoftStore {
 }
 
 /// What a list shows before anything has loaded: connecting, or why Loft can't be reached.
-/// Used instead of "No agents" / "No tasks", which would be wrong while nothing is known.
+/// Used instead of "No agents" / "No issues", which would be wrong while nothing is known.
 struct NotLoadedView: View {
     @Environment(LoftStore.self) private var store
 
@@ -402,4 +405,15 @@ extension Binding {
     func onChange(_ action: @escaping () -> Void) -> Binding<Value> {
         Binding(get: { wrappedValue }, set: { wrappedValue = $0; action() })
     }
+}
+
+/// The filled accent button (`.borderedProminent`) with a label that stays readable on the lime.
+struct AccentButtonStyle: PrimitiveButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button(configuration).buttonStyle(.borderedProminent).foregroundStyle(Theme.onAccent)
+    }
+}
+
+extension PrimitiveButtonStyle where Self == AccentButtonStyle {
+    static var accent: AccentButtonStyle { AccentButtonStyle() }
 }
