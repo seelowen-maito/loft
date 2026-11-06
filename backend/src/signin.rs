@@ -32,13 +32,18 @@ pub async fn start(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
         return Err(bad(format!("The push relay didn't give a code ({}).", res.status().as_u16())));
     }
     let v = res.json::<Value>().await.unwrap_or(Value::Null);
-    let (Some(code), seconds) = (v["code"].as_str().map(str::to_string), v["expires_in"].as_u64().unwrap_or(600)) else {
+    let (Some(code), Some(secret)) = (v["code"].as_str().map(str::to_string), v["secret"].as_str().map(str::to_string)) else {
         return Err(bad("The push relay's answer had no code."));
     };
+    // The code goes into a link: only the shape the relay makes is accepted.
+    if code.len() != 22 || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err(bad("The push relay's code looked wrong."));
+    }
+    let seconds = v["expires_in"].as_u64().unwrap_or(600).clamp(60, 900);
     *WAITING.lock().unwrap() = Some(code.clone());
     let url = format!("{portal}/connect?code={code}");
     tokio::spawn(async move {
-        if let Err(e) = wait_for_key(&state, &relay, &code, Duration::from_secs(2), Duration::from_secs(seconds)).await {
+        if let Err(e) = wait_for_key(&state, &relay, &code, &secret, Duration::from_secs(2), Duration::from_secs(seconds)).await {
             tracing::warn!("push sign-in: {e:#}");
         }
         let mut w = WAITING.lock().unwrap();
@@ -49,8 +54,8 @@ pub async fn start(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
     Ok(Json(json!({ "url": url })))
 }
 
-/// Polls the relay for `code` every `every` until it gives the key (stored), forgets the code, or `limit` passes.
-async fn wait_for_key(state: &AppState, relay: &str, code: &str, every: Duration, limit: Duration) -> Result<()> {
+/// Polls the relay for `code` (proving it with `secret`, which never goes into the link) every `every` until it gives the key (stored), forgets the code, or `limit` passes.
+async fn wait_for_key(state: &AppState, relay: &str, code: &str, secret: &str, every: Duration, limit: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + limit;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(every).await;
@@ -58,7 +63,7 @@ async fn wait_for_key(state: &AppState, relay: &str, code: &str, every: Duration
             return Ok(());
         }
         // A failed poll is tried again until the code runs out.
-        let Ok(res) = state.http.post(format!("{relay}/api/pair-poll")).timeout(Duration::from_secs(15)).json(&json!({ "code": code })).send().await else { continue };
+        let Ok(res) = state.http.post(format!("{relay}/api/pair-poll")).timeout(Duration::from_secs(15)).json(&json!({ "code": code, "secret": secret })).send().await else { continue };
         match res.status().as_u16() {
             200 => {
                 let v = res.json::<Value>().await.context("the relay's answer wasn't JSON")?;
@@ -87,18 +92,20 @@ mod tests {
         let Json(r) = start(State(st.clone())).await.unwrap();
         let url = r["url"].as_str().unwrap();
         let code = url.strip_prefix("https://portal.example.com/connect?code=").expect(url).to_string();
+        let secret = format!("s-{code}");
+        assert!(!url.contains(&secret), "the secret stays out of the link");
         assert_eq!(r.as_object().unwrap().len(), 1, "only the link comes back, never a key");
         assert!(waiting());
         // Waiting: nothing yet, and the wait goes on. Allowed: the key is stored and the wait ends.
         let fast = Duration::from_millis(20);
-        assert!(wait_for_key(&st, &relay, &code, fast, Duration::from_millis(100)).await.is_err());
+        assert!(wait_for_key(&st, &relay, &code, &secret, fast, Duration::from_millis(100)).await.is_err());
         apns::tests::approve_code(&code);
-        wait_for_key(&st, &relay, &code, fast, Duration::from_secs(2)).await.unwrap();
+        wait_for_key(&st, &relay, &code, &secret, fast, Duration::from_secs(2)).await.unwrap();
         let key_file = apns::key_dir().join("relay-key");
         assert_eq!(std::fs::read_to_string(&key_file).unwrap(), apns::tests::RELAY_KEY);
         std::fs::remove_file(&key_file).unwrap();
         // The code is dead: a second wait is refused instead of getting a key again.
-        assert!(format!("{:#}", wait_for_key(&st, &relay, &code, fast, Duration::from_secs(2)).await.unwrap_err()).contains("no longer knows"));
+        assert!(format!("{:#}", wait_for_key(&st, &relay, &code, &secret, fast, Duration::from_secs(2)).await.unwrap_err()).contains("no longer knows"));
         assert!(!format!("{:?}", crate::devices::status(State(st.clone()), HeaderMap::new()).await.unwrap().0).contains("lrk_"));
     }
 

@@ -77,8 +77,13 @@ const get = (path, cookies = "") => new Request(`https://portal.example.com${pat
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
 const post = (path, form, cookies = "") => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies }, body: new URLSearchParams(form) });
 const asLoft = (path, body, ip = "203.0.113.7") => new Request(`https://relay.example.com${path}`, { method: "POST", headers: { "x-forwarded-for": ip }, body: JSON.stringify(body) });
-const newCode = async (ip) => (await (await pair(asLoft("/api/pair", {}, ip), env, clock)).json()).code;
-const pollFor = (code) => poll(asLoft("/api/pair-poll", { code }), env);
+const secrets = new Map();
+const newCode = async (ip) => {
+  const { code, secret } = await (await pair(asLoft("/api/pair", {}, ip), env, clock)).json();
+  secrets.set(code, secret);
+  return code;
+};
+const pollFor = (code, secret = secrets.get(code)) => poll(asLoft("/api/pair-poll", { code, secret }), env);
 
 /** Starts a sign-in and comes back from Apple; `before` are cookies the browser already holds. Returns the cookies. */
 async function signInAs(before = "") {
@@ -150,6 +155,16 @@ test("a poll while the key is being made waits; it doesn't lose the code", async
   assert.equal((await pollFor(code)).status, 202, "not 404 while the key is saved");
   assert.equal((await approving).status, 200);
   assert.equal((await pollFor(code)).status, 200, "the key arrives");
+});
+
+test("the code in the link isn't enough to collect the key", async () => {
+  const code = await newCode();
+  const { cookies } = await signInAs();
+  assert.equal((await pollFor(code, null)).status, 404, "no secret");
+  assert.equal((await pollFor(code, "A".repeat(22))).status, 404, "a wrong secret");
+  assert.equal((await approve(post("/connect", { code, name: "Mac" }, cookies), env)).status, 200);
+  assert.equal((await pollFor(code, "A".repeat(22))).status, 404, "a wrong secret after Allow");
+  assert.equal((await pollFor(code)).status, 200, "the Loft's own secret gets the key");
 });
 
 test("asking for codes is limited per IP", async () => {

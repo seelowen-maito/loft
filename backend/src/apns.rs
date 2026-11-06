@@ -453,15 +453,17 @@ pub(crate) mod tests {
             .route("/api/pair", axum::routing::post(move || {
                 let log = pairs.clone();
                 async move {
-                    let code = uuid::Uuid::new_v4().simple().to_string();
+                    let code = uuid::Uuid::new_v4().simple().to_string()[..22].to_string();
                     log.lock().unwrap().codes.insert(code.clone(), false);
-                    axum::Json(json!({ "code": code, "expires_in": 600 }))
+                    axum::Json(json!({ "code": code, "secret": format!("s-{code}"), "expires_in": 600 }))
                 }
             }))
             .route("/api/pair-poll", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
                 let log = polls.clone();
                 async move {
                     let code = body["code"].as_str().unwrap_or("").to_string();
+                    // The fake's secret is "s-<code>": the code alone gets nothing.
+                    let code = if body["secret"].as_str() == Some(&format!("s-{code}")) { code } else { String::new() };
                     let mut l = log.lock().unwrap();
                     match l.codes.get(&code).copied() {
                         Some(true) => { l.codes.remove(&code); (StatusCode::OK, axum::Json(json!({ "key": RELAY_KEY }))) }

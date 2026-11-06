@@ -11,33 +11,39 @@ const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
 const CODES_PER_HOUR = 5;
 const CODE = /^[A-Za-z0-9_-]{22}$/;
+const SECRET = CODE;
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const waiting = (code) => `pair:${sha256(code)}`;
-const approved = (code) => `pair-key:${sha256(code)}`;
+// The code is in the portal link, so anyone who sees the link knows it. The key is parked under the hash of a secret
+// only the Loft that asked holds, and that Loft alone can collect it.
+const approved = (secretHash) => `pair-key:${secretHash}`;
 const claimed = (code) => `pair-claim:${sha256(code)}`;
 
-/** POST /api/pair: a new code for a Loft, `{code, expires_in}`. Limited per IP; the store holds only a hash of the IP. */
+/** POST /api/pair: a new code and secret for a Loft, `{code, secret, expires_in}`. Limited per IP; the store holds only a hash of the IP. */
 export async function pair(request, env = process.env, now = Date.now()) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
   const store = makeKv(env);
   const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
   if ((await store.hit(`limit:pair:${sha256(ip)}:${Math.floor(now / 3600000)}`, 3600)) > CODES_PER_HOUR) return json(429, { error: `at most ${CODES_PER_HOUR} sign-ins per hour` });
   const code = randomBytes(16).toString("base64url");
-  await store.setEx(waiting(code), "1", CODE_SECONDS);
-  return json(200, { code, expires_in: CODE_SECONDS });
+  const secret = randomBytes(16).toString("base64url");
+  // The waiting marker holds the secret's hash and when the code ends.
+  await store.setEx(waiting(code), `${sha256(secret)}.${Math.floor(now / 1000) + CODE_SECONDS}`, CODE_SECONDS);
+  return json(200, { code, secret, expires_in: CODE_SECONDS });
 }
 
-/** POST /api/pair-poll with `{code}`: 200 `{key}` once, after the user approved it; 202 while it waits; else 404. */
+/** POST /api/pair-poll with `{code, secret}`: 200 `{key}` once, after the user approved it; 202 while it waits; else 404. */
 export async function poll(request, env = process.env) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
-  const code = (await request.json().catch(() => null))?.code;
-  if (typeof code !== "string" || !CODE.test(code)) return json(404, { error: "unknown or expired code" });
+  const body = await request.json().catch(() => null);
+  const { code, secret } = body ?? {};
+  if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return json(404, { error: "unknown or expired code" });
   const store = makeKv(env);
-  const key = await store.getdel(approved(code));
+  const key = await store.getdel(approved(sha256(secret)));
   if (key) return json(200, { key });
-  if (await store.exists(waiting(code))) return json(202, { status: "waiting" });
+  if (((await store.get(waiting(code))) ?? "").split(".")[0] === sha256(secret)) return json(202, { status: "waiting" });
   return json(404, { error: "unknown or expired code" });
 }
 
@@ -70,9 +76,13 @@ export async function approve(request, env = process.env, now = Date.now()) {
   // The first approval claims the code; a second click or tab finds it claimed. The waiting marker stays until the key
   // is stored, so a poll in between still answers 202 instead of 404.
   const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
-  if (!CODE.test(code) || !(await store.exists(waiting(code)))) return expired();
+  const marker = CODE.test(code) ? await store.get(waiting(code)) : null;
+  if (!marker) return expired();
   if ((await store.hit(claimed(code), CODE_SECONDS)) > 1) return expired();
-  await store.setEx(approved(code), await createKey(env, name, now, account), CODE_SECONDS);
+  const [secretHash, ends] = marker.split(".");
+  // The key waits no longer than the code would have.
+  const left = Math.max(1, Number(ends) - Math.floor(now / 1000));
+  await store.setEx(approved(secretHash), await createKey(env, name, now, account), left);
   await store.getdel(waiting(code));
   return page("Loft is signed in", "<p>Your Loft has its key. You can close this page.</p>");
 }
