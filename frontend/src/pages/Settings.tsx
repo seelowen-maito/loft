@@ -6,6 +6,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { cx } from "../lib/format";
+import { comboFromEvent, DEFAULT_COMBO, formatCombo, loadCombo, recording, saveCombo, SWITCHER_KEY_CHANGED } from "../lib/quickSwitcher";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -131,6 +132,60 @@ function Spend() {
       </p>
       <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
     </Section>
+  );
+}
+
+/** The quick switcher's key combination, kept in this browser and used at once: no Save needed. */
+function SwitcherKey() {
+  const [combo, setCombo] = useState(loadCombo);
+  const [listening, setListening] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+
+  const use = (c: string) => {
+    saveCombo(c);
+    setCombo(c);
+    setHint(null);
+    window.dispatchEvent(new Event(SWITCHER_KEY_CHANGED));
+  };
+
+  useEffect(() => {
+    if (!listening) return;
+    recording.on = true;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.metaKey) return setListening(false);
+      if (/^(Shift|Control|Alt|Meta|OS)$/.test(e.key)) return;
+      const c = comboFromEvent(e);
+      if (!c) return setHint("Hold ⌘, Ctrl or Alt with the key.");
+      use(c);
+      setListening(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      recording.on = false;
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [listening]);
+
+  return (
+    <div className="space-y-1.5">
+      <span className="eyebrow">Open an agent</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <kbd className="chip min-w-12 justify-center font-mono text-[12px]">{listening ? "Press keys…" : formatCombo(combo)}</kbd>
+        <button type="button" className="btn" onClick={() => { setHint(null); setListening((l) => !l); }}>
+          {listening ? "Cancel" : "Record"}
+        </button>
+        {combo !== DEFAULT_COMBO && !listening && (
+          <button type="button" className="btn-ghost" onClick={() => use(DEFAULT_COMBO)}>
+            Reset to {formatCombo(DEFAULT_COMBO)}
+          </button>
+        )}
+      </div>
+      <span className="block text-[11.5px] text-fg-3">
+        {hint ?? "Opens the quick switcher from any page, even while typing. Press Record, then the new keys; it needs ⌘, Ctrl or Alt. Kept in this browser."}
+      </span>
+    </div>
   );
 }
 
@@ -313,6 +368,10 @@ export default function SettingsPage() {
             label="Show Simulator"
             hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
+        </Section>
+
+        <Section title="Keyboard shortcut">
+          <SwitcherKey />
         </Section>
 
         <PushSettings />
