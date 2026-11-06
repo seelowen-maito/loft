@@ -4,7 +4,7 @@ import { api, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
-const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Push is off" };
+const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Sign in to get push" };
 const WHERE: Record<PushStatus["path"], string> = {
   own_key: "Pushes go straight to Apple with your own key.",
   relay: "Pushes go through the Loft relay with your relay key.",
@@ -22,6 +22,7 @@ export function PushSettings() {
   const [portalAddr, setPortalAddr] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [portalLink, setPortalLink] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
   const load = () => {
@@ -35,6 +36,31 @@ export function PushSettings() {
     api.devices().then(setDevices);
   };
   useEffect(load, []);
+  // After Sign in the backend collects the key; look until it has it or the code is gone.
+  const signingIn = status?.signing_in;
+  useEffect(() => {
+    if (!signingIn) return;
+    const t = setInterval(load, 2000);
+    return () => clearInterval(t);
+  }, [signingIn]);
+  useEffect(() => {
+    if (status?.relay_key) setPortalLink(null);
+  }, [status?.relay_key]);
+
+  const signIn = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const { url } = await api.pushSignIn();
+      setPortalLink(url);
+      window.open(url, "_blank", "noopener");
+      load();
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
@@ -119,12 +145,28 @@ export function PushSettings() {
           <>
             <p className="text-[12px] text-fg-3">
               Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
-              and are never stored. {status.portal_url ? "Sign in on the Loft portal, then paste the relay key it gives you." : "Paste the relay key you were given."}
+              and are never stored. {status.relay_url && status.portal_url ? "Press Sign in and allow it on the portal; or paste a relay key." : status.portal_url ? "Sign in on the Loft portal, then paste the relay key it gives you." : "Paste the relay key you were given."}
             </p>
-            {status.portal_url && (
-              <a className="btn w-fit" href={status.portal_url} target="_blank" rel="noreferrer">
-                <ExternalLink className="size-3.5" /> Open the Loft portal to sign in
-              </a>
+            {status.relay_url && status.portal_url ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" className="btn-primary" disabled={busy} onClick={signIn}>
+                  <ExternalLink className="size-3.5" /> Sign in
+                </button>
+                {status.signing_in && portalLink && (
+                  <span className="text-[12px] text-fg-3">
+                    Waiting for you to allow it on the portal.{" "}
+                    <a className="underline hover:text-fg" href={portalLink} target="_blank" rel="noreferrer">
+                      Open the page again
+                    </a>
+                  </span>
+                )}
+              </div>
+            ) : (
+              status.portal_url && (
+                <a className="btn w-fit" href={status.portal_url} target="_blank" rel="noreferrer">
+                  <ExternalLink className="size-3.5" /> Open the Loft portal to sign in
+                </a>
+              )
             )}
             <div className="flex gap-2">
               <input

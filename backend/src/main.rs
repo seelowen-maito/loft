@@ -18,6 +18,7 @@ mod mentions;
 mod mirror;
 mod prs;
 mod push;
+mod signin;
 mod repos;
 mod schedule;
 mod sessions;
@@ -159,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/devices/{token}", axum::routing::patch(devices::update).delete(devices::remove))
         .route("/devices/{token}/test", post(devices::test))
         .route("/push", get(devices::status).put(devices::configure))
+        .route("/push/signin", post(signin::start))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))

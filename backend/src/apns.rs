@@ -432,6 +432,8 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct Relayed {
         pub pushes: Vec<(String, Value)>,
+        /// Sign-in codes handed out, and whether the user allowed them yet.
+        pub codes: std::collections::HashMap<String, bool>,
     }
     static RELAYED: std::sync::OnceLock<std::sync::Arc<Mutex<Relayed>>> = std::sync::OnceLock::new();
 
@@ -446,7 +448,30 @@ pub(crate) mod tests {
     /// alert's title starts with "Refused".
     fn relay_routes(log: std::sync::Arc<Mutex<Relayed>>) -> axum::Router {
         use axum::http::{HeaderMap, StatusCode};
+        let (pairs, polls) = (log.clone(), log.clone());
         axum::Router::new()
+            .route("/api/pair", axum::routing::post(move || {
+                let log = pairs.clone();
+                async move {
+                    let code = uuid::Uuid::new_v4().simple().to_string()[..22].to_string();
+                    log.lock().unwrap().codes.insert(code.clone(), false);
+                    axum::Json(json!({ "code": code, "secret": format!("s-{code}"), "expires_in": 600 }))
+                }
+            }))
+            .route("/api/pair-poll", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let log = polls.clone();
+                async move {
+                    let code = body["code"].as_str().unwrap_or("").to_string();
+                    // The fake's secret is "s-<code>": the code alone gets nothing.
+                    let code = if body["secret"].as_str() == Some(&format!("s-{code}")) { code } else { String::new() };
+                    let mut l = log.lock().unwrap();
+                    match l.codes.get(&code).copied() {
+                        Some(true) => { l.codes.remove(&code); (StatusCode::OK, axum::Json(json!({ "key": RELAY_KEY }))) }
+                        Some(false) => (StatusCode::ACCEPTED, axum::Json(json!({ "status": "waiting" }))),
+                        None => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "unknown or expired code" }))),
+                    }
+                }
+            }))
             .route("/api/push", axum::routing::post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
                 let log = log.clone();
                 async move {
@@ -462,6 +487,17 @@ pub(crate) mod tests {
                     (StatusCode::OK, axum::Json(if gone { json!({ "apple_status": 410, "reason": "Unregistered" }) } else { json!({ "apple_status": 200, "reason": null }) }))
                 }
             }))
+    }
+
+    /// The fake relay's address.
+    pub(crate) fn fake_apns_relay() -> String {
+        fake_apns();
+        std::env::var("LOFT_RELAY_URL").unwrap()
+    }
+
+    /// The user allows `code` on the (fake) portal.
+    pub(crate) fn approve_code(code: &str) {
+        relayed().lock().unwrap().codes.insert(code.to_string(), true);
     }
 
     /// One fake APNs (HTTP/2, 200, or 410 for tokens starting "dead") for the whole test process,
