@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { atToken, matchingEntries, mentionMode, withPick } from "../src/lib/mention.ts";
+import { atToken, matchingEntries, mentionMode, stillFound, withPick } from "../src/lib/mention.ts";
 
 test("only an @ token at the end of the text opens the menu", () => {
   assert.deepEqual(atToken("see @"), { query: "", dir: "", prefix: "" });
@@ -53,4 +53,25 @@ test("a search pick puts its whole path in the token", () => {
   const folder = withPick("see @agents", { dir: "", entry: { name: "frontend/src/pages/agents", dir: true } });
   assert.equal(folder, "see @frontend/src/pages/agents/", "a folder stays open");
   assert.equal(mentionMode(atToken(folder)!.query), "browse", "and browses its contents");
+});
+
+test("while a longer name is searched, only the last results it still matches stay up", () => {
+  const found = {
+    typed: "ch",
+    entries: [
+      { name: "src/Chat.tsx", dir: false },
+      { name: "chores", dir: true },
+      { name: "docs/c/h/a/t.md", dir: false },
+      { name: "change.log", dir: false },
+    ],
+  };
+  assert.deepEqual(stillFound(found, "ch"), found.entries, "the same name keeps them all");
+  assert.deepEqual(
+    stillFound(found, "chat").map((e) => e.name),
+    ["src/Chat.tsx", "docs/c/h/a/t.md"],
+    "in order, ignoring case, through the folders too",
+  );
+  assert.deepEqual(stillFound(found, "chq"), []);
+  assert.deepEqual(stillFound(found, "c"), [], "a shorter name waits for its own search");
+  assert.deepEqual(stillFound(found, "ab"), [], "a different name too");
 });

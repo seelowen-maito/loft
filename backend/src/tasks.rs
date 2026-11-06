@@ -1161,6 +1161,7 @@ pub(crate) mod tests {
             publish_locks: Arc::new(Default::default()),
             publish_known: Arc::new(Default::default()),
             mirror: Arc::new(Default::default()),
+            listings: Arc::new(Default::default()),
         }
     }
 
