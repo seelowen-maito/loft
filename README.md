@@ -98,6 +98,16 @@ Run `./dev.sh` for hot reload and open http://localhost:7421. `LOFT_PORT` change
 
 Feature pull requests target `develop`. A GitHub Action keeps one `Release: develop → main` pull request open that lists every merged PR not on `main` yet; merge it with a merge commit to ship a release. Every push to `main` is synced back into `develop` (fast-forward, or a merge commit); when that can't be pushed, a `Sync main → develop` pull request opens instead.
 
+To let the sync push straight to `develop` when its ruleset requires pull requests:
+
+1. Create a key pair: `ssh-keygen -t ed25519 -N "" -C develop-sync -f develop-sync`.
+2. Settings → Deploy keys: add `develop-sync.pub` with **Allow write access**.
+3. Settings → Secrets and variables → Actions: add a secret named `DEVELOP_SYNC_KEY` holding the private key (`develop-sync`).
+4. Settings → Rules → the `develop` ruleset: add **Deploy keys** to the bypass list.
+5. Settings → Actions → General: turn on **Allow GitHub Actions to create and approve pull requests**, so both workflows can open their pull requests.
+
+Without the secret, the sync pushes with the workflow's token. Once the ruleset blocks that push, every sync becomes a pull request.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Free to use, modify, and sell; just keep the copyright notice.
