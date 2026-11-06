@@ -14,7 +14,7 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
 import { TempMeter } from "./components/TempMeter";
-import { QuickSwitcher } from "./components/QuickSwitcher";
+import { Shortcuts } from "./components/Shortcuts";
 
 function Clock() {
   const [now, setNow] = useState(new Date());
@@ -175,7 +175,7 @@ export default function App() {
         </div>
       </header>
       <UpdateBanner live={live} />
-      <QuickSwitcher />
+      <Shortcuts />
       <main className="min-h-0 flex-1">
         <Routes>
           <Route path="/" element={<Navigate to="/repos" replace />} />
