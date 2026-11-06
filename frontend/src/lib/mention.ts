@@ -7,6 +7,12 @@ export function atToken(text: string): { query: string; dir: string; prefix: str
   return { query: query.toLowerCase(), dir, prefix: query.slice(dir.length).toLowerCase() };
 }
 
+/** How the menu finds files for an `@` token's `query`: a name with no "/" in it searches the whole project
+ * for it; nothing typed yet, a path, or just dots (on the way to `../`) browses folder by folder. */
+export function mentionMode(query: string): "search" | "browse" {
+  return query.includes("/") || /^\.*$/.test(query) ? "browse" : "search";
+}
+
 export type Entry = { name: string; dir: boolean };
 
 /** The folder's entries starting with `prefix`; hidden ones only once a "." is typed. */

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2, Play, Users } from "lucide-react";
+import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2, Users } from "lucide-react";
 import { cx } from "../../lib/format";
 import { teamNote } from "../../lib/teamNote";
+import { StartDeliveryButton } from "../../components/StartDeliveryButton";
 import { api, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
@@ -95,14 +96,13 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
-          <button
-            className="btn btn-primary text-[12.5px]"
+          <StartDeliveryButton
+            className="text-[12.5px]"
+            pending={busy === "start"}
             disabled={busy !== null}
             title={delivery.standalone ? `Opens #${delivery.spec}'s branch and draft PR and starts it on the team's Dev.` : `Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
             onClick={() => start(false)}
-          >
-            {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} Start delivery
-          </button>
+          />
         )}
         {delivery && startedOn && (
           <Link to={`/agents/${startedOn.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">

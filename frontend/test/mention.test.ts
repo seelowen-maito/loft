@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { atToken, matchingEntries, withPick } from "../src/lib/mention.ts";
+import { atToken, matchingEntries, mentionMode, withPick } from "../src/lib/mention.ts";
 
 test("only an @ token at the end of the text opens the menu", () => {
   assert.deepEqual(atToken("see @"), { query: "", dir: "", prefix: "" });
@@ -33,4 +33,24 @@ test("picking a folder keeps the menu on its contents, a file or agent ends the 
   assert.equal(withPick("see @src/ma", { dir: "src/", entry: { name: "main.rs", dir: false } }), "see @src/main.rs ");
   assert.equal(withPick("@we", { agent: "Web Dev" }), "@Web Dev ");
   assert.equal(atToken(withPick("see @sr", { dir: "", entry: { name: "src", dir: true } }))?.dir, "src/");
+});
+
+test("a name searches the whole project, a path or nothing yet browses folder by folder", () => {
+  const mode = (text: string) => mentionMode(atToken(text)!.query);
+  assert.equal(mode("see @chat"), "search");
+  assert.equal(mode("@Chat.tsx"), "search");
+  assert.equal(mode("@.github"), "search", "a hidden name searches too");
+  assert.equal(mode("see @"), "browse", "nothing typed lists the project's top folder");
+  assert.equal(mode("@frontend/"), "browse");
+  assert.equal(mode("@frontend/src/Ch"), "browse");
+  assert.equal(mode("@."), "browse", "on the way to ../");
+  assert.equal(mode("@.."), "browse");
+  assert.equal(mode("@../imole/pro"), "browse");
+});
+
+test("a search pick puts its whole path in the token", () => {
+  assert.equal(withPick("see @chat", { dir: "", entry: { name: "frontend/src/pages/agents/Chat.tsx", dir: false } }), "see @frontend/src/pages/agents/Chat.tsx ");
+  const folder = withPick("see @agents", { dir: "", entry: { name: "frontend/src/pages/agents", dir: true } });
+  assert.equal(folder, "see @frontend/src/pages/agents/", "a folder stays open");
+  assert.equal(mentionMode(atToken(folder)!.query), "browse", "and browses its contents");
 });

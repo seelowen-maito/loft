@@ -4,6 +4,7 @@ mod api;
 mod avatar;
 mod db;
 mod delivery;
+mod file_search;
 mod devices;
 mod github;
 mod github_inbox;
@@ -136,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{id}/memories/{mid}", delete(api::delete_memory))
         .route("/agents/{id}/files", get(api::list_files))
         .route("/agents/{id}/ls", get(api::list_dir))
+        .route("/agents/{id}/find", get(api::find_files))
         .route("/agents/{id}/open-editor", post(api::open_editor))
         .route("/simulator", get(simulator::booted))
         .route("/simulator/screenshot", get(simulator::screenshot))

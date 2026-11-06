@@ -304,6 +304,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Like the backend: marks the card's setup sent once and only then sends it to `loft`; a repeat is a duplicate.
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse {
         try check()
+        await slowEndCard()
         return try locked {
             guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
                 throw APIError.server(status: 404, message: "not found")
@@ -325,6 +326,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Like the backend: starts the card's Delivery once, on the fixture's Dev; a repeat is a duplicate.
     func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
         try check()
+        await slowEndCard()
         return try locked {
             guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
                 throw APIError.server(status: 404, message: "not found")
@@ -338,6 +340,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             deliveriesStarted += 1
             return SendMessageResponse(ok: true, queued: nil, duplicate: false, message: m)
         }
+    }
+
+    /// `-fixture-slow-end-card`: the end card's buttons take two seconds, so their pending states can be seen.
+    private func slowEndCard() async {
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-end-card") { try? await Task.sleep(for: .seconds(2)) }
     }
 
     private func locked<T>(_ f: () throws -> T) rethrows -> T {
@@ -575,6 +582,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     func resetSession(agentId: String) async throws {
         try check()
+        await slowEndCard()
         locked {
             guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { return }
             agentList[i].sessionId = nil
