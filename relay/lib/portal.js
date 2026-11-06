@@ -99,15 +99,24 @@ export async function home(request, env = process.env, now = Date.now()) {
     keys.length < MAX_KEYS
       ? '<form method="post" action="/keys"><p><label>Key name <input name="name" maxlength="60" required placeholder="My Mac"></label></p><button>Create key</button></form>'
       : "<p>Revoke a key to make room for a new one.</p>";
-  return page("Your keys", `${list}<p>${keys.length} of ${MAX_KEYS} keys. A key is shown once, when you create it. Revoke one and its Loft stops pushing at once.</p>${create}`);
+  return page("Your keys", `${list}<p>${keys.length} of ${MAX_KEYS} keys. A key is shown once, when you create it. Revoke one and its Loft stops pushing at once.</p>${create}<p><a href="/account/delete">Delete my account</a></p>`);
 }
 
-/** GET /auth/start: sends the user to Apple, with a state that comes back only to this browser. */
-export async function start(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+/**
+ * Sends the user to Apple, with a state that comes back only to this browser. With `deleting` (an account), this
+ * sign-in confirms deleting it: the intent is sealed with this state, so it never applies to a later sign-in.
+ */
+const toApple = (env, now, deleting) => {
   const state = randomBytes(16).toString("base64url");
   const query = new URLSearchParams({ client_id: env.APPLE_SERVICES_ID, redirect_uri: `${origin(env)}/auth/callback`, response_type: "code", state });
-  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS));
+  const intent = deleting ? cookie("delete", seal(env, "delete", `${state}.${deleting}`, STATE_SECONDS, now), STATE_SECONDS) : cookie("delete", "", 0);
+  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS), intent);
+};
+
+/** GET /auth/start: Sign in with Apple. */
+export async function start(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  return toApple(env, now);
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
@@ -117,7 +126,10 @@ export async function callback(request, env = process.env, now = Date.now()) {
   const state = unseal(env, "state", cookieOf(request, "state"), now);
   const clear = cookie("state", "", 0);
   if (!state || state !== params.get("state") || !params.get("code")) return page("Sign-in failed", '<p>That sign-in didn\'t check out. <a href="/">Try again</a>.</p>', 400, { "set-cookie": clear });
-  let sub;
+  // `state.account` from `toApple`: only for the sign-in it was made with.
+  const intent = unseal(env, "delete", cookieOf(request, "delete"), now) ?? "";
+  const deleting = intent.startsWith(`${state}.`) ? intent.slice(state.length + 1) : null;
+  let sub, tokens;
   try {
     const res = await fetch(`${appleHost(env)}/auth/token`, {
       method: "POST",
@@ -126,15 +138,85 @@ export async function callback(request, env = process.env, now = Date.now()) {
     });
     if (!res.ok) throw new Error(`Apple answered ${res.status}`);
     // The id token came from Apple over TLS in answer to our own request, so its signature isn't checked again.
-    const claims = JSON.parse(Buffer.from((await res.json()).id_token.split(".")[1], "base64url"));
+    tokens = await res.json();
+    const claims = JSON.parse(Buffer.from(tokens.id_token.split(".")[1], "base64url"));
     if (claims.iss !== APPLE || claims.aud !== env.APPLE_SERVICES_ID || claims.exp * 1000 < now || !claims.sub) throw new Error("unexpected id token");
     sub = String(claims.sub);
   } catch (e) {
     console.error(`push portal: sign-in failed (${e.message})`);
     return page("Sign-in failed", '<p>Apple didn\'t confirm the sign-in. <a href="/">Try again</a>.</p>', 502, { "set-cookie": clear });
   }
+  if (deleting) return finishDelete(env, now, deleting, sub, tokens);
   await makeKv(env).setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
   return redirect("/", clear, cookie("session", seal(env, "session", sub, SESSION_SECONDS, now), SESSION_SECONDS));
+}
+
+/** GET /account/delete: what deleting does, and the button. */
+export async function confirmDelete(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const account = accountOf(request, env, now);
+  if (!account) return redirect("/");
+  const n = (await keysOf(makeKv(env), account)).length;
+  const keys = n === 1 ? "your key, so its Loft stops" : n ? `all ${n} keys, so those Lofts stop` : "your account, so new Lofts can't";
+  return page(
+    "Delete your account?",
+    `<p>This deletes ${keys} pushing, and ends Sign in with Apple for this portal. It can't be undone. You can sign in again later and start fresh.</p>` +
+      '<p>Apple asks you to sign in once more to confirm.</p><form method="post" action="/account/delete"><button>Delete my account</button> <a href="/">Cancel</a></form>',
+  );
+}
+
+/** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
+export async function startDelete(request, env = process.env, now = Date.now()) {
+  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  const account = accountOf(request, env, now);
+  if (!account) return redirect("/");
+  return toApple(env, now, account);
+}
+
+/**
+ * Deletes `account` and its keys. The account goes first: from then on no key can be made for it, so every key it
+ * has is in its set when the set is read.
+ */
+export async function deleteAccount(store, account) {
+  await store.transaction([["DEL", `account:${account}`]]);
+  const [ids] = await store.pipeline([["SMEMBERS", `account-keys:${account}`]]);
+  await store.transaction([["DEL", `account-keys:${account}`, ...(ids ?? []).flatMap((id) => [`relay-key:${id}`, `relay-key-used:${id}`])]]);
+}
+
+/** Back from Apple on the way to deleting: only the account that asked can be deleted. */
+async function finishDelete(env, now, account, sub, tokens) {
+  const signedOut = [cookie("state", "", 0), cookie("delete", "", 0)];
+  if (account !== sub) {
+    const res = page("Not deleted", '<p>That was a different Apple ID from this account\'s, so nothing was deleted. <a href="/">Back</a></p>', 403);
+    signedOut.forEach((c) => res.headers.append("set-cookie", c));
+    return res;
+  }
+  await deleteAccount(makeKv(env), account);
+  const revoked = await revokeApple(env, tokens, now);
+  const res = page(
+    "Account deleted",
+    `<p>Your account and its keys are gone, and Lofts using them no longer push.${revoked ? "" : " Apple didn't confirm ending the sign-in: you can remove this portal under Sign in with Apple in your Apple ID settings."}</p>`,
+  );
+  [...signedOut, cookie("session", "", 0)].forEach((c) => res.headers.append("set-cookie", c));
+  return res;
+}
+
+/** Ends the Sign in with Apple link for this portal by revoking the token Apple just gave. True when Apple accepted it. */
+async function revokeApple(env, tokens, now) {
+  const [token, hint] = tokens.refresh_token ? [tokens.refresh_token, "refresh_token"] : [tokens.access_token, "access_token"];
+  if (!token) return false;
+  try {
+    const res = await fetch(`${appleHost(env)}/auth/revoke`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: env.APPLE_SERVICES_ID, client_secret: clientSecret(env, now), token, token_type_hint: hint }),
+    });
+    if (!res.ok) throw new Error(`Apple answered ${res.status}`);
+    return true;
+  } catch (e) {
+    console.error(`push portal: token revocation failed (${e.message})`);
+    return false;
+  }
 }
 
 /**
