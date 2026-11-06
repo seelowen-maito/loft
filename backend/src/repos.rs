@@ -20,11 +20,14 @@ const GIT_TTL: Duration = Duration::from_secs(120);
 const GITHUB_TTL: Duration = Duration::from_secs(15 * 60);
 /// Stars, forks, watchers and the description change rarely: read every few hours.
 const META_TTL: Duration = Duration::from_secs(6 * 3600);
+/// `project_problems` runs on every agent event: each project's folder is looked at once in this long.
+const PROBLEM_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct RepoCache {
     git: Mutex<Option<(Instant, Vec<RepoSummary>)>>,
     github: Mutex<HashMap<String, Cached>>,
+    problems: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
 /// A repo's GitHub numbers as last read, with what's needed to ask again cheaply.
@@ -205,9 +208,25 @@ pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
     holds_repos.then(|| format!("{} holds several repos: pick one of them", project.trim()))
 }
 
-/// An agent's projects that `project_problem` refuses, each with why, for clients to flag.
+/// An agent's projects that `project_problem` refuses, each with why, for clients to flag. Each answer
+/// is kept `PROBLEM_TTL`; saving a project (`new_agent`, a patch) still checks the disk itself.
 pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
-    let problems: Vec<serde_json::Value> = a.projects.iter().filter_map(|p| project_problem(state, p).map(|why| serde_json::json!({ "project": p, "problem": why }))).collect();
+    let mut cache = state.repos.problems.lock().unwrap_or_else(|e| e.into_inner());
+    let problems: Vec<serde_json::Value> = a
+        .projects
+        .iter()
+        .filter_map(|p| {
+            let why = match cache.get(p) {
+                Some((at, why)) if at.elapsed() < PROBLEM_TTL => why.clone(),
+                _ => {
+                    let why = project_problem(state, p);
+                    cache.insert(p.clone(), (Instant::now(), why.clone()));
+                    why
+                }
+            };
+            why.map(|why| serde_json::json!({ "project": p, "problem": why }))
+        })
+        .collect();
     serde_json::json!(problems)
 }
 

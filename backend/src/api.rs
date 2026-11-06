@@ -1345,6 +1345,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn project_problems_read_each_folder_once_in_a_while() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut a = agent(&st, "Busy");
+        a.projects = vec!["late".into()];
+        let flagged = |a: &crate::db::Agent| super::agent_json(&st, a)["project_problems"].as_array().unwrap().len();
+        assert_eq!(flagged(&a), 1, "no folder yet");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("late")).unwrap();
+        assert_eq!(flagged(&a), 1, "the next events reuse the answer instead of reading the disk");
+        // Saving still checks the disk itself.
+        assert!(apply_patch(&st, &mut a, &serde_json::json!({ "projects": ["late"] })).is_ok());
+    }
+
+    #[test]
     fn agent_ids_cannot_leave_the_storage_folder() {
         assert!(is_plain_id("3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b"));
         for bad in ["", "../../Users", "..%2F..", "a/b", "a\\b", ".", "..", "x\0y"] {
