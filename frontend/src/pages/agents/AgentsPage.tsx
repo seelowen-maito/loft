@@ -14,6 +14,7 @@ import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
+import { saveRecent } from "../../lib/quickSwitcher";
 import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
@@ -83,7 +84,9 @@ export default function AgentsPage() {
   const selectedId = selectedAgent(routeId, agents);
   const selected = agents?.find((a) => a.id === selectedId) ?? null;
   useEffect(() => {
-    if (selected) saveLastAgent(selected.id);
+    if (!selected) return;
+    saveLastAgent(selected.id);
+    saveRecent(selected.id);
   }, [selected?.id]);
 
   // Seeing the open chat clears its Unread reply, also when the tab comes back or a reply lands while both hold.
