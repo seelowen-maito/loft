@@ -218,9 +218,10 @@ struct GrillQuestionCard: View {
         }
     }
 
-    /// Your own answer, saved as a decision (Return) or as a comment to discuss.
+    /// Your own answer, saved as a decision (Return) or as a comment to discuss. At accessibility text sizes the icons
+    /// go under the field, and their frames grow with the glyphs instead of letting them spill over each other.
     private var answerField: some View {
-        HStack(spacing: 6) {
+        AdaptiveStack(spacing: 6) {
             TextField(q.accepted || q.state == .decided ? "Or answer differently…" : "Your answer, or a comment…", text: $draft, axis: .vertical)
                 .lineLimit(1...4)
                 .textFieldStyle(.roundedBorder)
@@ -228,21 +229,27 @@ struct GrillQuestionCard: View {
                 .onSubmit { answer(draft) }
                 .accessibilityLabel("Answer to question \(number)")
                 .accessibilityIdentifier("grillAnswerField")
+            answerButtons
+        }
+    }
+
+    private var answerButtons: some View {
+        HStack(spacing: 6) {
             let empty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if saved && q.state == .answered {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).frame(width: 44, height: 44)
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).frame(minWidth: 44, minHeight: 44)
                     .accessibilityLabel("Saved")
             } else {
-                Button { answer(draft) } label: { Image(systemName: "arrow.turn.down.left").frame(width: 44, height: 44) }
+                Button { answer(draft) } label: { Image(systemName: "arrow.turn.down.left").frame(minWidth: 44, minHeight: 44) }
                     .disabled(busy || empty || !store.canWrite)
                     .accessibilityLabel("Save as your answer")
                     .accessibilityIdentifier("grillSaveAnswer")
             }
             if saved && q.state == .discuss {
-                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.accent).frame(width: 44, height: 44)
+                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.accent).frame(minWidth: 44, minHeight: 44)
                     .accessibilityLabel("To discuss")
             } else {
-                Button { answer(draft, discuss: true) } label: { Image(systemName: "bubble.left.and.bubble.right").frame(width: 44, height: 44) }
+                Button { answer(draft, discuss: true) } label: { Image(systemName: "bubble.left.and.bubble.right").frame(minWidth: 44, minHeight: 44) }
                     .disabled(busy || empty || !store.canWrite)
                     .accessibilityLabel("Discuss instead of deciding")
                     .accessibilityHint("The agent explains and asks again next round")
