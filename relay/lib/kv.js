@@ -16,16 +16,22 @@ export function kv(env) {
     return res.json();
   };
   const command = async (...args) => (await call("", args)).result;
+  // A pipeline or transaction answers per command; one that failed must not read as an empty result.
+  const each = (answers) =>
+    answers.map((r) => {
+      if (r.error) throw new Error(`store refused a command (${r.error})`);
+      return r.result;
+    });
   return {
-    set: (key, value) => command("SET", key, value),
+    /** Sets `key`, expiring after `seconds` when given. */
+    set: (key, value, seconds) => command("SET", key, value, ...(seconds ? ["EX", seconds] : [])),
     /** Sets `key` only when it isn't there yet. */
     setIfMissing: (key, value) => command("SET", key, value, "NX"),
-    get: (key) => command("GET", key),
     exists: async (key) => (await command("EXISTS", key)) === 1,
     /** Runs `commands` in one round trip and returns their results; not atomic, so for reads. */
-    pipeline: async (commands) => (await call("/pipeline", commands)).map((r) => r.result),
+    pipeline: async (commands) => each(await call("/pipeline", commands)),
     /** Runs `commands` as one transaction (MULTI/EXEC): all of them or none. */
-    transaction: async (commands) => (await call("/multi-exec", commands)).map((r) => r.result),
+    transaction: async (commands) => each(await call("/multi-exec", commands)),
     /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. One round trip, so a
      *  counter never stays without its expiry. */
     hit: async (key, seconds) => {

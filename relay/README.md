@@ -52,7 +52,7 @@ A web page in the same project. `/` offers **Sign in with Apple**; Apple's answe
 the account is Apple's user id (`account:<id>` in the store) and nothing else: no email or name is requested. Signed
 in, the user names a key and gets it once on the next page; only its hash is stored (with the name, the date and the
 account), and the relay accepts it like one made by the script. The page lists the account's keys by name, with
-their created and last-used dates (`relay-key-used:<hash>`, set on each authorized push), never the key. **Revoke**
+their created and last-used dates (`relay-key-used:<hash>`, set on each authorized push and kept for a year), never the key. **Revoke**
 deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked. Without the portal's settings below, the page says
 "The push portal isn't configured" and the relay works as before: the portal is optional.
 

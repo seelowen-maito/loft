@@ -18,13 +18,16 @@ const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const store = new Map();
 const sets = new Map();
 const transactions = [];
+const expiries = new Map();
+let failing = null; // a command the store answers with an error
 const members = (key) => sets.get(key) ?? new Set();
 const run = ([cmd, key, ...args]) => {
+  if (cmd === "SET" && args[1] === "EX") expiries.set(key, args[2]);
   if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
   if (cmd === "GET") return store.get(key) ?? null;
   if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k)).length;
   if (cmd === "SADD") return (sets.set(key, members(key).add(args[0])), 1);
-  if (cmd === "SREM") return members(key).delete(args[0]) ? 1 : 0;
+  if (cmd === "SREM") return args.filter((m) => members(key).delete(m)).length;
   if (cmd === "SMEMBERS") return [...members(key)];
   if (cmd === "SCARD") return members(key).size;
   if (cmd === "SISMEMBER") return members(key).has(args[0]) ? 1 : 0;
@@ -38,7 +41,8 @@ const kvServer = createServer((req, res) => {
   req.on("end", () => {
     const parsed = JSON.parse(body);
     if (req.url === "/multi-exec") transactions.push(parsed.map((c) => c[0]));
-    const out = req.url === "/" ? { result: run(parsed) } : parsed.map((c) => ({ result: run(c) }));
+    const answer = (c) => (c[0] === failing ? { error: "ERR fake failure" } : { result: run(c) });
+    const out = req.url === "/" ? answer(parsed) : parsed.map(answer);
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
   });
 });
@@ -90,6 +94,8 @@ beforeEach(() => {
   store.clear();
   sets.clear();
   transactions.length = 0;
+  expiries.clear();
+  failing = null;
   tokenRequests.length = 0;
   pushed.length = 0;
   idp = { sub: "001234.abcdef", status: 200 };
@@ -193,7 +199,7 @@ test("a key is shown once and only its hash is stored", async () => {
   const record = store.get(`relay-key:${sha256(key)}`);
   assert.deepEqual(JSON.parse(record), { label: "My <Mac>", created: "2026-11-05T00:00:00.000Z", account: "001234.abcdef" });
   assert.deepEqual([...sets.get("account-keys:001234.abcdef")], [sha256(key)]);
-  assert.deepEqual(transactions, [["SET", "SADD"]], "the key and its place in the account are written together");
+  assert.deepEqual(transactions, [["EXISTS", "SET", "SADD", "SCARD"]], "the key and its place in the account are written and counted together");
   assert.ok(![...store.keys(), ...store.values(), ...[...sets.values()].flatMap((m) => [...m])].some((v) => v.includes(key)), "the key itself isn't stored");
   assert.ok(!(await (await home(get("/", session), env)).text()).includes(key), "it isn't shown again");
   assert.equal((await createAccountKey(post("/keys", { name: " " }, session), env)).status, 400, "a key needs a name");
@@ -272,4 +278,44 @@ test("a session whose account is gone gets no key and is signed out", async () =
   assert.equal(res.status, 303);
   assert.match(res.headers.getSetCookie().join(), /session=; Max-Age=0/);
   assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+});
+
+test("two keys created at once at 4 can't both be the 5th", async () => {
+  const session = await signInAs();
+  for (let i = 1; i <= 4; i++) await createAccountKey(post("/keys", { name: `Mac ${i}` }, session), env);
+  const both = await Promise.all(["A", "B"].map((name) => createAccountKey(post("/keys", { name }, session), env)));
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(sets.get("account-keys:001234.abcdef").size, 5);
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 5, "the refused one's record is undone");
+});
+
+test("a key deleted by hand neither shows nor counts toward the 5", async () => {
+  const session = await signInAs();
+  for (let i = 1; i <= 5; i++) await createAccountKey(post("/keys", { name: `Mac ${i}` }, session), env);
+  const [ghost] = idsOn(await (await home(get("/", session), env)).text());
+  store.delete(`relay-key:${ghost}`); // the README's runbook
+  const html = await (await home(get("/", session), env)).text();
+  assert.ok(!idsOn(html).includes(ghost));
+  assert.match(html, /4 of 5 keys/);
+  assert.ok(!sets.get("account-keys:001234.abcdef").has(ghost), "dropped from the account's set");
+  assert.equal((await createAccountKey(post("/keys", { name: "Mac 6" }, session), env)).status, 200);
+});
+
+test("a key's last-used date expires, so a push racing a revoke can't keep one forever", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  await pushWith(key);
+  assert.equal(expiries.get(`relay-key-used:${sha256(key)}`), 365 * 86400);
+  // A key without one that's over a year old may have been used before then.
+  const old = await signInAs("999.old");
+  await createAccountKey(post("/keys", { name: "Old" }, old), env, Date.UTC(2025, 0, 1));
+  assert.match(await (await home(get("/", old), env)).text(), /<td>Old<\/td><td>Jan 1, 2025<\/td><td>not in the last year<\/td>/);
+});
+
+test("a store error is an error, not an empty answer", async () => {
+  const session = await signInAs();
+  failing = "EXISTS";
+  await assert.rejects(createAccountKey(post("/keys", { name: "Mac" }, session), env), /store refused a command/);
+  failing = "SISMEMBER";
+  await assert.rejects(revokeAccountKey(post("/keys/revoke", { id: "a".repeat(64) }, session), env), /store refused a command/);
 });

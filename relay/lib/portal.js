@@ -4,7 +4,7 @@
 
 import { createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { createKey, MAX_KEYS } from "./relay.js";
+import { newKey, MAX_KEYS, USED_SECONDS } from "./relay.js";
 
 const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_KEY_P8", "PORTAL_URL", "SESSION_SECRET", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
 const APPLE = "https://appleid.apple.com";
@@ -58,18 +58,26 @@ function clientSecret(env, now) {
   return `${head}.${claims}.${sign("sha256", Buffer.from(`${head}.${claims}`), { key, dsaEncoding: "ieee-p1363" }).toString("base64url")}`;
 }
 
-/** The account's keys, oldest first: their hash (which names a key without being it), name, created and last used. */
+/**
+ * The account's keys, oldest first: their hash (which names a key without being it), name, created and last used.
+ * An id whose key is gone (deleted by hand, as the README's runbook says) is dropped from the account's set, so it
+ * neither shows nor counts toward the cap.
+ */
 async function keysOf(store, account) {
-  const ids = (await store.pipeline([["SMEMBERS", `account-keys:${account}`]]))[0] ?? [];
-  if (!ids.length) return [];
+  const [ids] = await store.pipeline([["SMEMBERS", `account-keys:${account}`]]);
+  if (!ids?.length) return [];
   const got = await store.pipeline(ids.flatMap((id) => [["GET", `relay-key:${id}`], ["GET", `relay-key-used:${id}`]]));
+  const gone = ids.filter((_, i) => !got[2 * i]);
+  if (gone.length) await store.pipeline([["SREM", `account-keys:${account}`, ...gone]]);
   return ids
     .map((id, i) => got[2 * i] && { id, ...JSON.parse(got[2 * i]), used: got[2 * i + 1] })
     .filter(Boolean)
     .sort((a, b) => a.created.localeCompare(b.created));
 }
 
-const day = (iso) => (iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "never");
+const day = (iso) => new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+/** A last-used date is kept for a year after the last push, so a key older than that without one may have been used before. */
+const lastUsed = (k, now) => (k.used ? day(k.used) : Date.parse(k.created) > now - USED_SECONDS * 1000 ? "never" : "not in the last year");
 const capped = () => page("Too many keys", `<p>An account can hold at most ${MAX_KEYS} keys. Revoke one to make room. <a href="/">Back</a></p>`, 409);
 
 /** GET /: the sign-in button, or, signed in, the account's keys and the form to create one. */
@@ -81,7 +89,7 @@ export async function home(request, env = process.env, now = Date.now()) {
   }
   const keys = await keysOf(makeKv(env), account);
   const rows = keys
-    .map((k) => `<tr><td>${esc(k.label)}</td><td>${day(k.created)}</td><td>${day(k.used)}</td><td><form method="post" action="/keys/revoke"><input type="hidden" name="id" value="${k.id}"><button>Revoke</button></form></td></tr>`)
+    .map((k) => `<tr><td>${esc(k.label)}</td><td>${day(k.created)}</td><td>${lastUsed(k, now)}</td><td><form method="post" action="/keys/revoke"><input type="hidden" name="id" value="${k.id}"><button>Revoke</button></form></td></tr>`)
     .join("");
   const list = keys.length ? `<table><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table>` : "<p>No keys yet.</p>";
   const create =
@@ -134,11 +142,14 @@ export async function createAccountKey(request, env = process.env, now = Date.no
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. <a href="/">Back</a></p>', 400);
   const store = makeKv(env);
-  const [exists, count] = await store.pipeline([["EXISTS", `account:${account}`], ["SCARD", `account-keys:${account}`]]);
+  await keysOf(store, account); // drops ids whose key is gone, so they don't count
+  // Written and counted in one transaction, then undone if it went over: two creates at once can't both make the 5th.
+  const { key, id, record } = newKey(name, now, account);
+  const [exists, , , count] = await store.transaction([["EXISTS", `account:${account}`], ["SET", `relay-key:${id}`, record], ["SADD", `account-keys:${account}`, id], ["SCARD", `account-keys:${account}`]]);
+  if (exists !== 1 || count > MAX_KEYS) await store.transaction([["DEL", `relay-key:${id}`], ["SREM", `account-keys:${account}`, id]]);
   // A session can outlive its account (deleted since): it's signed out rather than given a key nobody owns.
   if (exists !== 1) return redirect("/", cookie("session", "", 0));
-  if (count >= MAX_KEYS) return capped();
-  const key = await createKey(env, name, now, account);
+  if (count > MAX_KEYS) return capped();
   return page("Your new key", `<p>Copy it now. It is shown only this once.</p><code>${esc(key)}</code><p>Paste it in Loft → Settings → Push notifications.</p>`);
 }
 
