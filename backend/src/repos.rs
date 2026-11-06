@@ -20,11 +20,14 @@ const GIT_TTL: Duration = Duration::from_secs(120);
 const GITHUB_TTL: Duration = Duration::from_secs(15 * 60);
 /// Stars, forks, watchers and the description change rarely: read every few hours.
 const META_TTL: Duration = Duration::from_secs(6 * 3600);
+/// `project_problems` runs on every agent event: each project's folder is looked at once in this long.
+const PROBLEM_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct RepoCache {
     git: Mutex<Option<(Instant, Vec<RepoSummary>)>>,
     github: Mutex<HashMap<String, Cached>>,
+    problems: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
 /// A repo's GitHub numbers as last read, with what's needed to ask again cheaply.
@@ -205,10 +208,33 @@ pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
     holds_repos.then(|| format!("{} holds several repos: pick one of them", project.trim()))
 }
 
-/// An agent's projects that `project_problem` refuses, each with why, for clients to flag.
+/// An agent's projects that `project_problem` refuses, each with why, for clients to flag. Each answer
+/// is kept `PROBLEM_TTL`; saving a project (`new_agent`, a patch) checks the disk itself and drops it.
 pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
-    let problems: Vec<serde_json::Value> = a.projects.iter().filter_map(|p| project_problem(state, p).map(|why| serde_json::json!({ "project": p, "problem": why }))).collect();
+    let cache = &state.repos.problems;
+    let problems: Vec<serde_json::Value> = a
+        .projects
+        .iter()
+        .filter_map(|p| {
+            let kept = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p).filter(|(at, _)| at.elapsed() < PROBLEM_TTL).map(|(_, why)| why.clone());
+            let why = kept.unwrap_or_else(|| {
+                // Read outside the lock, so a slow disk doesn't hold up other agents' events.
+                let why = project_problem(state, p);
+                cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.clone(), (Instant::now(), why.clone()));
+                why
+            });
+            why.map(|why| serde_json::json!({ "project": p, "problem": why }))
+        })
+        .collect();
     serde_json::json!(problems)
+}
+
+/// Drops the kept `project_problems` answers for these projects, so the next one reads the disk.
+pub fn forget_project_problems(state: &AppState, projects: &[String]) {
+    let mut cache = state.repos.problems.lock().unwrap_or_else(|e| e.into_inner());
+    for p in projects {
+        cache.remove(p);
+    }
 }
 
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
