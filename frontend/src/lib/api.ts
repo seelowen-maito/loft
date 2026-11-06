@@ -542,6 +542,8 @@ export const api = {
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
+  /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
+  needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),

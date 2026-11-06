@@ -610,6 +610,7 @@ export function Chat({
                 )}
                 <textarea
                   ref={composer}
+                  data-chat-input
                   value={text}
                   onChange={(e) => {
                     setText(e.target.value);

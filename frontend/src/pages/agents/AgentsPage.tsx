@@ -14,7 +14,7 @@ import { Inspector } from "./Inspector";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
-import { saveRecent } from "../../lib/quickSwitcher";
+import { saveRecent } from "../../lib/shortcuts";
 import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
