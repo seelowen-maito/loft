@@ -156,6 +156,16 @@ test("a sign-in that Apple didn't start for this browser, or can't confirm, crea
   assert.equal(store.size, 0);
 });
 
+test("the sign-in state cookie is not a session", async () => {
+  const started = await start(get("/auth/start"), env);
+  const asSession = cookiesOf(started).join("; ").replace(/^state=/, "session=");
+  assert.match(await (await home(get("/", asSession), env)).text(), /Sign in with Apple/);
+  const res = await createAccountKey(post("/keys", { name: "x" }, asSession), env);
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get("location"), "/");
+  assert.equal(store.size, 0);
+});
+
 test("a forged or expired session is signed out", async () => {
   const session = await signInAs();
   const forged = session.replace(/\.[^.]+$/, ".AAAA");

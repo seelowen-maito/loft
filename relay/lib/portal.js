@@ -25,16 +25,16 @@ const page = (title, body, status = 200, headers = {}) =>
   );
 const notConfigured = () => page("Push portal", "<p>The push portal isn't configured.</p>", 503);
 
-const hmac = (env, value) => createHmac("sha256", env.SESSION_SECRET).update(value).digest("base64url");
-/** `value.expiry.signature`, valid until it expires. Used for the session and the sign-in state. */
-const seal = (env, value, seconds, now) => {
+const hmac = (env, purpose, value) => createHmac("sha256", env.SESSION_SECRET).update(`${purpose}.${value}`).digest("base64url");
+/** `value.expiry.signature`, valid until it expires. The purpose ("session" or "state") is signed but not stored, so a cookie sealed for one is refused as the other. */
+const seal = (env, purpose, value, seconds, now) => {
   const body = `${Buffer.from(value).toString("base64url")}.${Math.floor(now / 1000) + seconds}`;
-  return `${body}.${hmac(env, body)}`;
+  return `${body}.${hmac(env, purpose, body)}`;
 };
-const unseal = (env, sealed, now) => {
+const unseal = (env, purpose, sealed, now) => {
   const [value, expiry, mac] = (sealed ?? "").split(".");
   if (!value || !expiry || !mac) return null;
-  const good = Buffer.from(hmac(env, `${value}.${expiry}`));
+  const good = Buffer.from(hmac(env, purpose, `${value}.${expiry}`));
   const given = Buffer.from(mac);
   if (good.length !== given.length || !timingSafeEqual(good, given) || Number(expiry) * 1000 < now) return null;
   return Buffer.from(value, "base64url").toString();
@@ -46,7 +46,7 @@ const redirect = (to, ...cookies) => {
   cookies.forEach((c) => headers.append("set-cookie", c));
   return new Response(null, { status: 303, headers });
 };
-const accountOf = (request, env, now) => unseal(env, cookieOf(request, "session"), now);
+const accountOf = (request, env, now) => unseal(env, "session", cookieOf(request, "session"), now);
 
 /** The secret Apple wants to see: a short ES256 token signed with the sign-in key. */
 function clientSecret(env, now) {
@@ -72,14 +72,14 @@ export async function start(request, env = process.env, now = Date.now()) {
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
   const state = randomBytes(16).toString("base64url");
   const query = new URLSearchParams({ client_id: env.APPLE_SERVICES_ID, redirect_uri: `${origin(env)}/auth/callback`, response_type: "code", state });
-  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, state, STATE_SECONDS, now), STATE_SECONDS));
+  return redirect(`${appleHost(env)}/auth/authorize?${query}`, cookie("state", seal(env, "state", state, STATE_SECONDS, now), STATE_SECONDS));
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
 export async function callback(request, env = process.env, now = Date.now()) {
   if (REQUIRED.some((k) => !env[k])) return notConfigured();
   const params = new URL(request.url).searchParams;
-  const state = unseal(env, cookieOf(request, "state"), now);
+  const state = unseal(env, "state", cookieOf(request, "state"), now);
   const clear = cookie("state", "", 0);
   if (!state || state !== params.get("state") || !params.get("code")) return page("Sign-in failed", '<p>That sign-in didn\'t check out. <a href="/">Try again</a>.</p>', 400, { "set-cookie": clear });
   let sub;
@@ -99,7 +99,7 @@ export async function callback(request, env = process.env, now = Date.now()) {
     return page("Sign-in failed", '<p>Apple didn\'t confirm the sign-in. <a href="/">Try again</a>.</p>', 502, { "set-cookie": clear });
   }
   await makeKv(env).setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
-  return redirect("/", clear, cookie("session", seal(env, sub, SESSION_SECONDS, now), SESSION_SECONDS));
+  return redirect("/", clear, cookie("session", seal(env, "session", sub, SESSION_SECONDS, now), SESSION_SECONDS));
 }
 
 /** POST /keys with `name`: creates a key for the signed-in account and shows it, once. */
