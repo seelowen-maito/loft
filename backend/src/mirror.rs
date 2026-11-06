@@ -247,9 +247,12 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
         links_from_github(state, repo, i).await;
         comments_from_github(state, repo, i).await;
     }
+    // Only a backfill: when it fails it's tried again on the next full read, and the rest of this one goes on.
     if !cursor.authors_read {
-        closed_authors(state, repo).await?;
-        cursor.authors_read = true;
+        match closed_authors(state, repo).await {
+            Ok(()) => cursor.authors_read = true,
+            Err(e) => tracing::warn!("mirror {repo}: authors of closed issues: {e}"),
+        }
     }
     // Linked issues GitHub still had open last time but didn't list now: ask about each one.
     let gone: Vec<Task> = linked(state, repo).into_iter().filter(|t| t.github.as_ref().is_some_and(|g| g.state == "open" && !seen.contains(&g.number))).collect();
@@ -1074,6 +1077,45 @@ pub(crate) mod tests {
         assert!(fake.seen(path)[before + 2..].iter().all(|s| !s.path.contains("state=closed")));
         let _ = sync_now(State(st.clone()), None).await.unwrap();
         assert_eq!(fake.seen("/user").len(), 1, "the login is read once");
+    }
+
+    #[tokio::test]
+    async fn a_failed_author_backfill_doesnt_stop_the_full_read() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "mir-backfill", Some("https://github.com/octo/mir-backfill"));
+        let path = "/repos/octo/mir-backfill/issues";
+        let open = |n: i64, title: &str| gh("octo/mir-backfill", n, title, "open", "2026-10-02T00:00:00Z");
+        let closed = |n: i64, title: &str| gh("octo/mir-backfill", n, title, "closed", "2026-10-03T00:00:00Z");
+        fake.in_turn("GET", path, vec![
+            (200, json!([open(1, "Retry cap"), open(2, "Old work"), open(3, "Quiet fix")])),
+            // #2 closed: the change poll.
+            (200, json!([closed(2, "Old work")])),
+            // After the restart: #3 isn't listed open any more, and reading the closed issues fails.
+            (200, json!([open(1, "Retry cap")])),
+            (500, json!({ "message": "Server Error" })),
+            // The next full read.
+            (200, json!([open(1, "Retry cap")])),
+            (200, json!([closed(2, "Old work")])),
+        ]);
+        fake.route("GET", &format!("{path}/3"), 200, closed(3, "Quiet fix"));
+        sync_project(&st, "mir-backfill", false).await.unwrap();
+        sync_project(&st, "mir-backfill", false).await.unwrap();
+        for mut t in linked(&st, "octo/mir-backfill") {
+            t.github.as_mut().unwrap().author = String::new();
+            st.db.save_task(&t).unwrap();
+        }
+        st.mirror.repos.lock().unwrap().clear();
+        let link = |n: i64| linked(&st, "octo/mir-backfill").into_iter().find_map(|t| t.github.filter(|g| g.number == n)).unwrap();
+
+        let r = sync_project(&st, "mir-backfill", false).await.unwrap();
+        assert_eq!(r.error, None, "a cosmetic backfill isn't the read's error");
+        assert_eq!(link(3).state, "closed", "the open issue GitHub stopped listing was still asked about");
+        assert_eq!(link(2).author, "");
+
+        sync_project(&st, "mir-backfill", true).await.unwrap();
+        assert_eq!(link(2).author, "octo-author", "the next full read tries again");
+        assert_eq!(fake.seen(path).iter().filter(|s| s.path.contains("state=closed")).count(), 2);
     }
 
     #[tokio::test]
