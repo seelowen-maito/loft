@@ -446,7 +446,7 @@ Each message starts a run that ends with your reply. Claude Code background work
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
 - Dev servers (web apps, APIs, docs sites): start them detached (see Runs), listening on all interfaces (`vite --host`, `next dev -H 0.0.0.0`, `python3 -m http.server --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath build`, then `xcrun simctl install booted <path to .app>` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
+- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install booted "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -1565,6 +1565,14 @@ pub(crate) mod tests {
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("-showBuildSettings") && p.contains("-IDEBuildLocationStyle=Unique") && p.contains("$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"));
+        assert!(!p.contains("-derivedDataPath build"));
     }
 
     #[test]
