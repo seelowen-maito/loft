@@ -54,6 +54,10 @@ test("each combination survives a reload; a broken one falls back to its default
   assert.deepEqual(loadCombos(s), defaults);
   saveCombo("next", "Ctrl+Shift+N", s);
   assert.deepEqual(loadCombos(s), { switcher: "Mod+K", next: "Ctrl+Shift+N" });
+  saveCombo("switcher", comboFromEvent(key("KeyP", { metaKey: true, shiftKey: true }))!, s);
+  assert.equal(loadCombo("switcher", s), "Shift+Meta+P", "⇧⌘P is stored with Shift first and must survive");
+  saveCombo("switcher", "Shift+K", s);
+  assert.equal(loadCombo("switcher", s), "Mod+K", "Shift alone is typing");
   saveCombo("switcher", "K", s);
   assert.equal(loadCombo("switcher", s), "Mod+K", "never a plain key");
   const blocked = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };

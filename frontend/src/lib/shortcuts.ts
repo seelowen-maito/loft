@@ -83,7 +83,7 @@ const defaultOf = (id: Rebindable) => REBINDABLE.find((r) => r.id === id)!.defau
 export function loadCombo(id: Rebindable, storage?: Store): string {
   try {
     const v = (storage ?? localStorage).getItem(keyOf(id));
-    return v && /^(Mod|Ctrl|Alt|Meta)\+/.test(v) && !isReserved(v) ? v : defaultOf(id);
+    return v && /(^|\+)(Mod|Ctrl|Alt|Meta)\+/.test(v) && !isReserved(v) ? v : defaultOf(id);
   } catch {
     return defaultOf(id);
   }

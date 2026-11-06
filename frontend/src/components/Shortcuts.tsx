@@ -44,8 +44,12 @@ export function Shortcuts() {
       if (!a) return;
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
-        if (!document.querySelector('[role="dialog"][data-shortcuts]')) returnTo.current = document.activeElement as HTMLElement | null;
-        setOpen((o) => (a.type === "switcher" && o === "switcher" ? null : a.type));
+        const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
+        if (a.type === "switcher" && shown?.getAttribute("aria-label") === "Open an agent") close();
+        else {
+          if (!shown) returnTo.current = document.activeElement as HTMLElement | null;
+          setOpen(a.type);
+        }
       }
       else if (a.type === "g") gAt.current = Date.now();
       else if (a.type === "go") navigate(a.path);
@@ -70,7 +74,7 @@ export function Shortcuts() {
       window.removeEventListener(SHORTCUTS_CHANGED, onChanged);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [navigate]);
+  }, [navigate, close]);
 
   return (
     <>
@@ -104,7 +108,7 @@ export function Keys({ keys }: { keys: string }) {
 function useDialogKeys(onClose: () => void, stay: RefObject<HTMLElement | null>) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !e.isComposing) {
         e.preventDefault();
         onClose();
       } else if (e.key === "Tab") {

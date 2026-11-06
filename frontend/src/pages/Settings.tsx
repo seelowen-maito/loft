@@ -160,6 +160,8 @@ function ShortcutSettings() {
       const c = comboFromEvent(e);
       if (!c) return setHint("Hold ⌘, Ctrl or Alt with the key.");
       if (isReserved(c)) return setHint(`${formatCombo(c)} is the browser's (copy, paste, close tab…). Pick another.`);
+      const other = REBINDABLE.find((r) => r.id !== listening)!;
+      if (formatCombo(c) === formatCombo(loadCombos()[other.id])) return setHint(`${formatCombo(c)} already does “${other.label}”. Pick another.`);
       use(listening, normalizeCombo(c));
       setListening(null);
     };
