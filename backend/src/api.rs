@@ -197,8 +197,10 @@ pub const DEFAULT_TOOLS: &[&str] = &[
 ];
 
 /// Refuses a project the agent doesn't have yet when it isn't one folder that is, or will become, one repo.
-/// Projects it already has stay, however they look: they are flagged instead (`project_problems`).
+/// Projects it already has stay, however they look: they are flagged instead (`project_problems`), from the
+/// disk as it is now, so a folder fixed before this save clears its flag in the reply.
 fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), ApiError> {
+    crate::repos::forget_project_problems(state, ps);
     for p in ps.iter().filter(|p| !p.is_empty() && !a.projects.contains(p) && **p != a.project) {
         if let Some(why) = crate::repos::project_problem(state, p) {
             return Err(bad(why));
@@ -1354,8 +1356,9 @@ pub(crate) mod tests {
         assert_eq!(flagged(&a), 1, "no folder yet");
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("late")).unwrap();
         assert_eq!(flagged(&a), 1, "the next events reuse the answer instead of reading the disk");
-        // Saving still checks the disk itself.
+        // Saving still checks the disk itself, and the saved agent's flags are read from it again.
         assert!(apply_patch(&st, &mut a, &serde_json::json!({ "projects": ["late"] })).is_ok());
+        assert_eq!(flagged(&a), 0, "re-saving the same project after fixing its folder clears the flag");
     }
 
     #[test]

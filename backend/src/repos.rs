@@ -209,25 +209,32 @@ pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
 }
 
 /// An agent's projects that `project_problem` refuses, each with why, for clients to flag. Each answer
-/// is kept `PROBLEM_TTL`; saving a project (`new_agent`, a patch) still checks the disk itself.
+/// is kept `PROBLEM_TTL`; saving a project (`new_agent`, a patch) checks the disk itself and drops it.
 pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
-    let mut cache = state.repos.problems.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = &state.repos.problems;
     let problems: Vec<serde_json::Value> = a
         .projects
         .iter()
         .filter_map(|p| {
-            let why = match cache.get(p) {
-                Some((at, why)) if at.elapsed() < PROBLEM_TTL => why.clone(),
-                _ => {
-                    let why = project_problem(state, p);
-                    cache.insert(p.clone(), (Instant::now(), why.clone()));
-                    why
-                }
-            };
+            let kept = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p).filter(|(at, _)| at.elapsed() < PROBLEM_TTL).map(|(_, why)| why.clone());
+            let why = kept.unwrap_or_else(|| {
+                // Read outside the lock, so a slow disk doesn't hold up other agents' events.
+                let why = project_problem(state, p);
+                cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.clone(), (Instant::now(), why.clone()));
+                why
+            });
             why.map(|why| serde_json::json!({ "project": p, "problem": why }))
         })
         .collect();
     serde_json::json!(problems)
+}
+
+/// Drops the kept `project_problems` answers for these projects, so the next one reads the disk.
+pub fn forget_project_problems(state: &AppState, projects: &[String]) {
+    let mut cache = state.repos.problems.lock().unwrap_or_else(|e| e.into_inner());
+    for p in projects {
+        cache.remove(p);
+    }
 }
 
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
