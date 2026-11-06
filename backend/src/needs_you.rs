@@ -151,7 +151,7 @@ fn open_chat(agent_id: &str) -> Value {
 }
 
 fn open_task(task_id: &str) -> Value {
-    json!({ "kind": "open", "label": "Open task", "target": { "screen": "task", "task_id": task_id } })
+    json!({ "kind": "open", "label": "Open issue", "target": { "screen": "task", "task_id": task_id } })
 }
 
 fn dismiss(id: &str) -> Value {
@@ -222,7 +222,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
-        let mut actions = vec![action("answer", "Reply on the task", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
         if t.status == "failed" && t.agent_id.is_some() {
             actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
         }
@@ -238,13 +238,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
             actions,
             push: (
                 match t.status.as_str() {
-                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    _ => "A task failed".to_string(),
+                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    _ => "An issue failed".to_string(),
                 },
                 t.title.clone(),
             ),
@@ -267,7 +267,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("#{} was closed on GitHub while it's being worked on.", g.number), MAX_REASON),
             text: String::new(),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
             actions: vec![
                 action("deny", "Cancel issue", "POST", format!("{base}/cancel"), json!({})),
                 action("approve", &format!("Keep working (reopens #{})", g.number), "POST", format!("{base}/keep-working"), json!({})),
@@ -296,7 +296,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Not on GitHub yet: approve to post it on {}#{}.", g.repo, g.number), MAX_REASON),
             text: text(&c.text, MAX_TEXT),
             created_at: c.created_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
             actions: vec![
                 action("approve", "Approve", "POST", format!("{base}/approve"), json!({})),
                 action("answer", "Edit and approve", "POST", format!("{base}/approve"), json!({ "text": c.text })),
@@ -325,13 +325,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&if t.summary.is_empty() { "Done.".to_string() } else { format!("Done: {}", first_line(&t.summary)) }, MAX_REASON),
             text: text(&t.summary, MAX_TEXT),
             created_at: done_at,
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/tasks/{}", t.id) })],
             actions: vec![
                 action("answer", "Follow up", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })),
                 open_task(&t.id),
                 dismiss(&id),
             ],
-            push: ("Task done".to_string(), t.title.clone()),
+            push: ("Issue done".to_string(), t.title.clone()),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             pr: None,
             id,

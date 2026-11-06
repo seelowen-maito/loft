@@ -13,6 +13,8 @@ export type Agent = {
   group?: string;
   /** The projects it works in, main first. Missing from servers before groups. */
   projects?: string[];
+  /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
+  project_problems?: { project: string; problem: string }[];
   personality: string;
   prompt: string;
   model: string;

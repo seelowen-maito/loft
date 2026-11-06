@@ -1,4 +1,4 @@
-import type { Agent } from "./api";
+import type { Agent, Task } from "./api";
 
 type Teamed = Pick<Agent, "project"> & Partial<Pick<Agent, "group" | "projects">>;
 
@@ -47,4 +47,19 @@ export function outsideWarning(agent: (Teamed & { name: string }) | undefined, p
   const mine = agent ? projectsOf(agent) : [];
   if (!agent || !p || !mine.length || mine.includes(p)) return null;
   return `${agent.name} doesn't work in ${p} (its projects: ${mine.join(", ")}). You can still create it; the issue's thread will say so.`;
+}
+
+type GroupAgent = Pick<Agent, "id" | "project"> & Partial<Pick<Agent, "group" | "projects">>;
+
+/** Whether an issue is in a group. A group is only a label on agents: its issues are those of the projects
+ * its agents work in, and those assigned to one of them. */
+export function inGroup(t: Pick<Task, "project" | "agent_id">, group: string, agents: GroupAgent[]): boolean {
+  return agents.some((a) => teamOf(a) === group && ((!!t.project && projectsOf(a).includes(t.project)) || a.id === t.agent_id));
+}
+
+/** The projects of a group's agents, or every project in `known` without a group. */
+export function groupProjects(group: string, agents: GroupAgent[], known: string[]): string[] {
+  if (!group) return known;
+  const mine = new Set(agents.filter((a) => teamOf(a) === group).flatMap(projectsOf));
+  return known.filter((p) => mine.has(p));
 }

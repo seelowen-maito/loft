@@ -122,12 +122,12 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 | type | title | body |
 |---|---|---|
 | permission | "<agent> needs your approval" | "Wants to use <tool name>" |
-| task_approval | "<agent> needs your approval" | task title |
-| task_blocked | "<agent> is blocked" | task title |
+| task_approval | "<agent> needs your approval" | issue title |
+| task_blocked | "<agent> is blocked" | issue title |
 | question | "<agent> asked you something" | "Open the chat to answer" |
 | grill_round | "<agent>: round <n>" | "Interview: <topic>" |
 | stuck | "<agent> may be stuck" | "No activity for N min" / "Waiting on a background task" |
-| task_failed | "A task failed" | task title |
+| task_failed | "An issue failed" | issue title |
 | pr_ready | "Ready to merge" | "<repo>#<n>: <title>" |
 | pr_review | "Review requested" | "<repo>#<n>: <title>" |
 
