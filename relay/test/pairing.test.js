@@ -146,6 +146,18 @@ test("an expired or gone code in the cookie says so once and clears the cookie",
   }
 });
 
+test("malformed or over-long polls and connects make no store call", async () => {
+  const dead = { ...env, KV_REST_API_URL: "http://127.0.0.1:1" }; // any store command would throw
+  const ok = "A".repeat(22);
+  for (const body of [{}, { code: "x", secret: ok }, { code: ok, secret: "x" }, { code: ok, secret: ok, pad: "x".repeat(2000) }]) {
+    const res = await poll(asLoft("/api/pair-poll", body), dead);
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "unknown or expired code" });
+  }
+  assert.equal((await poll(new Request("https://relay.example.com/api/pair-poll", { method: "POST", body: "not json" }), dead)).status, 404);
+  assert.equal((await connect(get("/connect?code=short"), dead)).status, 404);
+});
+
 test("an unapproved or expired code returns no key", async () => {
   const code = await newCode();
   assert.equal((await (await pollFor(code)).json()).key, undefined);

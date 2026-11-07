@@ -36,14 +36,21 @@ export async function pair(request, env = process.env, now = Date.now()) {
 /** POST /api/pair-poll with `{code, secret}`: 200 `{key}` once, after the user approved it; 202 while it waits; else 404. */
 export async function poll(request, env = process.env) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
-  const body = await request.json().catch(() => null);
+  // Two 22-character values fit in far less than this: a bigger body is refused unread.
+  const gone = () => json(404, { error: "unknown or expired code" });
+  if (Number(request.headers.get("content-length") ?? 0) > 1024) return gone();
+  const raw = await request.text();
+  let body = null;
+  try {
+    body = raw.length > 1024 ? null : JSON.parse(raw);
+  } catch {}
   const { code, secret } = body ?? {};
-  if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return json(404, { error: "unknown or expired code" });
+  if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return gone();
   const store = makeKv(env);
   const key = await store.getdel(approved(sha256(secret)));
   if (key) return json(200, { key });
   if (((await store.get(waiting(code))) ?? "").split(".")[0] === sha256(secret)) return json(202, { status: "waiting" });
-  return json(404, { error: "unknown or expired code" });
+  return gone();
 }
 
 /** GET /connect?code=: the page where the user allows a Loft: sign in first, then Allow. */
