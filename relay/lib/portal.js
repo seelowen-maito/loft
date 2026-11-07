@@ -41,7 +41,10 @@ export const page = (title, body, status = 200, headers = {}) =>
       `<div class="brand">${LOGO}loft <small>push</small></div><main><h1>${esc(title)}</h1>${body}</main></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } },
   );
-export const notConfigured = () => page("Push portal", "<p>The push portal isn't configured.</p>", 503);
+/** True when a setting is missing, or PORTAL_URL isn't an https:// URL with a host (Apple refuses any other redirect address). */
+export const incomplete = (env) => REQUIRED.some((k) => !env[k]) || !/^https:\/\/[^/\s]+/i.test(env.PORTAL_URL);
+export const notConfigured = (env = {}) =>
+  page("Push portal", env.PORTAL_URL && !/^https:\/\/[^/\s]+/i.test(env.PORTAL_URL) ? "<p>The push portal isn't configured: PORTAL_URL must start with https://</p>" : "<p>The push portal isn't configured.</p>", 503);
 
 const hmac = (env, purpose, value) => createHmac("sha256", env.SESSION_SECRET).update(`${purpose}.${value}`).digest("base64url");
 /** `value.expiry.signature`, valid until it expires. The purpose ("session" or "state") is signed but not stored, so a cookie sealed for one is refused as the other. */
@@ -100,7 +103,7 @@ export const capped = () => page("Too many keys", `<p>An account can hold at mos
 
 /** GET /: the sign-in button, or, signed in, the account's keys and the form to create one. */
 export async function home(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) {
     return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`);
@@ -146,13 +149,13 @@ export async function limited(store, request, what, now) {
 
 /** GET /auth/start: Sign in with Apple. */
 export async function start(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now);
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
 export async function callback(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const limit = await limited(makeKv(env), request, "callback", now);
   if (limit) return limit;
   const params = new URL(request.url).searchParams;
@@ -186,7 +189,7 @@ export async function callback(request, env = process.env, now = Date.now()) {
 
 /** GET /account/delete: what deleting does, and the button. */
 export async function confirmDelete(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const n = (await keysOf(makeKv(env), account)).length;
@@ -200,7 +203,7 @@ export async function confirmDelete(request, env = process.env, now = Date.now()
 
 /** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
 export async function startDelete(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
@@ -280,7 +283,7 @@ export async function makeAccountKey(store, account, name, now) {
 
 /** POST /keys with `name`: creates a key for the signed-in account and shows it, once. */
 export async function createAccountKey(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
@@ -298,7 +301,7 @@ export async function createAccountKey(request, env = process.env, now = Date.no
 
 /** POST /keys/revoke with `id` (the key's hash): deletes one of the signed-in account's keys. The relay refuses it from the next push. */
 export async function revokeAccountKey(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const id = String((await request.formData()).get("id") ?? "");
