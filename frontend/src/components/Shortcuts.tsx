@@ -165,10 +165,11 @@ const SWITCHER = "Search";
 function Switcher({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [prs, setPrs] = useState<PullRequest[]>([]);
+  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [prs, setPrs] = useState<PullRequest[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [othersFailed, setOthersFailed] = useState(false);
+  const [tasksFailed, setTasksFailed] = useState(false);
+  const [prsFailed, setPrsFailed] = useState(false);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -179,21 +180,22 @@ function Switcher({ onClose }: { onClose: () => void }) {
   // Loaded once when the switcher opens; typing searches what's here.
   useEffect(() => {
     api.agents().then(setAgents).catch(() => setFailed(true));
-    api.tasks().then(setTasks).catch(() => setOthersFailed(true));
-    api.pullRequests().then(setPrs).catch(() => setOthersFailed(true));
+    api.tasks().then(setTasks).catch(() => setTasksFailed(true));
+    api.pullRequests().then(setPrs).catch(() => setPrsFailed(true));
   }, []);
 
   const shown = useMemo<Hit[]>(() => {
     const found = switcherAgents(agents ?? [], query, recent);
     const agentHits = (query.trim() ? found.slice(0, 5) : found).map((a): Hit => ({ kind: "agent", key: `a:${a.id}`, agent: a }));
     if (!query.trim()) return agentHits;
+    const issues = tasks ?? [];
     const row = (t: Task) => ({ title: t.title, number: t.github?.number ?? null, open: t.state === "open", project: t.project, task: t });
     const taskHits = (kind: "spec" | "issue") =>
-      searchRows(tasks.filter((t) => isSpec(t) === (kind === "spec")).map(row), query).map((r): Hit => ({
-        kind, key: `t:${r.task.id}`, task: r.task, progress: kind === "spec" ? specProgress(r.task, tasks) : null,
+      searchRows(issues.filter((t) => isSpec(t) === (kind === "spec")).map(row), query).map((r): Hit => ({
+        kind, key: `t:${r.task.id}`, task: r.task, progress: kind === "spec" ? specProgress(r.task, issues) : null,
       }));
     // The same PR can be registered by more than one agent.
-    const uniquePrs = [...new Map(prs.map((p) => [p.url, p])).values()];
+    const uniquePrs = [...new Map((prs ?? []).map((p) => [p.url, p])).values()];
     const prHits = searchRows(uniquePrs.map((p) => ({ title: p.title, number: p.number, open: p.state === "open" || p.state === "", project: p.slug.split("/").pop() ?? p.slug, pr: p })), query)
       .map((r): Hit => ({ kind: "pr", key: `p:${r.pr.url}`, pr: r.pr }));
     return [...agentHits, ...taskHits("spec"), ...taskHits("issue"), ...prHits];
@@ -212,6 +214,8 @@ function Switcher({ onClose }: { onClose: () => void }) {
   };
 
   const typed = query.trim() !== "";
+  const loading = (tasks === null && !tasksFailed) || (prs === null && !prsFailed);
+  const failedNote = tasksFailed && prsFailed ? "issues or pull requests" : tasksFailed ? "issues" : prsFailed ? "pull requests" : null;
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
@@ -240,8 +244,8 @@ function Switcher({ onClose }: { onClose: () => void }) {
         </div>
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-1.5" role="listbox" aria-label="Results">
           {failed && <p className="px-3 py-4 text-[12.5px] text-fg-3">Couldn't load agents.</p>}
-          {typed && othersFailed && <p className="px-3 py-2 text-[12px] text-fg-3">Couldn't load issues or pull requests: showing agents only.</p>}
-          {agents && shown.length === 0 && <p className="px-3 py-4 text-[12.5px] text-fg-3">{typed ? "Nothing matches." : "No agents yet."}</p>}
+          {typed && failedNote && <p className="px-3 py-2 text-[12px] text-fg-3">Couldn't load {failedNote}.</p>}
+          {agents && shown.length === 0 && <p className="px-3 py-4 text-[12.5px] text-fg-3">{!typed ? "No agents yet." : loading ? "Searching…" : "Nothing matches."}</p>}
           {GROUPS.map((g) => {
             const hits = shown.flatMap((h, i) => (h.kind === g.kind ? [{ h, i }] : []));
             if (!hits.length) return null;
