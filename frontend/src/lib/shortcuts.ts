@@ -32,6 +32,14 @@ export const FIXED: { keys: string; label: string }[] = [
 /** Sent on `window` when Settings saves a combination, so the shortcuts use it at once. */
 export const SHORTCUTS_CHANGED = "loft:shortcuts-changed";
 
+/** Sent on `window` to open the search or the shortcut sheet from a click, e.g. the chat's hint line. */
+export const OPEN_SHORTCUT = "loft:open-shortcut";
+export type Openable = "switcher" | "sheet";
+
+export function openShortcut(which: Openable, target: EventTarget = window) {
+  target.dispatchEvent(new CustomEvent<Openable>(OPEN_SHORTCUT, { detail: which }));
+}
+
 const keyOf = (id: Rebindable) => `loft:shortcut:${id}`;
 const RECENT_KEY = "loft:recent-agents";
 const RECENT_MAX = 20;

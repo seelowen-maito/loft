@@ -6,8 +6,8 @@ import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
 import {
-  FIXED, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, REBINDABLE, recording, shortcutAction,
-  searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos,
+  FIXED, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, OPEN_SHORTCUT, REBINDABLE, recording, shortcutAction,
+  searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
 import { Sticker } from "./Sticker";
@@ -36,6 +36,10 @@ export function Shortcuts() {
 
   useEffect(() => {
     const onChanged = () => (combos.current = loadCombos());
+    const onOpen = (e: Event) => {
+      returnTo.current = document.activeElement as HTMLElement | null;
+      setOpen((e as CustomEvent<Openable>).detail);
+    };
     // Capture, so a focused input can't swallow ⌘K first.
     const onKey = (e: KeyboardEvent) => {
       if (recording.on || e.isComposing) return;
@@ -72,9 +76,11 @@ export function Shortcuts() {
       }
     };
     window.addEventListener(SHORTCUTS_CHANGED, onChanged);
+    window.addEventListener(OPEN_SHORTCUT, onOpen);
     window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener(SHORTCUTS_CHANGED, onChanged);
+      window.removeEventListener(OPEN_SHORTCUT, onOpen);
       window.removeEventListener("keydown", onKey, true);
     };
   }, [navigate, close]);
