@@ -104,7 +104,12 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
 export type IssueDelivery = {
+  /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "ready", "settled" or "merged". */
   state: string;
+  /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
+  stall_reason?: string | null;
+  /** A ticket, or the final review, waits for the user after too many changes rounds. */
+  needs_human?: boolean;
   started: boolean;
   agent_id: string | null;
   agent_name: string | null;

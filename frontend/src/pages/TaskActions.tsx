@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
@@ -9,6 +9,8 @@ import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/menti
 import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
+import { deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
+import { useServerEvents, type ServerEvent } from "../lib/events";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -144,33 +146,60 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
   );
 }
 
+/** The issue's Delivery, loaded once and again whenever the server says it changed (here, on another device,
+ *  or from Loft moving it on), so the card stays live. */
+function useIssueDelivery(t: Task) {
+  const [d, setD] = useState<IssueDelivery | null>(null);
+  const reload = useCallback(() => {
+    api.issueDelivery(t.id).then(setD).catch(() => {});
+  }, [t.id]);
+  useEffect(reload, [reload]);
+  const repo = t.github?.repo.toLowerCase();
+  const number = t.github?.number;
+  useServerEvents(
+    useCallback(
+      (e: ServerEvent) => {
+        if (e.type === "delivery" && e.repo.toLowerCase() === repo && e.spec === number) reload();
+      },
+      [repo, number, reload],
+    ),
+  );
+  return [d, setD, reload] as const;
+}
+
+const TONE: Record<DeliveryTone, string> = {
+  running: "text-accent",
+  stalled: "text-bad",
+  needs_you: "text-warn",
+  final: "text-accent",
+  done: "text-good",
+};
+
+/** Where a started Delivery stands: running, stalled (and why), needs you, final review or done. */
+function DeliveryState({ d }: { d: IssueDelivery | null }) {
+  const line = deliveryStateLine(d);
+  if (!line) return null;
+  return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
+}
+
 /** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [started, setStarted] = useState<{ agent_id: string; agent_name: string; pr: number | null } | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
-  useEffect(() => {
-    let live = true;
-    api.issueDelivery(t.id)
-      .then((d) => live && d?.started && d.agent_id && setStarted({ agent_id: d.agent_id, agent_name: d.agent_name ?? "", pr: d.pr }))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [t.id]);
+  const [d, setD] = useIssueDelivery(t);
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
-      const d = await api.startIssueDelivery(t.id);
-      setStarted({ agent_id: d.agent_id ?? "", agent_name: d.agent_name ?? "", pr: d.pr });
+      setD(await api.startIssueDelivery(t.id));
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+  const started = d?.started && d.agent_id ? d : null;
   const n = t.github?.number;
   return (
     <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
@@ -182,6 +211,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
               ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
               : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
           </div>
+          <DeliveryState d={started} />
         </div>
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
@@ -197,17 +227,8 @@ export function DeliveryCard({ task: t }: { task: Task }) {
 export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [d, setD] = useState<IssueDelivery | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
-  useEffect(() => {
-    let live = true;
-    api.issueDelivery(t.id)
-      .then((d) => live && setD(d))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [t.id]);
+  const [d, setD, reload] = useIssueDelivery(t);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -215,7 +236,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
       setD(await api.startIssueDelivery(t.id));
     } catch (e) {
       setError((e as Error).message);
-      api.issueDelivery(t.id).then(setD).catch(() => {});
+      reload();
     } finally {
       setBusy(false);
     }
@@ -240,6 +261,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
               `Loft builds the open sub-issues of #${t.github?.number} one at a time on its spec branch and draft spec PR, starting with the first unblocked one on the team's Dev.`
             )}
           </div>
+          <DeliveryState d={started} />
         </div>
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
