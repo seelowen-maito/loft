@@ -261,7 +261,7 @@ export type PushStatus = {
   relay_key: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
-  /** The relay address in use (saved, else LOFT_RELAY_URL); null when there is none. Its push portal is at the same address. */
+  /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */
   relay_url: string | null;
   /** The address saved in Settings ("" when none: the environment's, if any, is used). */
   relay_address: string;
