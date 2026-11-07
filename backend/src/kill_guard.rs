@@ -1,46 +1,38 @@
-//! The `PreToolUse` hook on Bash that Loft gives every agent: it refuses commands that kill processes by name
-//! or pattern (`pkill -f vite`, `killall node`, `pgrep -f next | xargs kill`). Those hit every process on the Mac
-//! whose command line matches: other agents' claude and their running Bash commands (Claude Code runs each one
-//! as `zsh -c '<command>'`), and the user's own stdio MCP servers. Kills by PID or port stay allowed.
+//! The `PreToolUse` hook on Bash that Loft gives every agent. Kills an agent runs by name (`kill`, `pkill`,
+//! `killall`) go through Loft, which lets them stop only the agent's own processes and asks the user about any
+//! other (processes.rs). This hook spots the kills that would skip it, because they don't run Loft's `kill`
+//! function or the commands it puts first on PATH:
+//! - the real command by path (`/bin/kill`, `/usr/bin/pkill`);
+//! - through `sudo` or `doas`, which reset PATH, or `command` or `builtin`, which skip functions;
+//! - a `kill` in another shell's script (`sh -c 'kill 123'`, `bash <<EOF`, `watch 'kill 1'`), where that shell's
+//!   own builtin runs.
+//!
+//! It refuses those, telling the agent to run the kill by name, where Loft asks the user about any process that
+//! isn't the agent's. (A hook's "ask" doesn't reach the user: in auto mode Claude Code's classifier answers it.)
+//! Everything else runs.
 //!
 //! Claude runs it before every Bash call, so it is a plain scan of the command's shell text, in this binary
-//! (`loft kill-guard`) and before any runtime starts. It refuses:
-//! - `pkill` and `killall`, and a `kill` that hits every process the user owns (`kill -9 -1`) or a whole process
-//!   group (`kill 0`, `kill -- -1234`);
-//! - a `kill` fed by a lookup (`pgrep`, `pidof`, `ps` other than `ps -p`, `lsof -c`): later in the same pipeline
-//!   (`pgrep x | xargs kill`), inside the kill's `$(...)`, or through a variable or file the command fills from the
-//!   lookup (`PID=$(pgrep x); kill $PID`). A lookup that only checks (`kill 123; ps aux | grep vite`) runs.
+//! (`loft kill-guard`) and before any runtime starts. It looks through wrappers (`xargs`, `find -exec`, `watch`,
+//! `env -S`, ...), `sh -c`, `eval`, and shells that read their script from a heredoc or a piped `echo`.
 //!
-//! It looks through wrappers (`sudo`, `xargs`, `find -exec`, `watch`, `env -S`, ...), `sh -c`, `eval`, and shells
-//! that read their script from a heredoc or a piped `echo`.
-//!
-//! Its limits, which the prompt rule covers. It reads shell text, so it doesn't see:
-//! - a script file the agent writes and runs, or one it `source`s (`source <(...)`), and `trap` text;
-//! - a command name built at run time: from a variable (`p=pkill; $p`), brace expansion (`{pkill,-f,x}`), a glob
-//!   (`/usr/bin/pk?ll`), or arithmetic (`kill $((-1))`);
-//! - other languages sending a signal (osascript, python, node), other shells' syntax (fish, csh), and commands
-//!   that run text elsewhere (`ssh`, `tmux`, `screen`, `su -c`, `at`);
-//! - a port lookup filtered by name (`lsof -i | grep node | awk ... | xargs kill`), which looks like the port idiom.
-//!
-//! It fails open: input it can't read lets the command run, since failing closed would block every Bash call.
+//! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
+//! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
+//! (osascript, python, node). It fails open: input it can't read lets the command run.
 
-use std::collections::HashSet;
 use std::io::Read;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The argument that makes this binary run as the hook.
 pub const ARG: &str = "kill-guard";
 
-const REFUSAL: &str = "Loft refused this command: it kills processes by name or pattern (pkill, killall, or kill \
-fed by pgrep, pidof or ps), or every process (kill -1, kill 0). That also hits other agents' running commands and \
-servers and the user's MCP servers on this Mac. Stop only your own processes: by port, `lsof -ti tcp:<port> \
--sTCP:LISTEN | xargs kill`, or by the PID you saved when you started it (`kill <pid>`, `kill $!`). If you must look \
-a PID up, do it in one command, check the process is yours (started from your workspace), then kill it by number \
-in another.";
+const REFUSAL: &str = "Loft refused this command: it runs kill, pkill or killall by path, through sudo, `command` \
+or `builtin`, or as another shell's `kill`, where Loft can't tell whose processes it stops. Run kill, pkill or \
+killall by name, right in your command: Loft lets them stop your own processes, and asks the user before stopping \
+any other.";
 
-/// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows
-/// stderr to the agent, for a kill by name. Input it can't read passes.
+/// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows stderr to
+/// the agent, for a kill that skips Loft's. Input it can't read passes.
 pub fn hook() -> ! {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -54,236 +46,62 @@ pub fn hook() -> ! {
 /// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`.
 pub fn hooks(exe: &std::path::Path) -> Value {
     let command = format!("'{}' {ARG}", exe.to_string_lossy().replace('\'', r"'\''"));
-    serde_json::json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] }] })
+    json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] }] })
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
     let v: Value = serde_json::from_str(input).unwrap_or_default();
     match v["tool_input"]["command"].as_str() {
-        Some(command) if kills_by_name(command) => Err(REFUSAL),
+        Some(command) if unscoped(command) => Err(REFUSAL),
         _ => Ok(()),
     }
 }
 
-/// Whether `command` kills processes by name or pattern, or every process (see the module docs).
-pub fn kills_by_name(command: &str) -> bool {
-    scan(command, 0).refuse
-}
-
-/// What a piece of shell text, or one simple command in it, does that the guard cares about.
-#[derive(Default, Clone, Copy)]
-struct Scan {
-    /// Refused on its own: `pkill`, `killall`, a kill of everything, or (for text) a kill fed by a lookup.
-    refuse: bool,
-    /// Runs `kill`.
-    kill: bool,
-    /// Looks processes up by name.
-    lookup: bool,
-}
-
-impl Scan {
-    fn add(&mut self, s: Scan) {
-        self.refuse |= s.refuse;
-        self.kill |= s.kill;
-        self.lookup |= s.lookup;
-    }
+/// Whether `command` runs a kill that skips Loft's (see the module docs).
+pub fn unscoped(command: &str) -> bool {
+    scan(command, 0, false)
 }
 
 /// Shell text nested deeper than this (`sh -c "eval '...'"`) isn't scanned.
 const MAX_DEPTH: usize = 8;
 
-fn scan(text: &str, depth: usize) -> Scan {
+/// `shell`: the text runs in a shell of its own, which has no `kill` function from Loft.
+fn scan(text: &str, depth: usize, shell: bool) -> bool {
     if depth > MAX_DEPTH {
-        return Scan::default();
+        return false;
     }
     let cmds = parse(text);
-    let each: Vec<Scan> = (0..cmds.len()).map(|i| scan_command(&cmds, i, depth)).collect();
-    let mut s = Scan::default();
-    each.iter().for_each(|e| s.add(*e));
-    if !s.refuse && s.kill && s.lookup {
-        s.refuse = fed(&cmds, &each).into_iter().zip(&each).any(|(fed, e)| fed && e.kill);
-    }
-    s
+    (0..cmds.len()).any(|i| scan_command(&cmds, i, depth, shell))
 }
 
-/// What one simple command runs, through its wrappers and any shell text it hands on.
-fn scan_command(cmds: &[Cmd], i: usize, depth: usize) -> Scan {
-    let mut s = Scan::default();
+/// Whether one simple command, through its wrappers and any shell text it hands on, runs a kill that skips Loft's.
+fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> bool {
     let mut runs = vec![cmds[i].words.clone()];
     while let Some(words) = runs.pop() {
-        let words = match unwrap(&words) {
+        let mut bypass = false;
+        let words = match unwrap(&words, &mut bypass) {
             Run::Words(words) => words,
             Run::Text(text) => {
-                s.add(scan(&text, depth + 1));
+                if scan(&text, depth + 1, true) {
+                    return true;
+                }
                 continue;
             }
         };
         let Some((name, args)) = words.split_first() else { continue };
-        match base(name) {
-            "pkill" | "killall" => s.refuse = true,
-            "kill" => {
-                s.kill = true;
-                s.refuse |= hits_everything(args);
+        let found = match base(name) {
+            "kill" | "pkill" | "killall" if bypass || name.contains('/') => true,
+            "kill" => shell,
+            "find" => {
+                runs.extend(find_execs(args));
+                false
             }
-            "pgrep" | "pidof" => s.lookup = true,
-            "ps" if !ps_by_pid(args) => s.lookup = true,
-            "lsof" if args.iter().any(|a| lsof_by_name(a)) => s.lookup = true,
-            "find" => runs.extend(find_execs(args)),
-            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-                if let Some(text) = shell_script(cmds, i, args) {
-                    s.add(scan(&text, depth + 1));
-                }
-            }
-            "eval" => s.add(scan(&args.join(" "), depth + 1)),
-            _ => {}
-        }
-    }
-    s
-}
-
-/// Which commands get a lookup's output: from a lookup earlier in their pipeline or in their `$(...)`, or through a
-/// variable or file filled from one.
-fn fed(cmds: &[Cmd], each: &[Scan]) -> Vec<bool> {
-    let mut fed = vec![false; cmds.len()];
-    let (mut vars, mut files) = (HashSet::new(), HashSet::new());
-    loop {
-        let before = (fed.iter().filter(|f| **f).count(), vars.len(), files.len());
-        let carries: Vec<bool> = fed.iter().zip(each).map(|(f, e)| *f || e.lookup).collect();
-        for (i, c) in cmds.iter().enumerate() {
-            // A `$(...)`/`<(...)` feeds its parent; a `>(...)` reads it.
-            let from = |j: usize| {
-                carries[j]
-                    && ((cmds[j].parent == Some(i) && !cmds[j].reads_parent)
-                        || (c.parent == Some(j) && c.reads_parent)
-                        || piped(&cmds[j], c))
-            };
-            // What a compound command reads (`done < <(pgrep x)`) reaches every command inside it.
-            let into = |j: usize| fed[j] && closes(&cmds[j]) && cmds[j].pipes.last().is_some_and(|at| c.pipes.len() > cmds[j].pipes.len() && c.pipes.contains(at));
-            let now = (0..cmds.len()).any(|j| from(j) || into(j))
-                || c.words.iter().any(|w| vars.iter().any(|v: &String| uses(w, v)))
-                || c.words.iter().chain(&c.reads).any(|w| files.contains(w.trim_start_matches("./")));
-            fed[i] |= now;
-        }
-        for c in cmds.iter().enumerate().filter(|(i, _)| fed[*i] || each[*i].lookup).map(|(_, c)| c) {
-            vars.extend(assigns(c));
-            files.extend(writes(c).map(|f| f.trim_start_matches("./").to_string()));
-        }
-        if before == (fed.iter().filter(|f| **f).count(), vars.len(), files.len()) {
-            return fed;
-        }
-    }
-}
-
-/// Whether `c` ends a compound command (`done < file`).
-fn closes(c: &Cmd) -> bool {
-    c.words.first().is_some_and(|w| matches!(w.as_str(), "done" | "}" | "fi" | "esac"))
-}
-
-/// Whether `a` sits earlier than `b` in a pipeline, so `b` reads its output.
-fn piped(a: &Cmd, b: &Cmd) -> bool {
-    a.pipes.iter().any(|&(p, at)| b.pipes.iter().any(|&(q, bt)| p == q && at < bt))
-}
-
-/// Whether `word` expands the variable `var` (`$var`, `${var}`).
-fn uses(word: &str, var: &str) -> bool {
-    word.match_indices('$').any(|(i, _)| {
-        let rest = &word[i + 1..];
-        let rest = rest.strip_prefix('{').unwrap_or(rest);
-        rest.strip_prefix(var).is_some_and(|after| !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
-    })
-}
-
-/// The variables a command sets: `NAME=...` (also after `export`/`local`), `for NAME in`, `read NAME`.
-fn assigns(c: &Cmd) -> Vec<String> {
-    let mut vars: Vec<String> = c.words.iter().filter_map(|w| assignment(w)).map(String::from).collect();
-    if let Run::Words([name, args @ ..]) = unwrap(&c.words) {
-        match name.as_str() {
-            "for" | "select" => vars.extend(args.first().cloned()),
-            "read" | "mapfile" | "readarray" => {
-                vars.extend(args.iter().filter(|a| !a.starts_with('-')).cloned());
-                vars.extend(["REPLY".to_string(), "MAPFILE".to_string()]);
-            }
-            _ => {}
-        }
-    }
-    vars
-}
-
-/// The files a command writes: its `>` targets and what it `tee`s to.
-fn writes(c: &Cmd) -> impl Iterator<Item = &String> {
-    let tee = match unwrap(&c.words) {
-        Run::Words([name, args @ ..]) if base(name) == "tee" => args,
-        _ => &[],
-    };
-    c.writes.iter().chain(tee.iter().filter(|a| !a.starts_with('-'))).filter(|f| !f.starts_with("/dev/"))
-}
-
-/// Whether `kill`'s arguments signal every process the user owns (`-1`) or a whole process group (`0`, `-1234`).
-/// A first `-N` is the signal: `kill -1 1234` sends HUP to 1234.
-fn hits_everything(args: &[String]) -> bool {
-    let mut operands = match args.first().map(String::as_str) {
-        Some("-l" | "-L") => return false,
-        Some("-s" | "-n") => args.get(2..).unwrap_or_default(),
-        Some(a) if a.starts_with('-') => &args[1..],
-        _ => args,
-    };
-    if operands.first().is_some_and(|a| a == "--") {
-        operands = &operands[1..];
-    }
-    operands.iter().any(|a| {
-        let n = a.strip_prefix('-').unwrap_or(a);
-        !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && (a.starts_with('-') || n.bytes().all(|b| b == b'0'))
-    })
-}
-
-/// Whether `ps` only shows the processes it's given by PID (`ps -p 123`, `ps -o pid= -p $PID`), with nothing that
-/// selects every process (`-A`, `-e`, `-a`, `-x`, `aux`) or more of them: ps lists the union of its selectors, so
-/// `-u $USER -p 1` lists all the user's processes.
-fn ps_by_pid(args: &[String]) -> bool {
-    let (mut pid, mut all) = (false, false);
-    let mut it = args.iter().enumerate();
-    while let Some((n, a)) = it.next() {
-        let flags = match a.strip_prefix('-') {
-            Some(long) if long.starts_with('-') => {
-                pid |= long.starts_with("-pid");
-                let selectors = ["-user", "-User", "-group", "-Group", "-tty", "-sid", "-ppid", "-deselect"];
-                all |= selectors.iter().any(|s| long.starts_with(s));
-                continue;
-            }
-            Some(flags) => flags,
-            None if n == 0 => a.as_str(), // BSD style, `ps aux`
-            None => continue,             // an option's value or a PID
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => shell_script(cmds, i, args).is_some_and(|text| scan(&text, depth + 1, true)),
+            "eval" => scan(&args.join(" "), depth + 1, shell),
+            _ => false,
         };
-        for (k, f) in flags.char_indices() {
-            let dash = a.starts_with('-');
-            match f {
-                'A' | 'a' | 'e' | 'x' => all = true,
-                // Users, groups, terminals, sessions, command names, `-N`; `ps u` without a dash is a format.
-                'u' | 'U' | 'g' | 'G' | 't' | 's' | 'C' | 'N' if dash => all = true,
-                'p' => pid = true,
-                _ => {}
-            }
-            // The rest is this option's value, or the next word is.
-            if "pqoOUuGgtsC".contains(f) && dash {
-                if k + 1 == flags.len() {
-                    it.next();
-                }
-                break;
-            }
-        }
-    }
-    pid && !all
-}
-
-/// Whether an `lsof` option picks processes by command name: `-c`, also in a group (`-tc`, `-ct`).
-fn lsof_by_name(arg: &str) -> bool {
-    let Some(flags) = arg.strip_prefix('-').filter(|f| !f.starts_with('-')) else { return false };
-    for f in flags.chars() {
-        if f == 'c' {
+        if found {
             return true;
-        }
-        if "dDeFgikKopsSTuxz".contains(f) {
-            return false; // the rest is this option's value (`-itcp:3000`)
         }
     }
     false
@@ -335,7 +153,7 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
     let c = &cmds[i];
     let mut text = c.stdin.clone();
     for up in cmds.iter().filter(|up| up.pipes.iter().any(|&(p, at)| c.pipes.contains(&(p, at + 1)))) {
-        if let Run::Words([name, args @ ..]) = unwrap(&up.words) {
+        if let Run::Words([name, args @ ..]) = unwrap(&up.words, &mut false) {
             match base(name) {
                 "echo" | "printf" => text += &args.join(" ").replace("\\n", "\n"),
                 "cat" => text += &up.stdin,
@@ -378,8 +196,9 @@ enum Run<'a> {
 }
 
 /// The command a simple command runs: past variable assignments, shell keywords and wrappers that run the
-/// command they're given (`sudo`, `env`, `xargs`, `nohup`, `watch`, ...). `command -v` runs nothing.
-fn unwrap(words: &[String]) -> Run<'_> {
+/// command they're given (`sudo`, `env`, `xargs`, `nohup`, `watch`, ...). `command -v` runs nothing. `bypass` is set
+/// when a wrapper skips the shell's functions or PATH (`sudo`, `doas`, `command`, `builtin`).
+fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
     let rest = |i: usize| words.get(i..).unwrap_or_default();
     let mut i = 0;
     while let Some(w) = words.get(i) {
@@ -410,6 +229,7 @@ fn unwrap(words: &[String]) -> Run<'_> {
             "command" | "builtin" | "nohup" | "time" | "chronic" => &[],
             _ => return Run::Words(rest(i)),
         };
+        *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
         i += 1;
         while let Some(o) = words.get(i).filter(|o| o.starts_with('-')) {
             i += 1;
@@ -441,26 +261,17 @@ fn unwrap(words: &[String]) -> Run<'_> {
 struct Cmd {
     /// Its words with quotes removed. Redirections aren't words.
     words: Vec<String>,
-    /// The command whose word holds this one in a `$(...)`, backticks, `<(...)` or `>(...)`.
-    parent: Option<usize>,
-    /// In a `>(...)`: it reads the parent's output, where a `$(...)` gives the parent its own.
-    reads_parent: bool,
     /// Each pipeline it sits in, from the outermost (one a compound command it's in sits in) in: the pipeline and
     /// its place there.
     pipes: Vec<(usize, usize)>,
-    /// Files redirected in (`<`) and out (`>`, `>>`).
-    reads: Vec<String>,
-    writes: Vec<String>,
     /// Its heredoc bodies and herestrings.
     stdin: String,
 }
 
 #[derive(Clone, Copy)]
 enum Redirect {
-    In,
-    Out,
-    /// `2>&1`: the target is a file descriptor.
-    Fd,
+    /// The target is a file or a file descriptor (`2>&1`).
+    File,
     /// `<<<`: the target is a herestring.
     Here,
 }
@@ -485,14 +296,12 @@ struct Parse {
 fn parse(text: &str) -> Vec<Cmd> {
     let c: Vec<char> = text.chars().collect();
     let mut p = Parse::default();
-    lex(&mut p, &c, 0, None, None, false);
+    lex(&mut p, &c, 0, None);
     p.cmds
 }
 
 /// The state of one `lex`: the top level or one substitution.
 struct Level {
-    parent: Option<usize>,
-    reads_parent: bool,
     /// The command being lexed.
     cur: Option<usize>,
     word: String,
@@ -505,8 +314,8 @@ struct Level {
 }
 
 impl Level {
-    fn new(parent: Option<usize>, reads_parent: bool) -> Self {
-        Level { parent, reads_parent, cur: None, word: String::new(), in_word: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
+    fn new() -> Self {
+        Level { cur: None, word: String::new(), in_word: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -515,9 +324,8 @@ impl Level {
 
     /// The command being lexed, started if need be.
     fn cmd(&mut self, p: &mut Parse) -> usize {
-        let (parent, reads_parent) = (self.parent, self.reads_parent);
         *self.cur.get_or_insert_with(|| {
-            p.cmds.push(Cmd { parent, reads_parent, ..Default::default() });
+            p.cmds.push(Cmd::default());
             p.cmds.len() - 1
         })
     }
@@ -531,9 +339,7 @@ impl Level {
         let id = self.cmd(p);
         let cmd = &mut p.cmds[id];
         match self.redirect.take() {
-            Some(Redirect::In) => cmd.reads.push(word),
-            Some(Redirect::Out) => cmd.writes.push(word),
-            Some(Redirect::Fd) => {}
+            Some(Redirect::File) => {}
             Some(Redirect::Here) => {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
@@ -594,8 +400,8 @@ impl Level {
 
 /// Lexes from `i` to the end, or past the `stop` (`)` or a backtick) that closes a substitution, adding the
 /// commands it finds to `p`. Returns the index it stopped at.
-fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Option<usize>, reads_parent: bool) -> usize {
-    let mut l = Level::new(parent, reads_parent);
+fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
+    let mut l = Level::new();
     let mut depth = 0; // subshell parens open inside a `$(`
     let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
     while let Some(&ch) = c.get(i) {
@@ -661,12 +467,12 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
                             i += 1;
                         }
                         '$' if c.get(i) == Some(&'(') => {
-                            let id = l.cmd(p);
-                            i = lex(p, c, i + 1, Some(')'), Some(id), false);
+                            l.cmd(p);
+                            i = lex(p, c, i + 1, Some(')'));
                         }
                         '`' => {
-                            let id = l.cmd(p);
-                            i = lex(p, c, i, Some('`'), Some(id), false);
+                            l.cmd(p);
+                            i = lex(p, c, i, Some('`'));
                         }
                         _ => l.word.push(q),
                     }
@@ -675,13 +481,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>, parent: Opti
             '`' if stop == Some('`') => break,
             '`' => {
                 l.in_word = true;
-                let id = l.cmd(p);
-                i = lex(p, c, i, Some('`'), Some(id), false);
+                l.cmd(p);
+                i = lex(p, c, i, Some('`'));
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
-                let id = l.cmd(p);
-                i = lex(p, c, i + 1, Some(')'), Some(id), ch == '>');
+                l.cmd(p);
+                i = lex(p, c, i + 1, Some(')'));
             }
             '$' if next == Some('{') => {
                 l.in_word = true;
@@ -835,12 +641,7 @@ fn redirect(l: &mut Level, c: &[char], mut i: usize, ch: char) -> usize {
         op.push(n);
         i += 1;
     }
-    l.redirect = Some(match ch {
-        _ if op.ends_with('&') => Redirect::Fd,
-        '<' if op == "<<" => Redirect::Here,
-        '<' => Redirect::In,
-        _ => Redirect::Out,
-    });
+    l.redirect = Some(if ch == '<' && op == "<<" { Redirect::Here } else { Redirect::File });
     i
 }
 
@@ -868,253 +669,111 @@ mod tests {
     // These are only ever scanned as text: nothing here runs a command.
 
     #[test]
-    fn refuses_kills_by_name_wherever_they_sit() {
+    fn kills_by_name_run_through_loft_without_asking() {
+        // Loft's `kill`, `pkill` and `killall` functions, or the commands of those names first on PATH, get these.
         for cmd in [
-            "pkill -f foo",
+            "pkill -f vite",
             "killall node",
+            "kill 1234",
+            "kill -9 $!",
+            "kill %1",
+            "kill -9 -1",
+            "kill 0",
             "cd x && pkill -f foo",
-            "foo; killall node",
             "kill $(pgrep -f next)",
-            "kill -9 `pgrep vite`",
             "pgrep -f vite | xargs kill",
             "pgrep -f vite | xargs -n 1 kill -9",
-            "ps aux | grep vite | awk '{print $2}' | xargs kill",
             "PID=$(pgrep -f vite); kill $PID",
-            "kill $(lsof -c node -t)",
-            "sudo pkill node",
-            "sudo -u me killall node",
-            "/usr/bin/pkill x",
-            "\\pkill x",
-            "\"pkill\" x",
-            "(cd /tmp; pkill x)",
-            "echo $(pkill x)",
-            "echo \"$(killall x)\"",
-            "diff <(pkill x) y",
-            "bash -c 'pkill -f x'",
-            "zsh -lc \"killall node\"",
-            "eval \"pkill x\"",
-            "env FOO=1 pkill x",
-            "FOO=1 killall x",
-            "nohup killall x >/dev/null 2>&1 &",
-            "timeout 5 pkill x",
-            "xargs pkill < names",
-            "if true; then killall node; fi",
-            "{ pkill x; }",
-            "true\npkill x",
-            "npm test || pkill -f vite",
-            "cat <<EOF\nhi\nEOF\npkill x",
-            "git commit -m \"$(cat <<'EOF'\nDon't (really\nEOF\n)\" && pkill x",
-            "f() { pkill x; }; f",
-        ] {
-            assert!(kills_by_name(cmd), "should refuse: {cmd}");
-        }
-    }
-
-    #[test]
-    fn refuses_kills_of_every_process_or_a_process_group() {
-        for cmd in ["kill -9 -1", "kill -- -1", "kill -TERM 0", "kill 0", "kill -- 0", "kill -TERM -1234", "kill -s KILL -1", "kill -9 -- -1", "kill 1234 -1", "/bin/kill -1 -1", "sudo kill -9 -1", "bash -c 'kill -9 -1'"] {
-            assert!(kills_by_name(cmd), "should refuse: {cmd}");
-        }
-        // A first `-1` is the signal (HUP).
-        for cmd in ["kill -1 1234", "kill 1234", "kill $!", "kill -9 $PID", "kill -l", "kill -s HUP 1234", "lsof -ti tcp:3000 -sTCP:LISTEN | xargs kill"] {
-            assert!(!kills_by_name(cmd), "should allow: {cmd}");
-        }
-    }
-
-    #[test]
-    fn a_lookup_counts_only_when_it_feeds_the_kill() {
-        for cmd in [
-            "pgrep x | while read p; do kill $p; done",
-            "pgrep x | while IFS= read -r p; do kill -9 \"$p\"; done",
-            "for p in $(pgrep x); do kill $p; done",
-            "pids=$(pgrep x)\nsleep 1\nkill ${pids}",
-            "A=$(pgrep x); B=$A; kill $B",
-            "export PID=`pidof node` && kill -9 $PID",
-            "pgrep -f vite > p; kill $(cat p)",
-            "pgrep -f vite > /tmp/p; xargs kill < /tmp/p",
-            "pgrep -f vite | tee p; kill $(cat ./p)",
-            "kill $(pgrep x | head -1)",
-            "kill $(cat $(pgrep -f x))",
-            "{ pgrep x; } | xargs kill",
-            "(pgrep x) | xargs kill",
-            "pgrep x | xargs -I{} sh -c 'kill {}'",
-            "PID=$(pgrep x); sh -c \"kill $PID\"",
-            "sh -c 'pgrep x | xargs kill'",
-            "pgrep x | parallel kill",
-            "ps -eo pid,comm | awk '/vite/ {print $1}' | xargs kill",
-            "while read p; do kill $p; done < <(pgrep x)",
-            "pgrep x > p; while read q; do kill $q; done < p",
-            "xargs kill < <(pgrep x)",
-            "pgrep x > p; kill $(<p)",
-            "pids=($(pgrep x)); kill ${pids[@]}",
-            "f() { local pids=($(pgrep -f vite)); kill \"${pids[@]}\"; }",
-            "declare -a pids=($(pgrep x)); kill ${pids[*]}",
-            "pids=(`pgrep x`)\nkill $pids",
-            "pids+=( $(pidof node) ); kill -9 ${pids[0]}",
-            "pgrep x > >(xargs kill)",
-            "pgrep x | tee >(xargs kill)",
-            "PIDS=($(pgrep x)); kill \"${PIDS[@]}\"",
-            "p=( $(pgrep x) )\nkill $p",
-            "f() { local -a p=($(pgrep x)); kill $p; }",
-            "ps -A -p 1 | awk '{print $1}' | xargs kill",
-            "ps -p 1 -e | awk '{print $1}' | xargs kill",
-            "ps aux -p 1 | awk '{print $2}' | xargs kill",
-            "ps -u $USER -p 1 -o pid= | xargs kill",
-            "ps -U $USER -p 1 -o pid= | xargs kill",
-            "ps -g 20 -p 1 -o pid= | xargs kill",
-            "ps -G staff -p 1 -o pid= | xargs kill",
-            "ps -t ttys001 -p 1 -o pid= | xargs kill",
-            "ps -p 1 -uroot -o pid= | xargs kill",
-            "ps --user me --pid 1 -o pid= | xargs kill",
-            "ps -C node -p 1 -o pid= | xargs kill",
-        ] {
-            assert!(kills_by_name(cmd), "should refuse: {cmd}");
-        }
-        for cmd in [
-            "kill 123; sleep 1; ps aux | grep vite",
-            "lsof -ti tcp:3000 -sTCP:LISTEN | xargs kill; pgrep -fl next",
-            "kill $PID; sleep 1; ps -p $PID",
-            "pgrep -q vite && kill 1234",
-            "if pgrep -q vite; then kill $(cat server.pid); fi",
-            "{ pgrep x; kill 12; }",
-            "PID=$(cat server.pid); kill $PID; pgrep -fl vite",
-            "pgrep -fl x > procs.txt; kill 12",
-            "ps aux 2>&1 | grep x; kill 1",
-            "kill 12 && ps aux | grep vite | wc -l",
-            "command -v pkill",
-            "command -V killall",
-            "type pkill",
-            "type killall",
-            "case $1 in killall) echo nope;; esac",
-            "case \"$x\" in\n  pkill|killall) echo no ;;\n  *) kill 12 ;;\nesac",
-            "pids=(12 34); kill ${pids[@]}; pgrep -fl vite",
-            "files=(a b); pgrep -fl x > procs.txt",
-            "diff <(pgrep -fl x) >(cat); kill 12",
-            "function f { echo hi; }; f",
-            "a=(1 2); kill 12; pgrep -fl x",
-            "kill $PID; ps -o pid=,args= -p $PID",
-            "ps -fp $PID | tail -1 | awk '{print $2}' | xargs kill",
-            "ps -p123 -o pid= | xargs kill",
-            "ps -wwp $PID -o pid= | xargs kill",
-            "ps --pid $PID -o pid= | xargs kill",
-            "ps -p $PID -o pid= | xargs kill",
-            "ps -o user= -p $PID | xargs kill",
-            "ps -o pid=,user=,tty= -p $PID | xargs kill",
-            "ps u -p $PID | awk 'NR>1 {print $2}' | xargs kill",
-            "a=(x#y); kill 12",
-            "a=(1 # one\n 2); kill ${a[0]}",
-        ] {
-            assert!(!kills_by_name(cmd), "should allow: {cmd}");
-        }
-    }
-
-    #[test]
-    fn refuses_kills_hidden_behind_wrappers_and_stdin_shells() {
-        for cmd in [
-            "echo 'pkill x' | sh",
-            "echo 'pkill x' | bash -s",
-            "printf 'cd /tmp\\npkill x\\n' | zsh",
-            "bash <<'EOF'\ncd /tmp\npkill x\nEOF",
-            "sh <<EOF\nkillall node\nEOF",
-            "bash <<< 'pkill x'",
-            "cat <<'EOF' | bash\npkill x\nEOF",
-            "find . -exec pkill {} \\;",
-            "find . -name x -exec pkill {} \\;",
-            "find /tmp -execdir killall {} +",
-            "find . -ok pkill {} ';'",
-            "watch pkill x",
-            "watch -n 1 'pkill -f x'",
-            "stdbuf -o0 pkill x",
-            "stdbuf -o 0 pkill x",
-            "arch -arm64 pkill x",
-            "arch -arch arm64 killall x",
-            "script -q /dev/null pkill x",
-            "script -c 'pkill x' /dev/null",
-            "env -S 'pkill x'",
-            "env -S'pkill x'",
-            "nice -n 5 pkill x",
-            "nice -10 pkill x",
-            "chronic pkill x",
-            "parallel pkill ::: a b",
-            "doas pkill x",
-            "lsof -tc node | xargs kill",
-            "lsof -ct node | xargs kill",
-            "kill $(lsof -t -cnode)",
-            "echo edge case covered in tests && pkill x",
-            "echo case x in y; killall node",
-            "bash -eo pipefail -c 'pkill x'",
-            "bash -euo pipefail -c 'pkill x'",
-            "zsh -o errexit -c 'killall node'",
-            "function f { pkill x; }; f",
-            "function f() { pkill x; }",
-            "sh -c -- 'pkill x'",
-            "bash -c -- \"killall node\"",
-            "$'pkill' x",
-            "$'\\x70kill' x",
-            "$'\\160kill' -f x",
-            "$'\\u0070kill' x",
-            "$'\\U00000070kill' x",
-            "$'\\u70kill' x",
-            "a=( # (\n ); pkill -f vite",
-            "a=( 1 #)\n ) ; killall node",
-            "echo hi; $'kill' -9 $'-1'",
-        ] {
-            assert!(kills_by_name(cmd), "should refuse: {cmd}");
-        }
-        for cmd in [
-            "cat <<EOF > notes.md\npkill x\nEOF",
-            "echo 'pkill x' > notes.md",
-            "echo 'pkill x' | grep kill",
-            "bash script.sh <<EOF\npkill x\nEOF",
-            "find . -name '*.rs' -exec grep -l pkill {} +",
-            "watch -n 1 'lsof -ti tcp:3000'",
-            "lsof -itcp:3000 -t | xargs kill",
-            "lsof -i :3000",
-            "stdbuf -o0 cargo test",
-        ] {
-            assert!(!kills_by_name(cmd), "should allow: {cmd}");
-        }
-    }
-
-    #[test]
-    fn allows_kills_by_pid_or_port_and_mere_mentions() {
-        for cmd in [
-            "kill 1234",
-            "kill -9 1234",
-            "kill $!",
-            "kill %1",
-            "kill -TERM \"$PID\"",
             "lsof -ti tcp:3000 -sTCP:LISTEN | xargs kill",
-            "kill $(lsof -ti tcp:3000)",
-            "kill $(cat server.pid)",
-            "kill $PID; sleep 1; ps -p $PID",
+            "(cd /tmp; pkill x)",
+            "echo $(kill 12)",
+            "eval \"kill 12\"",
+            "env FOO=1 pkill x",
+            "nohup killall x >/dev/null 2>&1 &",
+            "timeout 5 kill 12",
+            "nice -n 5 kill 12",
+            "exec kill 12",
+            "find . -name x -exec kill {} \\;",
+            "f() { kill 12; }; f",
+            "if true; then killall node; fi",
+            // Another shell finds pkill and killall on PATH: only its `kill` is a builtin.
+            "bash -c 'pkill -f x'",
+            "echo 'killall node' | sh",
+            "watch 'pkill x'",
+            "pgrep x | xargs -I{} sh -c 'echo {}'",
+        ] {
+            assert!(!unscoped(cmd), "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn kills_that_skip_loft_are_refused() {
+        for cmd in [
+            "/bin/kill 1234",
+            "/usr/bin/pkill -f vite",
+            "cd x && /usr/bin/killall node",
+            "sudo kill 1234",
+            "sudo -u me pkill x",
+            "doas killall node",
+            "command kill 12",
+            "builtin kill 12",
+            "nohup /bin/kill 12 &",
+            "pgrep x | xargs /bin/kill",
+            "find . -exec /bin/kill {} \\;",
+            "sh -c 'kill 12'",
+            "bash -c -- \"kill -9 $PID\"",
+            "zsh -lc 'cd /tmp; kill 12'",
+            "bash -eo pipefail -c 'kill 12'",
+            "PID=$(cat p); sh -c \"kill $PID\"",
+            "pgrep x | xargs -I{} sh -c 'kill {}'",
+            "echo 'kill 12' | sh",
+            "printf 'cd /tmp\\nkill 12\\n' | zsh",
+            "bash <<'EOF'\ncd /tmp\nkill 12\nEOF",
+            "bash <<< 'kill 12'",
+            "cat <<'EOF' | bash\nkill 12\nEOF",
+            "watch -n 1 'kill 12'",
+            "script -c 'kill 12' /dev/null",
+            "eval \"sh -c 'kill 12'\"",
+            "$'/bin/kill' 12",
+            "sh -c \"eval 'kill 12'\"",
+        ] {
+            assert!(unscoped(cmd), "should refuse: {cmd}");
+        }
+    }
+
+    #[test]
+    fn mentions_and_lookups_run() {
+        for cmd in [
             "pgrep -f vite",
             "ps aux | grep vite",
             "grep -r pkill src",
             "echo \"don't pkill\"",
-            "echo 'killall node'",
-            "git commit -m 'Never pkill -f; use kill $(lsof -ti tcp:3000)'",
-            "git commit -F - <<'EOF'\nDon't pkill -f (or killall)\nEOF",
-            "git commit -m \"$(cat <<'EOF'\nDon't pkill -f (or killall)\nEOF\n)\"",
-            "cat <<EOF > notes.md\npkill x\nEOF",
-            "echo hi > pkill.txt",
-            "# pkill -f old way\nkill 12",
-            "ls # killall",
-            "man pkill",
-            "which killall",
-            "cargo test 2>&1 | tail -5",
-            "rg 'pkill|killall' backend/src",
+            "echo 'sudo kill 1'",
+            "git commit -m \"$(cat <<'EOF'\nNever /bin/kill (or sudo kill)\nEOF\n)\"",
+            "cat <<EOF > notes.md\nsh -c 'kill 1'\nEOF",
+            "echo 'kill 12' > notes.md",
+            "echo 'kill 12' | grep kill",
+            "bash script.sh <<EOF\nkill 12\nEOF",
+            "command -v kill",
+            "command -V killall",
+            "type pkill",
+            "man kill",
+            "case $1 in kill) echo no;; esac",
+            "# /bin/kill 12\nls",
+            "rg '/bin/kill' backend/src",
         ] {
-            assert!(!kills_by_name(cmd), "should allow: {cmd}");
+            assert!(!unscoped(cmd), "should run: {cmd}");
         }
     }
 
     #[test]
-    fn the_hook_input_blocks_only_a_bash_kill_by_name() {
-        let input = |cmd: &str| serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": cmd } }).to_string();
-        assert!(check(&input("cd x && pkill -f foo")).unwrap_err().contains("lsof -ti tcp:<port>"));
-        assert!(check(&input("kill -9 -1")).is_err());
-        assert!(check(&input("kill 1234")).is_ok());
+    fn the_hook_refuses_only_a_kill_that_skips_loft() {
+        let input = |cmd: &str| json!({ "tool_name": "Bash", "tool_input": { "command": cmd } }).to_string();
+        assert!(check(&input("cd x && sudo kill -9 1234")).unwrap_err().contains("Run kill, pkill or killall by name"));
+        // Kills by name, even of a pattern, go through Loft.
+        for cmd in ["pkill -f vite", "killall node", "kill 1234", "pgrep x | xargs kill"] {
+            assert!(check(&input(cmd)).is_ok(), "{cmd}");
+        }
         assert!(check("not json").is_ok());
         assert!(check("{}").is_ok());
     }

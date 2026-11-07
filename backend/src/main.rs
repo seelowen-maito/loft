@@ -18,6 +18,7 @@ mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
+mod processes;
 mod prs;
 mod push;
 mod signin;
@@ -50,8 +51,11 @@ use crate::state::{AppState, Config, Runtime};
 
 fn main() -> anyhow::Result<()> {
     // As the agents' Bash hook, claude runs this binary before every Bash call: answer before any setup.
-    if std::env::args().nth(1).as_deref() == Some(kill_guard::ARG) {
-        kill_guard::hook();
+    match std::env::args().nth(1).as_deref() {
+        Some(kill_guard::ARG) => kill_guard::hook(),
+        // And as their `kill`, `pkill` and `killall`.
+        Some(processes::ARG) => processes::cli(),
+        _ => {}
     }
     serve()
 }
@@ -118,6 +122,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
     tokio::spawn(agents::quiet_watcher(state.clone()));
+    tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
 
@@ -195,6 +200,8 @@ async fn serve() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", api)
         .route("/mcp/{agent_id}", post(mcp::handle))
+        // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
+        .route("/kill/{agent_id}", post(processes::handle))
         // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.

@@ -271,6 +271,44 @@ pub async fn ask_permission(
     reason: &str,
     rule: String,
 ) -> Decision {
+    ask_permission_for(state, agent_id, source, tool_name, input, reason, rule, PERMISSION_TIMEOUT).await
+}
+
+/// Marks a request expired when it ends unanswered: at the timeout, or when whoever asked stops waiting (a kill
+/// whose command was stopped), so a later answer can't act on it.
+struct Unanswered<'a> {
+    state: &'a AppState,
+    id: String,
+    answered: bool,
+}
+
+impl Drop for Unanswered<'_> {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        self.state.rt.lock().unwrap().waiters.remove(&self.id);
+        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id) {
+            if r.status == "pending" {
+                r.status = "expired".into();
+                let _ = self.state.db.save_permission(&r);
+                self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
+            }
+        }
+    }
+}
+
+/// `ask_permission`, waiting at most `timeout` for the user.
+pub async fn ask_permission_for(
+    state: &AppState,
+    agent_id: &str,
+    source: &str,
+    tool_name: &str,
+    input: Value,
+    reason: &str,
+    rule: String,
+    timeout: Duration,
+) -> Decision {
     let req = PermissionRequest {
         id: uuid::Uuid::new_v4().to_string(),
         agent_id: agent_id.into(),
@@ -292,18 +330,15 @@ pub async fn ask_permission(
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
     set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
 
-    let decision = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
-        Ok(Ok(d)) => d,
-        _ => {
-            state.rt.lock().unwrap().waiters.remove(&req.id);
-            if let Ok(Some(mut r)) = state.db.get_permission(&req.id) {
-                r.status = "expired".into();
-                let _ = state.db.save_permission(&r);
-                state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
-            }
-            Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) }
+    let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
+    let decision = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(d)) => {
+            pending.answered = true;
+            d
         }
+        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) },
     };
+    drop(pending);
     if is_running(state, agent_id) {
         set_status(state, agent_id, "running", &prev);
     }
@@ -318,8 +353,9 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
         req.rule = r.trim().to_string();
     }
     let allow = decision != "deny";
-    // Explicit requests are always about config, so any grant persists.
-    let persist = decision == "allow_always" || (allow && req.source == "request");
+    // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
+    // is about those processes only: it is never saved.
+    let persist = req.tool_name != "Kill" && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -443,7 +479,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti tcp:<port> -sTCP:LISTEN | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents and their servers run on this Mac and a pattern can match them, so Loft refuses those commands. To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of 960000: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -907,16 +943,16 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
 }
 
-/// Where claude reads one of an agent's files from: its system prompt (`md`), MCP config (`mcp.json`) and
-/// settings (`settings.json`). None of them is on claude's command line: every agent's prompt holds phrases like
+/// Where claude reads one of an agent's files from: its system prompt (`md`), MCP config (`mcp.json`), settings
+/// (`settings.json`) and the script each Bash command runs first (`env.sh`, see processes.rs). None of them is on claude's command line: every agent's prompt holds phrases like
 /// `vite --host` and its MCP config the user's servers (`npx @playwright/mcp`), so a `pkill -f` with one of them in
 /// any agent's command would match, and stop, every agent at once.
 fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
     state.cfg.storage_dir.join(AGENT_FILES).join(format!("{agent_id}.{kind}"))
 }
 
-const AGENT_FILES: &str = ".agent-files";
-const AGENT_FILE_KINDS: [&str; 3] = ["md", "mcp.json", "settings.json"];
+pub(crate) const AGENT_FILES: &str = ".agent-files";
+const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
 /// Where the agents' files were kept before they held more than the prompt.
 const OLD_AGENT_FILES: &str = ".system-prompts";
 
@@ -951,6 +987,16 @@ pub fn remove_agent_files(state: &AppState, agent_id: &str) {
     }
 }
 
+/// This binary, which claude runs as the Bash hook and as the agent's `kill`, `pkill` and `killall`. Tests run as
+/// their own binary, so they use the loft binary cargo builds next to it.
+fn loft_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if cfg!(test) {
+        return Ok(exe.parent().and_then(Path::parent).map(|d| d.join("loft")).unwrap_or(exe));
+    }
+    Ok(exe)
+}
+
 /// The claude command for a run. Writing its files fails the run rather than putting them on argv.
 fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let mut servers = serde_json::Map::new();
@@ -972,11 +1018,12 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         disallowed.push("Agent".into());
     }
     // The tool lists hold the user's own rules (`Bash(npm *)`), so they go in the settings file too; `--settings`
-    // applies despite `--setting-sources ""`. So does the hook that refuses kills by name (`pkill -f`, `killall`),
-    // which also hit other agents' running commands and the user's MCP servers.
+    // applies despite `--setting-sources ""`. So does the hook that refuses kills Loft can't scope to the agent's
+    // own processes (`/bin/kill`, `sudo kill`, a `kill` in `sh -c`).
+    let exe = loft_exe()?;
     let settings = json!({
         "permissions": { "allow": allowed, "deny": disallowed },
-        "hooks": crate::kill_guard::hooks(&std::env::current_exe()?),
+        "hooks": crate::kill_guard::hooks(&exe),
     });
 
     let mut cmd = Command::new(state.settings.get().claude_bin);
@@ -997,6 +1044,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .args(["--permission-mode", &a.permission_mode])
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
+        // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
+        .env("BASH_MAX_TIMEOUT_MS", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
+        .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
+        .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
@@ -1004,6 +1055,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Run in each Bash command's shell: records its process session as the agent's, and sends kills through Loft.
+    let storage = &state.cfg.storage_dir;
+    write_agent_file(state, &a.id, "env.sh", &crate::processes::env_script(storage, &a.id, &exe))?;
+    crate::processes::write_shims(storage, &exe)?;
+    // Its own process session: Loft knows the run's processes by it, and a group kill (`kill 0`) in the agent's
+    // commands can't reach Loft.
+    unsafe {
+        cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
     if !a.model.is_empty() {
         cmd.args(["--model", &a.model]);
     }
@@ -1126,6 +1186,12 @@ async fn run_process(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
+    // Its session id is its PID.
+    if let Some(pid) = child.id() {
+        if let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
+            tracing::warn!("agent {agent_id}: could not record its process session: {e}");
+        }
+    }
     {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
@@ -1734,6 +1800,8 @@ pub(crate) mod tests {
 /// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
+    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
+    /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -1831,6 +1899,10 @@ esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
+case "$prompt" in *bash-cmd*)
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
+  echo "exit $?" >> bash.out;;
+esac
 reply=started
 case "$prompt" in *ask*) reply='Which one?';; esac
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$reply"'"}]}}'
@@ -1892,7 +1964,8 @@ esac
         assert!(system.contains("# Identity") && system.contains("vite --host"), "{system}");
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(agent_file(&st, &a.id, "md")).unwrap().permissions().mode() & 0o777, 0o600);
-        assert!(system.contains("never with `pkill -f` or `killall`"), "agents are told to stop processes by PID");
+        assert!(system.contains("Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`)"), "agents may stop their own processes any way");
+        assert!(!system.contains("never with `pkill -f`"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
