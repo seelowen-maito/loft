@@ -84,7 +84,7 @@ beforeEach(() => {
 const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
 let addresses = 0;
-const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
+const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip, "sec-fetch-site": "same-origin" }, body: new URLSearchParams(form) });
 const asLoft = (path, body, ip = "203.0.113.7") => new Request(`https://relay.example.com${path}`, { method: "POST", headers: { "x-forwarded-for": ip }, body: JSON.stringify(body) });
 const secrets = new Map();
 const newCode = async (ip) => {
@@ -209,4 +209,17 @@ test("without the portal's settings, /api/pair says so and gives no code", async
   const res = await pairEndpoint(asLoft("/api/pair", {}));
   assert.equal(res.status, 503);
   assert.deepEqual(await res.json(), { error: "the push portal isn't configured", portal: false });
+});
+
+test("Allow posted from another site is refused with 403: no key, and the code stays good", async () => {
+  const code = await newCode("10.1.1.1");
+  const { cookies } = await signInAs();
+  for (const headers of [{ "sec-fetch-site": "cross-site" }, { origin: "https://evil.example.com" }, {}]) {
+    const req = post("/connect", { code, name: "Evil" }, cookies);
+    req.headers.delete("sec-fetch-site");
+    for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
+    assert.equal((await approve(req, env)).status, 403, JSON.stringify(headers));
+  }
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 0, "no key was made");
+  assert.equal((await approve(post("/connect", { code, name: "Mine" }, cookies), env)).status, 200);
 });

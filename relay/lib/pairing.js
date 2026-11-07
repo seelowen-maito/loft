@@ -4,7 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { incomplete, accountOf, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
+import { crossSite, incomplete, accountOf, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
@@ -65,6 +65,8 @@ export async function connect(request, env = process.env, now = Date.now()) {
 /** POST /connect with `code` and `name`: creates a key for the signed-in account and hands it to the Loft that asked. */
 export async function approve(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
+  const refused = crossSite(request, env);
+  if (refused) return refused;
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const form = await request.formData();

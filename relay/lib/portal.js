@@ -60,8 +60,15 @@ const unseal = (env, purpose, sealed, now) => {
   if (good.length !== given.length || !timingSafeEqual(good, given) || Number(expiry) * 1000 < now) return null;
   return Buffer.from(value, "base64url").toString();
 };
-export const cookie = (name, value, seconds) => `${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
-export const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
+// `__Host-` cookies must be Secure, Path=/ and have no Domain, so no sibling subdomain can set or shadow them.
+export const cookie = (name, value, seconds) => `__Host-${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+export const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`__Host-${name}=`))?.slice(name.length + 8);
+/** A 403 page unless this POST came from the portal itself: `Sec-Fetch-Site: same-origin`, or with no such header an `Origin` equal to PORTAL_URL's. Else null. */
+export const crossSite = (request, env) => {
+  const site = request.headers.get("sec-fetch-site");
+  if (site ? site === "same-origin" : request.headers.get("origin") === new URL(origin(env)).origin) return null;
+  return page("Refused", "<p>That request didn't come from this portal. <a href=\"/\">Back</a></p>", 403);
+};
 export const redirect = (to, ...cookies) => {
   const headers = new Headers({ location: to });
   cookies.forEach((c) => headers.append("set-cookie", c));
@@ -204,6 +211,8 @@ export async function confirmDelete(request, env = process.env, now = Date.now()
 /** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
 export async function startDelete(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
+  const refused = crossSite(request, env);
+  if (refused) return refused;
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
@@ -284,6 +293,8 @@ export async function makeAccountKey(store, account, name, now) {
 /** POST /keys with `name`: creates a key for the signed-in account and shows it, once. */
 export async function createAccountKey(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
+  const refused = crossSite(request, env);
+  if (refused) return refused;
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
@@ -302,6 +313,8 @@ export async function createAccountKey(request, env = process.env, now = Date.no
 /** POST /keys/revoke with `id` (the key's hash): deletes one of the signed-in account's keys. The relay refuses it from the next push. */
 export async function revokeAccountKey(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
+  const refused = crossSite(request, env);
+  if (refused) return refused;
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const id = String((await request.formData()).get("id") ?? "");
