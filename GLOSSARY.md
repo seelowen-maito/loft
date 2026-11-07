@@ -135,7 +135,7 @@ The secret an install uses to push through the push relay. The user gets it by s
 _Avoid_: Relay token, account, login
 
 **Push portal**:
-A small web page on the relay's Vercel project where a user signs in with Apple to create, name and revoke relay keys. It stores only Apple's user id and hashed keys.
+A small web page on the relay's Vercel project, at the relay's own address, where a user signs in with Apple to create, name and revoke relay keys. It stores only Apple's user id and hashed keys.
 _Avoid_: Dashboard, account page
 
 ## Threads

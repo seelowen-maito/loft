@@ -5,6 +5,7 @@ import { generateKeyPairSync, createHash } from "node:crypto";
 import { start, callback, home } from "../lib/portal.js";
 import { pair, poll, connect, approve } from "../lib/pairing.js";
 import { push } from "../lib/relay.js";
+import { POST as pairEndpoint } from "../api/pair.js";
 
 const SERVICES_ID = "com.example.loft.web";
 const signIn = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -202,4 +203,10 @@ test("approving a code counts as a key creation for the address's hourly limit",
   const code = await newCode("198.51.100.210");
   assert.equal((await approve(post("/connect", { code, name: "Mac 6" }, cookies, ip), env)).status, 429);
   assert.equal((await pollFor(code)).status, 202, "the code is still waiting");
+});
+
+test("without the portal's settings, /api/pair says so and gives no code", async () => {
+  const res = await pairEndpoint(asLoft("/api/pair", {}));
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { error: "the push portal isn't configured", portal: false });
 });

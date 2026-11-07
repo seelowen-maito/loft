@@ -64,10 +64,11 @@ ID confirms it. Then the account, its keys and their last-used dates are deleted
 revoked (`/auth/revoke`), which ends Sign in with Apple for the portal. No Apple token is ever stored. If Apple
 refuses the revocation, the account is still deleted and the page says how to remove the portal in the Apple ID
 settings. Without the portal's settings below, the page says
-"The push portal isn't configured" and the relay works as before: the portal is optional.
+"The push portal isn't configured", `POST /api/pair` answers `503 {portal: false}` (Loft then offers only pasting a key),
+and the relay works as before: the portal is optional.
 
 **Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, expires_in: 600}`, at most 5 per IP per
-hour). Loft opens `<PORTAL_URL>/connect?code=…`: signed out, the page offers Sign in with Apple and brings the user back;
+hour). Loft opens `<relay address>/connect?code=…` (the same as `PORTAL_URL`): signed out, the page offers Sign in with Apple and brings the user back;
 signed in, **Allow** makes a key for the account and parks it under the hash of the secret (the code is in the link; the secret never leaves the Loft). `POST /api/pair-poll` with `{code, secret}`
 answers `202` while waiting, `200 {key}` exactly once after Allow, then `404` (also for an expired or unknown code). Until
 it's collected, the new key waits in the store, readable only with the secret, for at most the code's 10 minutes.
@@ -129,10 +130,9 @@ repo, so anyone can run their own.
 
 **Loft**
 
-10. Settings → Push notifications → **Relay address** (`https://<project>.vercel.app`) and **Portal address**
-    (`PORTAL_URL`). Or `LOFT_RELAY_URL` / `LOFT_PORTAL_URL` for a scripted install. `RELAY_URL` and `PORTAL_URL` in
-    `backend/src/apns.rs` stay empty until the official project exists, so a name nobody owns can't receive relay keys
-    and push text.
+10. Settings → Push notifications → **Relay address**: `PORTAL_URL` (`https://<project>.vercel.app`); the portal is at
+    the same address. Or `LOFT_RELAY_URL` for a scripted install. `RELAY_URL` in `backend/src/apns.rs` stays empty
+    until the official project exists, so a name nobody owns can't receive relay keys and push text.
 
 **Test it end to end**
 

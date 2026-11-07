@@ -111,8 +111,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
         s.push = state.settings.get().push;
     } else {
         // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
-        let saved = state.settings.get().push;
-        (s.push.relay_url, s.push.portal_url) = (saved.relay_url, saved.portal_url);
+        s.push.relay_url = state.settings.get().push.relay_url;
     }
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
