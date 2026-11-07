@@ -5,7 +5,9 @@
 //! - the real command by path (`/bin/kill`, `/usr/bin/pkill`);
 //! - through `sudo` or `doas`, which reset PATH, or `command` or `builtin`, which skip functions;
 //! - a `kill` in another shell's script (`sh -c 'kill 123'`, `bash <<EOF`, `watch 'kill 1'`), where that shell's
-//!   own builtin runs.
+//!   own builtin runs;
+//! - with PATH emptied, changed or unset (`env -i kill 1`, `PATH=/bin; xargs kill`), which finds the real command;
+//! - after Loft's functions are removed or replaced (`unset -f kill`, `unfunction kill`, `alias kill=...`).
 //!
 //! It refuses those, telling the agent to run the kill by name, where Loft asks the user about any process that
 //! isn't the agent's. (A hook's "ask" doesn't reach the user: in auto mode Claude Code's classifier answers it.)
@@ -27,9 +29,9 @@ use serde_json::{Value, json};
 pub const ARG: &str = "kill-guard";
 
 const REFUSAL: &str = "Loft refused this command: it runs kill, pkill or killall by path, through sudo, `command` \
-or `builtin`, or as another shell's `kill`, where Loft can't tell whose processes it stops. Run kill, pkill or \
-killall by name, right in your command: Loft lets them stop your own processes, and asks the user before stopping \
-any other.";
+or `builtin`, as another shell's `kill`, with PATH changed, or after unsetting or redefining Loft's kill, where Loft \
+can't tell whose processes it stops. Run kill, pkill or killall by name, right in your command: Loft lets them stop \
+your own processes, and asks the user before stopping any other.";
 
 /// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows stderr to
 /// the agent, for a kill that skips Loft's. Input it can't read passes.
@@ -59,52 +61,94 @@ fn check(input: &str) -> Result<(), &'static str> {
 
 /// Whether `command` runs a kill that skips Loft's (see the module docs).
 pub fn unscoped(command: &str) -> bool {
-    scan(command, 0, false)
+    let f = scan(command, 0, false);
+    f.unscoped || (f.kill && f.path)
+}
+
+/// What a piece of shell text, or one simple command in it, does that the guard cares about.
+#[derive(Default, Clone, Copy)]
+struct Found {
+    /// A kill that skips Loft's on its own: by path, through `sudo`, `command` or `builtin`, with PATH reset, in
+    /// another shell, or after Loft's functions are removed or replaced (`unset -f kill`, `alias kill=...`).
+    unscoped: bool,
+    /// Any kill, pkill or killall.
+    kill: bool,
+    /// Changes PATH (`PATH=/bin; xargs kill` finds the real kill), or unsets it.
+    path: bool,
+}
+
+impl Found {
+    fn add(&mut self, f: Found) {
+        self.unscoped |= f.unscoped;
+        self.kill |= f.kill;
+        self.path |= f.path;
+    }
 }
 
 /// Shell text nested deeper than this (`sh -c "eval '...'"`) isn't scanned.
 const MAX_DEPTH: usize = 8;
 
 /// `shell`: the text runs in a shell of its own, which has no `kill` function from Loft.
-fn scan(text: &str, depth: usize, shell: bool) -> bool {
+fn scan(text: &str, depth: usize, shell: bool) -> Found {
+    let mut f = Found::default();
     if depth > MAX_DEPTH {
-        return false;
+        return f;
     }
     let cmds = parse(text);
-    (0..cmds.len()).any(|i| scan_command(&cmds, i, depth, shell))
+    for i in 0..cmds.len() {
+        f.add(scan_command(&cmds, i, depth, shell));
+    }
+    f
 }
 
-/// Whether one simple command, through its wrappers and any shell text it hands on, runs a kill that skips Loft's.
-fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> bool {
+const KILLS: [&str; 3] = ["kill", "pkill", "killall"];
+
+/// What one simple command does, through its wrappers and any shell text it hands on.
+fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
+    let mut f = Found::default();
+    // A command that only assigns, PATH among them (`PATH=/bin; ...`, `path+=(/bin)`).
+    f.path |= cmds[i].words.iter().all(|w| assignment(w).is_some()) && cmds[i].words.iter().any(|w| sets_path(w));
     let mut runs = vec![cmds[i].words.clone()];
     while let Some(words) = runs.pop() {
         let mut bypass = false;
         let words = match unwrap(&words, &mut bypass) {
             Run::Words(words) => words,
             Run::Text(text) => {
-                if scan(&text, depth + 1, true) {
-                    return true;
-                }
+                f.add(scan(&text, depth + 1, true));
                 continue;
             }
         };
         let Some((name, args)) = words.split_first() else { continue };
-        let found = match base(name) {
-            "kill" | "pkill" | "killall" if bypass || name.contains('/') => true,
-            "kill" => shell,
-            "find" => {
-                runs.extend(find_execs(args));
-                false
+        match base(name) {
+            k if KILLS.contains(&k) => {
+                f.kill = true;
+                f.unscoped |= bypass || name.contains('/') || (k == "kill" && shell);
             }
-            "sh" | "bash" | "zsh" | "dash" | "ksh" => shell_script(cmds, i, args).is_some_and(|text| scan(&text, depth + 1, true)),
-            "eval" => scan(&args.join(" "), depth + 1, shell),
-            _ => false,
-        };
-        if found {
-            return true;
+            "find" => runs.extend(find_execs(args)),
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
+                if let Some(text) = shell_script(cmds, i, args) {
+                    f.add(scan(&text, depth + 1, true));
+                }
+            }
+            "eval" => f.add(scan(&args.join(" "), depth + 1, shell)),
+            // Removing or replacing Loft's functions, or pointing the name at the real command.
+            "unset" | "unfunction" | "disable" | "enable" | "alias" | "hash" | "functions" => {
+                f.unscoped |= args.iter().any(|a| a.contains("kill"));
+                f.path |= name == "unset" && args.iter().any(|a| a == "PATH" || a == "path");
+            }
+            "export" | "typeset" | "declare" | "local" | "readonly" => f.path |= args.iter().any(|a| sets_path(a)),
+            _ => {}
         }
     }
-    false
+    f
+}
+
+/// Whether a word assigns PATH (or zsh's `path` array) so that another folder comes before Loft's: anything but
+/// adding to the end (`PATH="$PATH:/opt/bin"`).
+fn sets_path(w: &str) -> bool {
+    let Some(name @ ("PATH" | "path")) = assignment(w) else { return false };
+    let value = w.split_once('=').map_or("", |(_, v)| v);
+    !(name == "PATH" && (value.starts_with("$PATH") || value.starts_with("${PATH}")) || w.starts_with("PATH+="))
 }
 
 /// The commands `find` runs with `-exec`, `-execdir`, `-ok` and `-okdir`.
@@ -203,6 +247,8 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
     let mut i = 0;
     while let Some(w) = words.get(i) {
         if assignment(w).is_some() || KEYWORDS.contains(&w.as_str()) {
+            // `PATH=/bin xargs kill` finds the real kill.
+            *bypass |= sets_path(w);
             i += 1;
             continue;
         }
@@ -242,6 +288,13 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
                     return Run::Text(format!("{split} {}", rest(i).join(" ")));
                 }
                 ("script", "-c" | "--command") => return Run::Text(rest(i).first().cloned().unwrap_or_default()),
+                // A command run with an emptied environment, another PATH or a variable unset (`env -u PATH`).
+                ("env", o) if o == "-" || o.starts_with("--ignore") || o.starts_with("--unset") || (!o.starts_with("--") && o.contains(['i', 'P', 'u'])) => {
+                    *bypass = true;
+                    if valued.contains(&o) {
+                        i += 1;
+                    }
+                }
                 (_, o) if valued.contains(&o) => i += 1,
                 _ => {}
             }
@@ -736,8 +789,50 @@ mod tests {
             "eval \"sh -c 'kill 12'\"",
             "$'/bin/kill' 12",
             "sh -c \"eval 'kill 12'\"",
+            // PATH emptied, changed or unset: the real kill is found.
+            "env -i kill 123",
+            "env - kill 123",
+            "env --ignore-environment pkill x",
+            "env PATH=/bin kill 123",
+            "env -P /bin kill 123",
+            "env -u PATH kill 123",
+            "env --unset=PATH xargs kill",
+            "PATH=/bin:/usr/bin xargs kill",
+            "PATH=/bin; pgrep x | xargs kill",
+            "export PATH=/bin:$PATH; echo 12 | xargs kill",
+            "path=(/bin $path); find . -exec kill {} +",
+            "unset PATH; echo 12 | xargs kill",
+            "typeset -x PATH=/bin; xargs kill < pids",
+            "sh -c 'PATH=/bin; xargs kill' < pids",
+            // Loft's functions removed or replaced.
+            "unset -f kill; kill 123",
+            "unset -f pkill killall",
+            "unfunction kill; kill 123",
+            "disable kill",
+            "disable -f kill; kill 12",
+            "alias k=/bin/kill; k 12",
+            "hash -p /bin/kill kill",
+            "kill() { /bin/kill \"$@\"; }; kill 12",
+            "function kill { command kill \"$@\"; }",
         ] {
             assert!(unscoped(cmd), "should refuse: {cmd}");
+        }
+    }
+
+    #[test]
+    fn path_changes_without_a_kill_and_appends_run() {
+        for cmd in [
+            "export PATH=\"$PWD/node_modules/.bin:$PATH\"; npm test",
+            "PATH=/opt/bin:$PATH cargo build",
+            "export PATH=\"$PATH:$HOME/bin\"; kill 12",
+            "PATH+=:/opt/bin; kill 12",
+            "PATH=${PATH}:/opt/bin pgrep x | xargs kill",
+            "env FOO=1 kill 12",
+            "env -C /tmp kill 12",
+            "unset FOO; kill 12",
+            "unalias ll; kill 12",
+        ] {
+            assert!(!unscoped(cmd), "should run: {cmd}");
         }
     }
 

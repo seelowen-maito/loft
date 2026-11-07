@@ -91,13 +91,28 @@ fn session_of(pid: i32) -> Option<i32> {
 
 /// The script claude runs in each Bash command's shell before the command (`CLAUDE_ENV_FILE`): it records the
 /// shell's session (Claude Code makes the shell a session leader, so `$$` is its id) and sends kills through Loft.
-/// A job (`kill %1`) is the shell's own child, so it stays with the builtin.
+/// A job (`kill %1`) is the shell's own child, so a call naming only jobs (after the signal option) stays with the
+/// builtin; one that mixes jobs and PIDs is refused, or the builtin would signal the PIDs too.
 pub fn env_script(storage: &Path, agent_id: &str, exe: &Path) -> String {
     let loft = quote(&exe.to_string_lossy());
     format!(
         r#"# Loft: records this shell's process session as the agent's, and sends kills through Loft.
 : > {dir}/"$$" 2>/dev/null
-kill() {{ case " $* " in *" %"*) builtin kill "$@" ;; *) {loft} {ARG} kill "$@" ;; esac; }}
+kill() {{
+  case " $* " in *" %"*) ;; *) {loft} {ARG} kill "$@"; return ;; esac
+  local a s=f
+  for a in "$@"; do
+    case "$s:$a" in
+      f:-s|f:-n) s=v ;;
+      v:*) s=o ;;
+      f:--|o:--) s=j ;;
+      f:%*|o:%*|j:%*) s=j ;;
+      f:-*) s=o ;;
+      *) echo "kill: Loft refused this: name jobs (%1) and process IDs in separate kill commands." >&2; return 2 ;;
+    esac
+  done
+  builtin kill "$@"
+}}
 pkill() {{ {loft} {ARG} pkill "$@"; }}
 killall() {{ {loft} {ARG} killall "$@"; }}
 PATH={bin}:"$PATH"
@@ -127,6 +142,12 @@ pub fn write_shims(storage: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(dir)
+}
+
+/// `s` as one shell word: quoted when it holds anything but plain characters.
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c));
+    if plain { s.to_string() } else { quote(s) }
 }
 
 fn quote(s: &str) -> String {
@@ -374,7 +395,8 @@ enum Plan {
 async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     let storage = state.cfg.storage_dir.clone();
     let tool = req.tool.clone();
-    let command = std::iter::once(req.tool.as_str()).chain(req.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+    // As the agent typed it, near enough: `pkill -f 'sleep 120'` mustn't read as a PID 120.
+    let command = std::iter::once(req.tool.clone()).chain(req.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ");
     let Ok((plan, owners, procs)) = tokio::task::spawn_blocking(move || {
         let procs = table();
         (plan(&req, &procs), owners(&storage), procs)
@@ -593,7 +615,12 @@ mod tests {
 
     impl Sleeper {
         fn start(own_session: bool) -> Self {
-            let mut cmd = std::process::Command::new("/bin/sleep");
+            Self::start_as(Path::new("/bin/sleep"), own_session)
+        }
+
+        /// From `path`, a link to sleep: killall finds a process by that name.
+        fn start_as(path: &Path, own_session: bool) -> Self {
+            let mut cmd = std::process::Command::new(path);
             cmd.arg("60");
             if own_session {
                 unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
@@ -772,6 +799,51 @@ mod tests {
         assert!(v["stderr"].as_str().unwrap().contains("The user denied it."), "{v}");
     }
 
+    /// A link to sleep with a name no process outside this test has, for killall.
+    fn unique_sleep(st: &AppState) -> (PathBuf, String) {
+        let name = format!("ks{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+        let path = st.cfg.storage_dir.parent().unwrap().join(&name);
+        std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
+        (path, name)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn killall_stops_the_agents_own_process_by_name_and_asks_about_another() {
+        let (st, a) = fake_claude_state();
+        let (path, name) = unique_sleep(&st);
+        let server = Sleeper::start_as(&path, true);
+        record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
+        let v = ask(&st, &a.id, "killall", &["-KILL", &name]).await;
+        assert_eq!(v["code"], 0, "{v}");
+        until("the server to stop", 5, || !server.alive()).await;
+        assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "it asked the user");
+
+        // The same name, started by someone else: killall asks, and nobody answers.
+        let (path, name) = unique_sleep(&st);
+        let other = Sleeper::start_as(&path, false);
+        assert!(other.alive());
+        let v = ask(&st, &a.id, "killall", &[&name]).await;
+        assert_eq!(v["code"], 1, "{v}");
+        assert!(v["stderr"].as_str().unwrap().contains(&format!("Loft didn't stop {}", other.pid())), "{v}");
+        assert!(other.alive());
+        let req = &st.db.list_permissions(Some(&a.id)).unwrap()[0];
+        assert_eq!((req.input["command"].as_str(), req.status.as_str()), (Some(format!("killall {name}").as_str()), "expired"));
+        assert!(req.reason.contains(&format!("{} (not an agent's: ", other.pid())), "{}", req.reason);
+
+        // Nothing by that name: killall's own answer.
+        let v = ask(&st, &a.id, "killall", &["ks-no-such-process"]).await;
+        assert_eq!(v["code"], 1, "{v}");
+    }
+
+    #[test]
+    fn the_request_shows_the_command_with_its_quoting() {
+        assert_eq!(shell_word("-f"), "-f");
+        assert_eq!(shell_word("sleep 120"), "'sleep 120'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("vite|next"), "'vite|next'");
+        assert_eq!(shell_word(""), "''");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn deleting_an_agent_stops_the_processes_it_owns() {
         let (st, a) = fake_claude_state();
@@ -887,8 +959,14 @@ mod tests {
             assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "{stop} asked the user");
         }
 
-        // A process it didn't start: refused once nobody answers, with the reason in the command's output.
+        // A job of the command's own shell goes to the shell's builtin; a PID named with it doesn't come along.
         let other = Sleeper::start(false);
+        let out = bash(&st, &a.id, &format!("/bin/sleep 60 &\nkill %+ {}; echo \"mixed $?\"\nkill -9 %+; echo \"job $?\"\nwait\n", other.pid())).await;
+        assert!(out.contains("separate kill commands") && out.contains("mixed 2") && out.contains("job 0"), "{out}");
+        assert!(other.alive());
+        assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty());
+
+        // A process it didn't start: refused once nobody answers, with the reason in the command's output.
         let out = bash(&st, &a.id, &format!("kill {}", other.pid())).await;
         assert!(out.contains("Loft didn't stop") && out.contains("did not respond") && out.contains("exit 1"), "{out}");
         assert!(other.alive());
