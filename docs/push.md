@@ -89,7 +89,7 @@ uses the right host per device. The same auth key works for both.
 | `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?, relay_url?, portal_url?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
-`grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`, `delivery_stalled`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
+`grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`, `delivery_stalled`, `delivery_done`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
 `grill_question`, the name before rounds, is still accepted and stored as `grill_round`.
 `quiet_hours`: `{start: "22:00", end: "07:00", tz: "Europe/Lisbon", utc_offset_minutes: 60}`.
 
@@ -141,6 +141,7 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 | pr_ready | "Ready to merge" | "<repo>#<n>: <title>" |
 | pr_review | "Review requested" | "<repo>#<n>: <title>" |
 | delivery_stalled | "Delivery stalled" | the spec's (or standalone ticket's) title |
+| delivery_done | "Delivery done" | the spec's (or standalone ticket's) title |
 
 Push text is built from names and titles only, never from the item's `reason` or `text`: no tool input, no message content, no errors.
 It's still run through the same credential redaction. Send errors are logged with the device name and status, never the payload.

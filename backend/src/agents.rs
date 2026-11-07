@@ -693,6 +693,11 @@ pub fn wake_for_user(state: &AppState, agent_id: &str, prompt: String) {
     start(state, agent_id, Some(prompt), "user", true);
 }
 
+/// A Delivery done wake: not the user's words, but its reply is news for them, so it's an Unread reply.
+pub fn wake_with_reply(state: &AppState, agent_id: &str, prompt: String) {
+    start(state, agent_id, Some(prompt), "delivery", true);
+}
+
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
 pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     let prompt = format!(

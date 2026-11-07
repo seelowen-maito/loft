@@ -48,6 +48,13 @@ pub struct Delivery {
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
     #[serde(default)]
     pub stalled_at: String,
+    /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
+    /// item and the planner's wake, once. Empty before.
+    #[serde(default)]
+    pub done_at: String,
+    /// The tech-debt issues its final Code Review filed ("#77", or "Loft issue <id>"), for the done summary.
+    #[serde(default)]
+    pub tech_debt: Vec<String>,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -1439,6 +1446,8 @@ impl Db {
                 resume_to: String::new(),
                 stall_reason: String::new(),
                 stalled_at: String::new(),
+                done_at: String::new(),
+                tech_debt: vec![],
                 ready_retry: has(&retry),
                 tickets,
                 current: None,

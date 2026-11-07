@@ -47,10 +47,13 @@ final class PushTests: XCTestCase {
         XCTAssertFalse(r.kinds.contains("pr_ready"))
         XCTAssertTrue(r.kinds.contains("permission"), "on unless turned off")
         // The server's kinds, one to one with the Needs you types (it rejects unknown names).
-        XCTAssertEqual(Set(r.kinds), ["permission", "task_approval", "task_blocked", "task_failed", "question", "grill_round", "stuck", "delivery_stalled"])
+        XCTAssertEqual(Set(r.kinds), ["permission", "task_approval", "task_blocked", "task_failed", "question", "grill_round", "stuck", "delivery_stalled", "delivery_done"])
         d.set(false, forKey: PushKind.deliveryStalled.prefKey)
         XCTAssertFalse(DeviceRegistration.current(token: "abc", defaults: d).kinds.contains("delivery_stalled"), "its switch turns the Delivery stalled push off")
         d.removeObject(forKey: PushKind.deliveryStalled.prefKey)
+        d.set(false, forKey: PushKind.deliveryDone.prefKey)
+        XCTAssertFalse(DeviceRegistration.current(token: "abc", defaults: d).kinds.contains("delivery_done"), "its switch turns the Delivery done push off")
+        d.removeObject(forKey: PushKind.deliveryDone.prefKey)
         XCTAssertEqual(r.quietHours?.start, "23:00")
         XCTAssertEqual(r.quietHours?.end, "07:00")
         guard case .object(let o) = r.json else { return XCTFail() }

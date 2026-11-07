@@ -61,6 +61,8 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             resume_to: String::new(),
             stall_reason: String::new(),
             stalled_at: String::new(),
+            done_at: String::new(),
+            tech_debt: vec![],
             ready_retry: false,
             tickets: vec![],
             current: None,
@@ -1662,7 +1664,8 @@ pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Pat
 /// PR once. None when the team has no Code reviewer (the PR is then marked ready right away).
 pub(crate) fn begin_final_review(state: &AppState, d: &Delivery) -> Option<String> {
     let cr = with_role(state, d, "code_reviewer")?;
-    let d = update(state, &d.repo, d.spec, |d| d.state = "final_review".into())?;
+    // A ready call that failed before is moot: the Code reviewer's pass makes it again.
+    let d = update(state, &d.repo, d.spec, |d| (d.state, d.ready_retry) = ("final_review".into(), false))?;
     crate::agents::wake_on_ticket(state, &cr.id, &ticket_key(&d, None), false, final_brief(state, &d), wake_for(&d, Step::FinalReview { round: d.final_rounds }));
     let pr = if d.local { format!(" spec branch `{}`", d.branch) } else { d.pr.map(|pr| format!(" {} #{pr}", pr_name(&d))).unwrap_or_default() };
     let done = if d.standalone { "It passed its reviews" } else { "It was the spec's last open ticket" };
@@ -1761,6 +1764,12 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         return Err("The Delivery has no spec PR.".into());
     }
     let filed = file_tech_debt(state, &d, &me.id, args["tech_debt"].as_array().cloned().unwrap_or_default()).await;
+    // Kept for the done summary, across rounds.
+    let d = if filed.0.is_empty() {
+        d
+    } else {
+        update(state, &slug, d.spec, |d| d.tech_debt.extend(filed.0.iter().filter(|n| !d.tech_debt.contains(n)).cloned().collect::<Vec<_>>())).unwrap_or(d)
+    };
     let what = if d.local { "spec branch".to_string() } else { pr_name(&d).to_string() };
     let head = if verdict == "pass" {
         format!("**Code reviewer** ({}) passed the {what}.", me.name)
@@ -1840,7 +1849,60 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
 /// end-of-planning card offer. The line for the reply.
 pub(crate) fn local_ready(state: &AppState, d: &Delivery) -> String {
     update(state, &d.repo, d.spec, |d| d.state = "ready".into());
+    done(state, &d.repo, d.spec);
     format!(" The spec branch `{}` is ready to merge into `{}`: the user is offered Merge.", d.branch, d.base)
+}
+
+/// The Delivery is done: Loft marked its spec PR ready, or set a plan kept in Loft to ready. Only the first
+/// time (a retried ready call finds `done_at` set): Needs you gets its Delivery done item, and the agent that
+/// planned it, else the team's Lead, is woken once with a summary, in a run whose reply is an Unread reply.
+pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
+    let mut first = false;
+    let Some(d) = update(state, repo, spec, |d| {
+        if d.done_at.is_empty() {
+            (d.done_at, first) = (crate::db::now(), true);
+        }
+    }) else {
+        return;
+    };
+    if !first {
+        return;
+    }
+    let planner = Some(d.planner.as_str()).filter(|p| !p.is_empty()).and_then(|p| state.db.get_agent(p).ok().flatten());
+    let (to, lead) = match planner {
+        Some(a) => (a, false),
+        None => match with_role(state, &d, "lead") {
+            Some(a) => (a, true),
+            None => return tracing::info!("delivery {repo}#{spec}: done, with nobody to tell but the user"),
+        },
+    };
+    crate::agents::wake_with_reply(state, &to.id, done_brief(state, &d, lead));
+}
+
+/// The summary the done wake carries: the spec, its PR (or branch), the tickets closed and the tech debt filed.
+fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
+    let issue = if d.local {
+        state.db.get_task(&d.spec_id).ok().flatten()
+    } else {
+        state.db.list_tasks().unwrap_or_default().into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+    };
+    let title = title_of(d, issue.as_ref().map(|t| t.title.as_str()));
+    let about = subject(d);
+    // A plan kept in Loft's subject is its title already.
+    let named = if d.local || title == about { about.clone() } else { format!("{about} \"{title}\"") };
+    let lead = if lead { " You get this as the team's Lead: the agent that planned it is gone." } else { "" };
+    let ready = if d.local {
+        format!("Its spec branch `{}` is ready to merge into `{}`: the user is offered Merge.", d.branch, d.base)
+    } else {
+        format!("Loft marked its {} https://github.com/{}/pull/{} ready for review: the user merges it.", pr_name(d), d.repo, d.pr.unwrap_or_default())
+    };
+    let closed: Vec<String> = d.tickets.iter().filter(|t| t.state == "closed").map(|t| if d.local { format!("\"{}\"", t.title) } else { format!("#{} \"{}\"", t.number, t.title) }).collect();
+    let closed = if d.standalone || closed.is_empty() { String::new() } else { format!("\n- Tickets closed: {}.", closed.join(", ")) };
+    let debt = if d.tech_debt.is_empty() { "none".to_string() } else { d.tech_debt.join(", ") };
+    format!(
+        "[Loft Delivery: {about}] This is not a message from the user. The Delivery of {named} is done.{lead}\n- {ready}{closed}\n- Tech debt filed: {debt}.\n\
+         Nothing is left to build: tell the user in a line or two."
+    )
 }
 
 /// Files the Code reviewer's findings that can wait as `tech-debt` issues assigned to the user (Loft

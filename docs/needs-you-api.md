@@ -52,6 +52,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
 | `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall | resume, open (the spec's or standalone ticket's issue), dismiss |
+| `delivery_done` | 1 | Loft marked a Delivery's spec PR (or standalone ticket's PR) ready, or set a plan kept in Loft to ready to Merge, whatever GitHub says of its checks or conflicts. Until the PR merges or closes, or the plan is merged. One item per Delivery | open (the spec's or standalone ticket's issue), Open PR (GitHub) or merge (a plan kept in Loft), dismiss |
 | `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |

@@ -30,7 +30,7 @@ enum PushDestination: Equatable {
 /// item types one to one (docs/push.md).
 enum PushKind: String, CaseIterable, Identifiable {
     case permission, approval, blockedFailed = "blocked_failed", questions, stuck, prReady = "pr_ready", prReview = "pr_review",
-         deliveryStalled = "delivery_stalled"
+         deliveryStalled = "delivery_stalled", deliveryDone = "delivery_done"
 
     var id: String { rawValue }
     var label: String {
@@ -43,6 +43,7 @@ enum PushKind: String, CaseIterable, Identifiable {
         case .prReady: "PRs ready to merge"
         case .prReview: "PRs waiting for your review"
         case .deliveryStalled: "Delivery stalled"
+        case .deliveryDone: "Delivery done"
         }
     }
     /// The server's kinds this switch turns on.
@@ -56,6 +57,7 @@ enum PushKind: String, CaseIterable, Identifiable {
         case .prReady: ["pr_ready"]
         case .prReview: ["pr_review"]
         case .deliveryStalled: ["delivery_stalled"]
+        case .deliveryDone: ["delivery_done"]
         }
     }
     /// On unless turned off, except PRs (the server's default leaves them out too).
