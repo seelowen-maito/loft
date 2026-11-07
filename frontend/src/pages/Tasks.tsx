@@ -13,6 +13,8 @@ import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
+import { SpecBoard, SpecList, SpecPanel } from "./SpecViews";
+import type { DeliverySummary } from "../lib/specViews";
 import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
@@ -57,10 +59,21 @@ export default function TasksPage() {
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => parseFilters(params), [params]);
+  // Design preview: three takes on a spec view, `?specView=a|b|c` (see ./SpecViews).
+  const sv = params.get("specView");
+  const specView = sv === "a" || sv === "b" || sv === "c" ? sv : null;
   const setFilter = useCallback(
-    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => filtersToParams({ ...parseFilters(cur), ...change }), { replace }),
+    (change: Partial<IssueFilters>, replace = false) =>
+      setParams((cur) => {
+        const next = filtersToParams({ ...parseFilters(cur), ...change });
+        if (cur.get("specView")) next.set("specView", cur.get("specView")!);
+        return next;
+      }, { replace }),
     [setParams],
   );
+  const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
+  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}); }, []);
+  useEffect(() => { if (specView) loadDeliveries(); }, [specView, loadDeliveries]);
   const [query, setQuery] = useState(filters.q);
   // Back/forward to another search shows it in the box.
   useEffect(() => setQuery(filters.q), [filters.q]);
@@ -99,8 +112,9 @@ export default function TasksPage() {
           next[i] = e.task;
           return next;
         });
+      if (e.type === "task" && specView) setTimeout(loadDeliveries, 1500);
       if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
-    }, []),
+    }, [specView, loadDeliveries]),
   );
 
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
@@ -160,6 +174,15 @@ export default function TasksPage() {
             </button>
             </div>
           </div>
+          {specView && (
+            <div className="flex items-center gap-1 font-mono text-[11px] text-fg-3" role="group" aria-label="Spec view">
+              Spec view:
+              {(["a", "b", "c"] as const).map((v) => (
+                <button key={v} onClick={() => setParams((cur) => { const n = new URLSearchParams(cur); n.set("specView", v); return n; }, { replace: true })} aria-pressed={specView === v} className={cx("rounded-full px-2 py-0.5", specView === v ? "bg-white/[0.08] text-fg" : "hover:text-fg")}>{v}</button>
+              ))}
+              <button onClick={() => setParams((cur) => { const n = new URLSearchParams(cur); n.delete("specView"); return n; }, { replace: true })} className="rounded-full px-2 py-0.5 hover:text-fg">off</button>
+            </div>
+          )}
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
@@ -207,7 +230,10 @@ export default function TasksPage() {
               <div className="text-[13px]">No Loft issues yet. Agents add them as they work, or add one with +.</div>
             </div>
           )}
-          {groups.map((g) => {
+          {specView === "a" && tasks && (
+            <SpecList specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} active={routeId} onOpen={(id) => navigate({ pathname: `/issues/${id}`, search: params.toString() })} />
+          )}
+          {specView !== "a" && groups.map((g) => {
             if (!g.tasks.length) return null;
             const folded = g.key === "closed" && !showClosed;
             return (
@@ -234,9 +260,11 @@ export default function TasksPage() {
       {/* detail */}
       <section className={cx("min-h-0 overflow-y-auto", !routeId && "max-lg:hidden")}>
         {selected ? (
-          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} />
+          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={specView === "c" ? deliveries : null} />
         ) : routeId && tasks ? (
           <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
+        ) : specView === "b" && tasks ? (
+          <SpecBoard specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} onOpen={(id) => navigate({ pathname: `/issues/${id}`, search: params.toString() })} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center p-10 text-center text-fg-3">
             <ListTodo className="mb-3 size-8" />
@@ -277,7 +305,7 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
   );
 }
 
-function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
+function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string>; deliveries: DeliverySummary[] | null }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
   // Links keep the list's filters (they're in the URL).
@@ -354,6 +382,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
+      {deliveries && isSpec(t) && <SpecPanel spec={t} tasks={tasks} deliveries={deliveries} agentById={agentById} />}
       {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
       {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
       {t.state === "open" && !t.agent_id && !isSpec(t) && !isStandaloneTicket(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}

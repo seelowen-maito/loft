@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/messages/{mid}/start-delivery", post(delivery::start_from_card))
         .route("/deliveries/state", get(delivery::state_route))
+        .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1)))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))

@@ -614,6 +614,8 @@ export const api = {
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
   /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
+  /** Every spec's Delivery in one read, for the Issues page's spec views. */
+  deliverySummaries: () => req<import("./specViews").DeliverySummary[]>("GET", "/deliveries/summary"),
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),

@@ -1399,6 +1399,14 @@ impl Db {
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
     }
 
+    /// Every spec's Delivery on any repo, newest spec first: one read for a list that shows them all.
+    pub fn all_deliveries(&self) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries ORDER BY spec DESC")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
     /// The repo's Deliveries in `state`, picked by the state column so the others aren't decoded.
     pub fn deliveries_in(&self, repo: &str, state: &str) -> Result<Vec<Delivery>> {
         let c = self.0.lock().unwrap();
