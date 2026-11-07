@@ -52,3 +52,13 @@ export function filtersToParams(f: IssueFilters): URLSearchParams {
   if (f.closed) p.set("closed", "1");
   return p;
 }
+
+const FILTER_KEYS = ["q", "source", "group", "project", "agent", "mine", "closed"];
+
+/** `params` with the filters changed by `change`; everything else (the view, the open issue, the board's options) stays. */
+export function withFilters(params: URLSearchParams, change: Partial<IssueFilters>): URLSearchParams {
+  const next = new URLSearchParams(params);
+  for (const k of FILTER_KEYS) next.delete(k);
+  for (const [k, v] of filtersToParams({ ...parseFilters(params), ...change })) next.set(k, v);
+  return next;
+}

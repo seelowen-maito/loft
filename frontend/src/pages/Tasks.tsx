@@ -4,7 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
-import { filtersToParams, parseFilters, type IssueFilters } from "../lib/issueFilters";
+import { parseFilters, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -14,8 +14,8 @@ import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
-import { BoardPage, ViewToggle } from "./SpecBoard";
-import { withOpen, type DeliverySummary } from "../lib/specViews";
+import { BoardPage, ViewToggle, boardSpecs } from "./SpecBoard";
+import { parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
@@ -63,12 +63,7 @@ export default function TasksPage() {
   // The Specs board (`?view=specs`, see ./SpecBoard) instead of the list. Its open spec or ticket is `open=<id>`.
   const board = params.get("view") === "specs";
   const setFilter = useCallback(
-    (change: Partial<IssueFilters>, replace = false) =>
-      setParams((cur) => {
-        const next = filtersToParams({ ...parseFilters(cur), ...change });
-        for (const k of ["view", "open", "up"]) if (cur.get(k)) next.set(k, cur.get(k)!);
-        return next;
-      }, { replace }),
+    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => withFilters(cur, change), { replace }),
     [setParams],
   );
   const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
@@ -130,7 +125,7 @@ export default function TasksPage() {
   const from = params.get("from");
   useEffect(() => {
     const a = from && agentById.get(from);
-    if (from && agents.length) setParams((cur) => filtersToParams({ ...parseFilters(cur), group: a ? teamOf(a) : "" }), { replace: true });
+    if (from && agents.length) setParams((cur) => withFilters(cur, { group: a ? teamOf(a) : "" }), { replace: true });
   }, [from, agents.length, agentById, setParams]);
   // A group, agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
   const group = agents.length && !teams.includes(filters.group) ? "" : filters.group;
@@ -170,25 +165,59 @@ export default function TasksPage() {
     <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
   ) : null;
   const unread = groups[0].tasks.length;
+  const specs = useMemo(() => filtered.filter(isSpec), [filtered]);
+  const kept = useMemo(() => (board ? boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId) : []), [board, specs, deliveries, tasks, params, agentId]);
+  const count = board ? (kept.length === specs.length ? `${specs.length} specs` : `${kept.length} of ${specs.length} specs`) : filtered.length === (tasks ?? []).length ? `${filtered.length} issues` : `${filtered.length} of ${(tasks ?? []).length} issues`;
 
-  // One header over both views, so the toggle stays where it is.
+  // One header over both views, with the filters they share, so switching only changes the view below.
   const header = (
-    <div className={cx("flex items-center justify-between gap-3 border-b border-line px-4 pb-3 pt-5", openId && !board && "max-lg:hidden")}>
-      <div>
-        <div className="eyebrow">Loft issues</div>
-        <div className="mt-1 font-mono text-[11px] text-fg-3">
-          {unread > 0 && <span className="text-warn">{unread} need you · </span>}
-          {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
+    <div className={cx("border-b border-line px-4 pb-3 pt-5", openId && !board && "max-lg:hidden")}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="eyebrow">Loft issues</div>
+          <div className="mt-1 font-mono text-[11px] text-fg-3">
+            {unread > 0 && <span className="text-warn">{unread} need you · </span>}
+            {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <ViewToggle params={params} setParams={(n) => setParams(n)} />
+          <button className="btn-ghost size-8 justify-center p-0" onClick={sync} aria-label="Refresh from GitHub" title="Refresh from GitHub">
+            <RefreshCw className={cx("size-4", syncing && "animate-spin")} />
+          </button>
+          <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
+            <Plus className="size-4" />
+          </button>
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <ViewToggle params={params} setParams={(n) => setParams(n)} />
-        <button className="btn-ghost size-8 justify-center p-0" onClick={sync} aria-label="Refresh from GitHub" title="Refresh from GitHub">
-          <RefreshCw className={cx("size-4", syncing && "animate-spin")} />
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <label className="flex min-w-[160px] flex-1 items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5 sm:max-w-xs">
+          <Search className="size-3.5 text-fg-3" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" aria-label="Search issues" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
+        </label>
+        <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
+          {SOURCES.map((s) => (
+            <button key={s.key} onClick={() => setFilter({ source: s.key })} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
+              {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
+            </button>
+          ))}
+        </div>
+        <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "" })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
+          <option value="">All groups</option>
+          {teams.map((g) => <option key={g} value={g}>{g}</option>)}
+        </select>
+        <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
+          <option value="">All projects</option>
+          {groupProjectList.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
+          <option value="">All agents</option>
+          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
+          Created by me
         </button>
-        <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
-          <Plus className="size-4" />
-        </button>
+        {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
       </div>
     </div>
   );
@@ -199,8 +228,7 @@ export default function TasksPage() {
         {header}
         <div className="min-h-0 flex-1 overflow-hidden">
           {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
-            <BoardPage specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} filters={{ q: filters.q, group, project, agent: agentId }}
-              facets={{ teams, projects: groupProjectList, agents }} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
+            <BoardPage kept={kept} tasks={tasks} deliveries={deliveries} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
           )}
         </div>
         {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
@@ -215,37 +243,7 @@ export default function TasksPage() {
     <div className="grid min-h-0 flex-1 grid-cols-[400px_minmax(0,1fr)] overflow-hidden max-lg:grid-cols-1">
       {/* list */}
       <aside className={cx("flex min-h-0 flex-col border-r border-line bg-ink-950", routeId && "max-lg:hidden")}>
-        <div className="space-y-3 px-4 pb-3 pt-5">
-          <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
-            <Search className="size-3.5 text-fg-3" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
-              {SOURCES.map((s) => (
-                <button key={s.key} onClick={() => setFilter({ source: s.key })} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
-                  {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
-                </button>
-              ))}
-            </div>
-            <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "" })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
-              <option value="">All groups</option>
-              {teams.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
-            <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
-              <option value="">All projects</option>
-              {groupProjectList.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
-              <option value="">All agents</option>
-              {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-            <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
-              Created by me
-            </button>
-          </div>
-        </div>
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-6">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 py-3 pb-6">
           {mirror?.projects.filter((p) => p.error).map((p) => (
             <div key={p.project} className="mx-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
               <span className="text-fg">Couldn't read {p.repo}.</span> {p.error}
