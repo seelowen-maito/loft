@@ -67,13 +67,13 @@
             "text": ""
           },
           "kind": "answer",
-          "label": "Reply on the task",
+          "label": "Reply on the issue",
           "method": "POST",
           "path": "/api/tasks/2d15ed20-9fb4-4328-b09a-c0f8504ac5cd/comments"
         },
         {
           "kind": "open",
-          "label": "Open task",
+          "label": "Open issue",
           "target": {
             "screen": "task",
             "task_id": "2d15ed20-9fb4-4328-b09a-c0f8504ac5cd"
@@ -96,7 +96,7 @@
       "id": "task:2d15ed20-9fb4-4328-b09a-c0f8504ac5cd:blocked",
       "links": [
         {
-          "label": "Task",
+          "label": "Issue",
           "path": "/tasks/2d15ed20-9fb4-4328-b09a-c0f8504ac5cd"
         }
       ],
@@ -192,7 +192,7 @@
             "text": ""
           },
           "kind": "answer",
-          "label": "Reply on the task",
+          "label": "Reply on the issue",
           "method": "POST",
           "path": "/api/tasks/115f01fb-a015-416b-ad1d-938877c04da8/comments"
         },
@@ -209,7 +209,7 @@
         },
         {
           "kind": "open",
-          "label": "Open task",
+          "label": "Open issue",
           "target": {
             "screen": "task",
             "task_id": "115f01fb-a015-416b-ad1d-938877c04da8"
@@ -232,7 +232,7 @@
       "id": "task:115f01fb-a015-416b-ad1d-938877c04da8:failed",
       "links": [
         {
-          "label": "Task",
+          "label": "Issue",
           "path": "/tasks/115f01fb-a015-416b-ad1d-938877c04da8"
         }
       ],
@@ -417,7 +417,7 @@
         },
         {
           "kind": "open",
-          "label": "Open task",
+          "label": "Open issue",
           "target": {
             "screen": "task",
             "task_id": "bb55c88d-928c-4a07-b947-22e075277bdc"
@@ -440,7 +440,7 @@
       "id": "done:bb55c88d-928c-4a07-b947-22e075277bdc:2026-10-27T01:19:26.678667+00:00",
       "links": [
         {
-          "label": "Task",
+          "label": "Issue",
           "path": "/tasks/bb55c88d-928c-4a07-b947-22e075277bdc"
         }
       ],

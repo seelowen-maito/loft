@@ -82,7 +82,13 @@ struct LiveLoftAPI: LoftAPI {
     private let session: URLSession
     private let streamSession: URLSession
 
+    /// How many were made: every request the app sends goes through one, so a test can prove the demo made none.
+    nonisolated(unsafe) private static var made = 0
+    private static let madeLock = NSLock()
+    static var instancesMade: Int { madeLock.withLock { made } }
+
     init(baseURL: URL) {
+        Self.madeLock.withLock { Self.made += 1 }
         self.baseURL = baseURL
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 15

@@ -20,14 +20,14 @@ SECTIONS = [
      ["Paste, drag in or pick images.",
       "@-mention another agent to pull it into the conversation.",
       "When an agent asks you something, tap a suggested reply.",
-      "Plan cards show delegated work and its subtasks, live.",
-      "Attach a task to a message, and tap a task chip to open it."],
+      "Plan cards show delegated work and its sub-issues, live.",
+      "Attach an issue to a message, and tap an issue chip to open it."],
      ["web-chat-orchestrator", "web-chat-webdev"], ["chat", "mention"]),
-    ("tasks", "Tasks", "One shared to-do list for you and the crew",
-     "Tasks are where work gets tracked. You create them, agents pick them up, report progress and hand pieces to each other.",
-     ["Big jobs split into subtasks, each with its own agent.",
-      "Every task has a thread: progress notes, status changes and comments.",
-      "Comment on a task and the agent working on it answers right there.",
+    ("tasks", "Issues", "One shared issue list for you and the crew",
+     "Issues are where work gets tracked. You create them, agents pick them up, report progress and hand pieces to each other.",
+     ["Big jobs split into sub-issues, each with its own agent.",
+      "Every issue has a thread: progress notes, status changes and comments.",
+      "Comment on an issue and the agent working on it answers right there.",
       "The agent that handed work out hears back when it's done, failed or blocked.",
       "The same list on the web and on your phone."],
      ["web-task-detail", "web-tasks"], ["tasks", "task-detail"]),
@@ -73,12 +73,12 @@ SECTIONS = [
 
 COMING_SOON = [
     ("A native Mac app", "Loft in your menu bar, starting and stopping by itself."),
-    ("Backups", "Agents, tasks, chats and memories, saved and restorable in one step."),
+    ("Backups", "Agents, issues, chats and memories, saved and restorable in one step."),
 ]
 
 PHONE_CAPTIONS = {
     "agents": "Agents on iPhone", "chat": "Plan card in a chat", "mention": "@-mention picker",
-    "tasks": "Tasks", "task-detail": "A task's thread", "needs-you": "Needs you", "approval": "What does this do?",
+    "tasks": "Issues", "task-detail": "An issue's thread", "needs-you": "Needs you", "approval": "What does this do?",
     "talk": "Talk", "brief": "Make it a brief", "grill": "An interview question", "digest": "While you were away",
     "overview": "Plan usage and the Mac's temperature", "settings": "Settings",
 }

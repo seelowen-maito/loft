@@ -151,7 +151,7 @@ fn open_chat(agent_id: &str) -> Value {
 }
 
 fn open_task(task_id: &str) -> Value {
-    json!({ "kind": "open", "label": "Open task", "target": { "screen": "task", "task_id": task_id } })
+    json!({ "kind": "open", "label": "Open issue", "target": { "screen": "task", "task_id": task_id } })
 }
 
 fn dismiss(id: &str) -> Value {
@@ -222,7 +222,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
-        let mut actions = vec![action("answer", "Reply on the task", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
         if t.status == "failed" && t.agent_id.is_some() {
             actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
         }
@@ -238,13 +238,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions,
             push: (
                 match t.status.as_str() {
-                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    _ => "A task failed".to_string(),
+                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    _ => "An issue failed".to_string(),
                 },
                 t.title.clone(),
             ),
@@ -267,7 +267,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("#{} was closed on GitHub while it's being worked on.", g.number), MAX_REASON),
             text: String::new(),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("deny", "Cancel issue", "POST", format!("{base}/cancel"), json!({})),
                 action("approve", &format!("Keep working (reopens #{})", g.number), "POST", format!("{base}/keep-working"), json!({})),
@@ -296,7 +296,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Not on GitHub yet: approve to post it on {}#{}.", g.repo, g.number), MAX_REASON),
             text: text(&c.text, MAX_TEXT),
             created_at: c.created_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("approve", "Approve", "POST", format!("{base}/approve"), json!({})),
                 action("answer", "Edit and approve", "POST", format!("{base}/approve"), json!({ "text": c.text })),
@@ -325,13 +325,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&if t.summary.is_empty() { "Done.".to_string() } else { format!("Done: {}", first_line(&t.summary)) }, MAX_REASON),
             text: text(&t.summary, MAX_TEXT),
             created_at: done_at,
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("answer", "Follow up", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })),
                 open_task(&t.id),
                 dismiss(&id),
             ],
-            push: ("Task done".to_string(), t.title.clone()),
+            push: ("Issue done".to_string(), t.title.clone()),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             pr: None,
             id,
@@ -376,7 +376,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             let reason = if !waiting.is_empty() && age_secs(&since) / 60 >= QUIET_MINUTES {
                 Some(format!("Waiting on a background task for {} min: {}", age_secs(&since) / 60, waiting.join(", ")))
             } else if waiting.is_empty() && !last.is_empty() && quiet >= QUIET_MINUTES {
-                Some(format!("No activity for {quiet} min."))
+                let restarts = state.rt.lock().unwrap().auto_restarts.get(&a.id).copied().unwrap_or(0);
+                Some(if restarts >= crate::agents::MAX_AUTO_RESTARTS {
+                    format!("No activity for {quiet} min, after {restarts} automatic restarts. Loft won't restart it again.")
+                } else {
+                    format!("No activity for {quiet} min.")
+                })
             } else {
                 None
             };
@@ -464,7 +469,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Its reviews passed: merge `{}` into `{}`.", d.branch, d.base), MAX_REASON),
             text: String::new(),
             created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
-            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/tasks/{}", t.id) })]).unwrap_or_default(),
+            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
             actions: vec![
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 dismiss(&id),
@@ -496,7 +501,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             kind: "pr_ready",
             urgency: 1,
             title: text(&format!("{}#{}: {}", p.slug, p.number, p.title), MAX_TITLE),
-            reason: text(&format!("Ready to merge{}.", if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
+            reason: text(&format!("{}Ready to merge{}.", if p.ready_sha == p.head_sha && !p.head_sha.is_empty() { "Loft marked it ready: its verdicts are in. " } else { "" }, if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
             text: text(&format!("{} → {} · +{} −{} in {} files", p.head_ref, p.base_ref, p.additions, p.deletions, p.changed_files), MAX_TEXT),
             agent: who,
             task_id: None,
@@ -532,6 +537,37 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             push: (if g.review_requested { "Review requested" } else { "Ready to merge" }.to_string(), format!("{}#{}: {}", g.repo, g.number, g.title)),
             project: Some(repo_name.clone()),
             pr: Some(pr_fields(&g.repo, &repo_name, g.number, &g.title, &g.url, &g.author, checks, g.review_requested)),
+            id,
+        });
+    }
+
+    // macOS asking on a Mac nobody's looking at: an agent's file read waits until someone answers.
+    let asking = state.rt.lock().unwrap().tcc.asking(std::time::Instant::now());
+    let host = crate::tailnet::host();
+    let mac = host.as_deref().and_then(|h| h.split('.').next()).unwrap_or("this Mac").to_string();
+    for a in asking {
+        let id = format!("mac_access:{}:{}", a.service, a.since);
+        let mut actions = vec![];
+        if let Some(h) = &host {
+            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("http://{h}:{}/settings#mac-access", state.cfg.port) } }));
+            actions.push(json!({ "kind": "open", "label": "Screen Sharing", "target": { "url": format!("vnc://{h}") } }));
+        }
+        actions.push(action("check", "Check again", "POST", "/api/system/mac-access".into(), json!({})));
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "mac_access",
+            urgency: 3,
+            agent: None,
+            task_id: None,
+            title: text(&format!("macOS is asking for access to {} on {mac}", a.folder), MAX_TITLE),
+            reason: text("A prompt is up on the Mac's screen; an agent's work waits until someone answers it.", MAX_REASON),
+            text: text("Answer it over Screen Sharing, or give Loft Full Disk Access (Settings → Mac access) so macOS stops asking.", MAX_TEXT),
+            created_at: a.since,
+            links: vec![],
+            actions,
+            push: ("macOS is asking for access".to_string(), format!("{} on {mac}", a.folder)),
+            project: None,
+            pr: None,
             id,
         });
     }
@@ -591,7 +627,8 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        kind: i.kind,
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
+        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),

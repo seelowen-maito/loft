@@ -185,6 +185,33 @@ final class LoftStore {
     /// connection is left as it was; a relaunch starts from it again.
     private(set) var isDemo = false
 
+    /// The address that opens the demo instead of a server (App Review types it in). Matched on the text alone,
+    /// before any request: case, spaces, a trailing slash and the https:// prefix don't matter.
+    static let demoAddress = "demo-loft-dev.get-loft.com"
+
+    nonisolated static func isDemoAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["https://", "http://"] where s.hasPrefix(prefix) { s.removeFirst(prefix.count) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s == demoAddress
+    }
+
+    /// Connects to what was typed on the connect screen: the demo for the demo address (no request at all), the
+    /// server otherwise, saved for next time. False when it isn't an address.
+    @discardableResult
+    func connect(address: String) -> Bool {
+        if Self.isDemoAddress(address) {
+            enterDemo()
+            return true
+        }
+        guard let url = LiveLoftAPI.normalize(address) else { return false }
+        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
+        UserDefaults.standard.removeObject(forKey: "serverURL-override")
+        configure(LiveLoftAPI(baseURL: url))
+        activate()
+        return true
+    }
+
     func enterDemo() {
         deactivate()
         isDemo = true
@@ -433,11 +460,11 @@ final class LoftStore {
             upsert(&tasks, t)
             if let before, before.status != t.status {
                 switch t.state {
-                case .done: notifier.post(.taskOutcome, title: "Task done", body: t.title, whenActive: isActive,
+                case .done: notifier.post(.taskOutcome, title: "Issue done", body: t.title, whenActive: isActive,
                                           target: ["screen": "task", "task_id": t.id])
-                case .failed: notifier.post(.taskOutcome, title: "Task failed", body: t.title, whenActive: isActive,
+                case .failed: notifier.post(.taskOutcome, title: "Issue failed", body: t.title, whenActive: isActive,
                                             itemId: NeedsYouKey.task(t.id, "failed"), target: ["screen": "task", "task_id": t.id])
-                case .blocked: notifier.post(.taskOutcome, title: "Task blocked", body: t.title, whenActive: isActive,
+                case .blocked: notifier.post(.taskOutcome, title: "Issue blocked", body: t.title, whenActive: isActive,
                                              itemId: NeedsYouKey.task(t.id, "blocked"), target: ["screen": "task", "task_id": t.id])
                 default: break
                 }
@@ -530,7 +557,11 @@ final class LoftStore {
         for tick in 0..<(60 * 60 * 2) { // checked every half second
             guard keepWaiting() else { return nil }
             let a = agent(agentId)
-            let running = a?.running == true || a?.status == "running"
+            // A run that started after the message and has ended is over, whatever the agent's status says: its
+            // update can be missed (a reconnect, the app in the background), and the reply was then never read.
+            let after = conversation(agentId).filter { $0.id > id }
+            let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
+            let running = !runEnded && (a?.running == true || a?.status == "running")
             sawRun = sawRun || running
             let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
             // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.
@@ -786,7 +817,7 @@ final class LoftStore {
 
     private func requireTasks() throws -> LoftAPI {
         let api = try requireWrite()
-        guard supportsTasks else { throw APIError.unsupported("Tasks") }
+        guard supportsTasks else { throw APIError.unsupported("Issues") }
         return api
     }
 

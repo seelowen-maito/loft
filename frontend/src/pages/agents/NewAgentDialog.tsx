@@ -2,18 +2,19 @@ import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { createPayload, EMPTY_FORM, offersFreshContext, TEMPLATES, withProject } from "../../lib/newAgent";
+import { createPayload, EMPTY_FORM, offersFreshContext, TEMPLATES, withTeam } from "../../lib/newAgent";
 import { FRESH_CONTEXT, FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
-import { ProjectSelect } from "./ProjectSelect";
+import { GroupInput, ProjectsField } from "./ProjectsField";
+import { teamOf } from "../../lib/team";
 
-export function NewAgentDialog({ projects, agents, onClose, onCreated }: { projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
+export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }: { groups: string[]; projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Set when creating it took the Lead role from another agent: the dialog stays open to say so, as Save does in the settings.
   const [moved, setMoved] = useState<{ agent: Agent; notice: string } | null>(null);
   const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
-  const project = form.project.trim();
+  const team = teamOf({ group: form.group, project: form.projects[0] ?? "" });
   const close = () => (moved ? onCreated(moved.agent) : onClose());
 
   useEffect(() => {
@@ -79,22 +80,26 @@ export function NewAgentDialog({ projects, agents, onClose, onCreated }: { proje
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-3">
               <label className="space-y-1.5">
-                <span className="eyebrow">Project</span>
-                {/* Only an agent with a project can be Lead: clearing the project drops it back to Custom. */}
-                <ProjectSelect value={form.project} projects={projects} onChange={(v) => setForm((f) => withProject(f, v))} />
+                <span className="eyebrow">Group</span>
+                <GroupInput value={form.group} groups={groups} onChange={(v) => setForm((f) => withTeam(f, { group: v }))} />
               </label>
               <label className="space-y-1.5">
                 <span className="eyebrow">Role</span>
                 <select className="input" value={form.role} onChange={(e) => set("role", e.target.value)}>
                   {ROLES.map((r) => (
-                    <option key={r.value} value={r.value} disabled={r.value === "lead" && !project}>
+                    <option key={r.value} value={r.value} disabled={r.value === "lead" && !team}>
                       {r.label}: {r.hint}
                     </option>
                   ))}
                 </select>
               </label>
             </div>
-            <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(form.project)}</p>
+            <div className="space-y-1.5">
+              <span className="eyebrow">Projects</span>
+              {/* Only an agent with a group can be Lead: clearing it drops it back to Custom. */}
+              <ProjectsField value={form.projects} projects={projects} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
+            </div>
+            <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(team)}</p>
           </div>
           {offersFreshContext(form, agents) && (
             <label className="flex items-center justify-between gap-3" title={FRESH_CONTEXT_HINT}>

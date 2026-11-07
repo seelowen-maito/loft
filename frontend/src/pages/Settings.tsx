@@ -6,6 +6,8 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { cx } from "../lib/format";
+import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
+import { Keys } from "../components/Shortcuts";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -131,6 +133,74 @@ function Spend() {
       </p>
       <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
     </Section>
+  );
+}
+
+/** The keyboard shortcuts: ⌘K and ⌘J can be recorded anew or reset, kept in this browser and used at once (no Save needed); the rest are fixed. */
+function ShortcutSettings() {
+  const [combos, setCombos] = useState(loadCombos);
+  const [listening, setListening] = useState<Rebindable | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
+
+  const use = (id: Rebindable, c: string) => {
+    saveCombo(id, c);
+    setCombos(loadCombos());
+    setHint(null);
+    window.dispatchEvent(new Event(SHORTCUTS_CHANGED));
+  };
+
+  useEffect(() => {
+    if (!listening) return;
+    recording.on = true;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.metaKey) return setListening(null);
+      if (/^(Shift|Control|Alt|Meta|OS)$/.test(e.key)) return;
+      const c = comboFromEvent(e);
+      if (!c) return setHint("Hold ⌘, Ctrl or Alt with the key.");
+      if (isReserved(c)) return setHint(`${formatCombo(c)} is the browser's (copy, paste, close tab…). Pick another.`);
+      const other = REBINDABLE.find((r) => r.id !== listening)!;
+      if (formatCombo(c) === formatCombo(loadCombos()[other.id])) return setHint(`${formatCombo(c)} already does “${other.label}”. Pick another.`);
+      use(listening, normalizeCombo(c));
+      setListening(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      recording.on = false;
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [listening]);
+
+  return (
+    <div className="space-y-3">
+      {REBINDABLE.map((r) => (
+        <div key={r.id} className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 flex-1 basis-40 text-[13px] text-fg-2">{r.label}</span>
+          <kbd className="chip min-w-12 justify-center font-mono text-[12px]">{listening === r.id ? "Press keys…" : formatCombo(combos[r.id])}</kbd>
+          <button type="button" className="btn" aria-label={listening === r.id ? "Cancel" : `Record ${r.label}`} onClick={() => { setHint(null); setListening((l) => (l === r.id ? null : r.id)); }}>
+            {listening === r.id ? "Cancel" : "Record"}
+          </button>
+          {combos[r.id] !== r.default && listening !== r.id && (
+            <button type="button" className="btn-ghost" onClick={() => use(r.id, r.default)}>
+              Reset to {formatCombo(r.default)}
+            </button>
+          )}
+        </div>
+      ))}
+      <span className="block text-[11.5px] text-fg-3">
+        {hint ?? "These two work from any page, even while typing. Press Record, then the new keys; they need ⌘, Ctrl or Alt. Kept in this browser."}
+      </span>
+      <ul className="space-y-2 border-t border-line pt-3">
+        {FIXED.map((f) => (
+          <li key={f.keys} className="flex items-center justify-between gap-3 text-[13px]">
+            <span className="min-w-0 text-fg-2">{f.label}</span>
+            <Keys keys={f.keys} />
+          </li>
+        ))}
+      </ul>
+      <span className="block text-[11.5px] text-fg-3">Fixed. They don't fire while you type in a text field.</span>
+    </div>
   );
 }
 
@@ -313,6 +383,10 @@ export default function SettingsPage() {
             label="Show Simulator"
             hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
+        </Section>
+
+        <Section title="Keyboard shortcuts">
+          <ShortcutSettings />
         </Section>
 
         <PushSettings />

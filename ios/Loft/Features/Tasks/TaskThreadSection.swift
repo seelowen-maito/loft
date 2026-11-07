@@ -78,7 +78,7 @@ struct TaskThreadSection: View {
             Label("Not on GitHub yet", systemImage: "clock").font(.caption.weight(.semibold)).foregroundStyle(Theme.attentionInk)
             HStack {
                 Button("Approve") { act { try await store.approveComment(c) } }
-                    .buttonStyle(.borderedProminent).accessibilityIdentifier("threadApprove-\(c.id)")
+                    .buttonStyle(.accent).accessibilityIdentifier("threadApprove-\(c.id)")
                 Button("Keep in Loft") { act { try await store.keepComment(c) } }
                     .buttonStyle(.bordered).accessibilityIdentifier("threadKeep-\(c.id)")
             }

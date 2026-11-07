@@ -68,11 +68,11 @@ struct ConversationsView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Pick an orchestrator", systemImage: "sparkles").font(.headline)
-                        Text("Loft doesn't have a built-in orchestrator. Choose the agent you want to plan work and hand it to the others. It can delegate with Loft's task and messaging tools.")
+                        Text("Loft doesn't have a built-in orchestrator. Choose the agent you want to plan work and hand it to the others. It can delegate with Loft's issue and messaging tools.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         Button("Choose agent") { choosing = true }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.accent)
                             .disabled(store.agents.isEmpty)
                     }
                     .padding(.vertical, 6)

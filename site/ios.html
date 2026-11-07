@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loft for iOS</title>
-<meta name="description" content="A native iOS app for loft: agent status, approvals, tasks and chat, with push notifications. Build it yourself from the repo with Xcode.">
+<meta name="description" content="A native iOS app for loft: agent status, approvals, issues and chat, with push notifications. Join the beta on TestFlight, or build it yourself from the repo with Xcode.">
 <meta property="og:title" content="loft in your pocket">
 <meta property="og:description" content="A native iOS app for the loft running on your Mac.">
 <meta name="theme-color" content="#000000">
@@ -54,11 +54,12 @@
       <div class="copytext">
         <span class="exp"><i></i>Experimental</span>
         <h2 style="margin-top:18px">loft in your <span class="serif">pocket.</span></h2>
-        <p>A native iOS app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's not on the App Store yet, so you build it yourself from the repo with Xcode.</p>
+        <p>A native iOS app for the loft running on your Mac. It's a remote control: closing the app or losing signal never stops an agent. It's in beta on TestFlight. It needs loft running on your Mac, and Tailscale on your iPhone to reach it.</p>
+        <div class="cta" style="justify-content:flex-start"><a class="btn-primary btn lg" href="https://testflight.apple.com/join/w2rCtJYD">Join the beta on TestFlight</a><a class="btn lg" href="#setup">Or build it yourself</a></div>
         <ul>
           <li>Every agent's status, and a chat with each of them</li>
           <li>Approve or deny permission requests in one tap</li>
-          <li>Hand off and track tasks, and see what needs you</li>
+          <li>Hand off and track issues, and see what needs you</li>
           <li>Push notifications when an agent is waiting on you</li>
           <li>Talk to your agents, and hear the replies read aloud</li>
         </ul>
@@ -66,35 +67,29 @@
       <div class="phone-wrap" aria-hidden="true">
         <div class="phone">
           <div class="screen">
-            <span class="p-time">9:41</span><span class="island"></span>
+            <img class="shot" src="shots/needs-you.webp" alt="" width="600" height="1305">
+            <span class="island"></span>
             <div class="push">
               <div class="appicon"><svg viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg></div>
-              <div style="min-width:0;flex:1"><b>Builder needs your approval<time>now</time></b><span>Wants to use Bash</span></div>
-            </div>
-            <div class="p-title">Needs you</div>
-            <div class="p-sub">2 waiting · live</div>
-            <div class="p-item warn">
-              <img src="avatars/builder.svg" alt="">
-              <div style="min-width:0"><b>Builder needs your approval</b><span>Wants to run <code style="font-size:11px">npm test -- sync</code></span>
-                <div class="p-acts"><span class="btn-primary">Allow</span><span class="btn">Deny</span></div>
-              </div>
-            </div>
-            <div class="p-item">
-              <img src="avatars/reviewer.svg" alt="">
-              <div style="min-width:0"><b>Reviewer asked you something</b><span>Merge #42 now, or wait for CI?</span></div>
-            </div>
-            <div class="p-item">
-              <img src="avatars/triage.svg" alt="">
-              <div style="min-width:0"><b>Triage finished a task</b><span>Label last week's issues</span></div>
-            </div>
-            <div class="p-tabs">
-              <span><svg class="ico"><use href="#i-house"/></svg>Overview</span>
-              <span><svg class="ico"><use href="#i-bot"/></svg>Agents</span>
-              <span class="on"><svg class="ico"><use href="#i-shield"/></svg>Needs you</span>
-              <span><svg class="ico"><use href="#i-todo"/></svg>Tasks</span>
+              <div style="min-width:0;flex:1"><b>Backend Agent needs your approval<time>now</time></b><span>Wants to use Bash</span></div>
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="gallery">
+      <div class="center">
+        <div class="eyebrow">Inside the app</div>
+        <h2>Your team, <span class="serif">one tap away.</span></h2>
+      </div>
+      <div class="shots">
+        <figure><img src="shots/overview.webp" alt="The Overview screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Overview</b>Who's working, who's stuck, and what needs you.</figcaption></figure>
+        <figure><img src="shots/chat.webp" alt="The Chat screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Chat</b>Talk to any agent, wherever you are.</figcaption></figure>
+        <figure><img src="shots/needs-you.webp" alt="The Needs you screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Needs you</b>Approvals, questions and blocked work, one tap each.</figcaption></figure>
+        <figure><img src="shots/issues.webp" alt="The Issues screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Issues</b>Every piece of work, its state, and who has it.</figcaption></figure>
+        <figure><img src="shots/pull-requests.webp" alt="The Pull requests screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Pull requests</b>Ready to merge, grouped by project.</figcaption></figure>
+        <figure><img src="shots/voice.webp" alt="The Voice screen of the loft iPhone app" width="600" height="1305" loading="lazy"><figcaption><b>Voice</b>Say it out loud and hear the reply read back.</figcaption></figure>
       </div>
     </div>
 
@@ -102,7 +97,7 @@
       <div class="center">
         <div class="eyebrow">Set up the iOS app</div>
         <h2>Build it, sign it, <span class="serif">get pinged.</span></h2>
-        <p class="sub">About half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
+        <p class="sub">Rather not? <a href="https://testflight.apple.com/join/w2rCtJYD">Join the beta on TestFlight</a> and skip to <a href="#connect">connecting it</a>. Building takes about half an hour the first time. You need a Mac with Xcode, an iPhone on iOS 17 or later, and loft already installed.</p>
       </div>
       <ol>
         <li class="card g-step">
@@ -139,7 +134,7 @@ LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// you
             <p>Free Apple ID: personal teams can't sign push, so remove <b>Push Notifications</b> and <b>Time Sensitive Notifications</b> under <b>Signing &amp; Capabilities</b> before you build.</p>
           </div>
         </li>
-        <li class="card g-step">
+        <li class="card g-step" id="connect">
           <div class="n">03</div>
           <div>
             <h4>Let the phone reach loft</h4>

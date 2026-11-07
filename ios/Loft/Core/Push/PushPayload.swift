@@ -35,8 +35,8 @@ enum PushKind: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .permission: "Permission requests"
-        case .approval: "Tasks waiting for approval"
-        case .blockedFailed: "Blocked or failed tasks"
+        case .approval: "Issues waiting for approval"
+        case .blockedFailed: "Blocked or failed issues"
         case .questions: "Questions and interviews"
         case .stuck: "Stuck agents"
         case .prReady: "PRs ready to merge"

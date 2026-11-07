@@ -34,7 +34,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 | `age_seconds` | int | At `generated_at` |
 | `links` | `[{label, url?, path?}]` | Kept apart from the text. `url`: external (GitHub); `path`: a Loft web path (`/tasks/<id>`) |
 | `actions` | `[Action]` | What the user can do, in display order |
-| `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the task's or agent's project |
+| `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the issue's or agent's project |
 | `repo` | string \| null | PR items: the GitHub slug (`acme/shop`), the same as `pr.repo` |
 | `pr` | object \| null | PR items only: `{repo: "owner/name", project, number, title, url, author, draft: false, checks: "passing"\|"none", checks_green: true, review_requested}` |
 
@@ -46,15 +46,15 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `type` | urgency | When | Actions |
 |---|---|---|---|
 | `permission` | 3 | A permission prompt is pending | approve, approve_always, deny, open |
-| `task_approval` | 3 | Task in `waiting_approval` | answer, open, dismiss |
-| `task_blocked` | 2 | Task `blocked` (reason = its error) | answer, open, dismiss |
+| `task_approval` | 3 | Issue in `waiting_approval` | answer, open, dismiss |
+| `task_blocked` | 2 | Issue `blocked` (reason = its error) | answer, open, dismiss |
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
-| `task_failed` | 1 | Task `failed` | answer, retry (reopen and send), open, dismiss |
+| `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
-| `task_done` | 0 | A task **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
+| `task_done` | 0 | An issue **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
 
 ### Action
 
@@ -66,7 +66,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 { "kind": "answer", "label": "Reply", "method": "POST", "path": "/api/agents/<id>/messages", "body": { "text": "" } }
 { "kind": "answer", "label": "Answer", "method": "POST", "path": "/api/agents/<id>/messages",
   "body": { "text": "", "meta": { "grill": { "role": "answer", "session_id": "…", "question_id": "…" } } } }
-{ "kind": "answer", "label": "Reply on the task", "method": "POST", "path": "/api/tasks/<id>/comments", "body": { "text": "", "send": true } }
+{ "kind": "answer", "label": "Reply on the issue", "method": "POST", "path": "/api/tasks/<id>/comments", "body": { "text": "", "send": true } }
 
 // Navigation, no request: `target` is { screen: "chat", agent_id } | { screen: "task", task_id } | { url }.
 { "kind": "open", "label": "Open chat", "target": { "screen": "chat", "agent_id": "…" } }

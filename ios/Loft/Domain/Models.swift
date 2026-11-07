@@ -38,9 +38,22 @@ struct Agent: Codable, Identifiable, Hashable {
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
+    /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
+    var group: String? = nil
+    /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
+    var projects: [String]? = nil
 
-    /// Leads its project's team; it wears a captain hat.
+    /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
+
+    /// Its team: the group; empty when it has none (backend `Agent::team`).
+    var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
+
+    /// The projects it works in, main first: `projects`, else the one `project` from an older server.
+    var allProjects: [String] {
+        if let projects, !projects.isEmpty { return projects }
+        return (project ?? "").isEmpty ? [] : [project!]
+    }
 }
 
 /// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
@@ -261,6 +274,8 @@ struct PullRequest: Codable, Identifiable, Hashable {
     var state: String
     var draft: Bool?
     var createdAt: Date?
+    /// Label names; the verdicts are tests:green, qa:passed, security:passed and their failures.
+    var labels: [String]?
 }
 
 struct ServerInfo: Codable, Hashable {

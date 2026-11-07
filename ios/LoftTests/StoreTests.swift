@@ -85,6 +85,23 @@ final class StoreTests: XCTestCase {
         return store
     }
 
+    /// The Lead's status says "running" all along (its update was missed), but its run started and ended after the
+    /// message: the reply is picked up and read, not waited on forever.
+    func testAReplyIsPickedUpWhenTheRunEndedButTheStatusStillSaysRunning() async throws {
+        let store = LoftStore(api: FixtureAPI(scripted: true), cache: SnapshotStore(url: cacheURL))
+        store.activate()
+        defer { store.deactivate() }
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        let lead = try XCTUnwrap(store.orchestrator)
+        XCTAssertTrue(lead.running == true || lead.status == "running", "the fixture's Lead never stops working")
+        try await store.loadConversation(lead.id)
+        let before = store.conversation(lead.id).last?.id ?? 0
+        await store.send("What's the status?", to: lead.id)
+        let started = Date()
+        let reply = await store.waitForReply(agentId: lead.id, after: before) { Date().timeIntervalSince(started) < 15 }
+        XCTAssertTrue(reply?.contains("3 of 4 endpoints") == true, reply ?? "never read: waited on the stale status")
+    }
+
     /// A reply that arrives without a live event (missed in a reconnect) is still picked up and read: the wait
     /// refetches history and counts the reply once nothing new has come for 2 s. (Was a 40 s UI test.)
     func testAReplyWithoutAnEventIsStillPickedUp() async throws {
@@ -186,7 +203,7 @@ final class StoreTests: XCTestCase {
         api.features = []
         let store = try await connectedStore(api)
         XCTAssertFalse(store.supportsTasks)
-        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Tasks")) }
+        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Issues")) }
         store.deactivate()
     }
 

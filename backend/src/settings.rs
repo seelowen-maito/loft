@@ -55,13 +55,17 @@ pub struct Push {
     pub team_id: String,
     /// The app's bundle id, used as the APNs topic.
     pub bundle_id: String,
+    /// The push relay's address (https). Empty: LOFT_RELAY_URL, else none. Only `PUT /api/push` sets it.
+    pub relay_url: String,
+    /// The push portal's address (https). Empty: LOFT_PORTAL_URL, else none. Only `PUT /api/push` sets it.
+    pub portal_url: String,
 }
 
 impl Default for Push {
     /// The team and bundle id start from LOFT_TEAM_ID and LOFT_BUNDLE_ID, as for the iOS build.
     fn default() -> Self {
         let env = |k: &str| std::env::var(k).map(|v| v.trim().to_string()).unwrap_or_default();
-        Self { key_id: String::new(), team_id: env("LOFT_TEAM_ID"), bundle_id: env("LOFT_BUNDLE_ID") }
+        Self { key_id: String::new(), team_id: env("LOFT_TEAM_ID"), bundle_id: env("LOFT_BUNDLE_ID"), relay_url: String::new(), portal_url: String::new() }
     }
 }
 

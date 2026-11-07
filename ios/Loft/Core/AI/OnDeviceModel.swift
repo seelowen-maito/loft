@@ -12,6 +12,10 @@ enum OnDeviceModel {
         case appleIntelligenceOff
         case deviceNotEligible
         case modelNotReady
+        /// The model doesn't speak the iPhone's language; the name of that language.
+        case languageNotSupported(String)
+        /// A reason this app doesn't know by name (a newer iOS); the system's own text for it.
+        case unavailable(String)
         /// Older than iOS 26.
         case needsNewerSystem
 
@@ -24,42 +28,71 @@ enum OnDeviceModel {
             case .appleIntelligenceOff: "Turned off in Settings › Apple Intelligence & Siri"
             case .deviceNotEligible: "This iPhone doesn't support it"
             case .modelNotReady: "Getting ready (downloading)"
+            case .languageNotSupported(let language): "Not available in \(language)"
+            case .unavailable(let reason): "Unavailable (\(reason))"
             case .needsNewerSystem: "Needs iOS 26 or later"
             }
         }
     }
 
+    /// Read fresh on every call, so a feature turns on as soon as the model is ready, without a relaunch.
     static var status: Status {
         #if DEBUG
-        // `-fixture-ai-status off|ineligible|notReady|old|available`: show a state the Simulator can't produce.
+        // `-fixture-ai-status off|ineligible|notReady|old|language|unknown|available`: show a state the Simulator can't produce.
         switch FixtureAPI.launchText("fixture-ai-status") {
         case "off": return .appleIntelligenceOff
         case "ineligible": return .deviceNotEligible
         case "notReady": return .modelNotReady
         case "old": return .needsNewerSystem
+        case "language": return .languageNotSupported("Icelandic")
+        case "unknown": return .unavailable("someNewReason")
         case "available": return .available
         default: break
         }
         #endif
         if TestMode.noAI { return .appleIntelligenceOff }
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, macOS 26.0, *) { return status(from: SystemLanguageModel.default.availability) }
+        if #available(iOS 26.0, macOS 26.0, *) {
+            let model = SystemLanguageModel.default
+            var reason: String?
+            if case .unavailable(let r) = model.availability { reason = "\(r)" }
+            let languageSupported = model.supportsLocale()
+            logAvailability("\(reason.map { "unavailable(\($0))" } ?? "available"), \(Locale.current.identifier) supported: \(languageSupported)")
+            return status(unavailableReason: reason, languageSupported: languageSupported)
+        }
         #endif
         return .needsNewerSystem
     }
 
-    #if canImport(FoundationModels)
-    @available(iOS 26.0, macOS 26.0, *)
-    static func status(from a: SystemLanguageModel.Availability) -> Status {
-        switch a {
-        case .available: .available
-        case .unavailable(.appleIntelligenceNotEnabled): .appleIntelligenceOff
-        case .unavailable(.deviceNotEligible): .deviceNotEligible
-        case .unavailable(.modelNotReady): .modelNotReady
-        case .unavailable: .modelNotReady
+    /// What Settings shows for the system's unavailable reason (nil when the model is available). A reason
+    /// without a name here is shown as the system wrote it, never as a download.
+    static func status(unavailableReason reason: String?, languageSupported: Bool, language: String = currentLanguage) -> Status {
+        switch reason {
+        case nil: return .available
+        case "appleIntelligenceNotEnabled": return .appleIntelligenceOff
+        case "deviceNotEligible": return .deviceNotEligible
+        // Checked before "not ready": the model never downloads for a language it doesn't speak.
+        case _ where !languageSupported: return .languageNotSupported(language)
+        case "modelNotReady": return .modelNotReady
+        case let other?: return .unavailable(other)
         }
     }
-    #endif
+
+    static var currentLanguage: String {
+        Locale.current.localizedString(forLanguageCode: Locale.current.language.languageCode?.identifier ?? "") ?? Locale.current.identifier
+    }
+
+    @MainActor private static var lastAvailability: String?
+
+    /// Logs the raw availability when it differs from the last check, so the log shows each change without
+    /// a line for every voice command.
+    private static func logAvailability(_ line: String) {
+        Task { @MainActor in
+            guard line != lastAvailability else { return }
+            lastAvailability = line
+            VoiceLog.shared.add("ai: availability \(line)")
+        }
+    }
 
     /// What a job produced, and where it came from (for the log and for tests).
     enum Outcome<T> {

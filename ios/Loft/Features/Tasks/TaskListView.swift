@@ -43,13 +43,13 @@ struct TaskListView: View {
     var body: some View {
         Group {
             if store.info != nil && !store.supportsTasks {
-                EmptyState(symbol: "checklist", title: "Tasks need a newer Loft",
-                           message: "This server doesn't have the task API yet. Pull the latest Loft on your Mac and restart it.")
+                EmptyState(symbol: "checklist", title: "Issues need a newer Loft",
+                           message: "This server doesn't have the issues API yet. Pull the latest Loft on your Mac and restart it.")
             } else {
                 list
             }
         }
-        .navigationTitle("Tasks")
+        .navigationTitle("Issues")
         .createMenu()
     }
 
@@ -78,14 +78,14 @@ struct TaskListView: View {
                 if !search.isEmpty {
                     ContentUnavailableView.search(text: search)
                 } else {
-                    EmptyState(symbol: filter == .all ? "checklist" : "line.3.horizontal.decrease", title: hasFilters ? "No matching tasks" : "Nothing here",
+                    EmptyState(symbol: filter == .all ? "checklist" : "line.3.horizontal.decrease", title: hasFilters ? "No matching issues" : "Nothing here",
                                message: hasFilters ? "Try clearing the filters." : filter.emptyMessage,
-                               actionTitle: filter == .all || filter == .inbox ? "New task" : nil,
+                               actionTitle: filter == .all || filter == .inbox ? "New issue" : nil,
                                action: { router.composer = .newTask(agentId: nil, parentId: nil) })
                 }
             }
         }
-        .searchable(text: $search, prompt: "Search tasks")
+        .searchable(text: $search, prompt: "Search issues")
         .refreshable { try? await store.refresh() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { filterMenu }
@@ -108,7 +108,7 @@ struct TaskListView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(filter == f ? Theme.accent : Theme.card, in: Capsule())
-                        .foregroundStyle(filter == f ? .white : .primary)
+                        .foregroundStyle(filter == f ? Theme.onAccent : .primary)
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(filter == f ? .isSelected : [])
@@ -139,7 +139,7 @@ struct TaskListView: View {
         } label: {
             Image(systemName: hasFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
         }
-        .accessibilityLabel("Filter tasks")
+        .accessibilityLabel("Filter issues")
     }
 }
 
@@ -204,7 +204,7 @@ struct TaskRow: View {
             task.state == .inbox || task.state == .ready ? nil : task.state.label,
             store.agent(task.agentId)?.name,
             task.isPersonalTodo && task.agentId == nil ? "Personal" : nil,
-            children.isEmpty ? nil : "\(children.filter { $0.state == .done }.count)/\(children.count) subtasks",
+            children.isEmpty ? nil : "\(children.filter { $0.state == .done }.count)/\(children.count) sub-issues",
             children.isEmpty ? task.github?.subIssues : nil,
             task.ownerLogin.map { "@\($0)" },
             task.dueAt.map { "Due \($0.formatted(.dateTime.month(.abbreviated).day()))" },

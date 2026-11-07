@@ -120,9 +120,16 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// Free-form project or tag; agents sharing one are grouped in the UI.
+    /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
+    /// none), so clients that only know one project keep working.
     #[serde(default)]
     pub project: String,
+    /// Free-text label its team goes by (Acme); never a path. Empty: it has no team.
+    #[serde(default)]
+    pub group: String,
+    /// The projects it works in, main first.
+    #[serde(default)]
+    pub projects: Vec<String>,
     pub personality: String,
     pub prompt: String,
     pub model: String,
@@ -152,7 +159,7 @@ pub struct Agent {
     #[serde(default)]
     pub memory_index: Option<String>,
     /// What it does in its team: "lead", "dev", "code_reviewer", "qa", "security" or "custom"
-    /// (`planning::ROLES`). A team (the agents sharing a project) has at most one Lead. Set from the
+    /// (`planning::ROLES`). A team (the agents sharing a group, `Agent::team`) has at most one Lead. Set from the
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
@@ -199,6 +206,16 @@ pub fn default_fresh_context() -> String {
 }
 
 impl Agent {
+    /// Its team's name: its group. Empty: it has no team.
+    pub fn team(&self) -> &str {
+        self.group.trim()
+    }
+
+    /// Whether `project` is one it works in.
+    pub fn has_project(&self, project: &str) -> bool {
+        self.projects.iter().any(|p| p == project.trim())
+    }
+
     /// An Unread reply: a run the user started ended after their read mark.
     pub fn unread_reply(&self) -> bool {
         let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
@@ -331,6 +348,17 @@ pub struct PullRequest {
     pub checks_sha: String,
     /// GitHub answered 404/410: the PR (or its repo) is gone, so it's no longer polled.
     pub gone: bool,
+    /// The PR's label names, from the payload the poller already reads (the verdicts show from them).
+    pub labels: Vec<String>,
+    /// The head commit the pass labels (tests:green, qa:passed, security:passed) were set for, so a new head clears them.
+    pub passes_sha: String,
+    /// GitHub's node id, which marking a draft ready (GraphQL) needs.
+    pub node_id: String,
+    /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
+    pub kind: String,
+    pub kind_sha: String,
+    /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
+    pub ready_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -565,6 +593,16 @@ CREATE TABLE IF NOT EXISTS all_time_spend (
     runs INTEGER NOT NULL,
     cost_usd REAL NOT NULL
 );
+-- Each agent's port range, by slot (ports.rs); deleting the agent frees it.
+CREATE TABLE IF NOT EXISTS port_ranges (
+    slot INTEGER PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE
+);
+-- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
+CREATE TABLE IF NOT EXISTS agent_devices (
+    agent_id TEXT PRIMARY KEY,
+    udid TEXT NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -757,6 +795,14 @@ impl Db {
             [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
         )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
+        // Agents saved before groups existed get their project as group and only project, once, so every
+        // team stays as it was until the user changes it. Before the roles below: they save each agent back.
+        conn.execute(
+            "UPDATE agents SET data = json_set(data, '$.group', COALESCE(json_extract(data, '$.project'), ''),
+                 '$.projects', CASE WHEN TRIM(COALESCE(json_extract(data, '$.project'), '')) = '' THEN json('[]') ELSE json_array(TRIM(json_extract(data, '$.project'))) END)
+             WHERE json_type(data, '$.projects') IS NULL",
+            [],
+        )?;
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
         let unroled: Vec<(Value, &str)> = {
@@ -812,7 +858,9 @@ impl Db {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c
             .query_row(
-                "SELECT data FROM agents WHERE json_extract(data, '$.role') = ?1 AND trim(json_extract(data, '$.project')) = ?2
+                // An agent works in `project` when it's its main project or one of its projects.
+                "SELECT data FROM agents a WHERE json_extract(data, '$.role') = ?1
+                   AND (trim(json_extract(data, '$.project')) = ?2 OR EXISTS (SELECT 1 FROM json_each(a.data, '$.projects') WHERE trim(value) = ?2))
                  ORDER BY position, created_at LIMIT 1",
                 [role, project],
                 |r| r.get(0),
@@ -916,7 +964,50 @@ impl Db {
         c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM agent_devices WHERE agent_id = ?1", [id])?;
         Ok(())
+    }
+
+    /// The UDID of the agent's Simulator device, if it has one.
+    pub fn agent_device(&self, agent_id: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT udid FROM agent_devices WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_agent_device(&self, agent_id: &str, udid: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO agent_devices (agent_id, udid) VALUES (?1, ?2)", params![agent_id, udid])?;
+        Ok(())
+    }
+
+    /// Every agent device, as (UDID, agent id).
+    pub fn agent_devices(&self) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT udid, agent_id FROM agent_devices")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The agent's port range slot: the one it has while `usable` keeps it, else the lowest usable free one
+    /// below `slots`, kept for it. None when every one is taken.
+    pub fn port_slot(&self, agent_id: &str, usable: impl Fn(i64) -> bool, slots: i64) -> Result<Option<i64>> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let mine: Option<i64> = tx.query_row("SELECT slot FROM port_ranges WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?;
+        if let Some(slot) = mine.filter(|&s| usable(s)) {
+            return Ok(Some(slot));
+        }
+        tx.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [agent_id])?;
+        let taken: std::collections::HashSet<i64> = {
+            let mut st = tx.prepare("SELECT slot FROM port_ranges")?;
+            let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let Some(slot) = (0..slots).find(|s| !taken.contains(s) && usable(*s)) else { return Ok(None) };
+        tx.execute("INSERT INTO port_ranges (slot, agent_id) VALUES (?1, ?2)", params![slot, agent_id])?;
+        tx.commit()?;
+        Ok(Some(slot))
     }
 
     // ---- tasks --------------------------------------------------------
@@ -1820,6 +1911,36 @@ mod tests {
         assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
         assert_eq!(found("loft", "qa"), None);
         assert_eq!(found("", "dev"), None, "no project, no team");
+        // An agent of a group works in each of its projects, not only its main one.
+        let mut web = agent("web-dev");
+        (web.project, web.projects, web.role) = ("b2c".into(), vec!["b2c".into(), "b2b".into()], "dev".into());
+        db.save_agent(&web).unwrap();
+        assert_eq!(found("b2b", "dev").as_deref(), Some("web-dev"), "a project that isn't its main one");
+        assert_eq!(found("b2", "dev"), None, "whole names only");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agents_saved_before_groups_get_their_project_as_group_and_only_project_once() {
+        let path = std::env::temp_dir().join(format!("loft-groups-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, project) in [("a", "api"), ("b", " api "), ("c", "")] {
+                db.save_agent(&agent(id)).unwrap();
+                // As agents were stored before groups: a project and nothing else.
+                let c = db.0.lock().unwrap();
+                c.execute("UPDATE agents SET data = json_remove(json_set(data, '$.project', ?1), '$.group', '$.projects') WHERE id = ?2", params![project, id]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let got = |id: &str| { let a = db.get_agent(id).unwrap().unwrap(); (a.group.trim().to_string(), a.projects.clone(), a.team().to_string()) };
+        assert_eq!(got("a"), ("api".into(), vec!["api".to_string()], "api".into()));
+        assert_eq!(got("b"), ("api".into(), vec!["api".to_string()], "api".into()), "same team as before");
+        assert_eq!(got("c"), ("".into(), vec![], "".into()));
+        // An edit after the migration stays.
+        db.update_agent("a", |a| a.group = "Acme".into()).unwrap();
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Acme", "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 
