@@ -305,6 +305,30 @@ test("a session whose account is gone gets no key and is signed out", async () =
   assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
 });
 
+test("deleting an account signs out a session from another browser", async () => {
+  const mine = await signInAs();
+  const other = await signInAs();
+  await deleteAccount(makeKv(env), "001234.abcdef");
+  const res = await home(get("/", other), env);
+  assert.match(await res.text(), /Sign in with Apple/);
+  assert.match(res.headers.get("set-cookie"), /__Host-session=; Max-Age=0/);
+  for (const r of [await createAccountKey(post("/keys", { name: "Mac" }, other), env), await revokeAccountKey(post("/keys/revoke", { id: "a".repeat(64) }, mine), env)]) {
+    assert.equal(r.status, 303);
+    assert.match(r.headers.getSetCookie().join(), /__Host-session=; Max-Age=0/);
+  }
+  assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+});
+
+test("an old session stays signed out after the same Apple ID signs up again", async () => {
+  const old = await signInAs();
+  await deleteAccount(makeKv(env), "001234.abcdef");
+  const fresh = await signInAs();
+  assert.match(await (await home(get("/", old), env)).text(), /Sign in with Apple/);
+  assert.equal((await createAccountKey(post("/keys", { name: "Mac" }, old), env)).status, 303);
+  assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+  assert.match(await (await home(get("/", fresh), env)).text(), /Create key/);
+});
+
 test("two keys created at once at 4 can't both be the 5th", async () => {
   const session = await signInAs();
   for (let i = 1; i <= 4; i++) await createAccountKey(post("/keys", { name: `Mac ${i}` }, session), env);

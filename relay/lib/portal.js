@@ -76,7 +76,23 @@ export const redirect = (to, ...cookies) => {
   cookies.forEach((c) => headers.append("set-cookie", c));
   return new Response(null, { status: 303, headers });
 };
-export const accountOf = (request, env, now) => unseal(env, "session", cookieOf(request, "session"), now);
+/**
+ * The signed-in account, or null. The session holds `created|sub`: it counts only while the stored account exists with
+ * that created stamp, so deleting the account ends every session, even when the same Apple ID signs up again.
+ */
+export async function accountOf(request, env, now) {
+  const [created, ...rest] = (unseal(env, "session", cookieOf(request, "session"), now) ?? "").split("|");
+  const sub = rest.join("|");
+  if (!created || !sub) return null;
+  const stored = await makeKv(env).get(`account:${sub}`);
+  try {
+    return stored && JSON.parse(stored).created === created ? sub : null;
+  } catch {
+    return null;
+  }
+}
+/** Back to the sign-in page; a session cookie that no longer counts is cleared on the way. */
+export const endSession = (request) => (cookieOf(request, "session") ? redirect("/", cookie("session", "", 0)) : redirect("/"));
 
 /** The secret Apple wants to see: a short ES256 token signed with the sign-in key. */
 function clientSecret(env, now) {
@@ -113,9 +129,9 @@ export const capped = () => page("Too many keys", `<p>An account can hold at mos
 /** GET /: the sign-in button, or, signed in, the account's keys and the form to create one. */
 export async function home(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
+  const account = await accountOf(request, env, now);
   if (!account) {
-    return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`);
+    return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`, 200, cookieOf(request, "session") ? { "set-cookie": cookie("session", "", 0) } : {});
   }
   // Signed in on the way to approving a Loft's code: back to that page.
   const pairing = cookieOf(request, "pair");
@@ -192,15 +208,17 @@ export async function callback(request, env = process.env, now = Date.now()) {
     return page("Sign-in failed", '<p>Apple didn\'t confirm the sign-in. <a href="/">Try again</a>.</p>', 502, { "set-cookie": clear });
   }
   if (deleting) return finishDelete(env, now, deleting, sub, tokens);
-  await makeKv(env).setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
-  return redirect("/", clear, cookie("session", seal(env, "session", sub, SESSION_SECONDS, now), SESSION_SECONDS));
+  const store = makeKv(env);
+  await store.setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
+  const { created } = JSON.parse(await store.get(`account:${sub}`));
+  return redirect("/", clear, cookie("session", seal(env, "session", `${created}|${sub}`, SESSION_SECONDS, now), SESSION_SECONDS));
 }
 
 /** GET /account/delete: what deleting does, and the button. */
 export async function confirmDelete(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const n = (await keysOf(makeKv(env), account)).length;
   const what = n === 1 ? "your account and its key, so its Loft stops pushing" : n ? `your account and all ${n} keys, so those Lofts stop pushing` : "your account";
   return page(
@@ -215,8 +233,8 @@ export async function startDelete(request, env = process.env, now = Date.now()) 
   if (incomplete(env)) return notConfigured(env);
   const refused = crossSite(request, env);
   if (refused) return refused;
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
 }
 
@@ -297,8 +315,8 @@ export async function createAccountKey(request, env = process.env, now = Date.no
   if (incomplete(env)) return notConfigured(env);
   const refused = crossSite(request, env);
   if (refused) return refused;
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. <a href="/">Back</a></p>', 400);
   const store = makeKv(env);
@@ -317,8 +335,8 @@ export async function revokeAccountKey(request, env = process.env, now = Date.no
   if (incomplete(env)) return notConfigured(env);
   const refused = crossSite(request, env);
   if (refused) return refused;
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const id = String((await request.formData()).get("id") ?? "");
   const store = makeKv(env);
   const [mine] = /^[0-9a-f]{64}$/.test(id) ? await store.pipeline([["SISMEMBER", `account-keys:${account}`, id]]) : [0];

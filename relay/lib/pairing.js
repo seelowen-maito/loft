@@ -4,7 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { crossSite, incomplete, accountOf, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
+import { crossSite, incomplete, accountOf, endSession, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
@@ -51,7 +51,7 @@ export async function connect(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
   const code = new URL(request.url).searchParams.get("code") ?? "";
   if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
-  if (!accountOf(request, env, now)) {
+  if (!(await accountOf(request, env, now))) {
     return page("Connect your Loft", `<p>Sign in with Apple to let your Loft send push notifications.</p><p>${appleButton}</p>`, 200, { "set-cookie": cookie("pair", code, CODE_SECONDS) });
   }
   return page(
@@ -67,8 +67,8 @@ export async function approve(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
   const refused = crossSite(request, env);
   if (refused) return refused;
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const form = await request.formData();
   const code = String(form.get("code") ?? "");
   const name = String(form.get("name") ?? "").trim().slice(0, 60);
