@@ -4095,10 +4095,13 @@ pub(crate) mod tests {
         v["items"].as_array().unwrap().iter().filter(|i| i["type"] == "delivery_stalled").cloned().collect()
     }
 
-    /// The spec's Loft issue, as the mirror brings it in.
-    fn spec_issue(st: &AppState, project: &str, slug: &str) -> crate::db::Task {
+    /// The spec's Loft issue, as the mirror brings it in. The fake answers for it too: publishing the tickets
+    /// started a full read in the background, which asks about a linked issue it didn't list and, on a 404,
+    /// deletes it.
+    fn spec_issue(st: &AppState, fake: &Fake, project: &str, slug: &str) -> crate::db::Task {
         let mut spec = gh_ticket(slug, 40, "open", "Spec.");
         (spec["title"], spec["labels"]) = (json!("Rounds"), json!([{ "name": "spec" }]));
+        fake.route("GET", &format!("/repos/{slug}/issues/40"), 200, spec.clone());
         crate::mirror::bring_in(st, project, slug, &spec).unwrap().0
     }
 
@@ -4108,7 +4111,7 @@ pub(crate) mod tests {
         let fake = own_fake(&st);
         let slug = "octo/st-end";
         let (dev, _) = building(&st, &fake, "st-end", &["qa"]).await;
-        let spec = spec_issue(&st, "st-end", slug);
+        let spec = spec_issue(&st, &fake, "st-end", slug);
 
         // The Dev's run ends without submit_ticket.
         run_starts(&st, &dev);
@@ -4364,7 +4367,7 @@ pub(crate) mod tests {
         let fake = own_fake(&st);
         let slug = "octo/rs-build";
         let (dev, _) = building(&st, &fake, "rs-build", &["qa"]).await;
-        let spec = spec_issue(&st, "rs-build", slug);
+        let spec = spec_issue(&st, &fake, "rs-build", slug);
         run_starts(&st, &dev);
         crate::delivery::run_ended(&st, &dev.id, true).await;
         assert_eq!(delivery(&st, slug).state, "stalled");
@@ -4477,7 +4480,10 @@ pub(crate) mod tests {
         let fake = own_fake(&st);
         let slug = "octo/rs-hand";
         let (dev, _) = building(&st, &fake, "rs-hand", &["qa"]).await;
-        let spec = spec_issue(&st, "rs-hand", slug);
+        let spec = spec_issue(&st, &fake, "rs-hand", slug);
+        // The full read publishing started may run only now: the spec's Loft issue stays.
+        let _ = crate::mirror::sync_project(&st, "rs-hand", true).await;
+        assert!(st.db.get_task(&spec.id).unwrap().is_some());
         run_starts(&st, &dev);
         crate::delivery::run_ended(&st, &dev.id, false).await;
         // The user closed #41 on GitHub meanwhile.
@@ -4508,7 +4514,7 @@ pub(crate) mod tests {
         let fake = own_fake(&st);
         let slug = "octo/rs-refuse";
         let (dev, _) = building(&st, &fake, "rs-refuse", &["qa"]).await;
-        let spec = spec_issue(&st, "rs-refuse", slug);
+        let spec = spec_issue(&st, &fake, "rs-refuse", slug);
         let no = |e: crate::api::ApiError| e.1;
         let err = resume_card(&st, &spec).await.err().map(no).unwrap();
         assert_eq!(err, "spec #40 isn't stalled: an agent is working on its step, so there's nothing to resume.");
@@ -4555,5 +4561,42 @@ pub(crate) mod tests {
         assert!(out.contains("marked closed: \"Store\"") && out.contains("Next: \"API\" is with dev agent."), "{out}");
         let d = st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap();
         assert_eq!((d.state.as_str(), d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), ("running", "closed", "started"));
+    }
+
+    /// A stall caught after the step's work was done but before Loft moved on: every verdict in, or the close
+    /// pending. Resume only closes the ticket and starts the next, waking no reviewer.
+    #[tokio::test]
+    async fn resume_closes_a_ticket_whose_verdicts_are_all_in_or_whose_close_was_pending() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-close";
+        let (dev, team) = building_both(&st, &fake, "rs-close", &["qa"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        run_starts(&st, &team[0]);
+        run_starts(&st, &dev);
+        let stall = |ticket: i64, state: &str, verdict: &str| {
+            crate::delivery::update(&st, slug, 40, |d| {
+                let t = d.ticket_mut(ticket).unwrap();
+                t.state = state.into();
+                t.verdicts.insert("qa".into(), verdict.into());
+                (d.current, d.state, d.resume_to, d.stall_reason) = (Some(ticket), "stalled".into(), "running".into(), "restart".into());
+            });
+        };
+
+        stall(41, "review", "pass");
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(out.contains("Closed #41") && out.contains("Next: #42 is with Builder."), "{out}");
+        assert!(woken(&st, &team[0]).is_empty(), "no reviewer is woken");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), ("running", "closed", "started"));
+
+        // #42's close failed after its pass, then the Delivery stalled.
+        run_starts(&st, &dev);
+        stall(42, "closing", "pass");
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(42).unwrap().commits = vec!["0123abcd".into()]);
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(out.contains("Closed #42"), "{out}");
+        assert_eq!(delivery(&st, slug).tickets[1].state, "closed");
+        assert!(stalled_items(&st).is_empty());
     }
 }

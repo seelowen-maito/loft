@@ -244,14 +244,17 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           <div className="mt-0.5 text-[12.5px] text-fg-3">
             {started
               ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
-              : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
+              : d?.started
+                ? `Started${d.pr ? ` on PR #${d.pr}` : ""}; the agent building it is gone. #${n} closes when the PR merges.`
+                : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
           </div>
-          <DeliveryState d={started} />
+          <DeliveryState d={d} />
         </div>
-        {!started && (
+        {!d?.started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
-        {deliveryButtons(started).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
+        {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
+        {deliveryButtons(d).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
       </div>
       <Said said={r.said} />
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
