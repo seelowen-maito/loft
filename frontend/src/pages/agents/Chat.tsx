@@ -23,6 +23,7 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
@@ -678,7 +679,12 @@ export function Chat({
           {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
-            <span className="max-md:hidden">↵ send · ⇧↵ newline · / commands</span>
+            {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
+            <span className="max-md:hidden">
+              ↵ send · ⇧↵ newline · / commands ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("switcher")}>{formatCombo(loadCombo("switcher"))} search</button> ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("sheet")}>? shortcuts</button>
+            </span>
             <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
           </div>
         </div>
