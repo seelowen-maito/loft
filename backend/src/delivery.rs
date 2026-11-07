@@ -164,7 +164,8 @@ impl Step {
         match self {
             Step::Build { ticket, round } => d.current == Some(*ticket) && d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round),
             Step::Review { ticket, role, round } => d.ticket(*ticket).is_some_and(|t| t.state == "review" && t.rounds == *round && t.verdicts.get(role).is_some_and(|v| v == "pending")),
-            Step::FinalReview { round } => d.step_state() == "final_review" && d.final_rounds == *round,
+            // A pass whose ready call failed waits on Loft's retry, not on the Code reviewer.
+            Step::FinalReview { round } => d.step_state() == "final_review" && d.final_rounds == *round && !d.ready_retry,
             Step::FinalFixes { round } => d.step_state() == "final_fixes" && d.final_rounds == *round,
         }
     }
@@ -227,12 +228,19 @@ pub(crate) fn stalled_item_id(d: &Delivery) -> String {
 
 /// At start-up, before any run: runs and their queues live only in memory, so no agent is still working on
 /// any Delivery's step. Each Delivery with a ticket being built or in review, or in its final review or
-/// fixes, stalls: its run was lost to the restart. Its Needs you item is news, so it's pushed even though
-/// the pusher's first look takes what's already waiting as old.
+/// fixes, stalls: its run was lost to the restart. A final review that passed and only waits on the ready
+/// retry doesn't. Its Needs you item is news, so it's pushed even though the pusher's first look takes
+/// what's already waiting as old.
 pub fn stall_lost_runs(state: &AppState) {
     for s in ["running", "final_review", "final_fixes"] {
         for d in state.db.deliveries_in_state(s).unwrap_or_default() {
-            if (s != "running" || d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")))
+            let lost = match s {
+                "running" => d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")),
+                // A final review that passed only waits on Loft's ready retry, which survives the restart.
+                "final_review" => !d.ready_retry,
+                _ => true,
+            };
+            if lost
                 && let Some(d) = stall(state, &d, "restart")
             {
                 state.rt.lock().unwrap().news_at_start.insert(stalled_item_id(&d));

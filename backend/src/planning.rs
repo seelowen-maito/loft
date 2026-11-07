@@ -4297,6 +4297,9 @@ pub(crate) mod tests {
         save(90, "needs_human", vec![t(91, "closed")]);
         save(100, "planned", vec![t(101, "open")]);
         save(110, "running", vec![t(111, "closed"), t(112, "open")]);
+        // A final review that passed waits on the ready retry, not on a run.
+        save(120, "final_review", vec![t(121, "closed")]);
+        crate::delivery::update(&st, slug, 120, |d| d.ready_retry = true);
 
         crate::delivery::stall_lost_runs(&st);
         let state_of = |spec: i64| {
@@ -4306,7 +4309,7 @@ pub(crate) mod tests {
         for (spec, back) in [(40, "running"), (50, "running"), (60, "final_review"), (70, "final_fixes")] {
             assert_eq!(state_of(spec), ("stalled".into(), back.into(), "restart".into()), "spec #{spec}");
         }
-        for (spec, still) in [(80, "running"), (90, "needs_human"), (100, "planned"), (110, "running")] {
+        for (spec, still) in [(80, "running"), (90, "needs_human"), (100, "planned"), (110, "running"), (120, "final_review")] {
             assert_eq!(state_of(spec).0, still, "spec #{spec} had no step in flight");
         }
         let items = stalled_items(&st);
@@ -5046,6 +5049,45 @@ pub(crate) mod tests {
         pr.state = "merged".into();
         st.db.save_pull_request(&pr).unwrap();
         assert!(done_items(&st).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_final_pass_whose_ready_call_failed_waits_on_the_retry_not_stalled() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/done-retry";
+        let (dev, team) = building_both(&st, &fake, "done-retry", &["code_reviewer"]).await;
+        let cr = &team[0];
+        spec_issue(&st, &fake, "done-retry", slug);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true });
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, draft);
+        fake.in_turn("POST", "/graphql", vec![(200, json!({ "errors": [{ "message": "Something went wrong" }] })), (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }))]);
+
+        // The Code reviewer's run takes the final review wake, passes, and the ready call fails.
+        run_starts(&st, cr);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Clean." })).await.unwrap();
+        assert!(out.ends_with("Loft tries again on its next poll."), "{out}");
+        let d = delivery(&st, slug);
+        assert!(d.state == "final_review" && d.ready_retry, "{d:?}");
+
+        // Its run ends: the step was done, only Loft's retry is left. No stall.
+        crate::delivery::run_ended(&st, &cr.id, false).await;
+        let d = delivery(&st, slug);
+        assert!(d.state == "final_review" && d.stall_reason.is_empty(), "{d:?}");
+        assert!(stalled_items(&st).is_empty());
+
+        // Nor does a restart stall it.
+        crate::delivery::stall_lost_runs(&st);
+        assert_eq!(delivery(&st, slug).state, "final_review");
+
+        // The retry marks it ready, and it's done once.
+        retry_ready(&st, slug, false).await;
+        let d = delivery(&st, slug);
+        assert!(d.state == "ready" && !d.ready_retry && !d.done_at.is_empty(), "{d:?}");
+        assert_eq!(done_items(&st).len(), 1);
+        assert!(stalled_items(&st).is_empty());
     }
 
     #[tokio::test]
