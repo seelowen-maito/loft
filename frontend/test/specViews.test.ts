@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, deliveryOf, laneOf, parseBoard, stageOf, ticketLabel, ticketsOf, withBoard, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, deliveryOf, parseBoard, specRef, stageOf, ticketLabel, ticketsOf, withBoard, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -22,7 +22,11 @@ test("the stage follows the Delivery and the issue", () => {
   assert.equal(stageOf(open, del({ state: "ready" })), "ready");
   assert.equal(stageOf(open, del({ state: "settled" })), "ready");
   assert.equal(stageOf(open, del({ state: "merged" })), "shipped");
-  assert.equal(stageOf(spec({ state: "closed" }), del({ state: "settled" })), "shipped", "closed on GitHub");
+  assert.equal(stageOf(spec({ state: "closed", status: "done" }), del({ state: "settled" })), "shipped", "closed as completed");
+  assert.equal(stageOf(spec({ state: "closed", status: "done" }), null), "shipped");
+  assert.equal(stageOf(spec({ state: "closed", status: "cancelled" }), del({ state: "ready" })), "dropped", "closed as not planned is not Shipped");
+  assert.equal(stageOf(spec({ state: "closed", status: "cancelled" }), null), "dropped");
+  assert.equal(stageOf(spec({ state: "closed", status: "cancelled" }), del({ state: "merged" })), "shipped", "a merged Delivery shipped, whatever the issue says");
 });
 
 test("ticket states read in words", () => {
@@ -43,15 +47,11 @@ test("a spec's tickets: its Delivery's, each with its own issue, else its sub-is
   assert.deepEqual(ticketsOf(s, null, [s, kid]).map((t) => [t.title, t.state, t.taskId]), [["Kid", "started", "k"]]);
 });
 
-test("tickets fall in three lanes", () => {
-  assert.deepEqual(["open", "elsewhere", "started", "review", "needs_human", "closed"].map(laneOf), ["open", "open", "doing", "doing", "doing", "done"]);
-});
-
 test("board options round-trip through the URL and keep the other params", () => {
-  const p = withBoard(new URLSearchParams("project=loft&specView=b1"), { stages: ["delivery", "ready"], hideShipped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  const p = withBoard(new URLSearchParams("project=loft&specView=b1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
   assert.equal(p.get("project"), "loft");
-  assert.deepEqual(parseBoard(p), { stages: ["delivery", "ready"], hideShipped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
-  assert.equal(withBoard(p, { stages: [], hideShipped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&specView=b1", "defaults leave no trace");
+  assert.deepEqual(parseBoard(p), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&specView=b1", "defaults leave no trace");
   assert.deepEqual(parseBoard(new URLSearchParams("stage=nope,ready")).stages, ["ready"]);
 });
 
@@ -64,4 +64,17 @@ test("the board keeps the specs the options ask for, most recent or furthest alo
   assert.deepEqual(ids({ stages: ["ready"] }), ["a"]);
   assert.deepEqual(ids({ needsMe: true }), ["a"], "ready to merge needs you");
   assert.deepEqual(ids({ sort: "progress" }), ["b", "c", "a"]);
+});
+
+test("dropped specs stay off the board unless asked for, and a fork's spec and its upstream's stay two cards", () => {
+  const done = task({ id: "d", state: "closed", status: "done", updated_at: "2026-01-05", github: { repo: "me/loft", number: 26 } });
+  const dropped = task({ id: "x", state: "closed", status: "cancelled", updated_at: "2026-01-06", github: { repo: "me/loft", number: 83 } });
+  const upstream = task({ id: "u", state: "closed", status: "done", updated_at: "2026-01-04", github: { repo: "up/loft", number: 265 } });
+  const all = [done, dropped, upstream];
+  const ids = (o: object) => arrange(all, [], all, { ...parseBoard(new URLSearchParams()), ...o }).map((s) => s.id);
+  assert.deepEqual(ids({}), ["d", "u"], "shipped, not the dropped one");
+  assert.deepEqual(ids({ showDropped: true }), ["x", "d", "u"]);
+  assert.deepEqual(ids({ stages: ["shipped"], showDropped: true }), ["d", "u"]);
+  assert.deepEqual(all.map(specRef), ["me/loft#26", "me/loft#83", "up/loft#265"], "each card says which repo it is");
+  assert.equal(specRef(task({ project: "web" })), "Loft · web");
 });

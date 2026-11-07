@@ -3,17 +3,11 @@ import { ChevronRight, GitPullRequest, Search } from "lucide-react";
 import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
-import { STAGES, arrange, deliveryOf, parseBoard, stageOf, ticketLabel, ticketsOf, withBoard, LANES, laneOf, type BoardOptions, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
+import { STAGES, arrange, deliveryOf, parseBoard, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specRef, type BoardOptions, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
-/* The spec board, three ways to see each spec's tickets on it (`?specView=b1|b2|b3`):
- *  b1 swimlanes: a row per spec, its tickets in Open / In progress / Done;
- *  b2 spec cards in the stage columns, each with its tickets inline (expandable);
- *  b3 a ticket board: columns are ticket states, grouped under their spec.
+/* The Specs board of the Issues page (`?view=specs`): spec cards in stage columns, each with its tickets inline (expandable).
  * The filters and options sit in a bar on top and live in the URL. */
-
-export type BoardVariant = "b1" | "b2" | "b3";
-export const BOARD_VARIANTS: BoardVariant[] = ["b1", "b2", "b3"];
 
 type Facets = { teams: string[]; projects: string[]; agents: Agent[] };
 type Filters = { q: string; group: string; project: string; agent: string };
@@ -61,7 +55,7 @@ function SpecHead({ s, v, children }: { s: Task; v: View; children?: React.React
       <div className="flex flex-wrap items-start gap-x-2 gap-y-1"><span className={cx("min-w-[9rem] flex-1 leading-snug", v.o.dense ? "truncate text-[12.5px]" : "text-[13px]")}>{s.title}</span><Badge stage={stage} d={d} /></div>
       {p && <Bar {...p} stage={stage} />}
       {!v.o.dense && <Who d={d} agentById={v.agentById} />}
-      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span>{s.github ? `#${s.github.number}` : "Loft"}</span>{s.project && <span>· {s.project}</span>}{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}</div>
+      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{specRef(s)}</span>{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}</div>
       {children}
     </button>
   );
@@ -70,48 +64,14 @@ function SpecHead({ s, v, children }: { s: Task; v: View; children?: React.React
 const Empty = ({ text }: { text: string }) => <div className="px-2 py-4 text-center text-[12px] text-fg-3">{text}</div>;
 const Label = ({ text }: { text: string }) => <div className="px-1 pb-1 pt-2 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{text}</div>;
 
-/** b1: a row per spec, its tickets in three columns. */
-function Swimlanes(v: View) {
-  return (
-    <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
-      <div className="min-w-[780px]">
-        <div className="sticky top-0 z-10 grid grid-cols-[250px_repeat(3,minmax(0,1fr))] gap-2 bg-ink-950 py-2 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
-          <div>Spec</div>{LANES.map((l) => <div key={l.key}>{l.label}</div>)}
-        </div>
-        {sections(v.specs, v.o.byProject).map((sec) => (
-          <div key={sec.label ?? "all"}>
-            {sec.label && <Label text={sec.label} />}
-            {sec.specs.map((s) => {
-              const d = deliveryOf(s, v.deliveries), ts = ticketsOf(s, d, v.tasks);
-              return (
-                <div key={s.id} className="mb-2 grid grid-cols-[250px_repeat(3,minmax(0,1fr))] gap-2 rounded-2xl border border-line bg-ink-900/60 p-2">
-                  <div className="p-1"><SpecHead s={s} v={v} /></div>
-                  {LANES.map((l) => {
-                    const mine = ts.filter((t) => laneOf(t.state) === l.key);
-                    return (
-                      <div key={l.key} className="space-y-1.5 rounded-xl bg-ink-950/40 p-1.5">
-                        {mine.map((t) => <TicketCard key={t.key} t={t} d={d} dense={v.o.dense} agentById={v.agentById} open={v.openTicket} />)}
-                        {!mine.length && <div className="py-2 text-center font-mono text-[10.5px] text-fg-3/60">{ts.length ? "·" : l.key === "open" ? "No tickets yet" : ""}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** b2: spec cards in the stage columns; a strip of dots for the tickets, and the list when opened. */
+/** The spec cards in the stage columns; a strip of dots for the tickets, and the list when opened. */
 function Cards(v: View) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const cols = [...STAGES, ...(v.o.showDropped ? [DROPPED] : [])].filter((c) => !(v.o.hideShipped && c.key === "shipped"));
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-4 gap-3 overflow-x-auto px-4 pb-4 max-xl:grid-cols-2 max-md:flex max-md:flex-col max-md:overflow-y-auto">
-      {STAGES.map((st) => {
+    <div className={cx("grid min-h-0 flex-1 gap-3 overflow-x-auto px-4 pb-4 max-xl:grid-cols-2 max-md:flex max-md:flex-col max-md:overflow-y-auto", cols.length === 5 ? "grid-cols-5" : cols.length === 3 ? "grid-cols-3" : "grid-cols-4")}>
+      {cols.map((st) => {
         const specs = v.specs.filter((s) => stageOf(s, deliveryOf(s, v.deliveries)) === st.key);
         return (
           <section key={st.key} className="flex min-h-0 min-w-[240px] flex-col rounded-2xl border border-line bg-ink-900/60 max-md:shrink-0">
@@ -130,7 +90,7 @@ function Cards(v: View) {
                             <button onClick={() => toggle(s.id)} aria-expanded={isOpen} className="mt-2 flex w-full items-center gap-1.5 text-left text-[11.5px] text-fg-3 hover:text-fg">
                               <ChevronRight className={cx("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
                               <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} />)}</span>
-                              <span className="ml-auto font-mono text-[10.5px]">{ts.length} tickets</span>
+                              <span className="ml-auto font-mono text-[10.5px]">{ts.length} {ts.length === 1 ? "ticket" : "tickets"}</span>
                             </button>
                             {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} d={d} dense agentById={v.agentById} open={v.openTicket} />)}</div>}
                           </>
@@ -149,68 +109,33 @@ function Cards(v: View) {
   );
 }
 
-const TICKET_COLS: { key: string; label: string; has: (state: string) => boolean }[] = [
-  { key: "open", label: "Open", has: (s) => s === "open" || s === "elsewhere" },
-  { key: "doing", label: "Building", has: (s) => ["started", "closing", "needs_human"].includes(s) },
-  { key: "review", label: "In review", has: (s) => s === "review" },
-  { key: "done", label: "Done", has: (s) => s === "closed" },
-];
+const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 text-accent");
 
-/** b3: the tickets themselves in columns by state, grouped under their spec. */
-function TicketBoard(v: View) {
-  const rows = v.specs.map((s) => { const d = deliveryOf(s, v.deliveries); return { s, d, ts: ticketsOf(s, d, v.tasks) }; });
+/** List or Specs: the Issues page's two views, in the URL as `view=specs`. */
+export function ViewToggle({ params, setParams }: { params: URLSearchParams; setParams: (n: URLSearchParams) => void }) {
+  const specs = params.get("view") === "specs";
+  const go = (on: boolean) => { const n = new URLSearchParams(params); if (on) n.set("view", "specs"); else { n.delete("view"); n.delete("board"); } setParams(n); };
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-4 gap-3 overflow-x-auto px-4 pb-4 max-xl:grid-cols-2 max-md:flex max-md:flex-col max-md:overflow-y-auto">
-      {TICKET_COLS.map((col) => {
-        const here = rows.map((r) => ({ ...r, ts: r.ts.filter((t) => col.has(t.state)) })).filter((r) => r.ts.length);
-        return (
-          <section key={col.key} className="flex min-h-0 min-w-[240px] flex-col rounded-2xl border border-line bg-ink-900/60 max-md:shrink-0">
-            <div className="flex items-center justify-between px-3 py-2 font-mono text-[10.5px] uppercase tracking-wider"><span className="text-fg-2">{col.label}</span><span className="text-fg-3">{here.reduce((n, r) => n + r.ts.length, 0)}</span></div>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto max-md:overflow-visible px-2 pb-2">
-              {sections(here.map((r) => r.s), v.o.byProject).map((sec) => (
-                <div key={sec.label ?? "all"} className="space-y-3">
-                  {sec.label && <Label text={sec.label} />}
-                  {sec.specs.map((s) => {
-                    const r = here.find((x) => x.s.id === s.id)!;
-                    return (
-                      <div key={s.id} className="rounded-xl border border-line bg-ink-950/40 p-2">
-                        <button onClick={() => v.openSpec(s.id)} className="mb-1.5 flex w-full items-center gap-2 text-left">
-                          <span className="min-w-0 flex-1 truncate text-[12px] text-fg-2">{s.title}</span>
-                          <span className="shrink-0 font-mono text-[10px] text-fg-3">{r.ts.length}/{rows.find((x) => x.s.id === s.id)!.ts.length}</span>
-                        </button>
-                        <div className="space-y-1.5">{r.ts.map((t) => <TicketCard key={t.key} t={t} d={r.d} dense={v.o.dense} agentById={v.agentById} open={v.openTicket} />)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-              {!here.length && <Empty text="Nothing here" />}
-            </div>
-          </section>
-        );
-      })}
+    <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="View">
+      {[{ on: false, label: "List" }, { on: true, label: "Specs" }].map((b) => (
+        <button key={b.label} onClick={() => go(b.on)} aria-pressed={specs === b.on} className={cx("rounded-full px-2.5 py-0.5 text-[12px]", specs === b.on ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>{b.label}</button>
+      ))}
     </div>
   );
 }
 
-const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 text-accent");
-
 /** The filters and options, on top of the board; they all live in the URL. */
-function Bar2({ variant, filters, facets, setFilter, query, setQuery, params, setParams, shown, total }: {
-  variant: BoardVariant; filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
+function Bar2({ filters, facets, setFilter, query, setQuery, params, setParams, shown, total }: {
+  filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
   params: URLSearchParams; setParams: (n: URLSearchParams) => void; shown: number; total: number;
 }) {
   const o = parseBoard(params);
   const set = (c: Partial<BoardOptions>) => setParams(withBoard(params, c));
-  const view = (v: string | null) => { const n = new URLSearchParams(params); if (v) n.set("specView", v); else n.delete("specView"); setParams(n); };
   return (
     <div className="space-y-2 border-b border-line px-4 pb-3 pt-4">
       <div className="flex flex-wrap items-center gap-2">
         <div><div className="eyebrow">Specs</div><div className="font-mono text-[11px] text-fg-3">{shown === total ? `${total} specs` : `${shown} of ${total} specs`}</div></div>
-        <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Board layout">
-          {BOARD_VARIANTS.map((b) => <button key={b} onClick={() => view(b)} aria-pressed={variant === b} className={cx("rounded-full px-2.5 py-0.5 font-mono text-[12px]", variant === b ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>{b}</button>)}
-          <button onClick={() => view(null)} className="rounded-full px-2.5 py-0.5 font-mono text-[12px] text-fg-3 hover:text-fg">off</button>
-        </div>
+        <ViewToggle params={params} setParams={setParams} />
         <label className="flex min-w-[160px] flex-1 items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5 sm:max-w-xs">
           <Search className="size-3.5 text-fg-3" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search specs, or #42" aria-label="Search specs" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
@@ -234,6 +159,7 @@ function Bar2({ variant, filters, facets, setFilter, query, setQuery, params, se
         </div>
         <span className="mx-1 h-4 w-px bg-line" />
         <button className={chip(o.needsMe)} aria-pressed={o.needsMe} onClick={() => set({ needsMe: !o.needsMe })} title="Ready to merge, or something needs a human">Needs me</button>
+        <button className={chip(o.showDropped)} aria-pressed={o.showDropped} onClick={() => set({ showDropped: !o.showDropped })} title="Specs closed as not planned">Show dropped</button>
         <button className={chip(o.hideShipped)} aria-pressed={o.hideShipped} onClick={() => set({ hideShipped: !o.hideShipped })}>Hide shipped</button>
         <button className={chip(o.byProject)} aria-pressed={o.byProject} onClick={() => set({ byProject: !o.byProject })}>Group by project</button>
         <button className={chip(o.dense)} aria-pressed={o.dense} onClick={() => set({ dense: !o.dense })}>Compact</button>
@@ -245,9 +171,9 @@ function Bar2({ variant, filters, facets, setFilter, query, setQuery, params, se
   );
 }
 
-/** The whole page of a board variant. `specs` are the spec issues the shared filters (search, group, project, agent) kept. */
-export function BoardPage({ variant, specs, filters, facets, setFilter, query, setQuery, params, setParams, openSpec, openTicket, ...c }: Ctx & {
-  variant: BoardVariant; specs: Task[]; filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
+/** The whole page of the Specs board. `specs` are the spec issues the shared filters (search, group, project, agent) kept. */
+export function BoardPage({ specs, filters, facets, setFilter, query, setQuery, params, setParams, openSpec, openTicket, ...c }: Ctx & {
+  specs: Task[]; filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
   params: URLSearchParams; setParams: (n: URLSearchParams) => void; openSpec: (id: string) => void; openTicket: (id: string) => void;
 }) {
   const o = parseBoard(params);
@@ -260,10 +186,10 @@ export function BoardPage({ variant, specs, filters, facets, setFilter, query, s
   const v: View = { ...c, specs: shown, o, openSpec, openTicket };
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <Bar2 variant={variant} filters={filters} facets={facets} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={setParams} shown={kept.length} total={specs.length} />
+      <Bar2 filters={filters} facets={facets} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={setParams} shown={kept.length} total={specs.length} />
       {!c.deliveries.length && <div className="px-4 pt-3 font-mono text-[11px] text-fg-3">Loading Deliveries…</div>}
       <div className="flex min-h-0 flex-1 flex-col pt-3">
-        {variant === "b1" ? <Swimlanes {...v} /> : variant === "b2" ? <Cards {...v} /> : <TicketBoard {...v} />}
+        <Cards {...v} />
         {hidden.length > 0 && <button onClick={() => setAll(true)} className="mx-4 mb-3 mt-1 self-start rounded-full border border-line px-3 py-1 font-mono text-[11px] text-fg-3 hover:text-fg">Show {hidden.length} older shipped</button>}
       </div>
     </div>

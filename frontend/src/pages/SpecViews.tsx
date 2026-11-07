@@ -3,11 +3,11 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { STAGES, deliveryOf, stageOf, ticketLabel, type DeliverySummary, type Stage } from "../lib/specViews";
+import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, type DeliverySummary, type Stage } from "../lib/specViews";
 
 /* The Issues page's spec views, behind `?specView=`: the boards (./SpecBoard) and a spec's own page opening with its timeline (c). They share these pieces. */
 
-export const STAGE_TONE: Record<Stage, string> = { planned: "text-fg-3", delivery: "text-accent", ready: "text-warn", shipped: "text-merged" };
+export const STAGE_TONE: Record<Stage, string> = { planned: "text-fg-3", delivery: "text-accent", ready: "text-warn", shipped: "text-merged", dropped: "text-fg-3" };
 export const TONE_TEXT = { good: "text-good", accent: "text-accent", warn: "text-warn", muted: "text-fg-3" } as const;
 export const TONE_BG = { good: "bg-good", accent: "bg-accent", warn: "bg-warn", muted: "bg-fg-3/40" } as const;
 
@@ -20,7 +20,7 @@ export function progressOf(spec: Task, d: DeliverySummary | null, tasks: Task[])
 }
 
 export function Badge({ stage, d }: { stage: Stage; d: DeliverySummary | null }) {
-  const label = STAGES.find((s) => s.key === stage)!.label;
+  const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
   const sub = stage === "delivery" && d?.state === "final_review" ? " · final review" : stage === "delivery" && d?.state === "final_fixes" ? " · fixing" : stage === "delivery" && d?.state === "needs_human" ? " · needs you" : "";
   return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && d?.state === "needs_human" && "text-warn")}>{label}{sub}</span>;
 }
@@ -29,7 +29,7 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
   return (
     <div className="flex items-center gap-2">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/[0.08]" role="progressbar" aria-valuenow={done} aria-valuemax={total} aria-label="Tickets done">
-        <div className={cx("h-full rounded-full", stage === "shipped" ? "bg-merged" : stage === "ready" ? "bg-warn" : "bg-accent")} style={{ width: `${total ? Math.round((done / total) * 100) : 0}%` }} />
+        <div className={cx("h-full rounded-full", stage === "shipped" ? "bg-merged" : stage === "dropped" ? "bg-fg-3" : stage === "ready" ? "bg-warn" : "bg-accent")} style={{ width: `${total ? Math.round((done / total) * 100) : 0}%` }} />
       </div>
       <span className="shrink-0 font-mono text-[10.5px] text-fg-2">{done}/{total}</span>
     </div>
