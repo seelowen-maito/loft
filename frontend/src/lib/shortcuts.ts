@@ -7,7 +7,7 @@ type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftK
 
 /** The shortcuts that can be rebound in Settings. `Mod` is ⌘ on a Mac and Ctrl elsewhere. */
 export const REBINDABLE = [
-  { id: "switcher", label: "Open an agent", default: "Mod+K" },
+  { id: "switcher", label: "Search agents, specs, issues and PRs", default: "Mod+K" },
   { id: "next", label: "Next agent that needs you", default: "Mod+J" },
 ] as const;
 export type Rebindable = (typeof REBINDABLE)[number]["id"];
@@ -184,6 +184,29 @@ export function switcherAgents<T extends Searchable>(agents: T[], query: string,
     .map((a, i) => ({ a, i }))
     .sort((x, y) => score(x.a) - score(y.a) || x.i - y.i)
     .map((x) => x.a);
+}
+
+/** A spec, issue or pull request as the switcher searches it: `number` is null for a Loft-only issue. */
+export type FoundRow = { title: string; number: number | null; open: boolean; project: string };
+
+/** The switcher's best `limit` matches among specs, issues or pull requests. `#123` or `123` finds that number.
+ * Otherwise every word must appear in the title or project; open rows come first, then titles that start with the query, then titles containing it. */
+export function searchRows<T extends FoundRow>(rows: T[], query: string, limit = 5): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const num = q.match(/^#?(\d+)$/)?.[1];
+  if (num) return rows.filter((r) => r.number === Number(num)).sort((a, b) => Number(b.open) - Number(a.open)).slice(0, limit);
+  const words = q.split(/\s+/);
+  const score = (r: T) => {
+    const title = r.title.toLowerCase();
+    return (r.open ? 0 : 3) + (title.startsWith(q) ? 0 : title.includes(q) ? 1 : 2);
+  };
+  return rows
+    .filter((r) => words.every((w) => `${r.title} ${r.project}`.toLowerCase().includes(w)))
+    .map((r, i) => ({ r, i }))
+    .sort((x, y) => score(x.r) - score(y.r) || x.i - y.i)
+    .map((x) => x.r)
+    .slice(0, limit);
 }
 
 /** True while Settings records a combination, so no shortcut fires meanwhile. */
