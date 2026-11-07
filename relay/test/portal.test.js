@@ -136,6 +136,19 @@ test("without its Apple settings the portal says it isn't configured", async () 
   assert.equal((await start(get("/auth/start"), { ...env, PORTAL_URL: "" })).status, 503);
 });
 
+test("a PORTAL_URL that isn't an https:// URL with a host is not configured: it says why, without the value, and never goes to Apple", async () => {
+  for (const bad of ["portal.get-loft.com", "http://portal.get-loft.com", "https://", "https:// x"]) {
+    const bad_env = { ...env, PORTAL_URL: bad };
+    for (const res of [await home(get("/"), bad_env), await start(get("/auth/start"), bad_env)]) {
+      assert.equal(res.status, 503, bad);
+      assert.equal(res.headers.get("location"), null, bad);
+      const text = await res.text();
+      assert.match(text, /PORTAL_URL must start with https:\/\//);
+      assert.ok(!text.includes(bad.trim()) || bad === "https://", bad);
+    }
+  }
+});
+
 test("signed out, the page offers Sign in with Apple, which asks Apple for no email or name", async () => {
   assert.match(await (await home(get("/"), env)).text(), /Sign in with Apple/);
   const res = await start(get("/auth/start"), env);

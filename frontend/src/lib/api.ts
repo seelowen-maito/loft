@@ -251,6 +251,9 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
+/** The relay's portal page where the user manages their keys, when Sign in is offered; else null (only pasting a key). */
+export const portalHome = (s: Pick<PushStatus, "relay_url" | "signin">): string | null => (s.signin && s.relay_url ? `${s.relay_url}/` : null);
+
 /** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
 export type PushStatus = {
   path: "own_key" | "relay" | "none";
@@ -258,13 +261,12 @@ export type PushStatus = {
   relay_key: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
-  /** The push portal, where the user signs in for a relay key; null until it's live. */
-  portal_url: string | null;
-  /** The relay address in use (saved, else LOFT_RELAY_URL); null when there is none. */
+  /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */
   relay_url: string | null;
-  /** The addresses saved in Settings ("" when none: the environment's, if any, is used). */
+  /** The address saved in Settings ("" when none: the environment's, if any, is used). */
   relay_address: string;
-  portal_address: string;
+  /** Sign in is offered: there is a relay, and it hasn't said its portal isn't configured. */
+  signin: boolean;
   configured: boolean;
   key_present: boolean;
   key_id: string;
@@ -588,7 +590,7 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string; portal_url?: string }) =>
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string }) =>
     req<PushStatus>("PUT", "/push", b),
   /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
   pushSignIn: () => req<{ url: string }>("POST", "/push/signin"),
@@ -615,6 +617,8 @@ export const api = {
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
   /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
+  /** Every spec's Delivery in one read, for the Issues page's spec views. */
+  deliverySummaries: () => req<import("./specViews").DeliverySummary[]>("GET", "/deliveries/summary"),
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),

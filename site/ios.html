@@ -148,7 +148,14 @@ LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// you
           <div class="n">04</div>
           <div>
             <h4>Turn on push notifications</h4>
-            <p>Needs the paid membership. loft sends pushes straight to Apple with your own key, with names and titles only, never message text or tool input.</p>
+            <p>With the TestFlight app, sign in once and loft pushes through the Loft relay at <a href="https://portal.get-loft.com">portal.get-loft.com</a>. No Apple key or paid membership needed. Pushes carry names and titles only, never message text or tool input.</p>
+            <ol class="sub-steps">
+              <li>In loft on the Mac, open <b>Settings → Push notifications</b> and press <b>Sign in</b>. The portal opens in your browser.</li>
+              <li>Sign in with Apple, then press <b>Allow</b>. loft collects its relay key by itself; the key never passes through the browser.</li>
+              <li>On the phone, allow notifications when the app asks, then press <b>Send test push</b> next to your phone in Settings.</li>
+            </ol>
+            <p>The portal keeps only Apple's user id and hashed keys. Push text passes through the relay on its way to Apple and is never stored. On the portal you can revoke a key, or delete your account and every key with it.</p>
+            <p><b>Built the app yourself?</b> The relay only serves the official app, so your build sends pushes straight to Apple with its own key. Needs the paid membership.</p>
             <ol class="sub-steps">
               <li>On <a href="https://developer.apple.com/account/resources/identifiers/list">developer.apple.com → Identifiers</a>, open your app id (<code>com.yourname.loft</code>), tick <b>Push Notifications</b> and save.</li>
               <li>Under <b>Keys</b>, press <b>+</b>, name it “loft push”, tick <b>Apple Push Notifications service (APNs)</b>, then register.</li>
@@ -157,6 +164,7 @@ LOFT_BUNDLE_ID = <span class="a">com.yourname.loft</span> <span class="c">// you
               <li>Run the app on the phone again, allow notifications when it asks, then press <b>Send test push</b> next to your phone in Settings.</li>
             </ol>
             <p>The key is stored outside the repo with owner-only access and is never shown to agents. Builds run from Xcode use Apple's sandbox, and TestFlight builds use production. The same key works for both.</p>
+            <p><b>Running your own relay?</b> Follow the <a href="https://github.com/seelowen-maito/loft/blob/main/relay/README.md#runbook-deploy-the-relay-and-the-portal">deploy runbook</a>. It needs an Apple Services ID with your domain and the exact <code>https://&lt;host&gt;/auth/callback</code> return URL, and <code>PORTAL_URL</code> set with <code>https://</code>. Then enter that address in <b>Settings → Push notifications → Relay address</b>.</p>
           </div>
         </li>
         <li class="card g-step">

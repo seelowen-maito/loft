@@ -18,14 +18,33 @@ const appleHost = (env) => (env.VERCEL_ENV !== "production" && env.APPLE_ID_HOST
 const origin = (env) => env.PORTAL_URL.replace(/\/+$/, "");
 
 export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+// Loft's look (frontend/src/index.css): ink surfaces, hairlines, the green accent, Geist served from /fonts (no third-party request).
+const STYLE = `@font-face{font-family:Geist;src:url(/fonts/Geist-Variable.woff2) format("woff2");font-weight:100 900;font-display:swap}@font-face{font-family:"Geist Mono";src:url(/fonts/GeistMono-Variable.woff2) format("woff2");font-weight:100 900;font-display:swap}` +
+  `:root{color-scheme:dark;--ink-950:#08090a;--ink-900:#0d0e10;--ink-850:#121316;--ink-800:#17191c;--ink-700:#212328;--line:rgb(255 255 255/.07);--line-strong:rgb(255 255 255/.12);--fg:#eceae4;--fg-2:#a9a8a3;--fg-3:#6e6e6b;--accent:#c8f26d;--bad:#f27d6d}` +
+  `*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:clamp(1.5rem,8vh,4.5rem) 1rem 2rem;background:var(--ink-950);color:var(--fg);font:15px/1.55 Geist,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}` +
+  `::selection{background:rgb(200 242 109/.3)}.brand{display:flex;align-items:center;gap:.6rem;margin-bottom:1.25rem;font-size:17px;font-weight:600;letter-spacing:-.01em}.brand .mark{border-radius:8px}.brand small{font:400 10.5px "Geist Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.14em;color:var(--fg-3)}` +
+  `main{width:100%;max-width:34rem;padding:1.75rem;background:rgb(13 14 16/.7);border:1px solid var(--line);border-radius:1rem}h1{margin:0 0 1rem;font-size:22px;line-height:1.25;font-weight:600;letter-spacing:-.015em}p{margin:0 0 1rem;color:var(--fg-2)}main>:last-child{margin-bottom:0}` +
+  `a{color:var(--fg);text-decoration-color:var(--line-strong);text-underline-offset:3px}a:hover{text-decoration-color:var(--accent)}form{margin:0 0 1rem}label{display:block;color:var(--fg-2);font-size:13px}` +
+  `input:not([type=hidden]){display:block;width:100%;margin-top:.4rem;padding:.55rem .75rem;font:inherit;font-size:14px;color:var(--fg);background:var(--ink-850);border:1px solid var(--line-strong);border-radius:.75rem;outline:0}input::placeholder{color:var(--fg-3)}input:focus{border-color:rgb(200 242 109/.5);box-shadow:0 0 0 3px rgb(200 242 109/.1)}` +
+  `button{font:inherit;font-size:13px;padding:.45rem .95rem;color:var(--fg);background:var(--ink-800);border:1px solid var(--line-strong);border-radius:999px;cursor:pointer}button:hover{background:var(--ink-700);border-color:rgb(255 255 255/.2)}button.primary{color:var(--ink-950);font-weight:500;background:var(--accent);border-color:var(--accent)}button.primary:hover{filter:brightness(1.1)}button.danger{color:var(--bad);border-color:rgb(242 125 109/.4);background:transparent}button.danger:hover{background:rgb(242 125 109/.1)}` +
+  `.apple{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;min-width:15rem;height:44px;padding:0 1.25rem;color:#000;background:#fff;border:1px solid #fff;border-radius:8px;font-size:17px;font-weight:500;text-decoration:none;white-space:nowrap}.apple:hover{background:#eee}.apple svg{height:20px;width:auto;fill:#000}` +
+  `code{display:block;word-break:break-all;margin:0 0 1rem;padding:.8rem .9rem;font:13px/1.5 "Geist Mono",ui-monospace,"SF Mono",monospace;color:var(--accent);background:var(--ink-850);border:1px solid var(--line-strong);border-radius:.75rem;user-select:all}` +
+  `.table{overflow-x:auto;margin:0 0 1rem}table{width:100%;border-collapse:collapse;font-size:13.5px}th{padding:.4rem .5rem .4rem 0;text-align:left;font:400 10.5px "Geist Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.14em;color:var(--fg-3);white-space:nowrap}td{padding:.55rem .5rem .55rem 0;text-align:left;border-top:1px solid var(--line);white-space:nowrap}td:last-child,th:last-child{padding-right:0;text-align:right}td form{margin:0}td button{padding:.25rem .7rem;font-size:12px}` +
+  `.row{display:flex;flex-wrap:wrap;align-items:center;gap:.9rem}`;
+const APPLE_LOGO = '<svg viewBox="0 0 814 1000" aria-hidden="true"><path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76.5 0-103.7 40.8-165.9 40.8s-105.6-57-155.5-127C46.7 790.7 0 663 0 541.8c0-194.4 126.4-297.5 250.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z"/></svg>';
+/** Apple's white "Sign in with Apple" button (their guidelines: white on dark, logo left of the label). */
+export const appleButton = '<a class="apple" href="/auth/start">' + APPLE_LOGO + "Sign in with Apple</a>";
+const LOGO = `<svg class="mark" width="28" height="28" aria-hidden="true" viewBox="0 0 16 16" shape-rendering="crispEdges"><rect width="16" height="16" rx="3.5" fill="#08090a"/><g fill="#c8f26d"><rect x="7" y="4" width="1" height="1"/><rect x="8" y="4" width="1" height="1"/><rect x="6" y="5" width="1" height="1"/><rect x="7" y="5" width="1" height="1"/><rect x="8" y="5" width="1" height="1"/><rect x="9" y="5" width="1" height="1"/><rect x="5" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/><rect x="7" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="1"/><rect x="9" y="6" width="1" height="1"/><rect x="10" y="6" width="1" height="1"/><rect x="4" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/><rect x="6" y="7" width="1" height="1"/><rect x="7" y="7" width="1" height="1"/><rect x="8" y="7" width="1" height="1"/><rect x="9" y="7" width="1" height="1"/><rect x="10" y="7" width="1" height="1"/><rect x="11" y="7" width="1" height="1"/><rect x="5" y="8" width="1" height="1"/><rect x="10" y="8" width="1" height="1"/><rect x="5" y="9" width="1" height="1"/><rect x="7" y="9" width="1" height="1"/><rect x="8" y="9" width="1" height="1"/><rect x="10" y="9" width="1" height="1"/><rect x="5" y="10" width="1" height="1"/><rect x="7" y="10" width="1" height="1"/><rect x="8" y="10" width="1" height="1"/><rect x="10" y="10" width="1" height="1"/><rect x="5" y="11" width="1" height="1"/><rect x="6" y="11" width="1" height="1"/><rect x="7" y="11" width="1" height="1"/><rect x="8" y="11" width="1" height="1"/><rect x="9" y="11" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/></g></svg>`;
 export const page = (title, body, status = 200, headers = {}) =>
   new Response(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>` +
-      `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}button,input{font:inherit;padding:.5rem .75rem}code{word-break:break-all;display:block;padding:.75rem;background:#eee;border-radius:6px}table{width:100%;border-collapse:collapse;margin:1rem 0}th,td{text-align:left;padding:.4rem .25rem;border-bottom:1px solid #ddd}td form{margin:0}</style>` +
-      `<h1>${esc(title)}</h1>${body}</html>`,
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>${esc(title)}</title><style>${STYLE}</style>` +
+      `<div class="brand">${LOGO}loft <small>push</small></div><main><h1>${esc(title)}</h1>${body}</main></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } },
   );
-export const notConfigured = () => page("Push portal", "<p>The push portal isn't configured.</p>", 503);
+/** True when a setting is missing, or PORTAL_URL isn't an https:// URL with a host (Apple refuses any other redirect address). */
+export const incomplete = (env) => REQUIRED.some((k) => !env[k]) || !/^https:\/\/[^/\s]+/i.test(env.PORTAL_URL);
+export const notConfigured = (env = {}) =>
+  page("Push portal", env.PORTAL_URL && !/^https:\/\/[^/\s]+/i.test(env.PORTAL_URL) ? "<p>The push portal isn't configured: PORTAL_URL must start with https://</p>" : "<p>The push portal isn't configured.</p>", 503);
 
 const hmac = (env, purpose, value) => createHmac("sha256", env.SESSION_SECRET).update(`${purpose}.${value}`).digest("base64url");
 /** `value.expiry.signature`, valid until it expires. The purpose ("session" or "state") is signed but not stored, so a cookie sealed for one is refused as the other. */
@@ -84,22 +103,22 @@ export const capped = () => page("Too many keys", `<p>An account can hold at mos
 
 /** GET /: the sign-in button, or, signed in, the account's keys and the form to create one. */
 export async function home(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) {
-    return page("Loft push portal", '<p>Sign in with Apple to get a key for pushing from your Loft.</p><p><a href="/auth/start"><button>Sign in with Apple</button></a></p>');
+    return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`);
   }
   // Signed in on the way to approving a Loft's code: back to that page.
   const pairing = cookieOf(request, "pair");
   if (pairing && /^[A-Za-z0-9_-]{22}$/.test(pairing)) return redirect(`/connect?code=${pairing}`);
   const keys = await keysOf(makeKv(env), account);
   const rows = keys
-    .map((k) => `<tr><td>${esc(k.label)}</td><td>${day(k.created)}</td><td>${lastUsed(k, now)}</td><td><form method="post" action="/keys/revoke"><input type="hidden" name="id" value="${k.id}"><button>Revoke</button></form></td></tr>`)
+    .map((k) => `<tr><td>${esc(k.label)}</td><td>${day(k.created)}</td><td>${lastUsed(k, now)}</td><td><form method="post" action="/keys/revoke"><input type="hidden" name="id" value="${k.id}"><button class="danger">Revoke</button></form></td></tr>`)
     .join("");
-  const list = keys.length ? `<table><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table>` : "<p>No keys yet.</p>";
+  const list = keys.length ? `<div class="table"><table><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table></div>` : "<p>No keys yet.</p>";
   const create =
     keys.length < MAX_KEYS
-      ? '<form method="post" action="/keys"><p><label>Key name <input name="name" maxlength="60" required placeholder="My Mac"></label></p><button>Create key</button></form>'
+      ? '<form method="post" action="/keys"><p><label>Key name<input name="name" maxlength="60" required placeholder="My Mac"></label></p><button class="primary">Create key</button></form>'
       : "<p>Revoke a key to make room for a new one.</p>";
   return page("Your keys", `${list}<p>${keys.length} of ${MAX_KEYS} keys. A key is shown once, when you create it. Revoke one and its Loft stops pushing at once.</p>${create}<p><a href="/account/delete">Delete my account</a></p>`);
 }
@@ -130,13 +149,13 @@ export async function limited(store, request, what, now) {
 
 /** GET /auth/start: Sign in with Apple. */
 export async function start(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now);
 }
 
 /** GET /auth/callback: Apple's answer. The account is Apple's user id (`sub`) and nothing else. */
 export async function callback(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const limit = await limited(makeKv(env), request, "callback", now);
   if (limit) return limit;
   const params = new URL(request.url).searchParams;
@@ -170,7 +189,7 @@ export async function callback(request, env = process.env, now = Date.now()) {
 
 /** GET /account/delete: what deleting does, and the button. */
 export async function confirmDelete(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const n = (await keysOf(makeKv(env), account)).length;
@@ -178,13 +197,13 @@ export async function confirmDelete(request, env = process.env, now = Date.now()
   return page(
     "Delete your account?",
     `<p>This deletes ${what}, and ends Sign in with Apple for this portal. It can't be undone. You can sign in again later and start fresh.</p>` +
-      '<p>Apple asks you to sign in once more to confirm.</p><form method="post" action="/account/delete"><button>Delete my account</button> <a href="/">Cancel</a></form>',
+      '<p>Apple asks you to sign in once more to confirm.</p><form method="post" action="/account/delete"><div class="row"><button class="danger">Delete my account</button><a href="/">Cancel</a></div></form>',
   );
 }
 
 /** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
 export async function startDelete(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
@@ -264,7 +283,7 @@ export async function makeAccountKey(store, account, name, now) {
 
 /** POST /keys with `name`: creates a key for the signed-in account and shows it, once. */
 export async function createAccountKey(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
@@ -282,7 +301,7 @@ export async function createAccountKey(request, env = process.env, now = Date.no
 
 /** POST /keys/revoke with `id` (the key's hash): deletes one of the signed-in account's keys. The relay refuses it from the next push. */
 export async function revokeAccountKey(request, env = process.env, now = Date.now()) {
-  if (REQUIRED.some((k) => !env[k])) return notConfigured();
+  if (incomplete(env)) return notConfigured(env);
   const account = accountOf(request, env, now);
   if (!account) return redirect("/");
   const id = String((await request.formData()).get("id") ?? "");

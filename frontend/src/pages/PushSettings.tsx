@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
-import { api, type PushDevice, type PushStatus } from "../lib/api";
+import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
@@ -19,7 +19,6 @@ export function PushSettings() {
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [relayKey, setRelayKey] = useState("");
   const [relayAddr, setRelayAddr] = useState("");
-  const [portalAddr, setPortalAddr] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
@@ -31,7 +30,6 @@ export function PushSettings() {
       setKeyId(s.key_id);
       setTeamId(s.team_id);
       setRelayAddr(s.relay_address);
-      setPortalAddr(s.portal_address);
     });
     api.devices().then(setDevices);
   };
@@ -57,6 +55,8 @@ export function PushSettings() {
       load();
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
+      // A relay without a portal is remembered: Sign in goes away.
+      load();
     } finally {
       setBusy(false);
     }
@@ -99,7 +99,6 @@ export function PushSettings() {
       setTeamId(s.team_id);
       setRelayKey("");
       setRelayAddr(s.relay_address);
-      setPortalAddr(s.portal_address);
       setMsg({ ok: true, text: `${done} ${WHERE[s.path]}` });
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
@@ -116,7 +115,8 @@ export function PushSettings() {
   if (!status) return null;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
   const off = status.path === "none";
-  const addrChanged = relayAddr.trim() !== status.relay_address || portalAddr.trim() !== status.portal_address;
+  const addrChanged = relayAddr.trim() !== status.relay_address;
+  const portal = portalHome(status);
   return (
     <section className="panel space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
@@ -135,8 +135,8 @@ export function PushSettings() {
             <button type="button" className="btn" disabled={busy} onClick={() => change({ remove_relay_key: true }, "Relay key removed.")}>
               Remove relay key
             </button>
-            {status.portal_url && (
-              <a className="text-[12px] text-fg-3 underline hover:text-fg" href={status.portal_url} target="_blank" rel="noreferrer">
+            {portal && (
+              <a className="text-[12px] text-fg-3 underline hover:text-fg" href={portal} target="_blank" rel="noreferrer">
                 Manage keys
               </a>
             )}
@@ -145,9 +145,9 @@ export function PushSettings() {
           <>
             <p className="text-[12px] text-fg-3">
               Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
-              and are never stored. {status.relay_url && status.portal_url ? "Press Sign in and allow it on the portal; or paste a relay key." : status.portal_url ? "Sign in on the Loft portal, then paste the relay key it gives you." : "Paste the relay key you were given."}
+              and are never stored. {portal ? "Press Sign in and allow it on the portal; or paste a relay key." : "Paste the relay key you were given."}
             </p>
-            {status.relay_url && status.portal_url ? (
+            {portal && (
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" className="btn-primary" disabled={busy} onClick={signIn}>
                   <ExternalLink className="size-3.5" /> Sign in
@@ -161,12 +161,6 @@ export function PushSettings() {
                   </span>
                 )}
               </div>
-            ) : (
-              status.portal_url && (
-                <a className="btn w-fit" href={status.portal_url} target="_blank" rel="noreferrer">
-                  <ExternalLink className="size-3.5" /> Open the Loft portal to sign in
-                </a>
-              )
             )}
             <div className="flex gap-2">
               <input
@@ -190,28 +184,17 @@ export function PushSettings() {
         <p className="text-[12px] text-fg-3">
           Where the relay and its portal are: your relay key and the alerts' text go to this address, so only use one you trust. https only.
         </p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block space-y-1.5">
-            <span className="eyebrow">Relay address</span>
-            <input
-              className="input font-mono"
-              placeholder={status.relay_url && !status.relay_address ? `${status.relay_url} (from LOFT_RELAY_URL)` : "https://…"}
-              value={relayAddr}
-              onChange={(e) => setRelayAddr(e.target.value)}
-            />
-          </label>
-          <label className="block space-y-1.5">
-            <span className="eyebrow">Portal address</span>
-            <input
-              className="input font-mono"
-              placeholder={status.portal_url && !status.portal_address ? `${status.portal_url} (from LOFT_PORTAL_URL)` : "https://…"}
-              value={portalAddr}
-              onChange={(e) => setPortalAddr(e.target.value)}
-            />
-          </label>
-        </div>
-        <button type="button" className="btn" disabled={!addrChanged || busy} onClick={() => change({ relay_url: relayAddr, portal_url: portalAddr }, "Addresses saved.")}>
-          Save addresses
+        <label className="block space-y-1.5">
+          <span className="eyebrow">Relay address</span>
+          <input
+            className="input font-mono"
+            placeholder={status.relay_url && !status.relay_address ? `${status.relay_url} (default)` : "https://…"}
+            value={relayAddr}
+            onChange={(e) => setRelayAddr(e.target.value)}
+          />
+        </label>
+        <button type="button" className="btn" disabled={!addrChanged || busy} onClick={() => change({ relay_url: relayAddr }, "Address saved.")}>
+          Save address
         </button>
       </div>
 

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   comboFromEvent, formatCombo, isReserved, isTyping, loadCombo, normalizeCombo, loadCombos, loadRecent, matchesCombo, nextNeedsYou, saveCombo, saveRecent,
-  searchRows, shortcutAction, switcherAgents,
+  OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
 } from "../src/lib/shortcuts.ts";
 
 function memory() {
@@ -185,4 +185,21 @@ test("search: #123 or 123 finds that number, open first", () => {
   assert.deepEqual(ids("#999"), []);
   const same = [{ id: "old", title: "A", number: 7, open: false, project: "api" }, { id: "new", title: "B", number: 7, open: true, project: "loft" }];
   assert.deepEqual(searchRows(same, "#7").map((r) => r.id), ["new", "old"]);
+});
+
+test("the chat hint reads the saved search binding, ⌘K by default and Ctrl+K off a Mac", () => {
+  const s = memory();
+  assert.equal(formatCombo(loadCombo("switcher", s), true), "⌘K");
+  assert.equal(formatCombo(loadCombo("switcher", s), false), "Ctrl+K");
+  saveCombo("switcher", "Shift+Meta+P", s);
+  assert.equal(formatCombo(loadCombo("switcher", s), true), "⇧⌘P");
+});
+
+test("clicking a hint opens the search or the sheet through one event", () => {
+  const target = new EventTarget();
+  const got: string[] = [];
+  target.addEventListener(OPEN_SHORTCUT, (e) => got.push((e as CustomEvent).detail));
+  openShortcut("sheet", target);
+  openShortcut("switcher", target);
+  assert.deepEqual(got, ["sheet", "switcher"]);
 });

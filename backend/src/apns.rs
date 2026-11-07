@@ -128,15 +128,11 @@ pub fn route(state: &AppState) -> Route {
     route_for(own_key(state), relay_key_present() && relay_url(state).is_some())
 }
 
-/// The hosted push relay. Empty until the operator's Vercel project exists (#259), so no one else's
-/// project can receive relay keys and push text under its name; LOFT_RELAY_URL sets it meanwhile.
-const RELAY_URL: &str = "";
+/// The official push relay, which also serves the push portal's pages (ADR 0003), so a fresh install can Sign in for
+/// push with nothing to type. Settings → Relay address, else LOFT_RELAY_URL, overrides it.
+const RELAY_URL: &str = "https://portal.get-loft.com";
 
-/// The push portal, where a user signs in and gets a relay key (spec #265). Empty until it's live, so
-/// Settings shows no dead link; LOFT_PORTAL_URL sets it meanwhile.
-const PORTAL_URL: &str = "";
-
-/// A relay or portal address as typed in Settings: https, with a host and no user name or password; ""
+/// A relay address as typed in Settings: https, with a host and no user name or password; ""
 /// clears it. Tests may also use plain http on this Mac, for their fake relay.
 pub fn check_address(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
@@ -161,10 +157,6 @@ pub fn check_address(raw: &str) -> Result<String, String> {
 fn address(saved: &str, var: &str, fallback: &str) -> Option<String> {
     let raw = if saved.trim().is_empty() { std::env::var(var).unwrap_or_else(|_| fallback.into()) } else { saved.to_string() };
     check_address(&raw).ok().filter(|u| !u.is_empty())
-}
-
-pub fn portal_url(state: &AppState) -> Option<String> {
-    address(&state.settings.get().push.portal_url, "LOFT_PORTAL_URL", PORTAL_URL)
 }
 
 pub fn relay_url(state: &AppState) -> Option<String> {
@@ -419,6 +411,12 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn the_built_in_relay_is_the_official_one_and_passes_the_address_check() {
+        // Tests use a fake relay instead (see `relay_url`), so the built-in default is checked here.
+        assert_eq!(super::check_address(super::RELAY_URL).as_deref(), Ok("https://portal.get-loft.com"));
+    }
+
     use super::*;
     use p256::ecdsa::{VerifyingKey, signature::Verifier};
 
@@ -471,6 +469,10 @@ pub(crate) mod tests {
                         None => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "unknown or expired code" }))),
                     }
                 }
+            }))
+            // A relay whose portal isn't configured, as relay/api/pair.js answers.
+            .route("/no-portal/api/pair", axum::routing::post(|| async {
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "error": "the push portal isn't configured", "portal": false })))
             }))
             .route("/api/push", axum::routing::post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
                 let log = log.clone();

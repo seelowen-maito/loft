@@ -182,12 +182,12 @@ not the app). Paste these into App Store Connect:
 - *Review notes:* "Loft is a client for a server the user runs on their own Mac, reached over Tailscale, so the app
   can't be used without one. To try it, type demo-loft-dev.get-loft.com on the connect screen: it opens a demo with
   sample data, no server or sign-in needed. Notifications are optional: the server sends them with the user's own APNs key, or through
-  our push relay after the user signs in with Apple on our push portal (<PORTAL_URL>). The portal stores only Apple's
+  our push relay after the user signs in with Apple on our push portal (https://portal.get-loft.com). The portal stores only Apple's
   user id and hashed keys, and has Delete my account, which deletes them and revokes the Sign in with Apple token."
 - *Privacy (App Privacy questionnaire):* declare **User ID** (Apple's user id, from the portal sign-in), used for
   **App Functionality**, linked to the user, not used for tracking. Nothing else: the app itself collects no data and
   no name or email is asked for. Push text passes through the relay in transit only and is never stored.
-- *Account deletion:* the only account is on the portal, and it has **Delete my account** (`<PORTAL_URL>/account/delete`).
+- *Account deletion:* the only account is on the portal, and it has **Delete my account** (`https://portal.get-loft.com/account/delete`).
 
 **Tests**
 
@@ -209,7 +209,7 @@ UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only)
 
 ## Limitations and what needs outside setup
 
-- **Push notifications (APNs)** need outside setup: the Push Notifications capability on the app id, and an APNs auth key (`.p8`) added in Loft → Settings → Push notifications. The backend side (device registration at `/api/devices`, the APNs sender, a test push) is in place; see `docs/push.md` for the steps and the payload. Until the app registers for push, alerts only arrive while it's running.
+- **Push notifications (APNs).** With the TestFlight app: Loft → Settings → Push notifications → **Sign in**, then Sign in with Apple and **Allow** on the portal at https://portal.get-loft.com; Loft collects its relay key itself. A self-built app has its own bundle id, which the relay doesn't serve, so it needs outside setup: the Push Notifications capability on the app id, and an APNs auth key (`.p8`) added in the same Settings. To run your own relay and portal, see the deploy runbook in [`relay/README.md`](../relay/README.md). The backend side (device registration at `/api/devices`, the APNs sender, a test push) is in place; see `docs/push.md` for the steps and the payload. Until the app registers for push, alerts only arrive while it's running.
 - **No pause or resume.** Claude Code runs can't be paused, so the app doesn't offer it. "Stop current run" ends the process.
 - **One conversation per agent.** Loft keeps a single history per agent, so there are no separate threads.
 - **There's no separate plan-approval step.** The agent's permission mode, shown on its screen, decides what needs your approval. Those requests show up in the app like any other, and the app adds no approval rules of its own.

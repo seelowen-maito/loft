@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_FILTERS, filtersToParams, parseFilters, type IssueFilters } from "../src/lib/issueFilters.ts";
+import { DEFAULT_FILTERS, filtersToParams, parseFilters, withFilters, type IssueFilters } from "../src/lib/issueFilters.ts";
 
 const url = (f: IssueFilters) => filtersToParams(f).toString();
 const back = (s: string) => parseFilters(new URLSearchParams(s));
@@ -32,3 +32,22 @@ test("the old Issues tab's links still land on the right filters", () => {
   assert.deepEqual(back("source=github"), { ...DEFAULT_FILTERS, source: "github" });
   assert.deepEqual(back("q=%2361&project=api"), { ...DEFAULT_FILTERS, q: "#61", project: "api" });
 });
+
+test("a filter changed in one view is still set in the other, and the view's own params stay", () => {
+  const list = new URLSearchParams("project=api&agent=a1&q=retry");
+  const specs = withFilters(withView(list), { mine: true });
+  assert.deepEqual(back(specs.toString()), { ...DEFAULT_FILTERS, project: "api", agent: "a1", q: "retry", mine: true });
+  // and back to the list: the same filters
+  specs.delete("view");
+  assert.deepEqual(back(specs.toString()), back("project=api&agent=a1&q=retry&mine=1"));
+  // board options and the open spec survive a filter change
+  const board = withFilters(new URLSearchParams("view=specs&stage=planned&needsme=1&open=t1&source=loft"), { source: "all", group: "Dineout" });
+  assert.equal(board.get("view"), "specs");
+  assert.equal(board.get("stage"), "planned");
+  assert.equal(board.get("needsme"), "1");
+  assert.equal(board.get("open"), "t1");
+  assert.equal(board.get("source"), null);
+  assert.equal(board.get("group"), "Dineout");
+});
+
+function withView(p: URLSearchParams) { const n = new URLSearchParams(p); n.set("view", "specs"); return n; }
