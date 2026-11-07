@@ -34,10 +34,20 @@ pub struct Delivery {
     pub pr: Option<i64>,
     /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
     /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
-    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready; a plan kept in Loft
-    /// waits for Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready,
-    /// merged or closed).
+    /// "needs_human" (too many final rounds), "stalled" (the run woken for its step ended without the
+    /// step's call: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
+    /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
+    /// While stalled: the state it goes back to ("running", "final_review" or "final_fixes").
+    #[serde(default)]
+    pub resume_to: String,
+    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
+    /// lost when Loft restarted).
+    #[serde(default)]
+    pub stall_reason: String,
+    /// When it stalled (RFC 3339): a new stall is a new Needs you item.
+    #[serde(default)]
+    pub stalled_at: String,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -84,6 +94,19 @@ impl Delivery {
 
     pub fn ticket_mut(&mut self, n: i64) -> Option<&mut DeliveryTicket> {
         self.tickets.iter_mut().find(|t| t.number == n)
+    }
+
+    /// The state its step is in: a stalled one's is the state it goes back to.
+    pub fn step_state(&self) -> &str {
+        if self.state == "stalled" { &self.resume_to } else { &self.state }
+    }
+
+    /// Back to the state it stalled in, if it stalled.
+    pub fn unstall(&mut self) {
+        if self.state == "stalled" {
+            self.state = std::mem::take(&mut self.resume_to);
+        }
+        (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
     }
 }
 
@@ -1409,6 +1432,9 @@ impl Db {
                 branch: String::new(),
                 pr: Some(pr),
                 state: if has(&settled) { "settled" } else { "planned" }.into(),
+                resume_to: String::new(),
+                stall_reason: String::new(),
+                stalled_at: String::new(),
                 ready_retry: has(&retry),
                 tickets,
                 current: None,

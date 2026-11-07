@@ -358,6 +358,8 @@ mod tests {
         let Json(d) = register(State(st.clone()), reg(&good)).await.unwrap();
         assert_eq!((d["kinds"].clone(), d["quiet_hours"]["start"].clone()), (json!(["permission"]), json!("22:00")));
         assert!(update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["everything"] })).unwrap())).await.is_err());
+        let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["delivery_stalled"] })).unwrap())).await.unwrap();
+        assert_eq!(d["kinds"], json!(["delivery_stalled"]), "a Delivery stalled push can be chosen on its own");
         // App builds from before rounds still ask for grill_question; it's stored under the new name.
         let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission", "grill_question"] })).unwrap())).await.unwrap();
         assert_eq!(d["kinds"], json!(["permission", "grill_round"]));

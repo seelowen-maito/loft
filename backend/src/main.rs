@@ -113,6 +113,8 @@ async fn serve() -> anyhow::Result<()> {
             tracing::warn!("GitHub settings migration: {e}");
         }
     }
+    // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
+    delivery::stall_lost_runs(&state);
     tokio::spawn(agents::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));

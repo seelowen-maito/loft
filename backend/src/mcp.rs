@@ -1052,7 +1052,7 @@ mod tests {
         // A Delivery wake, then a message about the same ticket: one boundary, not two.
         set(|a| a.fresh_context = "always".into());
         let runs = prompts(&st, &to).len();
-        agents::wake_on_ticket(&st, &to.id, "o/r#20", true, "build #20".into());
+        agents::wake_on_ticket(&st, &to.id, "o/r#20", true, "build #20".into(), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         until("the Delivery run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > runs).await;
         assert_eq!(clears(), 3, "the Delivery wake");
         send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;

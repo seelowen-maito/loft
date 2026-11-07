@@ -617,9 +617,10 @@ fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool
 
 /// A Delivery wake on `ticket`: at a ticket boundary, the Fresh context setting applies just before the
 /// run, behind a running one if needed.
-pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String) {
+/// `wake` is the step it's for: when the run that takes it ends, Loft checks the step moved on.
+pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String, wake: crate::delivery::Wake) {
     let fresh = ticket_boundary(state, agent_id, ticket, builder);
-    start_with(state, agent_id, Some(prompt), "delivery", false, fresh);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake));
 }
 
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
@@ -741,7 +742,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         name = from.name,
         id = from.id,
     );
-    start_with(state, &to.id, Some(prompt), "agent", false, fresh);
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None);
 }
 
 /// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
@@ -777,12 +778,13 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
 
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
-    start_with(state, agent_id, text, trigger, for_user, false);
+    start_with(state, agent_id, text, trigger, for_user, false, None);
 }
 
 /// `start`; `fresh`: the prompt starts a new Delivery ticket, so the run that delivers it first applies
-/// the agent's Fresh context setting (`fresh_if_due`).
-fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool) {
+/// the agent's Fresh context setting (`fresh_if_due`). `delivery`: the Delivery step the prompt wakes the
+/// agent for, kept with the prompt (queued with it, then on the run that takes it).
+fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -802,6 +804,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 if for_user {
                     rt.queued_for_user.insert(agent_id.to_string());
                 }
+                if let Some(w) = delivery {
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push(w);
+                }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
                 w.notify_one();
@@ -810,6 +815,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         }
         let kill = Arc::new(Notify::new());
         rt.running.insert(agent_id.to_string(), kill.clone());
+        if let Some(w) = delivery {
+            rt.delivery_running.entry(agent_id.to_string()).or_default().push(w);
+        }
         kill
     };
     let state = state.clone();
@@ -828,17 +836,22 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
-            if let Err(e) = run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
-                // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
-                if !delivered {
-                    let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+                Ok(failed) => failed,
+                Err(e) => {
+                    // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
+                    if !delivered {
+                        let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+                    }
+                    add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
+                    set_status(&state, &agent_id, "error", &e.to_string());
+                    if for_user {
+                        mark_replied(&state, &agent_id);
+                    }
+                    true
                 }
-                add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
-                set_status(&state, &agent_id, "error", &e.to_string());
-                if for_user {
-                    mark_replied(&state, &agent_id);
-                }
-            }
+            };
+            crate::delivery::run_ended(&state, &agent_id, failed).await;
             let next = {
                 let mut rt = state.rt.lock().unwrap();
                 match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
@@ -848,6 +861,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                             rt.grill_queued.insert(agent_id.clone(), g);
                         }
                         let u = rt.queued_for_user.remove(&agent_id);
+                        take_delivery_queue(&mut rt, &agent_id);
                         Some((q.join("\n\n"), "user", u))
                     }
                     (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
@@ -870,6 +884,13 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             emit_agent(&state, &a);
         }
     });
+}
+
+/// The run that takes the agent's queue takes the Delivery steps it was woken for.
+pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str) {
+    if let Some(w) = rt.delivery_queued.remove(agent_id) {
+        rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w);
+    }
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -1118,11 +1139,12 @@ fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
 }
 
 /// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
+/// Whether the run failed: claude reported an error, or exited without a result when nobody stopped it.
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
     let mut resume = true;
     loop {
         match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
-            RunOutcome::Done => return Ok(()),
+            RunOutcome::Done { failed } => return Ok(failed),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
                 *delivered = false;
@@ -1150,7 +1172,7 @@ async fn terminate(child: &mut tokio::process::Child) {
 }
 
 enum RunOutcome {
-    Done,
+    Done { failed: bool },
     StaleSession,
 }
 
@@ -1618,7 +1640,7 @@ async fn run_process(
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
     }
-    Ok(RunOutcome::Done)
+    Ok(RunOutcome::Done { failed: run_error.is_some() })
 }
 
 // ---- scheduler --------------------------------------------------------
@@ -2639,6 +2661,45 @@ esac
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Restarted by user. The queued message runs next."));
     }
 
+    /// A Delivery wake's real run: one that ends without the step's call stalls the Delivery (failed or not),
+    /// and a Restart carries the wake over to the run it starts instead of stalling it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivery_runs_end_without_its_call_stalls_it() {
+        let (st, a) = fake_claude_state();
+        let save = |spec: i64| {
+            let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "o/r", "spec": spec, "state": "running", "current": spec + 1, "dev": a.id, "created_at": "" })).unwrap();
+            d.tickets.push(crate::db::DeliveryTicket { number: spec + 1, title: "T".into(), blocked_by: vec![], state: "started".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new() });
+            st.db.save_delivery(&d).unwrap();
+        };
+        let wake = |spec: i64, prompt: &str| {
+            let w = crate::delivery::Wake { repo: "o/r".into(), spec, step: crate::delivery::Step::Build { ticket: spec + 1, round: 0 } };
+            wake_on_ticket(&st, &a.id, &format!("o/r#{}", spec + 1), true, prompt.into(), w);
+        };
+        let stalled = |spec: i64| st.db.get_delivery("o/r", spec).unwrap().unwrap().stall_reason;
+        for (spec, prompt, why) in [(40, "build it", "no_call"), (50, "build it and fail", "run_failed")] {
+            save(spec);
+            wake(spec, prompt);
+            until("the Delivery to stall", 10, || !stalled(spec).is_empty()).await;
+            assert_eq!(stalled(spec), why);
+            idle(&st, &a.id).await;
+        }
+
+        save(60);
+        wake(60, "build it while busy");
+        until("the run to start", 10, || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default().contains("while busy")).await;
+        // The restarted run gets an FYI saying "busy", so it keeps going too.
+        st.db.add_pending_fyi(&a.id, "stay busy").unwrap();
+        assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
+        let prompts = || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default();
+        until("the restarted run to start", 10, || prompts().contains("restarted your last run")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(stalled(60), "", "the restarted run carries on with the step");
+        // Stopped from the agent's Stop without the call: now it stalls.
+        assert!(stop(&st, &a.id));
+        until("the Delivery to stall", 10, || !stalled(60).is_empty()).await;
+        assert_eq!(stalled(60), "no_call");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mention_reaches_the_agent_and_its_reply_comes_back() {
         let (st, orch) = fake_claude_state();
@@ -3009,7 +3070,7 @@ esac
     /// A Delivery wake on `key`, run to its end.
     async fn on_ticket(st: &AppState, id: &str, key: &str, builder: bool) {
         let runs = count(st, id, "run_end");
-        wake_on_ticket(st, id, key, builder, format!("work on {key}"));
+        wake_on_ticket(st, id, key, builder, format!("work on {key}"), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         until("the ticket's run", 10, || !is_running(st, id) && count(st, id, "run_end") == runs + 1).await;
     }
 
@@ -3077,7 +3138,7 @@ esac
         set(&st, &a.id, |a| a.fresh_context = "always".into());
         enqueue(&st, &a.id, Some("delegate".into()), "user");
         until("the run to start", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
-        wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into());
+        wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into(), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(count(&st, &a.id, "clear"), 0, "never during a run");
         let ws = workspace(&st, &a.id);

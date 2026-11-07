@@ -456,6 +456,39 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         }
     }
 
+    // Deliveries waiting on a step no agent is working on: only the user can bring them back.
+    for d in state.db.deliveries_in_state("stalled").map_err(e)? {
+        let id = format!("stalled:{}:{}:{}", d.repo, d.spec, d.stalled_at);
+        // The spec's (or standalone ticket's) Loft issue, else its issue on GitHub.
+        let issue = if d.local {
+            tasks.iter().find(|t| t.id == d.spec_id)
+        } else {
+            tasks.iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+        };
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let open = match issue {
+            Some(t) => open_task(&t.id),
+            None if !d.local => json!({ "kind": "open", "label": "Open issue", "target": { "url": format!("https://github.com/{}/issues/{}", d.repo, d.spec) } }),
+            None => json!({ "kind": "open", "label": "Open Needs you", "target": { "screen": "needs_you" } }),
+        };
+        items.push(Item {
+            kind: "delivery_stalled",
+            urgency: 2,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            reason: text(&crate::delivery::stalled_reason(&d), MAX_REASON),
+            text: String::new(),
+            created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
+            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![open, dismiss(&id)],
+            push: ("Delivery stalled".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
     // Plans kept in Loft whose reviews all passed: Merge merges the spec branch into the project's own repo.
     for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| d.local) {
         let id = format!("merge:{}:{}", d.repo, d.spec);
