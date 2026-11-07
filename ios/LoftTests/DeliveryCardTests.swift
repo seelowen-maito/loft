@@ -65,6 +65,19 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertTrue(r.delivery.showsResume)
     }
 
+    /// Start delivery on a standalone ticket, as the backend answers it (`start_from_issue`): the Delivery plus
+    /// `ok`, `duplicate` and `ticket`, with no `message`. The first start and a duplicate alike.
+    func testAStandaloneStartReplyDecodes() throws {
+        for duplicate in [false, true] {
+            let json = #"{"ok":true,"duplicate":\#(duplicate),"ticket":50,"state":"running","stall_reason":null,"can_pause":true,"can_resume":false,"needs_human":false,"started":true,"agent_id":"dev","agent_name":"Dev","pr":51}"#
+            let r = try JSONCoding.decoder.decode(IssueDeliveryReply.self, from: Data(json.utf8))
+            XCTAssertNil(r.message)
+            XCTAssertEqual(r.delivery.stateLine?.text, "Running.")
+            XCTAssertEqual(r.delivery.progressLine(issue: 50), "With Dev on PR #51. Its reviewers look at it next; #50 closes when the PR merges.")
+            XCTAssertTrue(r.delivery.showsPause && !r.delivery.showsResume)
+        }
+    }
+
     func testTheDeliveryEventDecodes() throws {
         guard case .delivery(let repo, let spec) = try ServerEvent.decode(Data(#"{"type":"delivery","repo":"Octo/Site","spec":40}"#.utf8)) else { return XCTFail() }
         XCTAssertEqual(repo, "Octo/Site")

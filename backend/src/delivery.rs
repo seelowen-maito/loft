@@ -1469,8 +1469,14 @@ pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<Stri
         record_standalone(&state, &repo, n, i["title"].as_str().unwrap_or(&t.title), &t.project, planner);
     }
     let s = start(&state, &repo, n, "").await.map_err(bad)?;
-    let pr = state.db.get_delivery(&repo, n)?.and_then(|d| d.pr);
-    Ok(Json(json!({ "ok": true, "duplicate": s.already, "ticket": n, "agent_id": s.agent.id, "agent_name": s.agent.name, "pr": pr })))
+    // The Delivery as the card shows it, like Pause and Resume answer, with who started it.
+    let mut v = delivery_json(&state, &state.db.get_delivery(&repo, n)?.ok_or_else(not_found)?);
+    v["ok"] = json!(true);
+    v["duplicate"] = json!(s.already);
+    v["ticket"] = json!(n);
+    v["agent_id"] = json!(s.agent.id);
+    v["agent_name"] = json!(s.agent.name);
+    Ok(Json(v))
 }
 
 /// Start delivery on spec #spec's Loft issue, for a spec published before this build or whose end-of-planning

@@ -3439,10 +3439,13 @@ pub(crate) mod tests {
 
         let v = start(t.id.clone()).await.unwrap().0;
         assert_eq!((&v["duplicate"], &v["ticket"], &v["agent_name"], &v["pr"]), (&json!(false), &json!(41), &json!("Builder"), &json!(500)));
+        // The Delivery as the card shows it, like Pause and Resume answer: the iPhone app reads it from the reply.
+        assert_eq!((&v["ok"], &v["state"], &v["started"], &v["can_pause"], &v["can_resume"]), (&json!(true), &json!("running"), &json!(true), &json!(true), &json!(false)));
         assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "ticket/41-ticket-41");
         assert_eq!(posts(&fake, slug, "pulls")[0]["body"], "Closes #41");
         assert!(woken(&st, &dev)[0].contains("build ticket #41 \"Ticket 41\""));
-        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        let again = start(t.id.clone()).await.unwrap().0;
+        assert_eq!((&again["duplicate"], &again["state"], &again["started"]), (&json!(true), &json!("running"), &json!(true)), "a duplicate carries the Delivery too");
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
