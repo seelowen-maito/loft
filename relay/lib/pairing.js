@@ -59,13 +59,14 @@ export async function connect(request, env = process.env, now = Date.now()) {
   const code = new URL(request.url).searchParams.get("code") ?? "";
   if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404, { "set-cookie": cookie("pair", "", 0) });
   if (!(await accountOf(request, env, now))) {
-    return page("Connect your Loft", `<p>Sign in with Apple to let your Loft send push notifications.</p><p>${appleButton}</p>`, 200, { "set-cookie": cookie("pair", code, CODE_SECONDS) });
+    return page("Connect your Loft", `<p>Sign in with Apple to let your Loft send push notifications.</p><p>${appleButton}</p>`, 200, { "set-cookie": cookie("pair", code, CODE_SECONDS) }, { layout: "center" });
   }
   return page(
     "Connect your Loft",
     `<form method="post" action="/connect"><input type="hidden" name="code" value="${esc(code)}"><p><label>Key name<input name="name" maxlength="60" required value="My Mac"></label></p><p>Allow this Loft to send you push notifications? Only allow if you just pressed Sign in in Loft; if someone sent you this link, close the page.</p><button class="primary">Allow</button></form>`,
     200,
     { "set-cookie": cookie("pair", "", 0) },
+    { signedIn: true },
   );
 }
 
@@ -100,5 +101,5 @@ export async function approve(request, env = process.env, now = Date.now()) {
   }
   await store.setEx(approved(secretHash), made.key, left);
   await store.getdel(waiting(code));
-  return page("Loft is signed in", "<p>Your Loft has its key. You can close this page.</p>");
+  return page("Loft is signed in", "<p>Your Loft has its key. You can close this page.</p>", 200, {}, { signedIn: true });
 }

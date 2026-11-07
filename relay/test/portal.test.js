@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
-import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { home, start, callback, createAccountKey, revokeAccountKey, signOut, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
 import { kv as makeKv } from "../lib/kv.js";
 import { push } from "../lib/relay.js";
 
@@ -252,8 +252,8 @@ test("the key list shows each key's name, created and last-used dates, never the
   const book = await keyFrom(await createAccountKey(post("/keys", { name: "MacBook" }, session), env, Date.UTC(2026, 10, 4)));
   assert.equal((await pushWith(mini)).status, 200);
   const html = await (await home(get("/", session), env)).text();
-  assert.match(html, /<td>Mac &lt;mini&gt;<\/td><td>Nov 3, 2026<\/td><td>Nov 6, 2026<\/td>/);
-  assert.match(html, /<td>MacBook<\/td><td>Nov 4, 2026<\/td><td>never<\/td>/);
+  assert.match(html, /Mac &lt;mini&gt;<\/td><td class="mono">Nov 3, 2026<\/td><td class="mono">Nov 6, 2026<\/td>/);
+  assert.match(html, /MacBook<\/td><td class="mono">Nov 4, 2026<\/td><td class="mono">never<\/td>/);
   assert.match(html, /2 of 5 keys/);
   assert.ok(!html.includes(mini) && !html.includes(book), "no key on the page");
   // Another account sees none of them.
@@ -358,7 +358,7 @@ test("a key's last-used date expires, so a push racing a revoke can't keep one f
   // A key without one that's over a year old may have been used before then.
   const old = await signInAs("999.old");
   await createAccountKey(post("/keys", { name: "Old" }, old), env, Date.UTC(2025, 0, 1));
-  assert.match(await (await home(get("/", old), env)).text(), /<td>Old<\/td><td>Jan 1, 2025<\/td><td>not in the last year<\/td>/);
+  assert.match(await (await home(get("/", old), env)).text(), /Old<\/td><td class="mono">Jan 1, 2025<\/td><td class="mono">not in the last year<\/td>/);
 });
 
 test("a store error is an error, not an empty answer", async () => {
@@ -386,7 +386,7 @@ test("Delete my account deletes the keys and the account and revokes Apple's tok
   const other = await signInAs("999.other");
   const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, other), env));
   assert.match(await (await home(get("/", session), env)).text(), /href="\/account\/delete"/);
-  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all 3 keys, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all <b>3 keys<\/b>, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
 
   const res = await deleteAs(session);
   assert.equal(res.status, 200);
@@ -528,7 +528,7 @@ test("a form posted from another site is refused with 403 and changes nothing", 
   const before = JSON.stringify([...store]);
   const id = sha256(key);
   for (const headers of FORGERIES) {
-    for (const [handler, path, form] of [[createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}]]) {
+    for (const [handler, path, form] of [[createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}], [signOut, "/signout", {}]]) {
       const res = await handler(forged(post(path, form, session), headers), env);
       assert.equal(res.status, 403, `${path} ${JSON.stringify(headers)}`);
       assert.match(await res.text(), /didn't come from this portal/);
@@ -588,4 +588,26 @@ test("every portal page carries the CSP (no scripts), Referrer-Policy and nosnif
     assert.equal(res.headers.get("x-content-type-options"), "nosniff");
     assert.equal(res.headers.get("cache-control"), "no-store");
   }
+});
+
+test("every signed-in page has the header with Signed in with Apple and a Sign out form; the signed-out page doesn't", async () => {
+  const session = await signInAs();
+  for (const res of [await home(get("/", session), env), await confirmDelete(get("/account/delete", session), env), await createAccountKey(post("/keys", { name: "Mac" }, session), env)]) {
+    const html = await res.text();
+    assert.match(html, /Loft push portal/);
+    assert.match(html, /Signed in with Apple[\s\S]*<form method="post" action="\/signout"><button>Sign out<\/button>/);
+  }
+  assert.doesNotMatch(await (await home(get("/"), env)).text(), /Sign out/);
+});
+
+test("Sign out clears the session cookie, shows the sign-in page, and the old cookie no longer works", async () => {
+  const session = await signInAs();
+  const res = await signOut(post("/signout", {}, session), env);
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get("location"), "/");
+  assert.match(res.headers.getSetCookie().join(), /^__Host-session=; Max-Age=0; /);
+  assert.match(await (await home(get("/"), env)).text(), /Sign in with Apple/);
+  // Someone who kept a copy of the cookie is signed out too.
+  assert.doesNotMatch(await (await home(get("/", session), env)).text(), /Sign out/);
+  assert.equal((await createAccountKey(post("/keys", { name: "Late" }, session), env)).status, 303);
 });
