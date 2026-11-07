@@ -458,7 +458,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
 
     // Deliveries waiting on a step no agent is working on: only the user can bring them back.
     for d in state.db.deliveries_in_state("stalled").map_err(e)? {
-        let id = format!("stalled:{}:{}:{}", d.repo, d.spec, d.stalled_at);
+        let id = crate::delivery::stalled_item_id(&d);
         // The spec's (or standalone ticket's) Loft issue, else its issue on GitHub.
         let issue = if d.local {
             tasks.iter().find(|t| t.id == d.spec_id)

@@ -187,7 +187,10 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
     let ended = {
         let mut rt = state.rt.lock().unwrap();
         let ended = rt.delivery_running.remove(agent_id).unwrap_or_default();
-        if rt.delivery_queued.get(agent_id).is_some_and(|q| !q.is_empty()) {
+        if let Some(q) = rt.delivery_queued.get_mut(agent_id).filter(|q| !q.is_empty()) {
+            // The run that takes the queue carries on: it checks these steps too when it ends, whichever
+            // Delivery its own wake is for.
+            q.extend(ended);
             return;
         }
         ended
@@ -203,25 +206,33 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
 
 /// Marks `d` stalled with `reason`, remembering the state to go back to. Only a Delivery whose step an
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`).
-fn stall(state: &AppState, d: &Delivery, reason: &str) {
+fn stall(state: &AppState, d: &Delivery, reason: &str) -> Option<Delivery> {
     if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") {
-        return;
+        return None;
     }
     tracing::info!("delivery {}#{}: stalled ({reason})", d.repo, d.spec);
     update(state, &d.repo, d.spec, |d| {
         d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
         (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
-    });
+    })
+}
+
+/// The id of a stalled Delivery's Needs you item: a new stall is a new item, pushed again.
+pub(crate) fn stalled_item_id(d: &Delivery) -> String {
+    format!("stalled:{}:{}:{}", d.repo, d.spec, d.stalled_at)
 }
 
 /// At start-up, before any run: runs and their queues live only in memory, so no agent is still working on
 /// any Delivery's step. Each Delivery with a ticket being built or in review, or in its final review or
-/// fixes, stalls: its run was lost to the restart.
+/// fixes, stalls: its run was lost to the restart. Its Needs you item is news, so it's pushed even though
+/// the pusher's first look takes what's already waiting as old.
 pub fn stall_lost_runs(state: &AppState) {
     for s in ["running", "final_review", "final_fixes"] {
         for d in state.db.deliveries_in_state(s).unwrap_or_default() {
-            if s != "running" || d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")) {
-                stall(state, &d, "restart");
+            if (s != "running" || d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")))
+                && let Some(d) = stall(state, &d, "restart")
+            {
+                state.rt.lock().unwrap().news_at_start.insert(stalled_item_id(&d));
             }
         }
     }
@@ -738,7 +749,6 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let labelled = label_issue(state, &slug, on, label_tag).await.err().map(|e| format!(" The comment is posted, but {e}.")).unwrap_or_default();
         (format!("#{on}"), labelled)
     };
-    let d = unstalled(state, d);
 
     if verdict == "pass" {
         let d = update(state, &slug, d.spec, |d| {
@@ -749,12 +759,17 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         .ok_or("The Delivery record couldn't be saved.")?;
         let t = d.ticket(n).expect("just saved");
         if t.verdicts.values().any(|v| v != "pass") {
+            // A stalled Delivery stays stalled: the verdict it waits on may be the other reviewer's.
             return Ok(format!("Posted your pass on {on}.{labelled} {name} waits for its other reviewers."));
         }
+        // The last verdict: the review step is done, so a stalled Delivery carries on.
+        let d = unstalled(state, d);
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Posted your pass on {on}.{labelled}{closed}"));
     }
 
+    // Changes end the review step for every reviewer: the ticket goes back to the Dev (or the user).
+    let d = unstalled(state, d);
     let rounds = t.rounds + 1;
     let stuck = rounds >= MAX_ROUNDS;
     update(state, &slug, d.spec, |d| {

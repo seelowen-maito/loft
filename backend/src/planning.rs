@@ -4196,6 +4196,64 @@ pub(crate) mod tests {
         assert_eq!(delivery(&st, slug).state, "stalled");
     }
 
+    /// QA and Security review together: a stall from QA's run stays until QA's verdict comes, whatever
+    /// Security says meanwhile. Changes from either end the review step for both.
+    #[tokio::test]
+    async fn one_reviewers_pass_doesnt_clear_a_stall_from_the_other_reviewer() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/st-two";
+        let (dev, team) = building(&st, &fake, "st-two", &["qa", "security"]).await;
+        let (qa, sec) = (&team[0], &team[1]);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        run_starts(&st, qa);
+        crate::delivery::run_ended(&st, &qa.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.tickets[0].verdicts.get("qa").map(String::as_str)), ("stalled", Some("pending")), "QA's verdict is still missing");
+        assert_eq!(stalled_items(&st).len(), 1, "the user is still told");
+
+        // QA's late pass ends the step: the Delivery carries on and closes #41.
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.tickets[0].state.as_str()), ("running", "closed"));
+        assert!(stalled_items(&st).is_empty());
+    }
+
+    #[tokio::test]
+    async fn changes_from_the_other_reviewer_end_the_stalled_review() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/st-changes";
+        let (dev, team) = building(&st, &fake, "st-changes", &["qa", "security"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        run_starts(&st, &team[0]);
+        crate::delivery::run_ended(&st, &team[0].id, false).await;
+        tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "It leaks the token." })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.tickets[0].state.as_str()), ("running", "started"), "back with the Dev, who is woken");
+    }
+
+    /// An agent on two Deliveries: its run for spec #40 ends without its call while a wake for another
+    /// Delivery is queued. The run that takes that wake checks #40's step too.
+    #[tokio::test]
+    async fn a_queued_wake_for_another_delivery_keeps_the_ended_step_for_the_next_run() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/st-other";
+        let (dev, _) = building(&st, &fake, "st-other", &["qa"]).await;
+        run_starts(&st, &dev);
+        let other = crate::delivery::Wake { repo: "octo/other".into(), spec: 99, step: crate::delivery::Step::Build { ticket: 100, round: 0 } };
+        crate::agents::wake_on_ticket(&st, &dev.id, "octo/other#100", true, "other work".into(), other);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "running", "the next run may still make the call");
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled", "it didn't");
+    }
+
     #[tokio::test]
     async fn a_restart_stalls_the_deliveries_with_a_step_in_flight() {
         let st = state();

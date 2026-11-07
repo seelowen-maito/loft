@@ -683,6 +683,7 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
+        rt.delivery_queued.remove(id);
         rt.fresh_before.remove(id);
     }
     // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.

@@ -104,6 +104,9 @@ pub struct Runtime {
     pub delivery_queued: HashMap<String, Vec<crate::delivery::Wake>>,
     /// agent id -> the Delivery steps its current run was woken for, checked when it ends (delivery::run_ended)
     pub delivery_running: HashMap<String, Vec<crate::delivery::Wake>>,
+    /// Needs you item ids that became news at this start-up (Deliveries stalled by the restart): the pusher's
+    /// first look pushes them, unlike the items already waiting
+    pub news_at_start: std::collections::HashSet<String>,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
