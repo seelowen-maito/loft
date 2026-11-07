@@ -593,6 +593,11 @@ CREATE TABLE IF NOT EXISTS all_time_spend (
     runs INTEGER NOT NULL,
     cost_usd REAL NOT NULL
 );
+-- Each agent's port range, by slot (ports.rs); deleting the agent frees it.
+CREATE TABLE IF NOT EXISTS port_ranges (
+    slot INTEGER PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -954,7 +959,29 @@ impl Db {
         c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [id])?;
         Ok(())
+    }
+
+    /// The agent's port range slot: the one it has while `usable` keeps it, else the lowest usable free one
+    /// below `slots`, kept for it. None when every one is taken.
+    pub fn port_slot(&self, agent_id: &str, usable: impl Fn(i64) -> bool, slots: i64) -> Result<Option<i64>> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let mine: Option<i64> = tx.query_row("SELECT slot FROM port_ranges WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?;
+        if let Some(slot) = mine.filter(|&s| usable(s)) {
+            return Ok(Some(slot));
+        }
+        tx.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [agent_id])?;
+        let taken: std::collections::HashSet<i64> = {
+            let mut st = tx.prepare("SELECT slot FROM port_ranges")?;
+            let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let Some(slot) = (0..slots).find(|s| !taken.contains(s) && usable(*s)) else { return Ok(None) };
+        tx.execute("INSERT INTO port_ranges (slot, agent_id) VALUES (?1, ?2)", params![slot, agent_id])?;
+        tx.commit()?;
+        Ok(Some(slot))
     }
 
     // ---- tasks --------------------------------------------------------

@@ -483,7 +483,7 @@ Each message starts a run that ends with your reply. Claude Code background work
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
-- Dev servers (web apps, APIs, docs sites): start them detached (see Runs), listening on all interfaces (`vite --host`, `next dev -H 0.0.0.0`, `python3 -m http.server --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
+- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
 - iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install booted "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
@@ -525,6 +525,8 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
             .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
             .unwrap_or_default(),
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
+        ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
+        range_var = crate::ports::RANGE_VAR,
     )
 }
 
@@ -1026,6 +1028,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
+    let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
@@ -1049,6 +1052,9 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
+        // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
+        .env("PORT", ports.start().to_string())
+        .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1821,6 +1827,7 @@ while [ $# -gt 0 ]; do
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
+printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
@@ -2005,6 +2012,34 @@ esac
             assert!(!agent_file(&st, &a.id, kind).exists(), "{kind} is left behind");
         }
         assert!(workspace(&st, &a.id).exists());
+    }
+
+    /// The `PORT` and `LOFT_PORT_RANGE` each of the agent's runs was started with, in order.
+    fn ports_seen(st: &AppState, id: &str) -> Vec<String> {
+        std::fs::read_to_string(workspace(st, id).join("ports.log")).unwrap_or_default().lines().map(String::from).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_agent_serves_on_its_own_port_range_on_every_run_until_it_is_deleted() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        run(&st, &a.id, "hello", 1).await;
+        run(&st, &b.id, "hello", 1).await;
+        run(&st, &a.id, "again", 2).await;
+        assert_eq!(ports_seen(&st, &a.id), ["20000 20000-20009", "20000 20000-20009"], "the same range on every run");
+        assert_eq!(ports_seen(&st, &b.id), ["20010 20010-20019"]);
+        let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
+        assert!(system.contains("only on your own ports, 20000–20009 (`$PORT` is the first, `$LOFT_PORT_RANGE` the whole range)"), "{system}");
+
+        // Deleted through the API, its range goes to the next new agent.
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        let c = crate::tasks::tests::agent(&st, "Newcomer");
+        run(&st, &c.id, "hello", 1).await;
+        assert_eq!(ports_seen(&st, &c.id), ["20000 20000-20009"]);
+        run(&st, &b.id, "again", 2).await;
+        assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
     }
 
     fn error_text(st: &AppState, id: &str) -> Option<String> {
