@@ -104,11 +104,13 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
 export type IssueDelivery = {
-  /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "ready", "settled" or "merged". */
+  /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
   /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
   stall_reason?: string | null;
-  /** Resume applies: the Delivery is stalled, or a ticket or its final review waits for the user. */
+  /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
+  can_pause?: boolean;
+  /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
   can_resume?: boolean;
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
@@ -625,8 +627,10 @@ export const api = {
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
-  /** Resume on a stalled Delivery: Loft checks what was done meanwhile, then wakes only the agent its step waits on. */
+  /** Resume on a stalled or paused Delivery: Loft checks what was done meanwhile, then wakes only the agent its step waits on. */
   resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
+  /** Pause on a running Delivery: Loft stops the run working on it and sends no more wakes until Resume. */
+  pauseIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/pause-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

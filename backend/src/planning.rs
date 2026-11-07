@@ -688,7 +688,7 @@ pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, t
 
 /// A Delivery past its tickets, or waiting on someone: nothing to move on.
 fn waits(d: &crate::db::Delivery) -> bool {
-    matches!(d.state.as_str(), "ready" | "merged" | "settled" | "final_review" | "final_fixes" | "needs_human" | "stalled")
+    matches!(d.state.as_str(), "ready" | "merged" | "settled" | "final_review" | "final_fixes" | "needs_human" | "stalled" | "paused")
 }
 
 /// The mirror's catch-up for ready calls that were missed: on every poll the Deliveries whose call
@@ -3440,7 +3440,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -4517,7 +4517,7 @@ pub(crate) mod tests {
         let spec = spec_issue(&st, &fake, "rs-refuse", slug);
         let no = |e: crate::api::ApiError| e.1;
         let err = resume_card(&st, &spec).await.err().map(no).unwrap();
-        assert_eq!(err, "spec #40 isn't stalled: an agent is working on its step, so there's nothing to resume.");
+        assert_eq!(err, "spec #40 isn't stalled or paused: an agent is working on its step, so there's nothing to resume.");
         assert!(woken(&st, &dev).len() <= 1, "nothing more was woken");
         let before = woken(&st, &dev).len();
         for (state, says) in [("planned", "hasn't started"), ("ready", "is done")] {
@@ -4771,5 +4771,167 @@ pub(crate) mod tests {
         let d = delivery(&st, slug);
         assert_eq!((d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), (Some(42), "closed", "started"));
         assert!(fake.seen(&format!("/repos/{slug}/issues/41/labels/needs-human")).is_empty(), "nothing to unlabel on a closed ticket");
+    }
+
+    // ---- paused Deliveries (#338) ----
+
+    async fn pause_card(st: &AppState, issue: &crate::db::Task) -> Result<Value, crate::api::ApiError> {
+        crate::delivery::pause_from_issue(State(st.clone()), Path(issue.id.clone())).await.map(|j| j.0)
+    }
+
+    /// Whether `a`'s run was told to stop.
+    async fn stopped(kill: &std::sync::Arc<tokio::sync::Notify>) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(100), kill.notified()).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn pause_stops_the_dev_run_drops_queued_delivery_wakes_and_never_stalls() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ps-run";
+        let (dev, _) = building(&st, &fake, "ps-run", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "ps-run", slug);
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&shown["can_pause"], &shown["can_resume"]), (&json!(true), &json!(false)), "a running Delivery shows Pause");
+
+        // The Dev's run is building #41. Queued behind it: another wake for this Delivery, the user's
+        // message, and a wake for another Delivery.
+        run_starts(&st, &dev);
+        let kill = st.rt.lock().unwrap().running[&dev.id].clone();
+        let again = crate::delivery::Wake { repo: slug.into(), spec: 40, step: crate::delivery::Step::Build { ticket: 41, round: 0 } };
+        crate::agents::wake_on_ticket(&st, &dev.id, "octo/ps-run#41", true, "again".into(), again);
+        crate::agents::wake_for_user(&st, &dev.id, "from the user".into());
+        let other = crate::delivery::Wake { repo: "octo/other".into(), spec: 99, step: crate::delivery::Step::Build { ticket: 100, round: 0 } };
+        crate::agents::wake_on_ticket(&st, &dev.id, "octo/other#100", true, "other".into(), other.clone());
+
+        let v = pause_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Paused spec #40. Stopped the run of Builder. Dropped the Delivery wake queued for Builder. Loft sends no more wakes until you resume it.");
+        assert_eq!((&v["state"], &v["can_pause"], &v["can_resume"]), (&json!("paused"), &json!(false), &json!(true)), "the card shows Resume instead");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.tickets[0].state.as_str()), ("paused", "running", "started"));
+        assert!(stopped(&kill).await, "the run in flight was stopped, as the agent's Stop does");
+        assert_eq!(woken(&st, &dev), ["from the user", "other"], "only this Delivery's queued wake is dropped");
+        let queued: Vec<crate::delivery::Wake> = st.rt.lock().unwrap().delivery_queued[&dev.id].iter().map(|(w, _)| w.clone()).collect();
+        assert_eq!(queued, [other]);
+
+        // The stopped run ends (as failed, even): the Delivery isn't stalled, nor by a restart.
+        crate::delivery::run_ended(&st, &dev.id, true).await;
+        crate::delivery::stall_lost_runs(&st);
+        assert_eq!(delivery(&st, slug).state, "paused");
+        // No Needs you item, so no push.
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert!(!items.iter().any(|i| i["type"].as_str().unwrap().starts_with("delivery") || i["title"].as_str().unwrap().contains("Rounds")), "{items:?}");
+        // A late call takes nothing in, and wakes nobody.
+        let qa_before = st.db.list_agents().unwrap().into_iter().find(|a| a.role == "qa").map(|qa| woken(&st, &qa).len()).unwrap();
+        let err = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err();
+        assert!(err.contains("The Delivery of spec #40 is paused"), "{err}");
+        assert_eq!(delivery(&st, slug).tickets[0].state, "started");
+        assert_eq!(st.db.list_agents().unwrap().into_iter().find(|a| a.role == "qa").map(|qa| woken(&st, &qa).len()).unwrap(), qa_before);
+        // Pausing again is refused, saying why.
+        let err = pause_card(&st, &spec).await.err().unwrap().1;
+        assert_eq!(err, "spec #40 is already paused: Resume carries it on.");
+
+        // Resume wakes the Dev on #41 with the resume brief.
+        subs_on_github(&fake, slug, &["open", "open"]);
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([]));
+        st.rt.lock().unwrap().fresh_before.remove(&dev.id);
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Builder is building #41 again.");
+        assert_eq!((&v["state"], &v["can_pause"], &v["can_resume"]), (&json!("running"), &json!(true), &json!(false)));
+        let w = woken(&st, &dev);
+        let brief = w.last().unwrap();
+        assert!(brief.contains("build ticket #41") && brief.contains("This is a resume: the user paused the Delivery, and Loft stopped the work on its step"), "{brief}");
+        assert!(!st.rt.lock().unwrap().fresh_before.contains(&dev.id), "a Resume isn't a ticket boundary");
+    }
+
+    #[tokio::test]
+    async fn pause_drops_a_queued_review_and_resume_wakes_only_the_pending_reviewer() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ps-review";
+        let (dev, team) = building(&st, &fake, "ps-review", &["qa", "security"]).await;
+        let (qa, sec) = (&team[0], &team[1]);
+        let spec = spec_issue(&st, &fake, "ps-review", slug);
+        run_starts(&st, &dev);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        run_starts(&st, qa);
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        crate::delivery::run_ended(&st, &qa.id, false).await;
+        let sec_kill = st.rt.lock().unwrap().running[&sec.id].clone();
+        assert_eq!(woken(&st, sec).len(), 1, "Security's review is queued behind its run");
+
+        let v = pause_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Paused spec #40. Dropped the Delivery wake queued for security agent. Loft sends no more wakes until you resume it.");
+        assert!(woken(&st, sec).is_empty());
+        assert!(!stopped(&sec_kill).await, "Security's own run wasn't for this Delivery");
+
+        subs_on_github(&fake, slug, &["open", "open"]);
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. security agent (Security) is reviewing #41 again.");
+        let w = woken(&st, sec);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("This is a resume: the user paused the Delivery") && w[0].contains("Verdicts already in: QA passed it."), "{}", w[0]);
+        assert!(woken(&st, qa).is_empty() && woken(&st, &dev).is_empty(), "only the pending reviewer is woken");
+    }
+
+    #[tokio::test]
+    async fn while_paused_the_catch_up_closes_and_starts_nothing() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ps-catch";
+        let (dev, _) = building(&st, &fake, "ps-catch", &[]).await;
+        crate::delivery::pause(&st, slug, 40).await.unwrap();
+        // #41 passed, but its close failed: the catch-up would close it and start #42.
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "closing".into());
+        let before = woken(&st, &dev).len();
+        crate::delivery::retry(&st, slug).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), ("paused", Some(41), "closing", "open"));
+        assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|m| m.method != "PATCH"), "nothing was closed");
+        assert_eq!(woken(&st, &dev).len(), before);
+        // Nor does its last ticket closed by hand move it on to its final review or a ready spec PR.
+        let pr_calls = || fake.seen("/graphql").len() + fake.seen(&format!("/repos/{slug}/pulls/500")).len();
+        let pr_before = pr_calls();
+        crate::delivery::update(&st, slug, 40, |d| (d.tickets[0].state, d.tickets[1].state) = ("started".into(), "closed".into()));
+        let _held = st.publish_locks.of(slug).lock_owned().await;
+        assert_eq!(ready_when_last(&st, slug, 41, "").await.unwrap(), None);
+        drop(_held);
+        crate::delivery::retry(&st, slug).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.current, d.tickets[0].state.as_str()), ("paused", None, "closed"));
+        assert_eq!(pr_calls(), pr_before, "the spec PR wasn't touched");
+        assert_eq!(woken(&st, &dev).len(), before);
+    }
+
+    #[tokio::test]
+    async fn pause_applies_only_to_a_running_delivery_and_says_why_otherwise() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ps-refuse";
+        building(&st, &fake, "ps-refuse", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "ps-refuse", slug);
+        let shown = || async { crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0 };
+        for (state, ticket, says) in [
+            ("planned", "open", "spec #40 hasn't started, so there's nothing to pause."),
+            ("stalled", "started", "spec #40 is stalled: no agent is working on it, so there's nothing to pause. Resume carries it on."),
+            ("running", "needs_human", "spec #40 waits for you after too many changes rounds, so no agent is working on it. Resume gives it a fresh set of rounds."),
+            ("needs_human", "closed", "spec #40 waits for you after too many changes rounds, so no agent is working on it. Resume gives it a fresh set of rounds."),
+            ("ready", "closed", "spec #40 is done: every review passed, so there's nothing to pause."),
+        ] {
+            crate::delivery::update(&st, slug, 40, |d| (d.state, d.resume_to, d.tickets[0].state) = (state.into(), "running".into(), ticket.into()));
+            assert_eq!(shown().await["can_pause"], false, "{state}");
+            assert_eq!(pause_card(&st, &spec).await.err().unwrap().1, says, "{state}");
+            assert_eq!(delivery(&st, slug).state, state, "unchanged");
+        }
+        // The final review and its fixes pause, and go back to where they were.
+        for state in ["final_review", "final_fixes"] {
+            crate::delivery::update(&st, slug, 40, |d| (d.state, d.resume_to) = (state.into(), String::new()));
+            assert_eq!(shown().await["can_pause"], true, "{state}");
+            pause_card(&st, &spec).await.unwrap();
+            let d = delivery(&st, slug);
+            assert_eq!((d.state.as_str(), d.resume_to.as_str()), ("paused", state));
+        }
     }
 }

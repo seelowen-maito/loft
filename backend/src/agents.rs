@@ -807,12 +807,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
-                rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
+                rt.queued.entry(agent_id.to_string()).or_default().push(prompt.clone());
                 if for_user {
                     rt.queued_for_user.insert(agent_id.to_string());
                 }
                 if let Some(w) = delivery {
-                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push(w);
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt)));
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -896,7 +896,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
 /// The run that takes the agent's queue takes the Delivery steps it was woken for.
 pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str) {
     if let Some(w) = rt.delivery_queued.remove(agent_id) {
-        rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w);
+        rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w.into_iter().map(|(w, _)| w));
     }
 }
 

@@ -30,7 +30,7 @@ pub async fn track_pr(state: &AppState, d: &Delivery) {
 
 /// On start-up: tracks the PRs of Deliveries not yet settled, opened before Loft tracked them.
 pub async fn track_open_prs(state: AppState) {
-    for s in ["planned", "running", "final_review", "final_fixes", "needs_human", "stalled"] {
+    for s in ["planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused"] {
         for d in state.db.deliveries_in_state(s).unwrap_or_default() {
             track_pr(&state, &d).await;
         }
@@ -191,7 +191,7 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
         if let Some(q) = rt.delivery_queued.get_mut(agent_id).filter(|q| !q.is_empty()) {
             // The run that takes the queue carries on: it checks these steps too when it ends, whichever
             // Delivery its own wake is for.
-            q.extend(ended);
+            q.extend(ended.into_iter().map(|w| (w, None)));
             return;
         }
         ended
@@ -654,6 +654,15 @@ async fn ticket_of(state: &AppState, me: &crate::db::Agent, args: &Value, tool: 
     Ok((slug, n, d, held))
 }
 
+/// A paused Delivery takes no call: the user paused it, so it moves on, and wakes anyone, only once they
+/// resume it. Resume then reads what was done meanwhile (commits on the branch) and wakes who it waits on.
+fn refuse_paused(d: &Delivery) -> Result<(), String> {
+    if d.state != "paused" {
+        return Ok(());
+    }
+    Err(format!("The Delivery of {} is paused: the user paused it, so Loft took nothing in. Stop here: when they resume it, Loft wakes the agent its step waits on with what's already done.", subject(d)))
+}
+
 /// The tickets being built or in review on `slug`, for a refusal.
 fn in_progress(state: &AppState, slug: &str) -> String {
     let ds = state.db.deliveries(slug, true).unwrap_or_default();
@@ -669,6 +678,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return out;
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "submit_ticket").await?;
+    refuse_paused(&d)?;
     let t = d.ticket(n).expect("of_ticket found it");
     let name = tag(&d, t);
     if d.current != Some(n) || t.state != "started" {
@@ -725,6 +735,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Err("Only the Code reviewer files tech_debt, in its review of the whole spec PR.".into());
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "review_ticket").await?;
+    refuse_paused(&d)?;
     let role = me.role.as_str();
     let t = d.ticket(n).expect("of_ticket found it").clone();
     let name = tag(&d, &t);
@@ -943,12 +954,12 @@ pub(crate) async fn retry(state: &AppState, repo: &str) {
     }
 }
 
-/// Why a Delivery that isn't stalled can't be resumed.
+/// Why a Delivery that isn't stalled or paused can't be resumed.
 fn not_resumable(d: &Delivery) -> String {
     let what = subject(d);
     match d.state.as_str() {
         "planned" => format!("{what} hasn't started: Start delivery starts it."),
-        "running" | "final_review" | "final_fixes" => format!("{what} isn't stalled: an agent is working on its step, so there's nothing to resume."),
+        "running" | "final_review" | "final_fixes" => format!("{what} isn't stalled or paused: an agent is working on its step, so there's nothing to resume."),
         _ => format!("{what} is done: every review passed, so there's nothing to resume."),
     }
 }
@@ -1196,11 +1207,11 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
     Ok(format!("Resumed {}.{line}{unlabelled}", subject(&saved)))
 }
 
-/// Resume on a stalled Delivery. It first reconciles what was done meanwhile (tickets closed by hand), then
+/// Resume on a stalled or paused Delivery. It first reconciles what was done meanwhile (tickets closed by hand), then
 /// wakes only the role its step waits on, with its role brief and a "this is a resume" section: the Dev for a
 /// ticket being built or the final fixes, the reviewers whose verdict is still pending, the Code reviewer for
 /// the final review, or the next ticket's builder when nothing is in flight. The Delivery goes back to the
-/// state it stalled in, so its Needs you item goes. A ticket or final review waiting for the user gets a fresh
+/// state it stalled or paused in, so a stall's Needs you item goes. A ticket or final review waiting for the user gets a fresh
 /// set of rounds instead (`resume_needs_human`). Anything else is refused, saying why. The line saying what it
 /// did.
 pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
@@ -1209,10 +1220,11 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
     if waits_for_user(&d) {
         return resume_needs_human(state, d).await;
     }
-    if d.state != "stalled" {
-        return Err(not_resumable(&d));
-    }
-    let stalled = format!("the Delivery stalled because {}", stall_why(&d.stall_reason));
+    let stalled = match d.state.as_str() {
+        "stalled" => format!("the Delivery stalled because {}", stall_why(&d.stall_reason)),
+        "paused" => "the user paused the Delivery, and Loft stopped the work on its step".to_string(),
+        _ => return Err(not_resumable(&d)),
+    };
     let (d, closed) = reconcile(state, &d).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
     let closed = match closed.as_slice() {
         [] => String::new(),
@@ -1297,17 +1309,125 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
 /// `POST /api/issues/{id}/resume-delivery`: Resume on the Delivery card of a spec's or standalone ticket's
 /// issue (its Loft issue, in a plan kept in Loft). The Delivery as the card shows it, and what Resume did.
 pub async fn resume_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let d = delivery_of_issue(&state, &id)?;
+    let message = resume(&state, &d.repo, d.spec).await.map_err(bad)?;
+    card_reply(&state, &d, message)
+}
+
+/// The Delivery of a spec's or standalone ticket's issue `id` (its Loft issue, in a plan kept in Loft).
+fn delivery_of_issue(state: &AppState, id: &str) -> Result<Delivery, crate::api::ApiError> {
+    let t = state.db.get_task(id)?.ok_or_else(not_found)?;
     let d = match &t.github {
         Some(g) => state.db.get_delivery(&g.repo, g.number)?.filter(|d| !d.local),
-        None => local_of(&state, &t.project, &t.id),
+        None => local_of(state, &t.project, &t.id),
     };
-    let d = d.ok_or_else(|| bad("This issue has no Delivery."))?;
-    let message = resume(&state, &d.repo, d.spec).await.map_err(bad)?;
-    let mut v = delivery_json(&state, &state.db.get_delivery(&d.repo, d.spec)?.ok_or_else(not_found)?);
+    d.ok_or_else(|| bad("This issue has no Delivery."))
+}
+
+/// A Delivery card button's answer: the Delivery as the card shows it now, and what the button did.
+fn card_reply(state: &AppState, d: &Delivery, message: String) -> ApiResult<Value> {
+    let mut v = delivery_json(state, &state.db.get_delivery(&d.repo, d.spec)?.ok_or_else(not_found)?);
     v["ok"] = json!(true);
     v["message"] = json!(message);
     Ok(Json(v))
+}
+
+/// Whether the user can pause `d`: an agent should be working on its step (building tickets, the final review
+/// or its fixes), and no ticket waits for the user.
+fn pausable(d: &Delivery) -> bool {
+    matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") && !waits_for_user(d)
+}
+
+/// Why a Delivery the user can't pause can't be.
+fn not_pausable(d: &Delivery) -> String {
+    let what = subject(d);
+    match d.state.as_str() {
+        "planned" => format!("{what} hasn't started, so there's nothing to pause."),
+        "paused" => format!("{what} is already paused: Resume carries it on."),
+        "stalled" => format!("{what} is stalled: no agent is working on it, so there's nothing to pause. Resume carries it on."),
+        _ if waits_for_user(d) => format!("{what} waits for you after too many changes rounds, so no agent is working on it. Resume gives it a fresh set of rounds."),
+        _ => format!("{what} is done: every review passed, so there's nothing to pause."),
+    }
+}
+
+/// Pause on a running Delivery (its final review and fixes included): it's marked paused, keeping the state
+/// to go back to, then each run working on one of its steps is stopped the way the agent's Stop does, and
+/// its Delivery wakes still queued are dropped. That stop doesn't stall it, and while paused it starts no
+/// ticket, takes no Delivery call and sends no wake, until Resume. Anything else is refused, saying why.
+/// The line saying what it did.
+pub async fn pause(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
+    let _held = state.publish_locks.of(repo).lock_owned().await;
+    let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or_else(|| format!("Spec #{spec} on {repo} has no Delivery."))?;
+    if !pausable(&d) {
+        return Err(not_pausable(&d));
+    }
+    // Paused first: the stopped runs' ends then find nothing to stall.
+    let d = update(state, repo, spec, |d| d.resume_to = std::mem::replace(&mut d.state, "paused".into())).ok_or("Nothing was paused: the Delivery record couldn't be saved.")?;
+    tracing::info!("delivery {repo}#{spec}: paused");
+    let (stopped, dropped) = drop_wakes(state, &d);
+    for id in &stopped {
+        for p in state.db.list_permissions(Some(id)).unwrap_or_default().into_iter().filter(|p| p.status == "pending") {
+            let _ = crate::agents::decide(state, &p.id, "deny", None, Some("Run stopped: the user paused its Delivery.".into()));
+        }
+        crate::agents::stop(state, id);
+    }
+    let names = |ids: &[String]| ids.iter().map(|id| state.db.get_agent(id).ok().flatten().map_or_else(|| id.clone(), |a| a.name)).collect::<Vec<_>>().join(" and ");
+    let mut line = format!("Paused {}.", subject(&d));
+    if !stopped.is_empty() {
+        line += &format!(" Stopped the run of {}.", names(&stopped));
+    }
+    if !dropped.is_empty() {
+        line += &format!(" Dropped the Delivery wake queued for {}.", names(&dropped));
+    }
+    Ok(format!("{line} Loft sends no more wakes until you resume it."))
+}
+
+/// Pause's hold on the agents' runs: forgets the steps of `d` that runs are working on, and drops its wakes
+/// still queued (their prompts too). The agents whose run to stop, and those whose queued wake was dropped.
+fn drop_wakes(state: &AppState, d: &Delivery) -> (Vec<String>, Vec<String>) {
+    let of_d = |w: &Wake| w.repo == d.repo && w.spec == d.spec;
+    let mut rt = state.rt.lock().unwrap();
+    let rt = &mut *rt;
+    let mut stopped = vec![];
+    for (id, ws) in rt.delivery_running.iter_mut() {
+        if ws.iter().any(of_d) {
+            ws.retain(|w| !of_d(w));
+            stopped.push(id.clone());
+        }
+    }
+    let mut dropped = vec![];
+    for (id, ws) in rt.delivery_queued.iter_mut() {
+        if !ws.iter().any(|(w, _)| of_d(w)) {
+            continue;
+        }
+        for (_, prompt) in ws.iter().filter(|(w, _)| of_d(w)) {
+            if let (Some(p), Some(q)) = (prompt, rt.queued.get_mut(id))
+                && let Some(i) = q.iter().position(|x| x == p)
+            {
+                q.remove(i);
+            }
+        }
+        ws.retain(|(w, _)| !of_d(w));
+        if ws.is_empty() {
+            // No queued wake left to start a new ticket.
+            rt.fresh_before.remove(id);
+        }
+        dropped.push(id.clone());
+    }
+    rt.queued.retain(|_, q| !q.is_empty());
+    rt.delivery_queued.retain(|_, ws| !ws.is_empty());
+    rt.delivery_running.retain(|_, ws| !ws.is_empty());
+    stopped.sort();
+    dropped.sort();
+    (stopped, dropped)
+}
+
+/// `POST /api/issues/{id}/pause-delivery`: Pause on the Delivery card of a spec's or standalone ticket's issue
+/// (its Loft issue, in a plan kept in Loft). The Delivery as the card shows it, and what Pause did.
+pub async fn pause_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let d = delivery_of_issue(&state, &id)?;
+    let message = pause(&state, &d.repo, d.spec).await.map_err(bad)?;
+    card_reply(&state, &d, message)
 }
 
 /// `POST /api/deliveries/resume` with `{ repo, spec }`: the "Delivery stalled" Needs you item's Resume.
@@ -1457,15 +1577,16 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
     })
 }
 
-/// What an issue page shows of its Delivery: its state (with why it stalled, whether Resume applies, and whether a
-/// ticket or its final review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
+/// What an issue page shows of its Delivery: its state (with why it stalled, whether Pause and Resume apply, and
+/// whether a ticket or its final review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
 fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let dev = state.db.get_agent(&d.dev).ok().flatten();
     let current = d.current.and_then(|n| d.ticket(n));
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
-        "can_resume": d.state == "stalled" || waits_for_user(d),
+        "can_pause": pausable(d),
+        "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
         "needs_human": d.state == "needs_human" || d.tickets.iter().any(|t| t.state == "needs_human"),
         "started": d.state != "planned",
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
@@ -1607,6 +1728,9 @@ async fn final_of(state: &AppState, me: &crate::db::Agent, args: &Value) -> Resu
 async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, commits: &[String]) -> Option<Result<String, String>> {
     let (slug, n, d, _held) = final_of(state, me, args).await.ok()?;
     let d = d.filter(|d| d.step_state() == "final_fixes")?;
+    if let Err(e) = refuse_paused(&d) {
+        return Some(Err(e));
+    }
     if d.dev != me.id {
         return Some(Err(format!("{n}'s fixes are with another agent: only the agent fixing it submits them.")));
     }
@@ -1631,6 +1755,7 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
 async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, verdict: &str, notes: &str) -> Result<String, String> {
     let (slug, n, d, _held) = final_of(state, me, args).await?;
     let d = d.filter(|d| d.step_state() == "final_review").ok_or_else(|| format!("{n} isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed."))?;
+    refuse_paused(&d)?;
     let pr = d.pr.unwrap_or_default();
     if !d.local && pr == 0 {
         return Err("The Delivery has no spec PR.".into());

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
@@ -170,45 +170,57 @@ function useIssueDelivery(t: Task) {
 const TONE: Record<DeliveryTone, string> = {
   running: "text-accent",
   stalled: "text-bad",
+  paused: "text-fg-3",
   needs_you: "text-warn",
   final: "text-accent",
   done: "text-good",
 };
 
-/** Where a started Delivery stands: running, stalled (and why), needs you, final review or done. */
+/** Where a started Delivery stands: running, stalled (and why), paused, needs you, final review or done. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
   const line = deliveryStateLine(d);
   if (!line) return null;
   return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
 }
 
-/** Resume on a stalled Delivery's card, or one whose ticket or final review waits for the user after too many
- *  changes rounds: Loft checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
+/** Pause and Resume on a Delivery's card. Pause stops the run working on a running Delivery and sends no more
+ *  wakes. Resume, on a stalled or paused Delivery or one whose ticket or final review waits for the user after too
+ *  many changes rounds, checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
  *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
-function useResume(t: Task, setD: (d: IssueDelivery) => void) {
-  const [busy, setBusy] = useState(false);
+function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
+  const [busy, setBusy] = useState<"pause" | "resume" | null>(null);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
-  const resume = async () => {
-    setBusy(true);
+  const run = async (what: "pause" | "resume") => {
+    setBusy(what);
     setSaid(null);
     try {
-      const r = await api.resumeIssueDelivery(t.id);
+      const r = await (what === "pause" ? api.pauseIssueDelivery(t.id) : api.resumeIssueDelivery(t.id));
       setD(r);
       setSaid({ ok: true, text: r.message });
     } catch (e) {
       setSaid({ ok: false, text: (e as Error).message });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
-  return { resume, busy, said };
+  return { pause: () => run("pause"), resume: () => run("resume"), busy, said };
 }
 
-function ResumeButton({ busy, onClick }: { busy: boolean; onClick: () => void }) {
+function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<typeof useDeliveryActions> }) {
+  const show = deliveryButtons(d);
   return (
-    <button className={cx("btn-primary", busy && "disabled:opacity-100")} disabled={busy} aria-busy={busy} onClick={onClick}>
-      {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {busy ? "Resuming…" : "Resume"}
-    </button>
+    <>
+      {show.pause && (
+        <button className={cx("btn-ghost", a.busy === "pause" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "pause"} onClick={a.pause}>
+          {a.busy === "pause" ? <Loader2 className="size-3.5 animate-spin" /> : <Pause className="size-3.5" />} {a.busy === "pause" ? "Pausing…" : "Pause"}
+        </button>
+      )}
+      {show.resume && (
+        <button className={cx("btn-primary", a.busy === "resume" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "resume"} onClick={a.resume}>
+          {a.busy === "resume" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {a.busy === "resume" ? "Resuming…" : "Resume"}
+        </button>
+      )}
+    </>
   );
 }
 
@@ -223,7 +235,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
   const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD] = useIssueDelivery(t);
-  const r = useResume(t, setD);
+  const r = useDeliveryActions(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -255,7 +267,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
         {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
-        {deliveryButtons(d).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
+        <DeliveryButtons d={d} a={r} />
       </div>
       <Said said={r.said} />
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
@@ -270,7 +282,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD, reload] = useIssueDelivery(t);
-  const r = useResume(t, setD);
+  const r = useDeliveryActions(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -308,7 +320,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
-        {deliveryButtons(started).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
+        <DeliveryButtons d={started} a={r} />
       </div>
       <Said said={r.said} />
       {skipped.length > 0 && (

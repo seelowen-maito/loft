@@ -100,8 +100,10 @@ pub struct Runtime {
     /// agents whose next run starts a Delivery ticket they haven't worked on: Loft first clears their
     /// context if their Fresh context setting says so
     pub fresh_before: std::collections::HashSet<String>,
-    /// agent id -> the Delivery steps its queued work was woken for: the run that takes the queue takes them
-    pub delivery_queued: HashMap<String, Vec<crate::delivery::Wake>>,
+    /// agent id -> the Delivery steps its queued work was woken for, each with the queued prompt that wakes
+    /// for it (None for a step moved back from an ended or restarted run): the run that takes the queue takes
+    /// them, and Pause drops a paused Delivery's (delivery::pause)
+    pub delivery_queued: HashMap<String, Vec<(crate::delivery::Wake, Option<String>)>>,
     /// agent id -> the Delivery steps its current run was woken for, checked when it ends (delivery::run_ended)
     pub delivery_running: HashMap<String, Vec<crate::delivery::Wake>>,
     /// Needs you item ids that became news at this start-up (Deliveries stalled by the restart): the pusher's

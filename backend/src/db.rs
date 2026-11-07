@@ -35,10 +35,10 @@ pub struct Delivery {
     /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
     /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
     /// "needs_human" (too many final rounds), "stalled" (the run woken for its step ended without the
-    /// step's call: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
+    /// step's call: see `resume_to`), "paused" (the user paused it: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
     /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
-    /// While stalled: the state it goes back to ("running", "final_review" or "final_fixes").
+    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
     #[serde(default)]
     pub resume_to: String,
     /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
@@ -100,14 +100,14 @@ impl Delivery {
         self.tickets.iter_mut().find(|t| t.number == n)
     }
 
-    /// The state its step is in: a stalled one's is the state it goes back to.
+    /// The state its step is in: a stalled or paused one's is the state it goes back to.
     pub fn step_state(&self) -> &str {
-        if self.state == "stalled" { &self.resume_to } else { &self.state }
+        if matches!(self.state.as_str(), "stalled" | "paused") { &self.resume_to } else { &self.state }
     }
 
-    /// Back to the state it stalled in, if it stalled.
+    /// Back to the state it stalled or paused in, if it did.
     pub fn unstall(&mut self) {
-        if self.state == "stalled" {
+        if matches!(self.state.as_str(), "stalled" | "paused") {
             self.state = std::mem::take(&mut self.resume_to);
         }
         (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());

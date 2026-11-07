@@ -606,7 +606,7 @@ pub(crate) async fn restart_run(state: AppState, id: String, by: &'static str) -
         }
         // The next run picks up the same work, so the Delivery steps it was woken for wait for that run's end.
         if let Some(w) = rt.delivery_running.remove(&id) {
-            rt.delivery_queued.entry(id.clone()).or_default().extend(w);
+            rt.delivery_queued.entry(id.clone()).or_default().extend(w.into_iter().map(|w| (w, None)));
         }
         rt.restarting.insert(id.clone(), by);
     }
