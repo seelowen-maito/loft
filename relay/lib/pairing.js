@@ -50,7 +50,7 @@ export async function poll(request, env = process.env) {
 export async function connect(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
   const code = new URL(request.url).searchParams.get("code") ?? "";
-  if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
+  if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404, { "set-cookie": cookie("pair", "", 0) });
   if (!(await accountOf(request, env, now))) {
     return page("Connect your Loft", `<p>Sign in with Apple to let your Loft send push notifications.</p><p>${appleButton}</p>`, 200, { "set-cookie": cookie("pair", code, CODE_SECONDS) });
   }
@@ -76,7 +76,7 @@ export async function approve(request, env = process.env, now = Date.now()) {
   const store = makeKv(env);
   // The first approval claims the code; a second click or tab finds it claimed. The waiting marker stays until the key
   // is stored, so a poll in between still answers 202 instead of 404.
-  const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
+  const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404, { "set-cookie": cookie("pair", "", 0) });
   const marker = CODE.test(code) ? await store.get(waiting(code)) : null;
   if (!marker) return expired();
   const limit = await limited(store, request, "key", now);

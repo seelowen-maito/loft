@@ -131,6 +131,21 @@ test("the code flow: a code, approved by a signed-in user, gives the Loft that a
   assert.equal(pushed.status, 400, "past the key check (the body is what's wrong)");
 });
 
+test("an expired or gone code in the cookie says so once and clears the cookie", async () => {
+  for (const gone of [(code) => (clock += 601_000), (code) => store.delete(`pair:${createHash("sha256").update(code).digest("hex")}`)]) {
+    const code = await newCode();
+    const remembered = cookiesOf(await connect(get(`/connect?code=${code}`), env)).join("; ");
+    const { cookies } = await signInAs(remembered);
+    gone(code);
+    assert.equal((await home(get("/", cookies), env)).headers.get("location"), `/connect?code=${code}`);
+    const res = await connect(get(`/connect?code=${code}`, cookies), env);
+    assert.equal(res.status, 404);
+    assert.match(res.headers.get("set-cookie"), /__Host-pair=; Max-Age=0/);
+    const next = await home(get("/", cookies.replace(/__Host-pair=[^;]*;?\s*/, "")), env);
+    assert.equal(next.status, 200, "the next visit shows the normal page");
+  }
+});
+
 test("an unapproved or expired code returns no key", async () => {
   const code = await newCode();
   assert.equal((await (await pollFor(code)).json()).key, undefined);
