@@ -37,7 +37,8 @@ export function deliveryStateLine(d: Pick<IssueDelivery, "state" | "started" | "
   return { tone: "running", text: "Running." };
 }
 
-/** The buttons a started Delivery's card shows: Resume only when the server says it applies. */
+/** The buttons a started Delivery's card shows: Resume only when the server says it applies (stalled, or a ticket
+ *  or final review waiting for the user). */
 export function deliveryButtons(d: Pick<IssueDelivery, "started" | "can_resume"> | null): { resume: boolean } {
   return { resume: !!d?.started && !!d.can_resume };
 }

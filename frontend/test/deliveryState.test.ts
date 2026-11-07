@@ -29,10 +29,12 @@ test("a ticket or the final review waiting for the user is Needs you, over runni
   assert.equal(at("stalled", { stall_reason: "no_call", needs_human: true })?.tone, "stalled", "a stalled one says so");
 });
 
-test("Resume shows only on a stalled Delivery", () => {
+test("Resume shows only on a stalled Delivery, or a ticket or final review waiting for the user", () => {
   const card = (state: string, can_resume: boolean, started = true) => deliveryButtons({ started, can_resume });
   assert.deepEqual(card("stalled", true), { resume: true });
-  for (const s of ["running", "final_review", "final_fixes", "needs_human", "ready", "settled", "merged"]) assert.deepEqual(card(s, false), { resume: false }, s);
+  assert.deepEqual(card("needs_human", true), { resume: true }, "the final review waits for the user");
+  assert.deepEqual(card("running", true), { resume: true }, "a ticket waits for the user");
+  for (const s of ["running", "final_review", "final_fixes", "ready", "settled", "merged"]) assert.deepEqual(card(s, false), { resume: false }, s);
   assert.deepEqual(card("planned", false, false), { resume: false });
   assert.deepEqual(deliveryButtons(null), { resume: false });
   assert.deepEqual(deliveryButtons({ started: true }), { resume: false }, "an older server sends no can_resume");

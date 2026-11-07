@@ -213,6 +213,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // Deliveries whose ticket (or final review) waits for the user after too many changes rounds: the Loft
+    // issue it blocked offers Resume.
+    let mut by_rounds = state.db.deliveries_in_state("running").map_err(e)?;
+    by_rounds.extend(state.db.deliveries_in_state("needs_human").map_err(e)?);
+    by_rounds.retain(crate::delivery::waits_for_user);
+
     // Tasks waiting for you, blocked or failed.
     for t in &tasks {
         let (urgency, reason) = match t.status.as_str() {
@@ -222,7 +228,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
-        let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        let mut actions = vec![];
+        if t.status == "blocked"
+            && let Some(d) = by_rounds.iter().find(|d| crate::delivery::blocked_by_rounds(d, t))
+        {
+            actions.push(action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })));
+        }
+        actions.push(action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true })));
         if t.status == "failed" && t.agent_id.is_some() {
             actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
         }

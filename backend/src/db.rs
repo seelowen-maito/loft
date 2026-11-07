@@ -63,6 +63,10 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
+    /// ticket or final review waiting for the user hands them to the Dev.
+    #[serde(default)]
+    pub last_notes: String,
     /// Made from a spec PR recorded before Deliveries: its tickets' states weren't recorded, so GitHub
     /// says whether they're closed.
     #[serde(default)]
@@ -1440,6 +1444,7 @@ impl Db {
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                last_notes: String::new(),
                 migrated: true,
                 standalone: false,
                 local: false,

@@ -182,8 +182,9 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
   return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
 }
 
-/** Resume on a stalled Delivery's card: Loft checks what was done meanwhile, then wakes only the agent its step
- *  waits on. The card shows what it did, or why it refused. */
+/** Resume on a stalled Delivery's card, or one whose ticket or final review waits for the user after too many
+ *  changes rounds: Loft checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
+ *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
 function useResume(t: Task, setD: (d: IssueDelivery) => void) {
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);

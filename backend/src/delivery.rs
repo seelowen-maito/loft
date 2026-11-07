@@ -66,6 +66,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             current: None,
             dev: String::new(),
             final_rounds: 0,
+            last_notes: String::new(),
             migrated: false,
             standalone: false,
             local: false,
@@ -784,6 +785,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             t.verdicts.clear();
             t.state = if stuck { "needs_human" } else { "started" }.into();
         }
+        d.last_notes = notes.into();
     })
     .ok_or("The Delivery record couldn't be saved.")?;
     if stuck {
@@ -947,7 +949,6 @@ fn not_resumable(d: &Delivery) -> String {
     match d.state.as_str() {
         "planned" => format!("{what} hasn't started: Start delivery starts it."),
         "running" | "final_review" | "final_fixes" => format!("{what} isn't stalled: an agent is working on its step, so there's nothing to resume."),
-        "needs_human" => format!("{what} waits for you after too many rounds of changes in its final review, not on a stalled step: there's nothing to resume."),
         _ => format!("{what} is done: every review passed, so there's nothing to resume."),
     }
 }
@@ -1022,11 +1023,11 @@ async fn branch_commits(state: &AppState, d: &Delivery, trailer: &str, known: &[
     Ok(found)
 }
 
-/// The "this is a resume" section a Resume wake adds to the role brief: why the step stopped, and what's
-/// already done.
-fn resume_section(why: &str, done: &[String]) -> String {
+/// The "this is a resume" section a Resume wake adds to the role brief: why the step stopped (`stopped`, a
+/// clause), and what's already done.
+fn resume_section(stopped: &str, done: &[String]) -> String {
     let done = done.iter().map(|l| format!("\n- {l}")).collect::<String>();
-    format!("\n\nThis is a resume: the Delivery stalled because {why}, and the user pressed Resume. Pick the work up where it stopped instead of starting over.{done}")
+    format!("\n\nThis is a resume: {stopped}, and the user pressed Resume. Pick the work up where it stopped instead of starting over.{done}")
 }
 
 /// What a Resume wake to the Dev on ticket `t` says is done: its commits found on the branch, and its
@@ -1050,10 +1051,11 @@ async fn build_done(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> Vec<S
 /// The Dev brief for the final Code Review's fixes, for a Resume: the Code reviewer's notes are on the spec
 /// PR (or the spec's Loft issue), since Loft doesn't keep them.
 fn fixes_brief(d: &Delivery) -> String {
-    let rounds = d.final_rounds;
+    // None yet after a Resume on a final review that waited for the user: its rounds start over.
+    let rounds = if d.final_rounds > 0 { format!(" (round {} of {MAX_ROUNDS})", d.final_rounds) } else { String::new() };
     if d.local {
         return format!(
-            "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the spec branch `{branch}` (round {rounds} of {MAX_ROUNDS}). Its notes are its last note on the spec's Loft issue {spec_id}.\n\
+            "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the spec branch `{branch}`{rounds}. Its notes are its last note on the spec's Loft issue {spec_id}.\n\
              Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
             about = subject(d),
             branch = d.branch,
@@ -1063,7 +1065,7 @@ fn fixes_brief(d: &Delivery) -> String {
     }
     let pr = d.pr.unwrap_or_default();
     format!(
-        "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the {pname} https://github.com/{repo}/pull/{pr} (round {rounds} of {MAX_ROUNDS}). Its notes are its last comment there.\n\
+        "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the {pname} https://github.com/{repo}/pull/{pr}{rounds}. Its notes are its last comment there.\n\
          Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
         about = subject(d),
         pname = pr_name(d),
@@ -1080,19 +1082,137 @@ fn dev_of(state: &AppState, d: &Delivery) -> Result<crate::db::Agent, String> {
     state.db.get_agent(&d.dev).ok().flatten().or_else(|| builder(state, d, &d.dev)).ok_or_else(|| "Nothing was resumed: the team has no Dev and the agent that planned the spec is gone.".to_string())
 }
 
+/// Whether a ticket of `d`, or its final review, waits for the user after too many changes rounds: Resume
+/// gives it a fresh set of rounds.
+pub(crate) fn waits_for_user(d: &Delivery) -> bool {
+    d.state == "needs_human" || (d.state == "running" && d.tickets.iter().any(|t| t.state == "needs_human"))
+}
+
+/// Whether the Loft issue `t` is the one blocked by `d`'s ticket (or final review) waiting for the user: its
+/// Needs you item offers Resume.
+pub(crate) fn blocked_by_rounds(d: &Delivery, t: &crate::db::Task) -> bool {
+    if !waits_for_user(d) {
+        return false;
+    }
+    let ticket = d.tickets.iter().find(|x| x.state == "needs_human");
+    if d.local {
+        return t.id == if d.state == "needs_human" { d.spec_id.as_str() } else { ticket.map_or("", |x| x.id.as_str()) };
+    }
+    let n = if d.state == "needs_human" { Some(d.spec) } else { ticket.map(|x| x.number) };
+    t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && Some(g.number) == n)
+}
+
+/// Takes label `name` off issue or PR #n; one that's gone already is fine.
+async fn unlabel_issue(state: &AppState, slug: &str, n: i64, name: &str) -> Result<(), String> {
+    match crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{slug}/issues/{n}/labels/{name}"), None).await {
+        Err(e) if !crate::github::is_gone(&e) => Err(format!("couldn't take `{name}` off #{n}: {e}")),
+        _ => Ok(()),
+    }
+}
+
+/// The ticket's (with None the spec's, or the standalone ticket's) Loft issue goes back to in progress, if
+/// `needs_human` blocked it.
+fn unblock(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) {
+    let x = if d.local {
+        state.db.get_task(t.map_or(d.spec_id.as_str(), |t| t.id.as_str())).ok().flatten()
+    } else {
+        let n = t.map_or(d.spec, |t| t.number);
+        state.db.list_tasks().unwrap_or_default().into_iter().find(|x| x.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == n))
+    };
+    if let Some(mut x) = x.filter(|x| x.status == "blocked") {
+        x.error.clear();
+        crate::tasks::set_status(state, &mut x, "in_progress", "user", Some(&format!("Resumed by you: a fresh {MAX_ROUNDS} rounds of changes")));
+    }
+}
+
+/// Resume on a ticket or final review waiting for the user after too many changes rounds, once they looked
+/// at it: its rounds start over, `needs-human` comes off the ticket (or the spec PR), its Loft issue is
+/// unblocked, and the Dev is woken with the last changes notes. The ticket is built again (the Delivery goes
+/// back to its final fixes), and the Delivery carries on as usual. A ticket closed by hand meanwhile is
+/// marked closed, and the next one starts. The line saying what it did.
+async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, String> {
+    let (d, closed) = reconcile(state, &d).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
+    let (repo, spec) = (d.repo.clone(), d.spec);
+    // The ticket waiting for the user, or with None the final review.
+    let waiting = if d.state == "needs_human" { Some(None) } else { d.tickets.iter().find(|t| t.state == "needs_human").cloned().map(Some) };
+    let Some(t) = waiting else {
+        // Its ticket was closed by hand meanwhile: on to the next one.
+        let names = closed.iter().filter_map(|n| d.ticket(*n)).map(|t| tag(&d, t)).collect::<Vec<_>>().join(", ");
+        let line = if !d.tickets.is_empty() && d.tickets.iter().all(|t| t.state == "closed") {
+            crate::planning::after_tickets(state, &d).await.unwrap_or_else(|e| Some(format!("\nBut {e}: Loft tries again on its next poll."))).unwrap_or_default()
+        } else {
+            start_next(state, &repo, spec).await
+        };
+        return Ok(format!("Resumed {}. Closed by hand meanwhile, so marked closed: {names}.{}", subject(&d), line.replace('\n', " ").trim_end()));
+    };
+    let dev = dev_of(state, &d)?;
+    let what = t.as_ref().map_or_else(|| final_tag(&d), |t| tag(&d, t));
+    let rounds = t.as_ref().map_or(d.final_rounds, |t| t.rounds);
+    let notes = d.last_notes.trim().to_string();
+    let saved = update(state, &repo, spec, |d| {
+        match &t {
+            Some(t) => {
+                if let Some(t) = d.ticket_mut(t.number) {
+                    (t.rounds, t.state) = (0, "started".into());
+                    t.verdicts.clear();
+                }
+                d.current = Some(t.number);
+            }
+            None => (d.final_rounds, d.state) = (0, "final_fixes".into()),
+        }
+        d.dev = dev.id.clone();
+    })
+    .ok_or("Nothing was resumed: the Delivery record couldn't be saved.")?;
+    let unlabelled = if d.local {
+        String::new()
+    } else {
+        let on = t.as_ref().map_or(d.pr.unwrap_or(d.spec), |t| t.number);
+        unlabel_issue(state, &repo, on, "needs-human").await.err().map(|e| format!(" But Loft {e}.")).unwrap_or_default()
+    };
+    unblock(state, &d, t.as_ref());
+
+    // The brief: the role's, the resume section, and the notes that asked for the last changes.
+    let at = match (&t, d.local) {
+        (Some(t), true) => format!("its Loft issue {}", t.id),
+        (None, true) => format!("the spec's Loft issue {}", d.spec_id),
+        _ => format!("the {} https://github.com/{repo}/pull/{}", pr_name(&d), d.pr.unwrap_or_default()),
+    };
+    let stopped = format!("{what} waited for the user after {rounds} rounds of changes; they looked at it, so it gets a fresh {MAX_ROUNDS} rounds");
+    let notes = if notes.is_empty() { format!("\n\nLoft doesn't have the last notes asking for changes: read them on {at}.") } else { format!("\n\nThe last notes asking for changes, also on {at}:\n\n{notes}") };
+    let line = match &t {
+        Some(t) => {
+            let done = build_done(state, &d, t).await;
+            let t = saved.ticket(t.number).expect("just saved");
+            let brief = format!("{}{}{notes}", dev_brief(state, &saved, t), resume_section(&stopped, &done));
+            crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, Some(t.number)), brief, wake_for(&saved, Step::Build { ticket: t.number, round: 0 }));
+            format!(" {} is fixing {what} again, with a fresh {MAX_ROUNDS} rounds of changes.", dev.name)
+        }
+        None => {
+            let brief = format!("{}{}{notes}", fixes_brief(&saved), resume_section(&stopped, &[]));
+            crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, None), brief, wake_for(&saved, Step::FinalFixes { round: 0 }));
+            format!(" {} is fixing what the final Code Review found, with a fresh {MAX_ROUNDS} rounds of changes; then the Code reviewer looks again.", dev.name)
+        }
+    };
+    Ok(format!("Resumed {}.{line}{unlabelled}", subject(&saved)))
+}
+
 /// Resume on a stalled Delivery. It first reconciles what was done meanwhile (tickets closed by hand), then
 /// wakes only the role its step waits on, with its role brief and a "this is a resume" section: the Dev for a
 /// ticket being built or the final fixes, the reviewers whose verdict is still pending, the Code reviewer for
 /// the final review, or the next ticket's builder when nothing is in flight. The Delivery goes back to the
-/// state it stalled in, so its Needs you item goes. One that isn't stalled is refused, saying why. The line
-/// saying what it did.
+/// state it stalled in, so its Needs you item goes. A ticket or final review waiting for the user gets a fresh
+/// set of rounds instead (`resume_needs_human`). Anything else is refused, saying why. The line saying what it
+/// did.
 pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or_else(|| format!("Spec #{spec} on {repo} has no Delivery."))?;
+    if waits_for_user(&d) {
+        return resume_needs_human(state, d).await;
+    }
     if d.state != "stalled" {
         return Err(not_resumable(&d));
     }
-    let why = stall_why(&d.stall_reason);
+    let stalled = format!("the Delivery stalled because {}", stall_why(&d.stall_reason));
     let (d, closed) = reconcile(state, &d).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
     let closed = match closed.as_slice() {
         [] => String::new(),
@@ -1109,7 +1229,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
         "final_review" => {
             let cr = with_role(state, &d, "code_reviewer").ok_or("Nothing was resumed: the team has no Code reviewer any more, so nobody can do the final review.")?;
             let d = unstall(&|_| {})?;
-            let brief = format!("{}{}", final_brief(state, &d), resume_section(why, &[]));
+            let brief = format!("{}{}", final_brief(state, &d), resume_section(&stalled, &[]));
             crate::agents::resume_on_ticket(state, &cr.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalReview { round: d.final_rounds }));
             format!(" {} (Code reviewer) is doing the final review again.", cr.name)
         }
@@ -1122,7 +1242,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
                 Err(e) => format!("Loft couldn't read the {} ({e}): check what's already on it yourself.", branch_name(&d)),
             };
             let d = unstall(&|d| d.dev = dev.id.clone())?;
-            let brief = format!("{}{}", fixes_brief(&d), resume_section(why, &[found]));
+            let brief = format!("{}{}", fixes_brief(&d), resume_section(&stalled, &[found]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalFixes { round: d.final_rounds }));
             format!(" {} is fixing what the final Code Review found again.", dev.name)
         }
@@ -1131,7 +1251,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
                 let dev = dev_of(state, &d)?;
                 let done = build_done(state, &d, &t).await;
                 let d = unstall(&|d| d.dev = dev.id.clone())?;
-                let brief = format!("{}{}", dev_brief(state, &d, &t), resume_section(why, &done));
+                let brief = format!("{}{}", dev_brief(state, &d, &t), resume_section(&stalled, &done));
                 crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, Some(t.number)), brief, wake_for(&d, Step::Build { ticket: t.number, round: t.rounds }));
                 format!(" {} is building {} again.", dev.name, tag(&d, &t))
             }
@@ -1149,7 +1269,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
                     let passed: Vec<&str> = t.verdicts.iter().filter(|(_, v)| *v == "pass").map(|(r, _)| crate::planning::role_label(r)).collect();
                     let done = if passed.is_empty() { vec![] } else { vec![format!("Verdicts already in: {} passed it.", passed.join(" and "))] };
                     for (role, a) in &reviewers {
-                        let brief = format!("{}{}", review_brief(state, &d, &t, role), resume_section(why, &done));
+                        let brief = format!("{}{}", review_brief(state, &d, &t, role), resume_section(&stalled, &done));
                         crate::agents::resume_on_ticket(state, &a.id, &ticket_key(&d, Some(t.number)), brief, wake_for(&d, Step::Review { ticket: t.number, role: role.to_string(), round: t.rounds }));
                     }
                     let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
@@ -1345,7 +1465,7 @@ fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
-        "can_resume": d.state == "stalled",
+        "can_resume": d.state == "stalled" || waits_for_user(d),
         "needs_human": d.state == "needs_human" || d.tickets.iter().any(|t| t.state == "needs_human"),
         "started": d.state != "planned",
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
@@ -1557,6 +1677,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     update(state, &slug, d.spec, |d| {
         d.final_rounds = rounds;
         d.state = if stuck { "needs_human" } else { "final_fixes" }.into();
+        d.last_notes = notes.into();
     })
     .ok_or("The Delivery record couldn't be saved.")?;
     if stuck {

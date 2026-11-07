@@ -47,7 +47,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 |---|---|---|---|
 | `permission` | 3 | A permission prompt is pending | approve, approve_always, deny, open |
 | `task_approval` | 3 | Issue in `waiting_approval` | answer, open, dismiss |
-| `task_blocked` | 2 | Issue `blocked` (reason = its error) | answer, open, dismiss |
+| `task_blocked` | 2 | Issue `blocked` (reason = its error) | resume (when a Delivery ticket or final review blocked it after too many changes rounds), answer, open, dismiss |
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
@@ -74,7 +74,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 ```
 
 `kind` values: `approve`, `approve_always`, `deny`, `answer`, `retry`, `skip`, `merge`, `restart`, `resume`, `open`, `dismiss`.
-`resume` (on `delivery_stalled`) is `POST /api/deliveries/resume` with `{ "repo", "spec" }`: Loft reconciles what was done while the Delivery stalled, then wakes only the agent its step waits on. A Delivery that isn't stalled any more gets a 400 saying why.
+`resume` (on `delivery_stalled`, and on a `task_blocked` issue a Delivery ticket or final review blocked after too many changes rounds) is `POST /api/deliveries/resume` with `{ "repo", "spec" }`: Loft reconciles what was done while the Delivery stalled, then wakes only the agent its step waits on. On a ticket or final review waiting for the user, its rounds start over, `needs-human` comes off, the issue is unblocked and the Dev is woken with the last changes notes. A Delivery that isn't stalled or waiting for the user any more gets a 400 saying why.
 Use the `path` and `body` as given. Add `client_id` to message and comment bodies as the apps do today.
 
 ### Pull requests from GitHub

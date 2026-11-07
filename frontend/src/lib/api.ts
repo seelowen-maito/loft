@@ -108,7 +108,7 @@ export type IssueDelivery = {
   state: string;
   /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
   stall_reason?: string | null;
-  /** Resume applies: the Delivery is stalled. */
+  /** Resume applies: the Delivery is stalled, or a ticket or its final review waits for the user. */
   can_resume?: boolean;
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;

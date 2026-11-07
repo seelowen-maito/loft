@@ -4520,7 +4520,7 @@ pub(crate) mod tests {
         assert_eq!(err, "spec #40 isn't stalled: an agent is working on its step, so there's nothing to resume.");
         assert!(woken(&st, &dev).len() <= 1, "nothing more was woken");
         let before = woken(&st, &dev).len();
-        for (state, says) in [("planned", "hasn't started"), ("ready", "is done"), ("needs_human", "too many rounds of changes")] {
+        for (state, says) in [("planned", "hasn't started"), ("ready", "is done")] {
             crate::delivery::update(&st, slug, 40, |d| d.state = state.into());
             let err = crate::delivery::resume(&st, slug, 40).await.unwrap_err();
             assert!(err.contains(says), "{state}: {err}");
@@ -4598,5 +4598,178 @@ pub(crate) mod tests {
         assert!(out.contains("Closed #42"), "{out}");
         assert_eq!(delivery(&st, slug).tickets[1].state, "closed");
         assert!(stalled_items(&st).is_empty());
+    }
+
+    // ---- Resume a ticket or final review waiting for the user (#337) ----
+
+    /// Three changes rounds from QA on #41, numbered from `first`: the reply to the last.
+    async fn three_changes(st: &AppState, dev: &Agent, qa: &Agent, first: u32) -> String {
+        let mut out = String::new();
+        for round in first..first + 3 {
+            tool(st, dev, "submit_ticket", submit_41()).await.unwrap();
+            out = tool(st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": format!("Change {round}: the total is off by one.") })).await.unwrap();
+        }
+        out
+    }
+
+    /// The Needs you item of the blocked Loft issue `id`.
+    fn blocked_item(st: &AppState, id: &str) -> Option<Value> {
+        let v = crate::needs_you::snapshot(st).unwrap();
+        v["items"].as_array().unwrap().iter().find(|i| i["type"] == "task_blocked" && i["task_id"] == id).cloned()
+    }
+
+    /// The Resume on that item, sent as Needs you gives it.
+    async fn resume_blocked(st: &AppState, id: &str) -> Result<Value, crate::api::ApiError> {
+        let item = blocked_item(st, id).unwrap_or_else(|| panic!("no blocked item for {id}"));
+        let a = item["actions"][0].clone();
+        assert_eq!((&a["kind"], &a["label"], &a["method"], &a["path"]), (&json!("resume"), &json!("Resume"), &json!("POST"), &json!("/api/deliveries/resume")), "{item}");
+        crate::delivery::resume_route(State(st.clone()), axum::Json(serde_json::from_value(a["body"].clone()).unwrap())).await.map(|j| j.0)
+    }
+
+    fn github_task(st: &AppState, slug: &str, n: i64) -> crate::db::Task {
+        st.db.list_tasks().unwrap().into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo == slug && g.number == n)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_needs_human_ticket_resets_its_rounds_and_wakes_the_dev_with_the_last_notes() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/nh-ticket";
+        let (dev, team) = building(&st, &fake, "nh-ticket", &["qa"]).await;
+        let qa = &team[0];
+        let spec = spec_issue(&st, &fake, "nh-ticket", slug);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        fake.route("DELETE", &format!("/repos/{slug}/issues/41/labels/needs-human"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([commit("fed4321abcde", "Fix the total\n\nRefs #41")]));
+        let out = three_changes(&st, &dev, qa, 1).await;
+        assert!(out.contains("That's round 3 of changes on #41, so it waits for the user now."), "{out}");
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&shown["can_resume"], &shown["needs_human"]), (&json!(true), &json!(true)), "the card offers Resume");
+        let ticket = github_task(&st, slug, 41);
+        assert_eq!(ticket.status, "blocked");
+        let before = woken(&st, &dev).len();
+
+        let v = resume_blocked(&st, &ticket.id).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Builder is fixing #41 again, with a fresh 3 rounds of changes.");
+        assert!(fake.seen(&format!("/repos/{slug}/issues/41/labels/needs-human")).iter().any(|s| s.method == "DELETE"), "the label comes off");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.current, d.tickets[0].state.as_str(), d.tickets[0].rounds), ("running", Some(41), "started", 0));
+        let ticket = st.db.get_task(&ticket.id).unwrap().unwrap();
+        assert_eq!((ticket.status.as_str(), ticket.error.as_str()), ("in_progress", ""), "the Loft issue is unblocked");
+        assert!(blocked_item(&st, &ticket.id).is_none());
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!((&shown["can_resume"], &shown["needs_human"]), (&json!(false), &json!(false)));
+
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1, "{w:?}");
+        let brief = w.last().unwrap();
+        assert!(brief.contains("You are the Dev on this Delivery: build ticket #41"), "the role brief: {brief}");
+        assert!(brief.contains("This is a resume: #41 waited for the user after 3 rounds of changes; they looked at it, so it gets a fresh 3 rounds, and the user pressed Resume."), "{brief}");
+        assert!(brief.contains("The last notes asking for changes, also on the spec PR https://github.com/octo/nh-ticket/pull/500:\n\nChange 3: the total is off by one."), "{brief}");
+        assert!(!brief.contains("Change 2:"), "only the last notes: {brief}");
+
+        // A fresh set of rounds: the first two go back to the Dev, the third to the user again.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Change 4." })).await.unwrap();
+        assert!(out.ends_with("The Dev is fixing #41 (round 1 of 3)."), "{out}");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Change 5." })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Change 6." })).await.unwrap();
+        assert!(out.contains("That's round 3 of changes on #41, so it waits for the user now."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/41/labels").iter().filter(|l| **l == json!({ "labels": ["needs-human"] })).count(), 2);
+        assert_eq!(st.db.get_task(&ticket.id).unwrap().unwrap().status, "blocked");
+        assert_eq!(delivery(&st, slug).last_notes, "Change 6.");
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_needs_human_final_review_wakes_the_dev_to_fix_then_the_code_reviewer() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/nh-final";
+        let (dev, team) = building_both(&st, &fake, "nh-final", &["code_reviewer"]).await;
+        let cr = &team[0];
+        let spec = spec_issue(&st, &fake, "nh-final", slug);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([]));
+        fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/needs-human"), 200, json!([]));
+        for round in 1..=3 {
+            tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": format!("Round {round}: a race in retry.") })).await.unwrap();
+            if round < 3 {
+                tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+            }
+        }
+        assert_eq!(delivery(&st, slug).state, "needs_human");
+        assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, "blocked");
+        assert!(blocked_item(&st, &spec.id).unwrap()["actions"][0]["kind"] == "resume", "Needs you offers Resume");
+        let (dev_before, cr_before) = (woken(&st, &dev).len(), woken(&st, cr).len());
+
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Builder is fixing what the final Code Review found, with a fresh 3 rounds of changes; then the Code reviewer looks again.");
+        assert_eq!((&v["state"], &v["can_resume"]), (&json!("final_fixes"), &json!(false)));
+        assert!(fake.seen(&format!("/repos/{slug}/issues/500/labels/needs-human")).iter().any(|s| s.method == "DELETE"), "the label comes off the spec PR");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_rounds), ("final_fixes", 0));
+        assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, "in_progress");
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), dev_before + 1);
+        let brief = w.last().unwrap();
+        assert!(brief.contains("fix what the Code reviewer asked for on the spec PR https://github.com/octo/nh-final/pull/500. Its notes are its last comment there."), "no round 0: {brief}");
+        assert!(brief.contains("This is a resume: spec PR #500 waited for the user after 3 rounds of changes") && brief.ends_with("Round 3: a race in retry."), "{brief}");
+        assert_eq!(woken(&st, cr).len(), cr_before, "the Code reviewer waits for the fixes");
+
+        // The fixes go to the Code reviewer, and its next changes are round 1 of a fresh 3.
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["beef5678"] })).await.unwrap();
+        assert_eq!(out, "Submitted the fixes for spec PR #500: code_reviewer agent (Code reviewer) is looking again.");
+        assert_eq!(woken(&st, cr).len(), cr_before + 1);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "Still racy." })).await.unwrap();
+        assert!(out.contains("The Dev is fixing them (round 1 of 3)"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_needs_human_ticket_of_a_plan_kept_in_loft_unblocks_its_loft_issue() {
+        let st = state();
+        let fake = own_fake(&st);
+        let project = "nh-local";
+        let (a, m, team, _dir) = local_plan(&st, project, &["dev", "qa"]).await;
+        let (dev, qa) = (&team[0], &team[1]);
+        press(&st, &a, &m).await.unwrap();
+        let store = loft_ticket(&st, project, "Store");
+        for round in 1..=3 {
+            tool(&st, dev, "submit_ticket", json!({ "number": store.id, "commits": ["abc1234def"] })).await.unwrap();
+            tool(&st, qa, "review_ticket", json!({ "number": store.id, "verdict": "changes", "notes": format!("Round {round}: saving twice loses data.") })).await.unwrap();
+        }
+        assert_eq!(st.db.get_task(&store.id).unwrap().unwrap().status, "blocked");
+        let before = woken(&st, dev).len();
+
+        let v = resume_blocked(&st, &store.id).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec \"Offline mode\". dev agent is fixing \"Store\" again, with a fresh 3 rounds of changes.");
+        assert_eq!(st.db.get_task(&store.id).unwrap().unwrap().status, "in_progress");
+        let d = crate::delivery::local_of(&st, project, &loft_ticket(&st, project, "Offline mode").id).unwrap();
+        assert_eq!((d.tickets[0].state.as_str(), d.tickets[0].rounds), ("started", 0));
+        let w = woken(&st, dev);
+        assert_eq!(w.len(), before + 1);
+        let brief = w.last().unwrap();
+        assert!(brief.contains(&format!("The last notes asking for changes, also on its Loft issue {}:\n\nRound 3: saving twice loses data.", store.id)), "{brief}");
+        assert!(fake.seen("/").is_empty(), "nothing is labelled: no GitHub at all");
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_needs_human_ticket_closed_by_hand_starts_the_next() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/nh-hand";
+        let (dev, team) = building(&st, &fake, "nh-hand", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "nh-hand", slug);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        three_changes(&st, &dev, &team[0], 1).await;
+        // The user looked, and closed #41 on GitHub before the mirror noticed.
+        subs_on_github(&fake, slug, &["closed", "open"]);
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Closed by hand meanwhile, so marked closed: #41. Next: #42 is with Builder.");
+        let d = delivery(&st, slug);
+        assert_eq!((d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), (Some(42), "closed", "started"));
+        assert!(fake.seen(&format!("/repos/{slug}/issues/41/labels/needs-human")).is_empty(), "nothing to unlabel on a closed ticket");
     }
 }
