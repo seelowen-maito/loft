@@ -15,7 +15,7 @@ export const LIMITS = { pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] }
 /** A relay key: `lrk_` and 32 random bytes, base64url. */
 const KEY = /^lrk_[A-Za-z0-9_-]{43}$/;
 
-const json = (status, body, headers) => Response.json(body, { status, headers });
+const json = (status, body, headers) => Response.json(body, { status, headers: { "x-content-type-options": "nosniff", "cache-control": "no-store", ...headers } });
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const hashed = (key) => `relay-key:${sha256(key)}`;
 

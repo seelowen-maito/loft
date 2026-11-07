@@ -223,3 +223,20 @@ test("Allow posted from another site is refused with 403: no key, and the code s
   assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 0, "no key was made");
   assert.equal((await approve(post("/connect", { code, name: "Mine" }, cookies), env)).status, 200);
 });
+
+test("the pairing endpoints send nosniff and no-store; the connect pages send the CSP", async () => {
+  const code = await newCode("10.2.2.2");
+  const secret = secrets.get(code);
+  const answers = [await pair(asLoft("/api/pair", {}, "10.2.2.3"), env, clock), await pollFor(code), await pollFor("bad"), await poll(asLoft("/api/pair-poll", { code, secret }), {})];
+  for (const res of answers) {
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
+  const { cookies } = await signInAs();
+  const pages = [await connect(get(`/connect?code=${code}`), env), await connect(get(`/connect?code=${code}`, cookies), env), await approve(post("/connect", { code, name: "Mac" }, cookies), env), await connect(get("/connect?code=bad"), env)];
+  for (const res of pages) {
+    assert.match(res.headers.get("content-security-policy"), /^default-src 'none'; .*form-action 'self' https:\/\/appleid\.apple\.com; base-uri 'none'; frame-ancestors 'none'$/);
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  }
+});

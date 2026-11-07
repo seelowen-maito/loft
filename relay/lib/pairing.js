@@ -13,7 +13,7 @@ const CODE = /^[A-Za-z0-9_-]{22}$/;
 const SECRET = CODE;
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
-const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } });
 const waiting = (code) => `pair:${sha256(code)}`;
 // The code is in the portal link, so anyone who sees the link knows it. The key is parked under the hash of a secret
 // only the Loft that asked holds, and that Loft alone can collect it.

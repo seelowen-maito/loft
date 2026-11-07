@@ -534,3 +534,34 @@ test("the session, state and delete cookies are __Host- cookies: Secure, HttpOnl
   assert.equal((await home(get("/", old), env)).status, 200);
   assert.doesNotMatch(await (await home(get("/", old), env)).text(), /Create key/);
 });
+
+const HTML_HEADERS = {
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action 'self' https://appleid.apple.com; base-uri 'none'; frame-ancestors 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+};
+
+test("every portal page carries the CSP (no scripts), Referrer-Policy and nosniff; the push endpoint carries nosniff and no-store", async () => {
+  const session = await signInAs();
+  const pages = [
+    await home(get("/"), env),
+    await home(get("/", session), env),
+    await confirmDelete(get("/account/delete", session), env),
+    await createAccountKey(post("/keys", { name: "Mac" }, session), env),
+    await createAccountKey(post("/keys", { name: " " }, session), env),
+    await revokeAccountKey(post("/keys/revoke", { id: "x" }, session), env),
+    await createAccountKey(forged(post("/keys", { name: "x" }, session), { "sec-fetch-site": "cross-site" }), env),
+    await callback(get("/auth/callback?code=x&state=y"), env),
+    await home(get("/"), {}),
+  ];
+  for (const res of pages) {
+    assert.match(res.headers.get("content-type"), /^text\/html/);
+    for (const [k, v] of Object.entries(HTML_HEADERS)) assert.equal(res.headers.get(k), v, `${res.status} ${k}`);
+  }
+  assert.doesNotMatch(HTML_HEADERS["content-security-policy"], /script/);
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Two" }, session), env));
+  for (const res of [await pushWith(key), await pushWith("nope")]) {
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
+});
