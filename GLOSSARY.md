@@ -52,6 +52,10 @@ _Avoid_: Note, knowledge
 The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
 _Avoid_: Notification, new message, unread message
 
+**Agent process**:
+A process started by one of an agent's runs, including servers it left running in the background. Each run starts in its own process session, so Loft knows which agent owns which process. An agent may stop its own processes freely; stopping any other process needs the user's approval.
+_Avoid_: Agent job, child process
+
 **Subagent**:
 A short-lived Claude Code worker an agent starts inside a run for a side job (a search, a self-contained task). It ends with the run at the latest and never talks to the user.
 _Avoid_: Sub-agent, child agent, worker
