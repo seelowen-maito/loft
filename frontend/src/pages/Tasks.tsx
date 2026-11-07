@@ -13,6 +13,9 @@ import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
+import { SpecPanel } from "./SpecViews";
+import { BoardPage, ViewToggle } from "./SpecBoard";
+import type { DeliverySummary } from "../lib/specViews";
 import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
@@ -57,10 +60,20 @@ export default function TasksPage() {
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => parseFilters(params), [params]);
+  // The Specs board (`?view=specs`, see ./SpecBoard) instead of the list.
+  const board = params.get("view") === "specs";
   const setFilter = useCallback(
-    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => filtersToParams({ ...parseFilters(cur), ...change }), { replace }),
+    (change: Partial<IssueFilters>, replace = false) =>
+      setParams((cur) => {
+        const next = filtersToParams({ ...parseFilters(cur), ...change });
+        if (cur.get("view")) next.set("view", cur.get("view")!);
+        return next;
+      }, { replace }),
     [setParams],
   );
+  const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
+  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}); }, []);
+  useEffect(() => { loadDeliveries(); }, [loadDeliveries]);
   const [query, setQuery] = useState(filters.q);
   // Back/forward to another search shows it in the box.
   useEffect(() => setQuery(filters.q), [filters.q]);
@@ -99,8 +112,9 @@ export default function TasksPage() {
           next[i] = e.task;
           return next;
         });
+      if (e.type === "task") setTimeout(loadDeliveries, 1500);
       if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
-    }, []),
+    }, [loadDeliveries]),
   );
 
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
@@ -138,6 +152,19 @@ export default function TasksPage() {
 
   const selected = tasks?.find((t) => t.id === routeId) ?? null;
 
+  if (board && !routeId) {
+    // A spec opens with its Delivery panel, a ticket on its own page; both can come back to the board.
+    const go = (id: string) => { const n = new URLSearchParams(params); n.set("board", "1"); navigate({ pathname: `/issues/${id}`, search: n.toString() }); };
+    return (
+      <div className="h-full overflow-hidden">
+        {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
+          <BoardPage specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} filters={{ q: filters.q, group, project, agent: agentId }}
+            facets={{ teams, projects: groupProjectList, agents }} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={(n) => setParams(n)} openSpec={go} openTicket={go} />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="grid h-full grid-cols-[400px_minmax(0,1fr)] overflow-hidden max-lg:grid-cols-1">
       {/* list */}
@@ -160,6 +187,7 @@ export default function TasksPage() {
             </button>
             </div>
           </div>
+          <ViewToggle params={params} setParams={(n) => setParams(n)} />
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
@@ -234,7 +262,7 @@ export default function TasksPage() {
       {/* detail */}
       <section className={cx("min-h-0 overflow-y-auto", !routeId && "max-lg:hidden")}>
         {selected ? (
-          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} />
+          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={deliveries} />
         ) : routeId && tasks ? (
           <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
         ) : (
@@ -277,11 +305,20 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
   );
 }
 
-function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
+/** The board's own URL again, the way out of a spec or ticket it opened. */
+function backToBoard(search: string): string {
+  const n = new URLSearchParams(search);
+  n.set("view", "specs");
+  n.delete("board");
+  return n.toString();
+}
+
+function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string>; deliveries: DeliverySummary[] }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
   // Links keep the list's filters (they're in the URL).
   const { search } = useLocation();
+  const fromBoard = new URLSearchParams(search).get("board") === "1";
   useEffect(() => {
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
@@ -306,9 +343,16 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 empty:hidden">
+      {fromBoard && (
+        <Link to={{ pathname: "/issues", search: backToBoard(search) }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+          <ArrowLeft className="size-3" /> Back to the board
+        </Link>
+      )}
       <Link to={{ pathname: "/issues", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
         <ArrowLeft className="size-3" /> All issues
       </Link>
+      </div>
       <header className="space-y-2">
         {parent && (
           <Link to={{ pathname: `/issues/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
@@ -354,6 +398,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
+      {isSpec(t) && <SpecPanel spec={t} tasks={tasks} deliveries={deliveries} agentById={agentById} />}
       {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
       {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
       {t.state === "open" && !t.agent_id && !isSpec(t) && !isStandaloneTicket(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}

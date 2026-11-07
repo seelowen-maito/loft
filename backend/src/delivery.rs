@@ -959,6 +959,27 @@ pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String
     Ok(Json(delivery_json(&state, &d)))
 }
 
+/// `GET /api/deliveries/summary`: every spec's Delivery in one read, for the Issues page's spec views:
+/// what `issue_delivery` shows, plus `repo` and `spec` (and `spec_id` for a plan kept in Loft) to tell
+/// which issue it belongs to, and each ticket's review verdicts.
+pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
+    let ds = state.db.all_deliveries()?;
+    let out: Vec<Value> = ds
+        .iter()
+        .filter(|d| !d.standalone)
+        .map(|d| {
+            let mut v = delivery_json(&state, d);
+            v["repo"] = json!(d.repo);
+            v["spec"] = json!(d.spec);
+            v["spec_id"] = json!(d.spec_id);
+            v["local"] = json!(d.local);
+            v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "verdicts": t.verdicts })).collect::<Vec<_>>());
+            v
+        })
+        .collect();
+    Ok(Json(json!(out)))
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 pub struct StartQuery {
@@ -1364,6 +1385,32 @@ mod tests {
         d.local = true;
         d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
+    }
+
+    /// One read lists every spec's Delivery with its tickets and verdicts, and leaves out a standalone ticket's.
+    #[tokio::test]
+    async fn summary_lists_every_spec_delivery_but_not_standalone_tickets() {
+        let st = crate::planning::tests::state();
+        let mut a: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
+        a.tickets = vec![ticket(10, "", "review"), ticket(11, "", "open")];
+        a.tickets[0].verdicts.insert("qa".into(), "pending".into());
+        a.current = Some(10);
+        let mut b = a.clone();
+        b.spec = 12;
+        b.state = "merged".into();
+        let mut one = a.clone();
+        one.spec = 20;
+        one.standalone = true;
+        for d in [&a, &b, &one] {
+            st.db.save_delivery(d).unwrap();
+        }
+        let v = summary_route(State(st)).await.unwrap().0;
+        let specs: Vec<(i64, &str)> = v.as_array().unwrap().iter().map(|d| (d["spec"].as_i64().unwrap(), d["state"].as_str().unwrap())).collect();
+        assert_eq!(specs, vec![(12, "merged"), (9, "running")]);
+        assert_eq!(v[1]["repo"], "o/r");
+        assert_eq!(v[1]["current"]["number"], 10);
+        assert_eq!(v[1]["tickets"][0]["verdicts"]["qa"], "pending");
+        assert_eq!(v[1]["tickets"][0]["id"], "", "a ticket kept in Loft carries its issue id");
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
