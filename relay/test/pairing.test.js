@@ -84,7 +84,7 @@ beforeEach(() => {
 const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
 let addresses = 0;
-const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
+const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip, "sec-fetch-site": "same-origin" }, body: new URLSearchParams(form) });
 const asLoft = (path, body, ip = "203.0.113.7") => new Request(`https://relay.example.com${path}`, { method: "POST", headers: { "x-forwarded-for": ip }, body: JSON.stringify(body) });
 const secrets = new Map();
 const newCode = async (ip) => {
@@ -129,6 +129,33 @@ test("the code flow: a code, approved by a signed-in user, gives the Loft that a
   assert.ok([...store.keys()].every((k) => !store.get(k).value.includes?.(key)), "the key waits nowhere once collected");
   const pushed = await push(new Request("https://relay.example.com/api/push", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: "{}" }), { ...env, APNS_KEY_P8: "x", APNS_KEY_ID: "x", APNS_TEAM_ID: "x", LOFT_BUNDLE_ID: "x" });
   assert.equal(pushed.status, 400, "past the key check (the body is what's wrong)");
+});
+
+test("an expired or gone code in the cookie says so once and clears the cookie", async () => {
+  for (const gone of [(code) => (clock += 601_000), (code) => store.delete(`pair:${createHash("sha256").update(code).digest("hex")}`)]) {
+    const code = await newCode();
+    const remembered = cookiesOf(await connect(get(`/connect?code=${code}`), env)).join("; ");
+    const { cookies } = await signInAs(remembered);
+    gone(code);
+    assert.equal((await home(get("/", cookies), env)).headers.get("location"), `/connect?code=${code}`);
+    const res = await connect(get(`/connect?code=${code}`, cookies), env);
+    assert.equal(res.status, 404);
+    assert.match(res.headers.get("set-cookie"), /__Host-pair=; Max-Age=0/);
+    const next = await home(get("/", cookies.replace(/__Host-pair=[^;]*;?\s*/, "")), env);
+    assert.equal(next.status, 200, "the next visit shows the normal page");
+  }
+});
+
+test("malformed or over-long polls and connects make no store call", async () => {
+  const dead = { ...env, KV_REST_API_URL: "http://127.0.0.1:1" }; // any store command would throw
+  const ok = "A".repeat(22);
+  for (const body of [{}, { code: "x", secret: ok }, { code: ok, secret: "x" }, { code: ok, secret: ok, pad: "x".repeat(2000) }]) {
+    const res = await poll(asLoft("/api/pair-poll", body), dead);
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "unknown or expired code" });
+  }
+  assert.equal((await poll(new Request("https://relay.example.com/api/pair-poll", { method: "POST", body: "not json" }), dead)).status, 404);
+  assert.equal((await connect(get("/connect?code=short"), dead)).status, 404);
 });
 
 test("an unapproved or expired code returns no key", async () => {
@@ -208,5 +235,37 @@ test("approving a code counts as a key creation for the address's hourly limit",
 test("without the portal's settings, /api/pair says so and gives no code", async () => {
   const res = await pairEndpoint(asLoft("/api/pair", {}));
   assert.equal(res.status, 503);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("cache-control"), "no-store");
   assert.deepEqual(await res.json(), { error: "the push portal isn't configured", portal: false });
+});
+
+test("Allow posted from another site is refused with 403: no key, and the code stays good", async () => {
+  const code = await newCode("10.1.1.1");
+  const { cookies } = await signInAs();
+  for (const headers of [{ "sec-fetch-site": "cross-site" }, { origin: "https://evil.example.com" }, {}]) {
+    const req = post("/connect", { code, name: "Evil" }, cookies);
+    req.headers.delete("sec-fetch-site");
+    for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
+    assert.equal((await approve(req, env)).status, 403, JSON.stringify(headers));
+  }
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 0, "no key was made");
+  assert.equal((await approve(post("/connect", { code, name: "Mine" }, cookies), env)).status, 200);
+});
+
+test("the pairing endpoints send nosniff and no-store; the connect pages send the CSP", async () => {
+  const code = await newCode("10.2.2.2");
+  const secret = secrets.get(code);
+  const answers = [await pair(asLoft("/api/pair", {}, "10.2.2.3"), env, clock), await pollFor(code), await pollFor("bad"), await poll(asLoft("/api/pair-poll", { code, secret }), {})];
+  for (const res of answers) {
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
+  const { cookies } = await signInAs();
+  const pages = [await connect(get(`/connect?code=${code}`), env), await connect(get(`/connect?code=${code}`, cookies), env), await approve(post("/connect", { code, name: "Mac" }, cookies), env), await connect(get("/connect?code=bad"), env)];
+  for (const res of pages) {
+    assert.match(res.headers.get("content-security-policy"), /^default-src 'none'; .*form-action 'self' https:\/\/appleid\.apple\.com; base-uri 'none'; frame-ancestors 'none'$/);
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  }
 });

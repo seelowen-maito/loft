@@ -147,6 +147,21 @@ repo, so anyone can run their own.
 Leave the portal's settings unset. The relay works as before, `/` says "The push portal isn't configured", and
 keys come only from the operator's script (below). In Loft, set only the Relay address and paste the key.
 
+## Runbook: protect the relay from floods
+
+Every request that reaches the store costs a command, so a flood can burn the store's quota and stop the relay for
+every Loft. The code refuses requests that can't succeed (a malformed key, code or secret, or an over-long body)
+before any store command; these three settings cap the rest:
+
+1. **DNS only, no CDN proxy.** Keep the relay's DNS record unproxied (Cloudflare: the grey cloud). A proxy would make
+   every visitor share its own addresses, which breaks the per-address limits, and it would see relay keys and push
+   text.
+2. **A monthly budget cap in Upstash.** Upstash console → the database → Details → set a monthly budget (or the
+   plan's hard limit). When a flood reaches it, the store pauses and the relay stops until the next month or until
+   you raise the cap: a pause instead of a bill.
+3. **A Vercel Firewall rate-limit rule**, where the plan offers one: Vercel → the project → Firewall → Add rule →
+   path starts with `/api/` or equals `/connect` → Rate limit, for example 60 requests per minute per IP → Deny.
+
 ## Runbook: make a relay key
 
 With the store's credentials in your shell (Vercel → Storage → the store → `.env.local` tab):

@@ -15,7 +15,7 @@ export const LIMITS = { pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] }
 /** A relay key: `lrk_` and 32 random bytes, base64url. */
 const KEY = /^lrk_[A-Za-z0-9_-]{43}$/;
 
-const json = (status, body, headers) => Response.json(body, { status, headers });
+const json = (status, body, headers) => Response.json(body, { status, headers: { "x-content-type-options": "nosniff", "cache-control": "no-store", ...headers } });
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const hashed = (key) => `relay-key:${sha256(key)}`;
 
@@ -76,17 +76,18 @@ function invalid(b, env) {
 export async function push(request, env = process.env, now = Date.now(), appleTimeoutMs = undefined) {
   const broken = unconfigured(env);
   if (broken) return broken;
+  const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
   const store = makeKv(env);
   const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
   // Anything not shaped like a key is refused before it costs a store lookup.
-  if (!key || !KEY.test(key) || !(await store.exists(hashed(key)))) return json(401, { error: "a valid relay key is required" });
+  if (!key || !KEY.test(key)) return json(401, { error: "a valid relay key is required" });
+  // The whole request (payload plus a few small fields) can't be much over the payload's cap: a declared size beyond it is refused before any store command.
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
+  if (!(await store.exists(hashed(key)))) return json(401, { error: "a valid relay key is required" });
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
   await store.set(`relay-key-used:${who}`, new Date(now).toISOString(), USED_SECONDS);
-  const tooBig = () => json(413, { error: `the payload must be at most ${MAX_PAYLOAD_BYTES} bytes` });
-  // The whole request (payload plus a few small fields) can't be much over the payload's cap.
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
   const raw = await request.text();
   if (Buffer.byteLength(raw) > MAX_PAYLOAD_BYTES * 2) return tooBig();
   let b;

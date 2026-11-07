@@ -35,11 +35,13 @@ const APPLE_LOGO = '<svg viewBox="0 0 814 1000" aria-hidden="true"><path d="M788
 /** Apple's white "Sign in with Apple" button (their guidelines: white on dark, logo left of the label). */
 export const appleButton = '<a class="apple" href="/auth/start">' + APPLE_LOGO + "Sign in with Apple</a>";
 const LOGO = `<svg class="mark" width="28" height="28" aria-hidden="true" viewBox="0 0 16 16" shape-rendering="crispEdges"><rect width="16" height="16" rx="3.5" fill="#08090a"/><g fill="#c8f26d"><rect x="7" y="4" width="1" height="1"/><rect x="8" y="4" width="1" height="1"/><rect x="6" y="5" width="1" height="1"/><rect x="7" y="5" width="1" height="1"/><rect x="8" y="5" width="1" height="1"/><rect x="9" y="5" width="1" height="1"/><rect x="5" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/><rect x="7" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="1"/><rect x="9" y="6" width="1" height="1"/><rect x="10" y="6" width="1" height="1"/><rect x="4" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/><rect x="6" y="7" width="1" height="1"/><rect x="7" y="7" width="1" height="1"/><rect x="8" y="7" width="1" height="1"/><rect x="9" y="7" width="1" height="1"/><rect x="10" y="7" width="1" height="1"/><rect x="11" y="7" width="1" height="1"/><rect x="5" y="8" width="1" height="1"/><rect x="10" y="8" width="1" height="1"/><rect x="5" y="9" width="1" height="1"/><rect x="7" y="9" width="1" height="1"/><rect x="8" y="9" width="1" height="1"/><rect x="10" y="9" width="1" height="1"/><rect x="5" y="10" width="1" height="1"/><rect x="7" y="10" width="1" height="1"/><rect x="8" y="10" width="1" height="1"/><rect x="10" y="10" width="1" height="1"/><rect x="5" y="11" width="1" height="1"/><rect x="6" y="11" width="1" height="1"/><rect x="7" y="11" width="1" height="1"/><rect x="8" y="11" width="1" height="1"/><rect x="9" y="11" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/></g></svg>`;
+// No scripts at all. The inline <style> needs 'unsafe-inline'; form-action names Apple because a form's redirect counts too (Delete my account ends at Apple).
+const CSP = `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action 'self' ${APPLE}; base-uri 'none'; frame-ancestors 'none'`;
 export const page = (title, body, status = 200, headers = {}) =>
   new Response(
     `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>${esc(title)}</title><style>${STYLE}</style>` +
       `<div class="brand">${LOGO}loft <small>push</small></div><main><h1>${esc(title)}</h1>${body}</main></html>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } },
+    { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP, "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", ...headers } },
   );
 /** True when a setting is missing, or PORTAL_URL isn't an https:// URL with a host (Apple refuses any other redirect address). */
 export const incomplete = (env) => REQUIRED.some((k) => !env[k]) || !/^https:\/\/[^/\s]+/i.test(env.PORTAL_URL);
@@ -60,14 +62,37 @@ const unseal = (env, purpose, sealed, now) => {
   if (good.length !== given.length || !timingSafeEqual(good, given) || Number(expiry) * 1000 < now) return null;
   return Buffer.from(value, "base64url").toString();
 };
-export const cookie = (name, value, seconds) => `${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
-export const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
+// `__Host-` cookies must be Secure, Path=/ and have no Domain, so no sibling subdomain can set or shadow them.
+export const cookie = (name, value, seconds) => `__Host-${name}=${value}; Max-Age=${seconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+export const cookieOf = (request, name) => (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`__Host-${name}=`))?.slice(name.length + 8);
+/** A 403 page unless this POST came from the portal itself: `Sec-Fetch-Site: same-origin`, or with no such header an `Origin` equal to PORTAL_URL's. Else null. */
+export const crossSite = (request, env) => {
+  const site = request.headers.get("sec-fetch-site");
+  if (site ? site === "same-origin" : request.headers.get("origin") === new URL(origin(env)).origin) return null;
+  return page("Refused", "<p>That request didn't come from this portal. <a href=\"/\">Back</a></p>", 403);
+};
 export const redirect = (to, ...cookies) => {
   const headers = new Headers({ location: to });
   cookies.forEach((c) => headers.append("set-cookie", c));
   return new Response(null, { status: 303, headers });
 };
-export const accountOf = (request, env, now) => unseal(env, "session", cookieOf(request, "session"), now);
+/**
+ * The signed-in account, or null. The session holds `created|sub`: it counts only while the stored account exists with
+ * that created stamp, so deleting the account ends every session, even when the same Apple ID signs up again.
+ */
+export async function accountOf(request, env, now) {
+  const [created, ...rest] = (unseal(env, "session", cookieOf(request, "session"), now) ?? "").split("|");
+  const sub = rest.join("|");
+  if (!created || !sub) return null;
+  const stored = await makeKv(env).get(`account:${sub}`);
+  try {
+    return stored && JSON.parse(stored).created === created ? sub : null;
+  } catch {
+    return null;
+  }
+}
+/** Back to the sign-in page; a session cookie that no longer counts is cleared on the way. */
+export const endSession = (request) => (cookieOf(request, "session") ? redirect("/", cookie("session", "", 0)) : redirect("/"));
 
 /** The secret Apple wants to see: a short ES256 token signed with the sign-in key. */
 function clientSecret(env, now) {
@@ -104,9 +129,9 @@ export const capped = () => page("Too many keys", `<p>An account can hold at mos
 /** GET /: the sign-in button, or, signed in, the account's keys and the form to create one. */
 export async function home(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
+  const account = await accountOf(request, env, now);
   if (!account) {
-    return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`);
+    return page("Loft push portal", `<p>Sign in with Apple to get a key for pushing from your Loft.</p><p>${appleButton}</p>`, 200, cookieOf(request, "session") ? { "set-cookie": cookie("session", "", 0) } : {});
   }
   // Signed in on the way to approving a Loft's code: back to that page.
   const pairing = cookieOf(request, "pair");
@@ -183,15 +208,17 @@ export async function callback(request, env = process.env, now = Date.now()) {
     return page("Sign-in failed", '<p>Apple didn\'t confirm the sign-in. <a href="/">Try again</a>.</p>', 502, { "set-cookie": clear });
   }
   if (deleting) return finishDelete(env, now, deleting, sub, tokens);
-  await makeKv(env).setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
-  return redirect("/", clear, cookie("session", seal(env, "session", sub, SESSION_SECONDS, now), SESSION_SECONDS));
+  const store = makeKv(env);
+  await store.setIfMissing(`account:${sub}`, JSON.stringify({ created: new Date(now).toISOString() }));
+  const { created } = JSON.parse(await store.get(`account:${sub}`));
+  return redirect("/", clear, cookie("session", seal(env, "session", `${created}|${sub}`, SESSION_SECONDS, now), SESSION_SECONDS));
 }
 
 /** GET /account/delete: what deleting does, and the button. */
 export async function confirmDelete(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const n = (await keysOf(makeKv(env), account)).length;
   const what = n === 1 ? "your account and its key, so its Loft stops pushing" : n ? `your account and all ${n} keys, so those Lofts stop pushing` : "your account";
   return page(
@@ -204,8 +231,10 @@ export async function confirmDelete(request, env = process.env, now = Date.now()
 /** POST /account/delete: Apple confirms it's still the account's owner, and hands over the token to revoke (none is stored). */
 export async function startDelete(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const refused = crossSite(request, env);
+  if (refused) return refused;
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   return (await limited(makeKv(env), request, "sign-in", now)) ?? toApple(env, now, account);
 }
 
@@ -284,8 +313,10 @@ export async function makeAccountKey(store, account, name, now) {
 /** POST /keys with `name`: creates a key for the signed-in account and shows it, once. */
 export async function createAccountKey(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const refused = crossSite(request, env);
+  if (refused) return refused;
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const name = String((await request.formData()).get("name") ?? "").trim().slice(0, 60);
   if (!name) return page("Name the key", '<p>A key needs a name. <a href="/">Back</a></p>', 400);
   const store = makeKv(env);
@@ -302,8 +333,10 @@ export async function createAccountKey(request, env = process.env, now = Date.no
 /** POST /keys/revoke with `id` (the key's hash): deletes one of the signed-in account's keys. The relay refuses it from the next push. */
 export async function revokeAccountKey(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const refused = crossSite(request, env);
+  if (refused) return refused;
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const id = String((await request.formData()).get("id") ?? "");
   const store = makeKv(env);
   const [mine] = /^[0-9a-f]{64}$/.test(id) ? await store.pipeline([["SISMEMBER", `account-keys:${account}`, id]]) : [0];

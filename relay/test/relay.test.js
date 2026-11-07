@@ -329,6 +329,21 @@ test("an oversized request is refused from its length, before reading it", async
   assert.equal(res.status, 413);
 });
 
+test("a request that can't succeed costs no store command", async () => {
+  commands.length = 0;
+  const validShape = `lrk_${"A".repeat(43)}`;
+  const tries = [
+    [{ authorization: "Bearer nope" }, "{}", 401],
+    [{}, "{}", 401],
+    [{ authorization: `Bearer ${validShape}`, "content-length": "999999" }, "{}", 413],
+  ];
+  for (const [headers, body, status] of tries) {
+    const res = await push(new Request("http://relay/api/push", { method: "POST", headers, body }), env);
+    assert.equal(res.status, status);
+  }
+  assert.deepEqual(commands, []);
+});
+
 test("relay/ holds no one's own hosts or ids: every value comes from the environment", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const files = (await readdir(new URL("../", import.meta.url), { recursive: true })).filter((f) => /\.(js|json|md)$/.test(f) && !f.includes("node_modules") && !f.startsWith("test"));

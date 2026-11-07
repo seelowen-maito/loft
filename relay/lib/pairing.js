@@ -4,7 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
-import { incomplete, accountOf, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
+import { crossSite, incomplete, accountOf, endSession, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
 /** Codes one IP can ask for per hour. */
@@ -13,7 +13,7 @@ const CODE = /^[A-Za-z0-9_-]{22}$/;
 const SECRET = CODE;
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
-const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+const json = (status, body) => Response.json(body, { status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } });
 const waiting = (code) => `pair:${sha256(code)}`;
 // The code is in the portal link, so anyone who sees the link knows it. The key is parked under the hash of a secret
 // only the Loft that asked holds, and that Loft alone can collect it.
@@ -36,22 +36,29 @@ export async function pair(request, env = process.env, now = Date.now()) {
 /** POST /api/pair-poll with `{code, secret}`: 200 `{key}` once, after the user approved it; 202 while it waits; else 404. */
 export async function poll(request, env = process.env) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
-  const body = await request.json().catch(() => null);
+  // Two 22-character values fit in far less than this: a bigger body is refused unread.
+  const gone = () => json(404, { error: "unknown or expired code" });
+  if (Number(request.headers.get("content-length") ?? 0) > 1024) return gone();
+  const raw = await request.text();
+  let body = null;
+  try {
+    body = raw.length > 1024 ? null : JSON.parse(raw);
+  } catch {}
   const { code, secret } = body ?? {};
-  if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return json(404, { error: "unknown or expired code" });
+  if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return gone();
   const store = makeKv(env);
   const key = await store.getdel(approved(sha256(secret)));
   if (key) return json(200, { key });
   if (((await store.get(waiting(code))) ?? "").split(".")[0] === sha256(secret)) return json(202, { status: "waiting" });
-  return json(404, { error: "unknown or expired code" });
+  return gone();
 }
 
 /** GET /connect?code=: the page where the user allows a Loft: sign in first, then Allow. */
 export async function connect(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
   const code = new URL(request.url).searchParams.get("code") ?? "";
-  if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
-  if (!accountOf(request, env, now)) {
+  if (!CODE.test(code) || !(await makeKv(env).exists(waiting(code)))) return page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404, { "set-cookie": cookie("pair", "", 0) });
+  if (!(await accountOf(request, env, now))) {
     return page("Connect your Loft", `<p>Sign in with Apple to let your Loft send push notifications.</p><p>${appleButton}</p>`, 200, { "set-cookie": cookie("pair", code, CODE_SECONDS) });
   }
   return page(
@@ -65,8 +72,10 @@ export async function connect(request, env = process.env, now = Date.now()) {
 /** POST /connect with `code` and `name`: creates a key for the signed-in account and hands it to the Loft that asked. */
 export async function approve(request, env = process.env, now = Date.now()) {
   if (incomplete(env)) return notConfigured(env);
-  const account = accountOf(request, env, now);
-  if (!account) return redirect("/");
+  const refused = crossSite(request, env);
+  if (refused) return refused;
+  const account = await accountOf(request, env, now);
+  if (!account) return endSession(request);
   const form = await request.formData();
   const code = String(form.get("code") ?? "");
   const name = String(form.get("name") ?? "").trim().slice(0, 60);
@@ -74,7 +83,7 @@ export async function approve(request, env = process.env, now = Date.now()) {
   const store = makeKv(env);
   // The first approval claims the code; a second click or tab finds it claimed. The waiting marker stays until the key
   // is stored, so a poll in between still answers 202 instead of 404.
-  const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404);
+  const expired = () => page("Code expired", '<p>This code has expired or was already used. Press Sign in in Loft again.</p>', 404, { "set-cookie": cookie("pair", "", 0) });
   const marker = CODE.test(code) ? await store.get(waiting(code)) : null;
   if (!marker) return expired();
   const limit = await limited(store, request, "key", now);

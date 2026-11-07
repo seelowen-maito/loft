@@ -113,7 +113,7 @@ let addresses = 0;
 const fresh = () => `198.51.100.${addresses++ % 250}, 10.0.0.1`;
 const get = (path, cookies = "", ip = fresh()) => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies, "x-forwarded-for": ip } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
-const post = (path, form, cookies, ip = fresh()) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip }, body: new URLSearchParams(form) });
+const post = (path, form, cookies, ip = fresh()) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip, "sec-fetch-site": "same-origin" }, body: new URLSearchParams(form) });
 /** The store's keys but the limits' counters (which hold hashes of addresses only). */
 const kept = () => [...store.keys()].filter((k) => !k.startsWith("limit:"));
 
@@ -199,7 +199,7 @@ test("a sign-in that Apple didn't start for this browser, or can't confirm, crea
 
 test("the sign-in state cookie is not a session", async () => {
   const started = await start(get("/auth/start"), env);
-  const asSession = cookiesOf(started).join("; ").replace(/^state=/, "session=");
+  const asSession = cookiesOf(started).join("; ").replace(/^__Host-state=/, "__Host-session=");
   assert.match(await (await home(get("/", asSession), env)).text(), /Sign in with Apple/);
   const res = await createAccountKey(post("/keys", { name: "x" }, asSession), env);
   assert.equal(res.status, 303);
@@ -301,8 +301,32 @@ test("a session whose account is gone gets no key and is signed out", async () =
   store.delete("account:001234.abcdef");
   const res = await createAccountKey(post("/keys", { name: "Mac" }, session), env);
   assert.equal(res.status, 303);
-  assert.match(res.headers.getSetCookie().join(), /session=; Max-Age=0/);
+  assert.match(res.headers.getSetCookie().join(), /__Host-session=; Max-Age=0/);
   assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+});
+
+test("deleting an account signs out a session from another browser", async () => {
+  const mine = await signInAs();
+  const other = await signInAs();
+  await deleteAccount(makeKv(env), "001234.abcdef");
+  const res = await home(get("/", other), env);
+  assert.match(await res.text(), /Sign in with Apple/);
+  assert.match(res.headers.get("set-cookie"), /__Host-session=; Max-Age=0/);
+  for (const r of [await createAccountKey(post("/keys", { name: "Mac" }, other), env), await revokeAccountKey(post("/keys/revoke", { id: "a".repeat(64) }, mine), env)]) {
+    assert.equal(r.status, 303);
+    assert.match(r.headers.getSetCookie().join(), /__Host-session=; Max-Age=0/);
+  }
+  assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+});
+
+test("an old session stays signed out after the same Apple ID signs up again", async () => {
+  const old = await signInAs();
+  await deleteAccount(makeKv(env), "001234.abcdef");
+  const fresh = await signInAs();
+  assert.match(await (await home(get("/", old), env)).text(), /Sign in with Apple/);
+  assert.equal((await createAccountKey(post("/keys", { name: "Mac" }, old), env)).status, 303);
+  assert.ok(![...store.keys()].some((k) => k.startsWith("relay-key:")));
+  assert.match(await (await home(get("/", fresh), env)).text(), /Create key/);
 });
 
 test("two keys created at once at 4 can't both be the 5th", async () => {
@@ -367,7 +391,7 @@ test("Delete my account deletes the keys and the account and revokes Apple's tok
   const res = await deleteAs(session);
   assert.equal(res.status, 200);
   assert.match(await res.text(), /Account deleted/);
-  assert.match(res.headers.getSetCookie().join(), /session=; Max-Age=0/);
+  assert.match(res.headers.getSetCookie().join(), /__Host-session=; Max-Age=0/);
   for (const key of keys) assert.equal((await pushWith(key)).status, 401);
   assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.includes("001234.abcdef")), "nothing of the account is left");
   assert.ok(!keys.some((k) => store.has(`relay-key:${sha256(k)}`) || store.has(`relay-key-used:${sha256(k)}`)));
@@ -399,10 +423,10 @@ test("deleting needs a signed-in session and a sign-in started for it", async ()
   const session = await signInAs();
   // Pressed, then abandoned at Apple: the next ordinary sign-in in that browser signs in and deletes nothing.
   const abandoned = await startDelete(post("/account/delete", {}, session), env);
-  const intent = cookiesOf(abandoned).find((c) => c.startsWith("delete="));
+  const intent = cookiesOf(abandoned).find((c) => c.startsWith("__Host-delete="));
   const started = await start(get("/auth/start"), env);
   const state = new URL(started.headers.get("location")).searchParams.get("state");
-  const done = await callback(get(`/auth/callback?code=c0de&state=${state}`, [...cookiesOf(started).filter((c) => c.startsWith("state=")), intent].join("; ")), env);
+  const done = await callback(get(`/auth/callback?code=c0de&state=${state}`, [...cookiesOf(started).filter((c) => c.startsWith("__Host-state=")), intent].join("; ")), env);
   assert.equal(done.headers.get("location"), "/");
   assert.ok(store.has("account:001234.abcdef"));
   assert.equal(revoked.length, 0);
@@ -422,7 +446,7 @@ test("a delete that fails part way says so, keeps the keys reachable, and can be
   const res = await deleteAs(session);
   assert.equal(res.status, 502);
   assert.match(await res.text(), /couldn't be deleted completely[\s\S]*href="\/account\/delete"/);
-  assert.doesNotMatch(res.headers.getSetCookie().join(), /session=;/, "still signed in, to try again");
+  assert.doesNotMatch(res.headers.getSetCookie().join(), /__Host-session=;/, "still signed in, to try again");
   assert.equal(revoked.length, 0);
   assert.equal((await pushWith(key)).status, 200);
   failing = null;
@@ -488,4 +512,80 @@ test("the 6th key creation from one address in an hour is refused, across accoun
   assert.match(await refused.text(), /At most 5 key creations an hour/);
   assert.equal(sets.get("account-keys:222.b").size, 2);
   assert.ok(await keyFrom(await createAccountKey(post("/keys", { name: "Mac 6" }, b), env)), "from another address");
+});
+
+/** `post`, but as another site would send it: `Sec-Fetch-Site: cross-site`, a foreign `Origin`, or neither header. */
+const forged = (req, headers) => {
+  req.headers.delete("sec-fetch-site");
+  for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
+  return req;
+};
+const FORGERIES = [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "https://evil.example.com" }, {}];
+
+test("a form posted from another site is refused with 403 and changes nothing", async () => {
+  const session = await signInAs();
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const before = JSON.stringify([...store]);
+  const id = sha256(key);
+  for (const headers of FORGERIES) {
+    for (const [handler, path, form] of [[createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}]]) {
+      const res = await handler(forged(post(path, form, session), headers), env);
+      assert.equal(res.status, 403, `${path} ${JSON.stringify(headers)}`);
+      assert.match(await res.text(), /didn't come from this portal/);
+      assert.equal(res.headers.get("location"), null);
+    }
+  }
+  assert.equal(JSON.stringify([...store]), before, "nothing was written, not even a rate-limit count");
+  assert.equal((await pushWith(key)).status, 200, "the key still works");
+  // The portal's own origin passes, with or without Sec-Fetch-Site.
+  assert.equal((await createAccountKey(forged(post("/keys", { name: "Own" }, session), { origin: "https://portal.example.com" }), env)).status, 200);
+});
+
+test("the session, state and delete cookies are __Host- cookies: Secure, HttpOnly, SameSite=Lax, Path=/, no Domain", async () => {
+  const started = await start(get("/auth/start"), env);
+  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  const done = await callback(get(`/auth/callback?code=c0de&state=${state}`, cookiesOf(started).join("; ")), env);
+  for (const res of [started, done]) {
+    for (const c of res.headers.getSetCookie()) {
+      assert.match(c, /^__Host-(session|state|delete)=/);
+      assert.match(c, /; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
+      assert.doesNotMatch(c, /Domain/i);
+    }
+  }
+  assert.ok(done.headers.getSetCookie().some((c) => c.startsWith("__Host-session=") && !c.includes("Max-Age=0")));
+  // Cookies under the old names are no longer read.
+  const old = cookiesOf(done).join("; ").replaceAll("__Host-", "");
+  assert.equal((await home(get("/", old), env)).status, 200);
+  assert.doesNotMatch(await (await home(get("/", old), env)).text(), /Create key/);
+});
+
+const HTML_HEADERS = {
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action 'self' https://appleid.apple.com; base-uri 'none'; frame-ancestors 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+};
+
+test("every portal page carries the CSP (no scripts), Referrer-Policy and nosniff; the push endpoint carries nosniff and no-store", async () => {
+  const session = await signInAs();
+  const pages = [
+    await home(get("/"), env),
+    await home(get("/", session), env),
+    await confirmDelete(get("/account/delete", session), env),
+    await createAccountKey(post("/keys", { name: "Mac" }, session), env),
+    await createAccountKey(post("/keys", { name: " " }, session), env),
+    await revokeAccountKey(post("/keys/revoke", { id: "x" }, session), env),
+    await createAccountKey(forged(post("/keys", { name: "x" }, session), { "sec-fetch-site": "cross-site" }), env),
+    await callback(get("/auth/callback?code=x&state=y"), env),
+    await home(get("/"), {}),
+  ];
+  for (const res of pages) {
+    assert.match(res.headers.get("content-type"), /^text\/html/);
+    for (const [k, v] of Object.entries(HTML_HEADERS)) assert.equal(res.headers.get(k), v, `${res.status} ${k}`);
+  }
+  assert.doesNotMatch(HTML_HEADERS["content-security-policy"], /script/);
+  const key = await keyFrom(await createAccountKey(post("/keys", { name: "Two" }, session), env));
+  for (const res of [await pushWith(key), await pushWith("nope")]) {
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  }
 });
