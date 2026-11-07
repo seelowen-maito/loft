@@ -55,7 +55,7 @@ pub struct Push {
     pub team_id: String,
     /// The app's bundle id, used as the APNs topic.
     pub bundle_id: String,
-    /// The push relay's address (https), where its portal lives too. Empty: LOFT_RELAY_URL, else none. Only
+    /// The push relay's address (https), where its portal lives too. Empty: LOFT_RELAY_URL, else the official relay. Only
     /// `PUT /api/push` sets it. A `portal_url` saved by older versions is ignored.
     pub relay_url: String,
 }

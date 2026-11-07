@@ -188,7 +188,7 @@ export function PushSettings() {
           <span className="eyebrow">Relay address</span>
           <input
             className="input font-mono"
-            placeholder={status.relay_url && !status.relay_address ? `${status.relay_url} (from LOFT_RELAY_URL)` : "https://…"}
+            placeholder={status.relay_url && !status.relay_address ? `${status.relay_url} (default)` : "https://…"}
             value={relayAddr}
             onChange={(e) => setRelayAddr(e.target.value)}
           />

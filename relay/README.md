@@ -131,8 +131,8 @@ repo, so anyone can run their own.
 **Loft**
 
 10. Settings → Push notifications → **Relay address**: `PORTAL_URL` (`https://<project>.vercel.app`); the portal is at
-    the same address. Or `LOFT_RELAY_URL` for a scripted install. `RELAY_URL` in `backend/src/apns.rs` stays empty
-    until the official project exists, so a name nobody owns can't receive relay keys and push text.
+    the same address. Or `LOFT_RELAY_URL` for a scripted install. Either overrides `RELAY_URL` in `backend/src/apns.rs`,
+    the official relay (`https://portal.get-loft.com`).
 
 **Test it end to end**
 

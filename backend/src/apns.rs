@@ -128,10 +128,9 @@ pub fn route(state: &AppState) -> Route {
     route_for(own_key(state), relay_key_present() && relay_url(state).is_some())
 }
 
-/// The hosted push relay, which also serves the push portal's pages (ADR 0003). Empty until the operator's Vercel
-/// project exists (#259), so no one else's project can receive relay keys and push text under its name;
-/// LOFT_RELAY_URL sets it meanwhile.
-const RELAY_URL: &str = "";
+/// The official push relay, which also serves the push portal's pages (ADR 0003), so a fresh install can Sign in for
+/// push with nothing to type. Settings → Relay address, else LOFT_RELAY_URL, overrides it.
+const RELAY_URL: &str = "https://portal.get-loft.com";
 
 /// A relay address as typed in Settings: https, with a host and no user name or password; ""
 /// clears it. Tests may also use plain http on this Mac, for their fake relay.
@@ -412,6 +411,12 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn the_built_in_relay_is_the_official_one_and_passes_the_address_check() {
+        // Tests use a fake relay instead (see `relay_url`), so the built-in default is checked here.
+        assert_eq!(super::check_address(super::RELAY_URL).as_deref(), Ok("https://portal.get-loft.com"));
+    }
+
     use super::*;
     use p256::ecdsa::{VerifyingKey, signature::Verifier};
 

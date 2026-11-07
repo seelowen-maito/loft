@@ -12,8 +12,7 @@ service, by one of two paths (ADR 0002):
 | Apps | Any bundle id (your own build) | The official Loft app only |
 
 Your own key wins when both are set. A relay key only counts when Loft knows the relay's address: Settings → Push
-notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (empty until the operator's relay is
-deployed). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (the official relay, `https://portal.get-loft.com`). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
 late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
 off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
 paths: which phones, which kinds, quiet hours, the rate limit and the payload.
@@ -29,7 +28,7 @@ The relay is login-only. With the relay address set, Settings → Push notificat
 relay for a one-time code (10 minutes, at most 5 per IP per hour) and opens `<relay address>/connect?code=…`. After signing in with Apple and pressing
 Allow there, this backend, polling the relay, receives a new relay key once and stores it: the key never passes
 through the browser, and the code stops working. Approving from a phone works too. With a relay address (Settings → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in
-`backend/src/apns.rs`, empty until the official address is final), Settings shows **Sign in** and, with a key stored,
+`backend/src/apns.rs`, the official `https://portal.get-loft.com`), Settings shows **Sign in** and, with a key stored,
 "Manage keys". A relay whose portal isn't configured (its operator makes keys with `relay/scripts/create-key.js`)
 answers `/api/pair` with `503 {portal: false}`: Settings then drops **Sign in** for that address and offers only
 pasting a key. Pasting a key in Settings → Push notifications → Loft relay stays as a fallback. Either way it is kept owner-only in
