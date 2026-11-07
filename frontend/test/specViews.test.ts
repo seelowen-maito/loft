@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, deliveryOf, parseBoard, specRef, stageOf, ticketLabel, ticketsOf, withBoard, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, deliveryOf, parseBoard, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -77,4 +77,12 @@ test("dropped specs stay off the board unless asked for, and a fork's spec and i
   assert.deepEqual(ids({ stages: ["shipped"], showDropped: true }), ["d", "u"]);
   assert.deepEqual(all.map(specRef), ["me/loft#26", "me/loft#83", "up/loft#265"], "each card says which repo it is");
   assert.equal(specRef(task({ project: "web" })), "Loft · web");
+});
+
+test("the board's open pane is in the URL, with the spec it came from, and leaves the filters alone", () => {
+  const p = new URLSearchParams("view=specs&project=loft");
+  assert.equal(withOpen(p, "t1").toString(), "view=specs&project=loft&open=t1");
+  assert.equal(withOpen(p, "t1", "s1").toString(), "view=specs&project=loft&open=t1&up=s1");
+  assert.equal(withOpen(withOpen(p, "t1", "s1"), "s1").toString(), "view=specs&project=loft&open=s1", "back to the spec drops the arrow");
+  assert.equal(withOpen(withOpen(p, "t1", "s1"), null).toString(), "view=specs&project=loft", "closing leaves the board as it was");
 });

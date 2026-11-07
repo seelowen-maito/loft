@@ -134,8 +134,7 @@ function Bar2({ filters, facets, setFilter, query, setQuery, params, setParams, 
   return (
     <div className="space-y-2 border-b border-line px-4 pb-3 pt-4">
       <div className="flex flex-wrap items-center gap-2">
-        <div><div className="eyebrow">Specs</div><div className="font-mono text-[11px] text-fg-3">{shown === total ? `${total} specs` : `${shown} of ${total} specs`}</div></div>
-        <ViewToggle params={params} setParams={setParams} />
+        <div><div className="font-mono text-[11px] text-fg-3">{shown === total ? `${total} specs` : `${shown} of ${total} specs`}</div></div>
         <label className="flex min-w-[160px] flex-1 items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5 sm:max-w-xs">
           <Search className="size-3.5 text-fg-3" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search specs, or #42" aria-label="Search specs" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />

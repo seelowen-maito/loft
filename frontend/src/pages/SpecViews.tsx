@@ -3,7 +3,7 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, type DeliverySummary, type Stage } from "../lib/specViews";
+import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
 
 /* The Issues page's spec views, behind `?specView=`: the boards (./SpecBoard) and a spec's own page opening with its timeline (c). They share these pieces. */
 
@@ -49,10 +49,11 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
 
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
-function TicketLine({ t, current }: { t: DeliverySummary["tickets"][number]; current: boolean }) {
+function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
   const l = ticketLabel(t.state);
-  return (
-    <li className="flex items-center gap-2 py-0.5 text-[12.5px]">
+  const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
+  const body = (
+    <>
       <span className={cx("grid size-4 shrink-0 place-items-center rounded-full", TONE_BG[l.tone], l.tone === "muted" ? "text-fg-3" : "text-ink-950")}>
         {t.state === "closed" ? <Check className="size-3" /> : current ? <CircleDot className="size-3" /> : null}
       </span>
@@ -62,13 +63,15 @@ function TicketLine({ t, current }: { t: DeliverySummary["tickets"][number]; cur
         <span key={role} className={cx("font-mono text-[10px]", v === "pass" ? "text-good" : "text-fg-3")} title={`${role}: ${v}`}>{role} {v === "pass" ? "✓" : "…"}</span>
       ))}
       <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[l.tone])}>{l.text}</span>
-    </li>
+    </>
   );
+  return <li>{open ? <button onClick={open} className={cx(row, "rounded-md hover:bg-white/[0.04]")}>{body}</button> : <div className={row}>{body}</div>}</li>;
 }
 
 /** The top of a spec's own page: its Delivery as a timeline, who has what, the PR and each ticket's verdicts. */
-export function SpecPanel({ spec, ...c }: Ctx & { spec: Task }) {
+export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTicket: (id: string) => void }) {
   const d = deliveryOf(spec, c.deliveries), stage = stageOf(spec, d), p = progressOf(spec, d, c.tasks), url = prUrl(spec, d);
+  const own = d?.tickets.length ? ticketsOf(spec, d, c.tasks) : []; // same order as d.tickets, each with its own issue
   const verdicts = (d?.tickets ?? []).filter((t) => t.state === "review");
   return (
     <section className="panel space-y-4 p-4" aria-label="Delivery">
@@ -90,7 +93,7 @@ export function SpecPanel({ spec, ...c }: Ctx & { spec: Task }) {
             </div>
           )}
           <ol className="relative ml-2 border-l border-line pl-4">
-            {d.tickets.map((t) => <TicketLine key={t.number} t={t} current={d.current?.number === t.number} />)}
+            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={d.current?.number === t.number} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
           </ol>
         </>
       )}
