@@ -1,5 +1,5 @@
 //! Signing in to the push relay from Settings (ADR 0003): the relay gives a one-time code, the user allows it on the
-//! push portal, and this backend, polling the relay, receives a relay key once and stores it like a pasted one.
+//! push portal (at the relay's own address), and this backend, polling the relay, receives a relay key once and stores it like a pasted one.
 //! The key never passes through the browser; only the portal link does.
 
 use std::sync::Mutex;
@@ -21,17 +21,31 @@ pub fn waiting() -> bool {
     WAITING.lock().unwrap().is_some()
 }
 
+/// The relay address that last answered that its portal isn't configured: no one can allow a code there.
+static NO_PORTAL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether Settings offers Sign in: there is a relay, and it hasn't said its portal isn't configured.
+pub fn offered(state: &AppState) -> bool {
+    apns::relay_url(state).is_some_and(|r| NO_PORTAL.lock().unwrap().as_deref() != Some(r.as_str()))
+}
+
 /// `POST /api/push/signin`: asks the relay for a code and returns the portal link that allows it. The key is
 /// collected in the background, so approving from a phone works too.
 pub async fn start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let (Some(relay), Some(portal)) = (apns::relay_url(&state), apns::portal_url(&state)) else {
-        return Err(bad("Set the relay and portal addresses first (or paste a relay key)."));
+    let Some(relay) = apns::relay_url(&state) else {
+        return Err(bad("Set the relay address first (or paste a relay key)."));
     };
     let res = state.http.post(format!("{relay}/api/pair")).timeout(Duration::from_secs(15)).send().await.map_err(|_| bad("The push relay is unreachable."))?;
-    if !res.status().is_success() {
-        return Err(bad(format!("The push relay didn't give a code ({}).", res.status().as_u16())));
-    }
+    let ok = res.status().is_success();
+    let status = res.status().as_u16();
     let v = res.json::<Value>().await.unwrap_or(Value::Null);
+    if v["portal"] == json!(false) {
+        *NO_PORTAL.lock().unwrap() = Some(relay);
+        return Err(bad("This relay has no sign-in portal: paste a relay key from its operator."));
+    }
+    if !ok {
+        return Err(bad(format!("The push relay didn't give a code ({status}).")));
+    }
     let (Some(code), Some(secret)) = (v["code"].as_str().map(str::to_string), v["secret"].as_str().map(str::to_string)) else {
         return Err(bad("The push relay's answer had no code."));
     };
@@ -41,7 +55,7 @@ pub async fn start(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
     }
     let seconds = v["expires_in"].as_u64().unwrap_or(600).clamp(60, 900);
     *WAITING.lock().unwrap() = Some(code.clone());
-    let url = format!("{portal}/connect?code={code}");
+    let url = format!("{relay}/connect?code={code}");
     tokio::spawn(async move {
         if let Err(e) = wait_for_key(&state, &relay, &code, &secret, Duration::from_secs(2), Duration::from_secs(seconds)).await {
             tracing::warn!("push sign-in: {e:#}");
@@ -84,14 +98,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_code_flow_ends_with_the_relays_key_stored_once_and_never_returned() {
+        // Only the relay address is set (LOFT_RELAY_URL): the portal's page is at that same address.
         let relay = apns::tests::fake_apns_relay();
         let st = crate::tasks::tests::state();
-        let mut s = st.settings.get();
-        s.push.portal_url = "https://portal.example.com".into();
-        st.settings.save(s).unwrap();
         let Json(r) = start(State(st.clone())).await.unwrap();
         let url = r["url"].as_str().unwrap();
-        let code = url.strip_prefix("https://portal.example.com/connect?code=").expect(url).to_string();
+        let code = url.strip_prefix(&format!("{relay}/connect?code=")).expect(url).to_string();
         let secret = format!("s-{code}");
         assert!(!url.contains(&secret), "the secret stays out of the link");
         assert_eq!(r.as_object().unwrap().len(), 1, "only the link comes back, never a key");
@@ -110,16 +122,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_addresses_or_a_reachable_relay_signing_in_says_why() {
+    async fn without_a_reachable_relay_signing_in_says_why() {
         apns::tests::fake_apns();
         let st = crate::tasks::tests::state();
         let mut s = st.settings.get();
         s.push.relay_url = "http://127.0.0.1:9".into();
-        s.push.portal_url = String::new();
-        st.settings.save(s.clone()).unwrap();
-        assert!(start(State(st.clone())).await.unwrap_err().1.contains("addresses"));
-        s.push.portal_url = "https://portal.example.com".into();
         st.settings.save(s).unwrap();
         assert!(start(State(st.clone())).await.unwrap_err().1.contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn a_relay_without_a_portal_is_not_offered_sign_in_again() {
+        let relay = apns::tests::fake_apns_relay();
+        let st = crate::tasks::tests::state();
+        let mut s = st.settings.get();
+        s.push.relay_url = format!("{relay}/no-portal");
+        st.settings.save(s).unwrap();
+        assert!(offered(&st), "offered until the relay says otherwise");
+        let err = start(State(st.clone())).await.unwrap_err();
+        assert!(err.1.contains("paste a relay key"), "{}", err.1);
+        assert!(!offered(&st));
+        let Json(p) = crate::devices::status(State(st.clone()), HeaderMap::new()).await.unwrap();
+        assert_eq!(p["signin"], json!(false));
+        // Another address is offered again.
+        let mut s = st.settings.get();
+        s.push.relay_url = String::new();
+        st.settings.save(s).unwrap();
+        assert!(offered(&st));
     }
 }

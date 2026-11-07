@@ -156,11 +156,12 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         "relay_key": apns::relay_key_present(),
         // Sign in was pressed and the code isn't allowed yet.
         "signing_in": crate::signin::waiting(),
-        // The addresses in use (saved, else the environment), and the saved ones the Settings fields show.
+        // The relay address in use (saved, else the environment), and the saved one the Settings field shows. The
+        // portal's pages are at the same address.
         "relay_url": apns::relay_url(&state),
-        "portal_url": apns::portal_url(&state),
         "relay_address": s.relay_url,
-        "portal_address": s.portal_url,
+        // Sign in is offered: there is a relay, and it hasn't said its portal isn't configured.
+        "signin": crate::signin::offered(&state),
         "configured": route == apns::Route::OwnKey,
         "key_present": key,
         "key_id": s.key_id,
@@ -185,9 +186,8 @@ pub struct Configure {
     /// Removes the stored relay key.
     #[serde(default)]
     remove_relay_key: bool,
-    /// The push relay's and portal's addresses: https only, "" clears.
+    /// The push relay's address, where its portal lives too: https only, "" clears.
     relay_url: Option<String>,
-    portal_url: Option<String>,
 }
 
 /// `PUT /api/push`: key id, team id, bundle id, and optionally the key itself or the relay key.
@@ -210,9 +210,6 @@ pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b
     }
     if let Some(u) = b.relay_url {
         s.push.relay_url = apns::check_address(&u).map_err(|e| bad(format!("Relay address: {e}")))?;
-    }
-    if let Some(u) = b.portal_url {
-        s.push.portal_url = apns::check_address(&u).map_err(|e| bad(format!("Portal address: {e}")))?;
     }
     if let Some(bid) = b.bundle_id {
         s.push.bundle_id = bid.trim().to_string();
@@ -266,31 +263,23 @@ mod tests {
         assert_eq!(s["relay_key"], json!(true));
         let text = s.to_string();
         assert!(!text.contains("lrk_") && !text.contains("PRIVATE KEY"), "{text}");
-        // No portal yet: no link to show.
-        assert_eq!(s["portal_url"], Value::Null);
+        // One address: no separate portal in the status.
+        assert!(s.get("portal_url").is_none() && s.get("portal_address").is_none(), "{s}");
+        assert_eq!(s["signin"], json!(true));
     }
 
     #[test]
-    fn the_portal_link_comes_from_the_environment_when_nothing_is_saved() {
-        let st = crate::tasks::tests::state();
-        // Set and cleared in one test, so no other test sees it.
-        unsafe { std::env::set_var("LOFT_PORTAL_URL", " https://loft-push-relay.vercel.app/account ") };
-        assert_eq!(crate::apns::portal_url(&st).as_deref(), Some("https://loft-push-relay.vercel.app/account"));
-        let mut s = st.settings.get();
-        s.push.portal_url = "https://portal.example.com".into();
-        st.settings.save(s).unwrap();
-        assert_eq!(crate::apns::portal_url(&st).as_deref(), Some("https://portal.example.com"), "the saved address wins");
-        let mut s = st.settings.get();
-        s.push.portal_url = String::new();
-        st.settings.save(s).unwrap();
-        unsafe { std::env::set_var("LOFT_PORTAL_URL", "javascript:alert(1)") };
-        assert_eq!(crate::apns::portal_url(&st), None);
-        unsafe { std::env::remove_var("LOFT_PORTAL_URL") };
-        assert_eq!(crate::apns::portal_url(&st), None, "empty by default");
+    fn a_portal_address_saved_by_an_older_version_is_ignored() {
+        let mut v = serde_json::to_value(crate::settings::Settings::default()).unwrap();
+        v["push"]["relay_url"] = json!("https://relay.example.com");
+        v["push"]["portal_url"] = json!("https://portal.example.com");
+        let s: crate::settings::Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.push.relay_url, "https://relay.example.com");
+        assert!(!serde_json::to_string(&s).unwrap().contains("portal"));
     }
 
     #[tokio::test]
-    async fn relay_and_portal_addresses_are_saved_checked_and_used_without_a_restart() {
+    async fn the_relay_address_is_saved_checked_and_used_without_a_restart() {
         crate::apns::tests::fake_apns();
         let st = crate::tasks::tests::state();
         let put = |p: Value| configure(State(st.clone()), HeaderMap::new(), Json(serde_json::from_value::<Configure>(p).unwrap()));
@@ -307,12 +296,11 @@ mod tests {
             assert_eq!(err.0, StatusCode::BAD_REQUEST, "{bad}");
             assert!(err.1.starts_with("Relay address: ") && err.1.contains(why), "{bad}: {}", err.1);
         }
-        assert!(put(json!({ "portal_url": "http://portal.example.com" })).await.unwrap_err().1.starts_with("Portal address: "));
-        assert_eq!((st.settings.get().push.relay_url, st.settings.get().push.portal_url), (String::new(), String::new()));
+        assert_eq!(st.settings.get().push.relay_url, String::new());
 
         // Saved and reported (no key); a trailing slash goes.
-        let Json(s) = put(json!({ "relay_url": " https://relay.example.com/ ", "portal_url": "https://relay.example.com/account" })).await.unwrap();
-        assert_eq!((&s["relay_address"], &s["relay_url"], &s["portal_address"], &s["portal_url"]), (&json!("https://relay.example.com"), &json!("https://relay.example.com"), &json!("https://relay.example.com/account"), &json!("https://relay.example.com/account")));
+        let Json(s) = put(json!({ "relay_url": " https://relay.example.com/ " })).await.unwrap();
+        assert_eq!((&s["relay_address"], &s["relay_url"]), (&json!("https://relay.example.com"), &json!("https://relay.example.com")));
         assert!(!s.to_string().contains("lrk_"));
 
         // The saved address wins over LOFT_RELAY_URL (here the fake relay) at once: an address with nothing behind it
@@ -326,17 +314,15 @@ mod tests {
         assert_eq!(s["relay_address"], json!(""));
         assert!(test(State(st.clone()), Path(phone)).await.is_ok(), "the environment's relay again");
 
-        // The general settings can't change them, even when a client sends the push section.
-        let _ = put(json!({ "portal_url": "https://portal.example.com" })).await.unwrap();
+        // The general settings can't change it, even when a client sends the push section.
         let mut general = serde_json::to_value(st.settings.get()).unwrap();
         general["push"]["relay_url"] = json!("https://evil.example.com");
-        general["push"]["portal_url"] = json!("https://evil.example.com");
         let _ = crate::api::put_settings(State(st.clone()), Json(general)).await.ok().unwrap();
-        assert_eq!((st.settings.get().push.relay_url, st.settings.get().push.portal_url), (String::new(), "https://portal.example.com".to_string()));
+        assert_eq!(st.settings.get().push.relay_url, String::new());
 
         // No agent tool can set them.
         let tools = crate::mcp::tools(&st).to_string();
-        assert!(!tools.contains("relay_url") && !tools.contains("portal_url") && !tools.contains("relay_key"));
+        assert!(!tools.contains("relay_url") && !tools.contains("relay_key"));
     }
 
     #[tokio::test]
