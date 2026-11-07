@@ -161,17 +161,6 @@ export default function TasksPage() {
   const selected = tasks?.find((t) => t.id === openId) ?? null;
   const up = board ? params.get("up") : null;
   const openOnBoard = useCallback((id: string | null, from?: string) => navigate({ pathname: "/issues", search: withOpen(params, id, from).toString() }), [navigate, params]);
-  // Esc closes the board's pane, unless it's for a field or a dialog.
-  useEffect(() => {
-    if (!board || !openId) return;
-    const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement;
-      if (e.key !== "Escape" || e.defaultPrevented || el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || document.querySelector('[role="dialog"]')) return;
-      openOnBoard(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [board, openId, openOnBoard]);
   const to = (id: string): To => (board ? { pathname: "/issues", search: withOpen(params, id).toString() } : { pathname: `/issues/${id}`, search: params.toString() });
   const detail = selected ? (
     <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={deliveries} to={to}
@@ -184,7 +173,7 @@ export default function TasksPage() {
 
   // One header over both views, so the toggle stays where it is.
   const header = (
-    <div className={cx("flex items-center justify-between gap-3 border-b border-line px-4 pb-3 pt-5", openId && "max-lg:hidden")}>
+    <div className={cx("flex items-center justify-between gap-3 border-b border-line px-4 pb-3 pt-5", openId && !board && "max-lg:hidden")}>
       <div>
         <div className="eyebrow">Loft issues</div>
         <div className="mt-1 font-mono text-[11px] text-fg-3">
@@ -208,15 +197,13 @@ export default function TasksPage() {
     return (
       <div className="flex h-full flex-col overflow-hidden">
         {header}
-        <div className={cx("grid min-h-0 flex-1 overflow-hidden max-lg:grid-cols-1", openId ? "grid-cols-[400px_minmax(0,1fr)]" : "grid-cols-1")}>
-          <div className={cx("min-h-0 overflow-hidden", openId && "border-r border-line max-lg:hidden")}>
-            {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
-              <BoardPage specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} filters={{ q: filters.q, group, project, agent: agentId }}
-                facets={{ teams, projects: groupProjectList, agents }} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
-            )}
-          </div>
-          {openId && <section className="min-h-0 overflow-y-auto">{detail}</section>}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
+            <BoardPage specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} filters={{ q: filters.q, group, project, agent: agentId }}
+              facets={{ teams, projects: groupProjectList, agents }} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
+          )}
         </div>
+        {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
         {creating && <NewTaskDialog agents={agents} projects={projects} onClose={() => setCreating(false)} />}
       </div>
     );
@@ -343,7 +330,42 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
   );
 }
 
-/** An issue's page. In the board it's the pane beside it: `onClose` is its ✕, `onBack` the arrow to the spec it was opened from. `to` is where a link to another issue goes. */
+/** The board's large modal over the full-width board: background click, ✕ or Esc close it; Tab stays inside and focus goes back to the card on close. Full screen at phone width. */
+function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  const box = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const from = document.activeElement as HTMLElement | null;
+    box.current?.focus();
+    return () => { if (from?.isConnected) from.focus(); };
+  }, []);
+  const onKey = (e: React.KeyboardEvent) => {
+    const el = e.target as HTMLElement;
+    if (e.key === "Escape") {
+      // Not while a field or another dialog (new issue, confirm…) has it.
+      if (e.defaultPrevented || el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || document.querySelectorAll('[role="dialog"]').length > 1) return;
+      e.stopPropagation();
+      close.current();
+    } else if (e.key === "Tab" && box.current) {
+      const f = [...box.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')];
+      if (f.length === 0) return e.preventDefault();
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && (el === first || el === box.current)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && el === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px] sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} role="dialog" aria-modal="true" aria-label="Issue" tabIndex={-1} onKeyDown={onKey}
+        className="h-full w-full animate-rise overflow-y-auto bg-ink-950 shadow-2xl outline-none sm:h-auto sm:max-h-full sm:max-w-[960px] sm:rounded-2xl sm:border sm:border-line-strong">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** An issue's page. In the board it's the modal over it: `onClose` is its ✕, `onBack` the arrow to the spec it was opened from. `to` is where a link to another issue goes. */
 function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, openTicket, onClose, onBack }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string>; deliveries: DeliverySummary[]; to: (id: string) => To; openTicket: (id: string) => void; onClose?: () => void; onBack?: () => void }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
