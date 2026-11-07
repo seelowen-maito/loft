@@ -208,6 +208,8 @@ test("approving a code counts as a key creation for the address's hourly limit",
 test("without the portal's settings, /api/pair says so and gives no code", async () => {
   const res = await pairEndpoint(asLoft("/api/pair", {}));
   assert.equal(res.status, 503);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("cache-control"), "no-store");
   assert.deepEqual(await res.json(), { error: "the push portal isn't configured", portal: false });
 });
 
