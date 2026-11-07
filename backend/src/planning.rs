@@ -3440,7 +3440,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -4125,7 +4125,7 @@ pub(crate) mod tests {
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!((&items[0]["title"], &items[0]["urgency"]), (&json!("Delivery stalled: Rounds"), &json!(2)));
         assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building #41.");
-        assert_eq!(items[0]["actions"][0]["target"], json!({ "screen": "task", "task_id": spec.id }));
+        assert_eq!(items[0]["actions"][1]["target"], json!({ "screen": "task", "task_id": spec.id }));
         let all = crate::needs_you::collect(&st).unwrap();
         let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
         assert_eq!((p.kind, p.title.as_str(), p.body.as_str()), ("delivery_stalled", "Delivery stalled", "Rounds"));
@@ -4290,7 +4290,7 @@ pub(crate) mod tests {
         assert!(items.iter().all(|i| i["reason"].as_str().unwrap().starts_with("Its run was lost when Loft restarted")), "{items:?}");
         let fixes = items.iter().find(|i| i["title"] == "Delivery stalled: spec #70").unwrap();
         assert_eq!(fixes["reason"], "Its run was lost when Loft restarted. Stopped at: the fixes from the final Code Review.");
-        assert_eq!(fixes["actions"][0]["target"], json!({ "url": "https://github.com/octo/st-restart/issues/70" }), "not mirrored: its GitHub issue");
+        assert_eq!(fixes["actions"][1]["target"], json!({ "url": "https://github.com/octo/st-restart/issues/70" }), "not mirrored: its GitHub issue");
     }
 
     #[tokio::test]
@@ -4335,6 +4335,225 @@ pub(crate) mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["title"], "Delivery stalled: Offline mode");
         assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building \"Store\".");
-        assert_eq!(items[0]["actions"][0]["target"], json!({ "screen": "task", "task_id": spec.id }));
+        assert_eq!(items[0]["actions"][1]["target"], json!({ "screen": "task", "task_id": spec.id }));
+    }
+
+    // ---- Resume a stalled Delivery (#336) ----
+
+    /// Resume on the issue's Delivery card.
+    async fn resume_card(st: &AppState, issue: &crate::db::Task) -> Result<Value, crate::api::ApiError> {
+        crate::delivery::resume_from_issue(State(st.clone()), Path(issue.id.clone())).await.map(|j| j.0)
+    }
+
+    /// The "Delivery stalled" item's Resume, sent as Needs you gives it.
+    async fn resume_from_needs_you(st: &AppState) -> Result<Value, crate::api::ApiError> {
+        let items = stalled_items(st);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let a = items[0]["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "resume").unwrap().clone();
+        assert_eq!((&a["label"], &a["method"], &a["path"]), (&json!("Resume"), &json!("POST"), &json!("/api/deliveries/resume")));
+        crate::delivery::resume_route(State(st.clone()), axum::Json(serde_json::from_value(a["body"].clone()).unwrap())).await.map(|j| j.0)
+    }
+
+    fn commit(sha: &str, message: &str) -> Value {
+        json!({ "sha": sha, "commit": { "message": message } })
+    }
+
+    #[tokio::test]
+    async fn resume_wakes_the_dev_on_its_started_ticket_with_the_commits_already_pushed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-build";
+        let (dev, _) = building(&st, &fake, "rs-build", &["qa"]).await;
+        let spec = spec_issue(&st, "rs-build", slug);
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, true).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!(shown["can_resume"], true, "the card offers Resume");
+
+        // Newest first, as GitHub lists them: one for #41, one for #410 and one for #42.
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([
+            commit("bbbb2222cccc", "Wire the API\n\nRefs #42"),
+            commit("cccc3333dddd", "Unrelated\n\nRefs #410"),
+            commit("aaaa1111bbbb", "Store table\n\nRefs #41"),
+        ]));
+        // Since then the Dev worked on another ticket, and its setting clears context at each new one.
+        st.db.update_agent(&dev.id, |a| (a.fresh_context, a.delivery_ticket) = ("always".into(), Some("octo/other#9".into()))).unwrap();
+        st.rt.lock().unwrap().fresh_before.remove(&dev.id); // taken by the run that took the first wake
+
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Builder is building #41 again.");
+        assert_eq!((&v["state"], &v["can_resume"], &v["stall_reason"]), (&json!("running"), &json!(false), &Value::Null));
+        let commits = fake.seen(&format!("/repos/{slug}/commits"));
+        assert_eq!(commits[0].path, format!("/repos/{slug}/commits?sha=spec/40-rounds&per_page=100"));
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.tickets[0].state.as_str()), ("running", "", "", "started"));
+        assert!(stalled_items(&st).is_empty(), "the stalled item goes");
+
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("You are the Dev on this Delivery: build ticket #41"), "the role brief: {}", w[0]);
+        assert!(w[0].contains("This is a resume: the Delivery stalled because the run Loft woke for its step failed"), "{}", w[0]);
+        assert!(w[0].contains("with `Refs #41`: `aaaa111` Store table."), "{}", w[0]);
+        assert!(!w[0].contains("#410") && !w[0].contains("Wire the API"), "only this ticket's commits: {}", w[0]);
+        assert!(!st.rt.lock().unwrap().fresh_before.contains(&dev.id), "a Resume on the same ticket isn't a ticket boundary");
+
+        // The wake carries its step: a run that ends without the call stalls it again.
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).stall_reason, "no_call");
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_review_wakes_only_the_reviewers_still_pending() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-review";
+        let (dev, team) = building(&st, &fake, "rs-review", &["qa", "security"]).await;
+        let (qa, sec) = (&team[0], &team[1]);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        for a in [&dev, qa, sec] {
+            run_starts(&st, a);
+        }
+        crate::delivery::run_ended(&st, &sec.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        let v = resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. security agent (Security) is reviewing #41 again.");
+        assert!(woken(&st, qa).is_empty() && woken(&st, &dev).is_empty(), "QA passed already; the Dev waits");
+        let w = woken(&st, sec);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("You are Security on this Delivery: review ticket #41") && w[0].contains("`abc1234`"), "{}", w[0]);
+        assert!(w[0].contains("This is a resume") && w[0].contains("Verdicts already in: QA passed it."), "{}", w[0]);
+        assert!(stalled_items(&st).is_empty());
+
+        // Security's verdict closes it, as usual.
+        tool(&st, sec, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(delivery(&st, slug).tickets[0].state, "closed");
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_stalled_final_review_wakes_the_code_reviewer_then_the_fixes_the_dev() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-final";
+        let (dev, team) = building_both(&st, &fake, "rs-final", &["code_reviewer"]).await;
+        let cr = &team[0];
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        run_starts(&st, cr);
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &cr.id, false).await;
+        assert_eq!(delivery(&st, slug).resume_to, "final_review");
+
+        let v = resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. code_reviewer agent (Code reviewer) is doing the final review again.");
+        assert_eq!(delivery(&st, slug).state, "final_review");
+        let w = woken(&st, cr);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("You are the Code reviewer on this Delivery") && w[0].contains("This is a resume"), "{}", w[0]);
+        assert!(woken(&st, &dev).is_empty());
+
+        // Changes, then the Dev's fixes run stalls: Resume wakes the Dev with where the notes are.
+        tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error." })).await.unwrap();
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).resume_to, "final_fixes");
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([commit("feed1234aaaa", "Keep the error\n\nRefs #40"), commit("abc1234def", "Store\n\nRefs #41")]));
+        let v = resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Builder is fixing what the final Code Review found again.");
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("fix what the Code reviewer asked for on the spec PR https://github.com/octo/rs-final/pull/500 (round 1 of 3). Its notes are its last comment there."), "{}", w[0]);
+        assert!(w[0].contains("`feed123` Keep the error") && !w[0].contains("`abc1234` Store"), "{}", w[0]);
+        tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "final_review");
+    }
+
+    #[tokio::test]
+    async fn resume_marks_a_ticket_closed_by_hand_closed_and_starts_the_next() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-hand";
+        let (dev, _) = building(&st, &fake, "rs-hand", &["qa"]).await;
+        let spec = spec_issue(&st, "rs-hand", slug);
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        // The user closed #41 on GitHub meanwhile.
+        subs_on_github(&fake, slug, &["closed", "open"]);
+
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert_eq!(v["message"], "Resumed spec #40. Closed by hand meanwhile, so marked closed: #41. Next: #42 is with Builder.");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.current, d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), ("running", Some(42), "closed", "started"));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("build ticket #42") && !w[0].contains("This is a resume"), "a new ticket gets the plain Dev brief: {}", w[0]);
+
+        // Every ticket closed by hand: on to the final review (here, with no Code reviewer, the spec PR is ready).
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        subs_on_github(&fake, slug, &["closed", "closed"]);
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        let v = resume_card(&st, &spec).await.unwrap();
+        assert!(v["message"].as_str().unwrap().contains("marked closed: #42. It was the spec's last open ticket: spec PR #500 is now ready for review"), "{v}");
+        assert_eq!(delivery(&st, slug).state, "ready");
+    }
+
+    #[tokio::test]
+    async fn resume_is_refused_on_a_delivery_that_isnt_stalled() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/rs-refuse";
+        let (dev, _) = building(&st, &fake, "rs-refuse", &["qa"]).await;
+        let spec = spec_issue(&st, "rs-refuse", slug);
+        let no = |e: crate::api::ApiError| e.1;
+        let err = resume_card(&st, &spec).await.err().map(no).unwrap();
+        assert_eq!(err, "spec #40 isn't stalled: an agent is working on its step, so there's nothing to resume.");
+        assert!(woken(&st, &dev).len() <= 1, "nothing more was woken");
+        let before = woken(&st, &dev).len();
+        for (state, says) in [("planned", "hasn't started"), ("ready", "is done"), ("needs_human", "too many rounds of changes")] {
+            crate::delivery::update(&st, slug, 40, |d| d.state = state.into());
+            let err = crate::delivery::resume(&st, slug, 40).await.unwrap_err();
+            assert!(err.contains(says), "{state}: {err}");
+        }
+        assert_eq!(woken(&st, &dev).len(), before);
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!(shown["can_resume"], false);
+    }
+
+    #[tokio::test]
+    async fn resume_on_a_plan_kept_in_loft_reads_its_loft_issues_and_the_local_branch() {
+        let st = state();
+        let project = "rs-local";
+        let (a, m, team, dir) = local_plan(&st, project, &["dev"]).await;
+        press(&st, &a, &m).await.unwrap();
+        let (dev, store) = (&team[0], loft_ticket(&st, project, "Store"));
+        let d = crate::delivery::local_of(&st, project, &loft_ticket(&st, project, "Offline mode").id).unwrap();
+        run_starts(&st, dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        // The Dev pushed one commit for Store to the spec branch before its run ended.
+        git_in(&dir, &["checkout", "-q", "spec/1-offline-mode"]);
+        std::fs::write(dir.join("store.rs"), "// store\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", &format!("Store table\n\nRefs {}", store.id)]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+
+        let out = resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(out["message"], "Resumed spec \"Offline mode\". dev agent is building \"Store\" again.");
+        let w = woken(&st, dev);
+        assert!(w[0].contains("This is a resume") && w[0].contains("Store table"), "{}", w[0]);
+
+        // Stalls again; the user marked Store done meanwhile: API starts.
+        run_starts(&st, dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        let mut x = st.db.get_task(&store.id).unwrap().unwrap();
+        crate::tasks::set_status(&st, &mut x, "done", "user", None);
+        let out = crate::delivery::resume(&st, &d.repo, d.spec).await.unwrap();
+        assert!(out.contains("marked closed: \"Store\"") && out.contains("Next: \"API\" is with dev agent."), "{out}");
+        let d = st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.tickets[0].state.as_str(), d.tickets[1].state.as_str()), ("running", "closed", "started"));
     }
 }

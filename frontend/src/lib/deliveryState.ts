@@ -36,3 +36,8 @@ export function deliveryStateLine(d: Pick<IssueDelivery, "state" | "started" | "
   if (d.needs_human) return { tone: "needs_you", text: "Needs you: a ticket had too many rounds of changes." };
   return { tone: "running", text: "Running." };
 }
+
+/** The buttons a started Delivery's card shows: Resume only when the server says it applies. */
+export function deliveryButtons(d: Pick<IssueDelivery, "started" | "can_resume"> | null): { resume: boolean } {
+  return { resume: !!d?.started && !!d.can_resume };
+}

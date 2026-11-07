@@ -481,7 +481,11 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             text: String::new(),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
             links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
-            actions: vec![open, dismiss(&id)],
+            actions: vec![
+                action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                open,
+                dismiss(&id),
+            ],
             push: ("Delivery stalled".to_string(), title),
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,

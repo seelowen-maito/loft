@@ -108,6 +108,8 @@ export type IssueDelivery = {
   state: string;
   /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
   stall_reason?: string | null;
+  /** Resume applies: the Delivery is stalled. */
+  can_resume?: boolean;
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
@@ -623,6 +625,8 @@ export const api = {
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
+  /** Resume on a stalled Delivery: Loft checks what was done meanwhile, then wakes only the agent its step waits on. */
+  resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

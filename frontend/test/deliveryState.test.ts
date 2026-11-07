@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deliveryStateLine } from "../src/lib/deliveryState.ts";
+import { deliveryButtons, deliveryStateLine } from "../src/lib/deliveryState.ts";
 
 const at = (state: string, more: { stall_reason?: string | null; needs_human?: boolean; started?: boolean } = {}) =>
   deliveryStateLine({ state, started: more.started ?? true, stall_reason: more.stall_reason ?? null, needs_human: more.needs_human ?? false });
@@ -27,4 +27,13 @@ test("a ticket or the final review waiting for the user is Needs you, over runni
   assert.equal(at("running", { needs_human: true })?.tone, "needs_you");
   assert.equal(at("needs_human", { needs_human: true })?.text, "Needs you: too many rounds of changes in the final review.");
   assert.equal(at("stalled", { stall_reason: "no_call", needs_human: true })?.tone, "stalled", "a stalled one says so");
+});
+
+test("Resume shows only on a stalled Delivery", () => {
+  const card = (state: string, can_resume: boolean, started = true) => deliveryButtons({ started, can_resume });
+  assert.deepEqual(card("stalled", true), { resume: true });
+  for (const s of ["running", "final_review", "final_fixes", "needs_human", "ready", "settled", "merged"]) assert.deepEqual(card(s, false), { resume: false }, s);
+  assert.deepEqual(card("planned", false, false), { resume: false });
+  assert.deepEqual(deliveryButtons(null), { resume: false });
+  assert.deepEqual(deliveryButtons({ started: true }), { resume: false }, "an older server sends no can_resume");
 });

@@ -623,6 +623,13 @@ pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: b
     start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake));
 }
 
+/// A Resume wake on `ticket`, the one its Delivery stalled on: the agent carries on with it, so it's never a
+/// ticket boundary, whatever the agent worked on meanwhile.
+pub fn resume_on_ticket(state: &AppState, agent_id: &str, ticket: &str, prompt: String, wake: crate::delivery::Wake) {
+    let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
+    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake));
+}
+
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
 /// `owner/repo#N` for a GitHub issue given as `N`, `#N`, `owner/repo#N` or its link (a bare number is on
 /// `repo`, the recipient's project's repo, when it has one), and a Loft issue id as it is. None when blank.

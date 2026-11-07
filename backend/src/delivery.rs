@@ -351,13 +351,19 @@ pub(crate) fn title_of(d: &Delivery, issue_title: Option<&str>) -> String {
     title.filter(|t| !t.trim().is_empty()).map_or_else(|| subject(d), str::to_string)
 }
 
+/// Why a Delivery stalled, mid-sentence.
+fn stall_why(reason: &str) -> &'static str {
+    match reason {
+        "run_failed" => "the run Loft woke for its step failed",
+        "restart" => "its run was lost when Loft restarted",
+        _ => "the run Loft woke for its step ended without its call",
+    }
+}
+
 /// Why a Delivery stalled and what waits, for Needs you: names and titles only.
 pub(crate) fn stalled_reason(d: &Delivery) -> String {
-    let why = match d.stall_reason.as_str() {
-        "run_failed" => "The run Loft woke for its step failed",
-        "restart" => "Its run was lost when Loft restarted",
-        _ => "The run Loft woke for its step ended without its call",
-    };
+    let why = stall_why(&d.stall_reason);
+    let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
     let what = match (d.resume_to.as_str(), d.current.and_then(|n| d.ticket(n))) {
         ("final_review", _) => "the final Code Review".to_string(),
         ("final_fixes", _) => "the fixes from the final Code Review".to_string(),
@@ -935,6 +941,261 @@ pub(crate) async fn retry(state: &AppState, repo: &str) {
     }
 }
 
+/// Why a Delivery that isn't stalled can't be resumed.
+fn not_resumable(d: &Delivery) -> String {
+    let what = subject(d);
+    match d.state.as_str() {
+        "planned" => format!("{what} hasn't started: Start delivery starts it."),
+        "running" | "final_review" | "final_fixes" => format!("{what} isn't stalled: an agent is working on its step, so there's nothing to resume."),
+        "needs_human" => format!("{what} waits for you after too many rounds of changes in its final review, not on a stalled step: there's nothing to resume."),
+        _ => format!("{what} is done: every review passed, so there's nothing to resume."),
+    }
+}
+
+/// Resume's first look at what was done while the Delivery stalled: its tickets closed by hand (on GitHub,
+/// or Loft issues done or cancelled in a plan kept in Loft) are marked closed. The Delivery as it is now,
+/// and those tickets. The caller holds the repo's publish lock.
+async fn reconcile(state: &AppState, d: &Delivery) -> Result<(Delivery, Vec<i64>), String> {
+    let open: Vec<i64> = d.tickets.iter().filter(|t| t.state != "closed").map(|t| t.number).collect();
+    let mut closed = vec![];
+    if open.is_empty() {
+        return Ok((d.clone(), closed));
+    }
+    if d.local {
+        for t in d.tickets.iter().filter(|t| open.contains(&t.number)) {
+            if let Ok(Some(x)) = state.db.get_task(&t.id)
+                && matches!(x.status.as_str(), "done" | "cancelled")
+            {
+                closed.push(t.number);
+            }
+        }
+    } else if d.standalone {
+        let i = crate::github::get(state, &format!("/repos/{}/issues/{}", d.repo, d.spec)).await.map_err(|e| format!("couldn't read #{} on GitHub: {e}", d.spec))?;
+        if i["state"] == "closed" {
+            closed.push(d.spec);
+        }
+    } else {
+        let subs = crate::github::get(state, &format!("/repos/{}/issues/{}/sub_issues?per_page=100", d.repo, d.spec)).await.map_err(|e| format!("couldn't read spec #{}'s tickets on GitHub: {e}", d.spec))?;
+        closed = subs.as_array().into_iter().flatten().filter(|x| x["state"] == "closed").filter_map(|x| x["number"].as_i64()).filter(|n| open.contains(n)).collect();
+    }
+    if closed.is_empty() {
+        return Ok((d.clone(), closed));
+    }
+    let d = update(state, &d.repo, d.spec, |d| {
+        for n in &closed {
+            if let Some(t) = d.ticket_mut(*n) {
+                t.state = "closed".into();
+            }
+        }
+        if d.current.is_some_and(|n| closed.contains(&n)) {
+            d.current = None;
+        }
+    })
+    .ok_or("the Delivery record couldn't be saved")?;
+    Ok((d, closed))
+}
+
+/// Whether a commit message carries `trailer` (`Refs #41`, not `Refs #410`).
+fn has_trailer(message: &str, trailer: &str) -> bool {
+    message.match_indices(trailer).any(|(i, _)| !message[i + trailer.len()..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// The commits on the Delivery's branch whose message carries `trailer`, pushed after the newest of `known`
+/// (the last submit's commits): "`abc1234` Subject" each, oldest first. Read on GitHub, or for a plan kept
+/// in Loft in the project's own repo.
+async fn branch_commits(state: &AppState, d: &Delivery, trailer: &str, known: &[String]) -> Result<Vec<String>, String> {
+    let list: Vec<(String, String)> = if d.local {
+        let dir = project_dir(state, d)?;
+        let log = git(&dir, &["log", "-n", "200", "--format=%H%x1f%B%x1e", &format!("refs/heads/{}", d.branch)]).await?;
+        log.split('\x1e').filter_map(|c| c.trim().split_once('\x1f').map(|(sha, m)| (sha.to_string(), m.to_string()))).collect()
+    } else {
+        let v = crate::github::get(state, &format!("/repos/{}/commits?sha={}&per_page=100", d.repo, d.branch)).await.map_err(|e| e.to_string())?;
+        v.as_array().into_iter().flatten().filter_map(|c| Some((c["sha"].as_str()?.to_string(), c["commit"]["message"].as_str().unwrap_or("").to_string()))).collect()
+    };
+    let known = |sha: &str| {
+        let sha = sha.to_lowercase();
+        known.iter().any(|k| !k.is_empty() && (sha.starts_with(k.as_str()) || k.starts_with(&sha)))
+    };
+    // Newest first: back to the last submit.
+    let mut found: Vec<String> = list.iter().take_while(|(sha, _)| !known(sha)).filter(|(_, m)| has_trailer(m, trailer)).map(|(sha, m)| format!("`{}` {}", short(sha), m.lines().next().unwrap_or("").trim())).collect();
+    found.reverse();
+    Ok(found)
+}
+
+/// The "this is a resume" section a Resume wake adds to the role brief: why the step stopped, and what's
+/// already done.
+fn resume_section(why: &str, done: &[String]) -> String {
+    let done = done.iter().map(|l| format!("\n- {l}")).collect::<String>();
+    format!("\n\nThis is a resume: the Delivery stalled because {why}, and the user pressed Resume. Pick the work up where it stopped instead of starting over.{done}")
+}
+
+/// What a Resume wake to the Dev on ticket `t` says is done: its commits found on the branch, and its
+/// changes rounds.
+async fn build_done(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> Vec<String> {
+    let mut done = vec![];
+    if t.rounds > 0 {
+        let at = if d.local { "its Loft issue".to_string() } else { format!("the {}", pr_name(d)) };
+        let last = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
+        done.push(format!("Its reviewers asked for changes {} time(s); their notes are on {at}. You last submitted {last}.", t.rounds));
+    }
+    let since = if t.commits.is_empty() { "" } else { " since then" };
+    done.push(match branch_commits(state, d, &refs(d, t), &t.commits).await {
+        Ok(c) if c.is_empty() => format!("No commit with `{}` is on the {} `{}`{since} yet.", refs(d, t), branch_name(d), d.branch),
+        Ok(c) => format!("Already on the {} `{}`{since}, with `{}`: {}. Check them, finish what's missing, then submit all the ticket's commits.", branch_name(d), d.branch, refs(d, t), c.join(", ")),
+        Err(e) => format!("Loft couldn't read the {} ({e}): check what's already on it yourself.", branch_name(d)),
+    });
+    done
+}
+
+/// The Dev brief for the final Code Review's fixes, for a Resume: the Code reviewer's notes are on the spec
+/// PR (or the spec's Loft issue), since Loft doesn't keep them.
+fn fixes_brief(d: &Delivery) -> String {
+    let rounds = d.final_rounds;
+    if d.local {
+        return format!(
+            "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the spec branch `{branch}` (round {rounds} of {MAX_ROUNDS}). Its notes are its last note on the spec's Loft issue {spec_id}.\n\
+             Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
+            about = subject(d),
+            branch = d.branch,
+            spec_id = d.spec_id,
+            own = own_rules("build and check the work"),
+        );
+    }
+    let pr = d.pr.unwrap_or_default();
+    format!(
+        "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the {pname} https://github.com/{repo}/pull/{pr} (round {rounds} of {MAX_ROUNDS}). Its notes are its last comment there.\n\
+         Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
+        about = subject(d),
+        pname = pr_name(d),
+        repo = d.repo,
+        bname = branch_name(d),
+        branch = d.branch,
+        spec = d.spec,
+        own = own_rules("build and check the work"),
+    )
+}
+
+/// The agent building the Delivery's tickets: its Dev, or whoever builds them now when it's gone.
+fn dev_of(state: &AppState, d: &Delivery) -> Result<crate::db::Agent, String> {
+    state.db.get_agent(&d.dev).ok().flatten().or_else(|| builder(state, d, &d.dev)).ok_or_else(|| "Nothing was resumed: the team has no Dev and the agent that planned the spec is gone.".to_string())
+}
+
+/// Resume on a stalled Delivery. It first reconciles what was done meanwhile (tickets closed by hand), then
+/// wakes only the role its step waits on, with its role brief and a "this is a resume" section: the Dev for a
+/// ticket being built or the final fixes, the reviewers whose verdict is still pending, the Code reviewer for
+/// the final review, or the next ticket's builder when nothing is in flight. The Delivery goes back to the
+/// state it stalled in, so its Needs you item goes. One that isn't stalled is refused, saying why. The line
+/// saying what it did.
+pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
+    let _held = state.publish_locks.of(repo).lock_owned().await;
+    let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or_else(|| format!("Spec #{spec} on {repo} has no Delivery."))?;
+    if d.state != "stalled" {
+        return Err(not_resumable(&d));
+    }
+    let why = stall_why(&d.stall_reason);
+    let (d, closed) = reconcile(state, &d).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
+    let closed = match closed.as_slice() {
+        [] => String::new(),
+        ns => format!(" Closed by hand meanwhile, so marked closed: {}.", ns.iter().filter_map(|n| d.ticket(*n)).map(|t| tag(&d, t)).collect::<Vec<_>>().join(", ")),
+    };
+    let unstall = |f: &dyn Fn(&mut Delivery)| {
+        update(state, repo, spec, |d| {
+            d.unstall();
+            f(d);
+        })
+        .ok_or("Nothing was resumed: the Delivery record couldn't be saved.")
+    };
+    let line = match d.resume_to.as_str() {
+        "final_review" => {
+            let cr = with_role(state, &d, "code_reviewer").ok_or("Nothing was resumed: the team has no Code reviewer any more, so nobody can do the final review.")?;
+            let d = unstall(&|_| {})?;
+            let brief = format!("{}{}", final_brief(state, &d), resume_section(why, &[]));
+            crate::agents::resume_on_ticket(state, &cr.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalReview { round: d.final_rounds }));
+            format!(" {} (Code reviewer) is doing the final review again.", cr.name)
+        }
+        "final_fixes" => {
+            let dev = dev_of(state, &d)?;
+            let trailer = if d.local { format!("Refs {}", d.spec_id) } else { format!("Refs #{}", d.spec) };
+            let found = match branch_commits(state, &d, &trailer, &[]).await {
+                Ok(c) if c.is_empty() => format!("No commit with `{trailer}` is on the {} yet.", branch_name(&d)),
+                Ok(c) => format!("On the {} with `{trailer}` (this round's fixes, or earlier rounds'): {}.", branch_name(&d), c.join(", ")),
+                Err(e) => format!("Loft couldn't read the {} ({e}): check what's already on it yourself.", branch_name(&d)),
+            };
+            let d = unstall(&|d| d.dev = dev.id.clone())?;
+            let brief = format!("{}{}", fixes_brief(&d), resume_section(why, &[found]));
+            crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalFixes { round: d.final_rounds }));
+            format!(" {} is fixing what the final Code Review found again.", dev.name)
+        }
+        _ => match d.current.and_then(|n| d.ticket(n)).cloned() {
+            Some(t) if t.state == "started" => {
+                let dev = dev_of(state, &d)?;
+                let done = build_done(state, &d, &t).await;
+                let d = unstall(&|d| d.dev = dev.id.clone())?;
+                let brief = format!("{}{}", dev_brief(state, &d, &t), resume_section(why, &done));
+                crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, Some(t.number)), brief, wake_for(&d, Step::Build { ticket: t.number, round: t.rounds }));
+                format!(" {} is building {} again.", dev.name, tag(&d, &t))
+            }
+            Some(t) if t.state == "review" => {
+                let pending: Vec<&str> = TICKET_REVIEWERS.iter().copied().filter(|r| t.verdicts.get(*r).is_some_and(|v| v == "pending")).collect();
+                let reviewers = pending
+                    .iter()
+                    .map(|r| with_role(state, &d, r).map(|a| (*r, a)).ok_or_else(|| format!("Nothing was resumed: {} waits for a {} verdict, and the team has no {0} any more.", tag(&d, &t), crate::planning::role_label(r))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let d = unstall(&|_| {})?;
+                if reviewers.is_empty() {
+                    // Every verdict is in: it only had to close.
+                    finish(state, &d, t.number).await?
+                } else {
+                    let passed: Vec<&str> = t.verdicts.iter().filter(|(_, v)| *v == "pass").map(|(r, _)| crate::planning::role_label(r)).collect();
+                    let done = if passed.is_empty() { vec![] } else { vec![format!("Verdicts already in: {} passed it.", passed.join(" and "))] };
+                    for (role, a) in &reviewers {
+                        let brief = format!("{}{}", review_brief(state, &d, &t, role), resume_section(why, &done));
+                        crate::agents::resume_on_ticket(state, &a.id, &ticket_key(&d, Some(t.number)), brief, wake_for(&d, Step::Review { ticket: t.number, role: role.to_string(), round: t.rounds }));
+                    }
+                    let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
+                    format!(" {names} {} reviewing {} again.", if reviewers.len() > 1 { "are" } else { "is" }, tag(&d, &t))
+                }
+            }
+            Some(t) if t.state == "closing" => {
+                let d = unstall(&|_| {})?;
+                finish(state, &d, t.number).await?
+            }
+            _ => {
+                // Nothing in flight: the next ticket, or what comes after the last one.
+                let d = unstall(&|_| {})?;
+                if !d.tickets.is_empty() && d.tickets.iter().all(|t| t.state == "closed") {
+                    crate::planning::after_tickets(state, &d).await.unwrap_or_else(|e| Some(format!("\nBut {e}: Loft tries again on its next poll."))).unwrap_or_default()
+                } else {
+                    start_next(state, repo, spec).await
+                }
+            }
+        },
+    };
+    Ok(format!("Resumed {}.{closed}{}", subject(&d), line.replace('\n', " ").trim_end()))
+}
+
+/// `POST /api/issues/{id}/resume-delivery`: Resume on the Delivery card of a spec's or standalone ticket's
+/// issue (its Loft issue, in a plan kept in Loft). The Delivery as the card shows it, and what Resume did.
+pub async fn resume_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let d = match &t.github {
+        Some(g) => state.db.get_delivery(&g.repo, g.number)?.filter(|d| !d.local),
+        None => local_of(&state, &t.project, &t.id),
+    };
+    let d = d.ok_or_else(|| bad("This issue has no Delivery."))?;
+    let message = resume(&state, &d.repo, d.spec).await.map_err(bad)?;
+    let mut v = delivery_json(&state, &state.db.get_delivery(&d.repo, d.spec)?.ok_or_else(not_found)?);
+    v["ok"] = json!(true);
+    v["message"] = json!(message);
+    Ok(Json(v))
+}
+
+/// `POST /api/deliveries/resume` with `{ repo, spec }`: the "Delivery stalled" Needs you item's Resume.
+pub async fn resume_route(State(state): State<AppState>, Json(w): Json<Which>) -> ApiResult<Value> {
+    let message = resume(&state, &w.repo, w.spec).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "message": message })))
+}
+
 /// `POST /api/issues/{id}/start-delivery`: "Start delivery" on a standalone ticket's Loft issue. Makes its
 /// Delivery the first time (only for an open `ready-for-agent` issue that isn't a spec's ticket), then
 /// starts it like the end-of-planning card does: its branch, its draft PR with `Closes #N`, and the Dev.
@@ -1076,14 +1337,15 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
     })
 }
 
-/// What an issue page shows of its Delivery: its state (with why it stalled, and whether a ticket or its final
-/// review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
+/// What an issue page shows of its Delivery: its state (with why it stalled, whether Resume applies, and whether a
+/// ticket or its final review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
 fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let dev = state.db.get_agent(&d.dev).ok().flatten();
     let current = d.current.and_then(|n| d.ticket(n));
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
+        "can_resume": d.state == "stalled",
         "needs_human": d.state == "needs_human" || d.tickets.iter().any(|t| t.state == "needs_human"),
         "started": d.state != "planned",
         "agent_id": dev.as_ref().map(|a| a.id.clone()),

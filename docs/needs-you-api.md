@@ -51,7 +51,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
-| `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall | open (the spec's or standalone ticket's issue), dismiss |
+| `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall | resume, open (the spec's or standalone ticket's issue), dismiss |
 | `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
@@ -73,7 +73,8 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 { "kind": "open", "label": "Open chat", "target": { "screen": "chat", "agent_id": "…" } }
 ```
 
-`kind` values: `approve`, `approve_always`, `deny`, `answer`, `retry`, `skip`, `merge`, `restart`, `open`, `dismiss`.
+`kind` values: `approve`, `approve_always`, `deny`, `answer`, `retry`, `skip`, `merge`, `restart`, `resume`, `open`, `dismiss`.
+`resume` (on `delivery_stalled`) is `POST /api/deliveries/resume` with `{ "repo", "spec" }`: Loft reconciles what was done while the Delivery stalled, then wakes only the agent its step waits on. A Delivery that isn't stalled any more gets a 400 saying why.
 Use the `path` and `body` as given. Add `client_id` to message and comment bodies as the apps do today.
 
 ### Pull requests from GitHub

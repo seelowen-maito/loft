@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
@@ -9,7 +9,7 @@ import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/menti
 import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
-import { deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
+import { deliveryButtons, deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
@@ -182,12 +182,47 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
   return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
 }
 
+/** Resume on a stalled Delivery's card: Loft checks what was done meanwhile, then wakes only the agent its step
+ *  waits on. The card shows what it did, or why it refused. */
+function useResume(t: Task, setD: (d: IssueDelivery) => void) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
+  const resume = async () => {
+    setBusy(true);
+    setSaid(null);
+    try {
+      const r = await api.resumeIssueDelivery(t.id);
+      setD(r);
+      setSaid({ ok: true, text: r.message });
+    } catch (e) {
+      setSaid({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { resume, busy, said };
+}
+
+function ResumeButton({ busy, onClick }: { busy: boolean; onClick: () => void }) {
+  return (
+    <button className={cx("btn-primary", busy && "disabled:opacity-100")} disabled={busy} aria-busy={busy} onClick={onClick}>
+      {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {busy ? "Resuming…" : "Resume"}
+    </button>
+  );
+}
+
+function Said({ said }: { said: { ok: boolean; text: string } | null }) {
+  if (!said) return null;
+  return <div className={cx("mt-2 text-[12px]", said.ok ? "text-fg-3" : "text-bad")}>{said.text}</div>;
+}
+
 /** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD] = useIssueDelivery(t);
+  const r = useResume(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -216,7 +251,9 @@ export function DeliveryCard({ task: t }: { task: Task }) {
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
+        {deliveryButtons(started).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
       </div>
+      <Said said={r.said} />
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </section>
   );
@@ -229,6 +266,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD, reload] = useIssueDelivery(t);
+  const r = useResume(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -266,7 +304,9 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
+        {deliveryButtons(started).resume && <ResumeButton busy={r.busy} onClick={r.resume} />}
       </div>
+      <Said said={r.said} />
       {skipped.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-[12px] text-fg-3">
           {skipped.map((x) => (
