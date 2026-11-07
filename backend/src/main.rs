@@ -12,11 +12,14 @@ mod greenfield;
 mod grill;
 mod needs_you;
 mod planning;
+mod ports;
 mod guard;
+mod kill_guard;
 mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
+mod processes;
 mod prs;
 mod push;
 mod signin;
@@ -47,8 +50,24 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::{AppState, Config, Runtime};
 
+fn main() -> anyhow::Result<()> {
+    // As the agents' Bash hook, claude runs this binary before every Bash call: answer before any setup.
+    match std::env::args().nth(1).as_deref() {
+        Some(kill_guard::ARG) => kill_guard::hook(),
+        // And as their `kill`, `pkill` and `killall`.
+        Some(processes::ARG) => processes::cli(),
+        _ => {}
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
+    // Loft takes no arguments. Refuse any before opening the db or binding a port: an older binary run as a newer
+    // Loft's hook (`loft kill-guard`, or a later subcommand) must not start a whole server on every call.
+    if let Some(arg) = std::env::args().nth(1) {
+        anyhow::bail!("unknown argument {arg:?}: loft takes no arguments");
+    }
     tracing_subscriber::fmt().init();
     signing::ensure();
 
@@ -60,9 +79,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
         storage_dir: root.join("agent-local-storage"),
+        xcrun: "xcrun".into(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
     std::fs::create_dir_all(&data_dir)?;
+    agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {
@@ -103,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
     tokio::spawn(agents::quiet_watcher(state.clone()));
+    tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
 
@@ -180,6 +202,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", api)
         .route("/mcp/{agent_id}", post(mcp::handle))
+        // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
+        .route("/kill/{agent_id}", post(processes::handle))
         // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.

@@ -40,6 +40,8 @@ pub struct Decision {
 pub struct Config {
     pub port: u16,
     pub storage_dir: PathBuf,
+    /// `xcrun`, which runs `simctl` (simulator.rs). Tests point it at a fake.
+    pub xcrun: PathBuf,
 }
 
 #[derive(Clone, Default)]

@@ -123,6 +123,11 @@ fn base_tools() -> Value {
             }, "required": ["url"] }
         },
         {
+            "name": "simulator_device",
+            "description": "Your own iOS Simulator device, to build, install and run iOS apps on: Loft creates it (named after you) the first time you call this, then returns the same one. Returns its UDID.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_pr_verdict",
             "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
             "inputSchema": { "type": "object", "properties": {
@@ -334,6 +339,16 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Err(e) => tool_error(format!("Couldn't read that pull request: {e}")),
             }
         }
+        "simulator_device" => match state.db.get_agent(agent_id) {
+            Ok(Some(me)) => match crate::simulator::agent_device(state, &me).await {
+                Ok((udid, name)) => text(format!(
+                    "Your Simulator device is `{name}`, UDID `{udid}`. Use it for every simctl, xcodebuild and AXe call; from your next run it is also in `${}`.",
+                    crate::simulator::DEVICE_VAR
+                )),
+                Err(e) => tool_error(e),
+            },
+            _ => tool_error("agent not found"),
+        },
         "set_pr_verdict" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match s("verdict").as_str() {
                 v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {

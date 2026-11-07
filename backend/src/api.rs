@@ -450,8 +450,12 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
         return Err(ApiError(StatusCode::FORBIDDEN, "Loft's own agent can't be deleted.".into()));
     }
     agents::stop(&state, &id);
+    // With the processes it left running (detached servers), so nothing of it keeps running.
+    crate::processes::stop_all(&state.cfg.storage_dir, &id).await;
+    crate::simulator::delete_agent_device(&state, &id).await;
     state.db.delete_agent(&id)?;
     crate::uploads::remove_all(&state, &id);
+    agents::remove_agent_files(&state, &id);
     if q.purge_files {
         let _ = std::fs::remove_dir_all(workspace(&state, &id));
     }

@@ -1173,7 +1173,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         AppState {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
-            cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents") }),
+            cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents"), xcrun: dir.join("no-xcrun") }),
             events: tokio::sync::broadcast::channel(64).0,
             rt: Arc::new(Mutex::new(Default::default())),
             repos: Arc::new(Default::default()),
