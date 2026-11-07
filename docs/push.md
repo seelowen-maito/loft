@@ -11,6 +11,12 @@ service, by one of two paths (ADR 0002):
 | Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
 | Apps | Any bundle id (your own build) | The official Loft app only |
 
+**The easy way (the TestFlight app):** Settings → Push notifications → **Sign in**, then Sign in with Apple and
+**Allow** on the portal at `https://portal.get-loft.com`. Allow notifications on the phone and press **Send test
+push**. A self-built app has its own bundle id, which the relay doesn't serve: it needs [your own key](#setting-up-your-own-key-by-hand-once).
+To run your own relay and portal, follow the deploy runbook in [`relay/README.md`](../relay/README.md): it needs an Apple
+Services ID with your domain and the exact `https://<host>/auth/callback` return URL, and `PORTAL_URL` with `https://`.
+
 Your own key wins when both are set. A relay key only counts when Loft knows the relay's address: Settings → Push
 notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (the official relay, `https://portal.get-loft.com`). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
 late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
