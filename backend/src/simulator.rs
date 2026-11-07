@@ -1,5 +1,8 @@
 //! The iOS Simulator running on this Mac, viewable and controllable from other devices.
 //! `simctl` can only take screenshots; live video and touch input go through AXe (github.com/cameroncooke/AXe).
+//!
+//! Each agent builds and runs on its own agent device, which Loft creates (named after the agent) the first time the
+//! agent asks for it, and deletes with the agent, so two agents never install over each other.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,13 +11,19 @@ use std::sync::{Mutex, OnceLock};
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+use crate::db::Agent;
+use crate::state::AppState;
+
+/// The variable holding the UDID of the agent's device, in each of its runs once it has one.
+pub const DEVICE_VAR: &str = "LOFT_SIMULATOR_UDID";
 
 /// Where AXe may be: on PATH, Homebrew, or a manual install in ~/.local/bin (a background service has a short PATH).
 pub fn axe() -> Option<PathBuf> {
@@ -32,27 +41,106 @@ fn valid_udid(u: &str) -> bool {
     !u.is_empty() && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-async fn simctl_json(args: &[&str]) -> Value {
-    match Command::new("xcrun").arg("simctl").args(args).arg("-j").output().await {
+fn simctl(state: &AppState) -> Command {
+    let mut c = Command::new(&state.cfg.xcrun);
+    c.arg("simctl").stdin(Stdio::null());
+    c
+}
+
+async fn simctl_json(state: &AppState, args: &[&str]) -> Value {
+    match simctl(state).args(args).arg("-j").output().await {
         Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
         _ => Value::Null,
     }
 }
 
-/// Booted simulators and whether they can be controlled: `{ interactive, devices: [{ udid, name, runtime }] }`.
-pub async fn booted() -> Response {
-    let v = simctl_json(&["list", "devices", "booted"]).await;
+/// The devices in a `simctl list devices -j`, with the runtime each runs.
+fn devices(list: &Value) -> Vec<(&str, &Value)> {
+    let Some(runtimes) = list["devices"].as_object() else { return vec![] };
+    runtimes.iter().flat_map(|(r, ds)| ds.as_array().into_iter().flatten().map(move |d| (r.as_str(), d))).collect()
+}
+
+/// Booted simulators and whether they can be controlled: `{ interactive, devices: [{ udid, name, runtime, agent }] }`.
+/// `agent` (`{ id, name }`) is the agent whose device it is, or null for one the user booted; agents' come first.
+pub async fn booted(State(state): State<AppState>) -> Response {
+    let v = simctl_json(&state, &["list", "devices", "booted"]).await;
+    let names: HashMap<String, String> = state.db.list_agents().unwrap_or_default().into_iter().map(|a| (a.id, a.name)).collect();
+    let owners: HashMap<String, String> = state.db.agent_devices().unwrap_or_default().into_iter().collect();
     let mut list = Vec::new();
-    if let Some(runtimes) = v["devices"].as_object() {
-        for (runtime, devices) in runtimes {
-            // com.apple.CoreSimulator.SimRuntime.iOS-27-0 -> iOS 27.0
-            let runtime = runtime.rsplit('.').next().unwrap_or(runtime).replacen('-', " ", 1).replace('-', ".");
-            for d in devices.as_array().into_iter().flatten() {
-                list.push(json!({ "udid": d["udid"], "name": d["name"], "runtime": runtime }));
+    for (runtime, d) in devices(&v) {
+        // com.apple.CoreSimulator.SimRuntime.iOS-27-0 -> iOS 27.0
+        let runtime = runtime.rsplit('.').next().unwrap_or(runtime).replacen('-', " ", 1).replace('-', ".");
+        let agent = d["udid"].as_str().and_then(|u| owners.get(u)).and_then(|id| Some(json!({ "id": id, "name": names.get(id)? })));
+        list.push(json!({ "udid": d["udid"], "name": d["name"], "runtime": runtime, "agent": agent }));
+    }
+    list.sort_by_key(|d| (d["agent"].is_null(), d["agent"]["name"].as_str().unwrap_or("").to_lowercase()));
+    Json(json!({ "interactive": axe().is_some(), "devices": list })).into_response()
+}
+
+/// What an agent's device is called, in Xcode and on the Simulator page.
+fn device_name(agent: &Agent) -> String {
+    format!("{} (Loft)", agent.name)
+}
+
+/// The agent's own device: the one it has (renamed if the agent was), else a new one, the first time it needs one or
+/// after its device was deleted outside Loft. Returns its UDID and name.
+pub async fn agent_device(state: &AppState, agent: &Agent) -> Result<(String, String), String> {
+    // One at a time, so two calls of one agent don't both create a device.
+    static CREATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = CREATING.lock().await;
+    let name = device_name(agent);
+    let all = simctl_json(state, &["list", "devices"]).await;
+    if all.is_null() {
+        return Err("Couldn't run `xcrun simctl`. Is Xcode installed, and selected with `xcode-select`?".into());
+    }
+    if let Some(udid) = state.db.agent_device(&agent.id).map_err(|e| e.to_string())? {
+        if let Some((_, d)) = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid.as_str()) {
+            if d["name"] != name.as_str() {
+                let _ = simctl(state).args(["rename", &udid, &name]).output().await;
             }
+            return Ok((udid, name));
         }
     }
-    Json(json!({ "interactive": axe().is_some(), "devices": list })).into_response()
+    let Some((kind, runtime)) = new_device_kind(state, &all).await else {
+        return Err("No iOS Simulator runtime is installed. Add one in Xcode (Settings > Components).".into());
+    };
+    let out = simctl(state).args(["create", &name, &kind, &runtime]).output().await.map_err(|e| format!("Couldn't run simctl: {e}"))?;
+    let udid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || !valid_udid(&udid) {
+        return Err(format!("Couldn't create a Simulator device: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    state.db.set_agent_device(&agent.id, &udid).map_err(|e| e.to_string())?;
+    Ok((udid, name))
+}
+
+/// The device type and runtime for a new agent device: those of the iPhone the user used last, else the newest iOS
+/// runtime's newest iPhone.
+async fn new_device_kind(state: &AppState, all: &Value) -> Option<(String, String)> {
+    let last = devices(all)
+        .into_iter()
+        .filter(|(r, d)| r.contains(".iOS-") && d["isAvailable"] == true && d["deviceTypeIdentifier"].as_str().is_some_and(|t| t.contains(".iPhone")))
+        .max_by_key(|(_, d)| d["lastUsedAt"].as_str().unwrap_or("").to_string());
+    if let Some((r, d)) = last {
+        return Some((d["deviceTypeIdentifier"].as_str()?.to_string(), r.to_string()));
+    }
+    let runtimes = simctl_json(state, &["list", "runtimes"]).await;
+    // Runtimes are listed oldest first, and each one's device types newest first.
+    runtimes["runtimes"].as_array()?.iter().rev().filter(|r| r["platform"] == "iOS" && r["isAvailable"] == true).find_map(|r| {
+        let t = r["supportedDeviceTypes"].as_array()?.iter().find(|t| t["productFamily"] == "iPhone")?;
+        Some((t["identifier"].as_str()?.to_string(), r["identifier"].as_str()?.to_string()))
+    })
+}
+
+/// Deletes the agent's device, if it has one: it goes with the agent.
+pub async fn delete_agent_device(state: &AppState, agent_id: &str) {
+    let Ok(Some(udid)) = state.db.agent_device(agent_id) else { return };
+    // A booted device can't be deleted.
+    let _ = simctl(state).args(["shutdown", &udid]).output().await;
+    match simctl(state).args(["delete", &udid]).output().await {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::warn!("couldn't delete Simulator device {udid}: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => tracing::warn!("couldn't delete Simulator device {udid}: {e}"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -62,10 +150,10 @@ pub struct Which {
 }
 
 /// A JPEG of the simulator's screen. The fallback view when AXe isn't installed.
-pub async fn screenshot(Query(q): Query<Which>) -> Response {
+pub async fn screenshot(State(state): State<AppState>, Query(q): Query<Which>) -> Response {
     let device = q.udid.filter(|u| valid_udid(u)).unwrap_or_else(|| "booted".into());
     let path = std::env::temp_dir().join(format!("loft-sim-{}.jpg", uuid::Uuid::new_v4()));
-    let out = Command::new("xcrun").args(["simctl", "io", &device, "screenshot", "--type=jpeg"]).arg(&path).output().await;
+    let out = simctl(&state).args(["io", &device, "screenshot", "--type=jpeg"]).arg(&path).output().await;
     let bytes = std::fs::read(&path);
     let _ = std::fs::remove_file(&path);
     match (out, bytes) {
@@ -135,18 +223,15 @@ pub async fn stream(Query(q): Query<Which>) -> Response {
 }
 
 /// Screen size in points (what AXe takes), from the device type's profile. Cached per device.
-async fn screen_points(udid: &str) -> Option<(f64, f64)> {
+async fn screen_points(state: &AppState, udid: &str) -> Option<(f64, f64)> {
     static CACHE: OnceLock<Mutex<HashMap<String, (f64, f64)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(s) = cache.lock().unwrap().get(udid) {
         return Some(*s);
     }
-    let devices = simctl_json(&["list", "devices"]).await;
-    let type_id = devices["devices"].as_object()?.values().flat_map(|d| d.as_array().into_iter().flatten()).find(|d| d["udid"] == udid)?
-        ["deviceTypeIdentifier"]
-        .as_str()?
-        .to_string();
-    let types = simctl_json(&["list", "devicetypes"]).await;
+    let all = simctl_json(state, &["list", "devices"]).await;
+    let type_id = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid)?.1["deviceTypeIdentifier"].as_str()?.to_string();
+    let types = simctl_json(state, &["list", "devicetypes"]).await;
     let bundle = types["devicetypes"].as_array()?.iter().find(|t| t["identifier"] == type_id.as_str())?["bundlePath"].as_str()?.to_string();
     let plist = PathBuf::from(bundle).join("Contents/Resources/capabilities.plist");
     let out = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&plist).output().await.ok()?;
@@ -179,7 +264,7 @@ pub struct InputReq {
 }
 
 /// Touch, type or press a button. Runs one at a time so a tap lands before the text typed after it.
-pub async fn input(Json(req): Json<InputReq>) -> Response {
+pub async fn input(State(state): State<AppState>, Json(req): Json<InputReq>) -> Response {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     if !valid_udid(&req.udid) {
         return err(StatusCode::BAD_REQUEST, "invalid udid");
@@ -187,7 +272,7 @@ pub async fn input(Json(req): Json<InputReq>) -> Response {
     let Some(bin) = axe() else { return err(StatusCode::NOT_FOUND, "AXe isn't installed") };
     let pt = |fx: f64, fy: f64, (w, h): (f64, f64)| (format!("{:.1}", fx.clamp(0.0, 1.0) * w), format!("{:.1}", fy.clamp(0.0, 1.0) * h));
     let size = match req.input {
-        Input::Tap { .. } | Input::Swipe { .. } => match screen_points(&req.udid).await {
+        Input::Tap { .. } | Input::Swipe { .. } => match screen_points(&state, &req.udid).await {
             Some(s) => s,
             None => return err(StatusCode::NOT_FOUND, "Couldn't find this simulator's screen size"),
         },
@@ -218,5 +303,156 @@ pub async fn input(Json(req): Json<InputReq>) -> Response {
             err(StatusCode::INTERNAL_SERVER_ERROR, msg)
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Couldn't run AXe: {e}")),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Stands in for `xcrun simctl`: each device is a file in `sim/` beside it, named by UDID, holding its state and
+    /// name. Every call is logged to `simctl.log`. One iOS runtime, whose iPhone is an iPhone 18 Pro.
+    const FAKE_XCRUN: &str = r#"#!/bin/sh
+here=$(dirname "$0"); dir="$here/sim"; mkdir -p "$dir"
+echo "$*" >> "$here/simctl.log"
+shift
+rt=com.apple.CoreSimulator.SimRuntime.iOS-27-0
+case "$1" in
+  list)
+    if [ "$2" = runtimes ]; then
+      echo '{"runtimes":[{"identifier":"'$rt'","platform":"iOS","isAvailable":true,"supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro","productFamily":"iPhone"}]}]}'
+      exit 0
+    fi
+    printf '{"devices":{"%s":[' $rt; sep=
+    for f in "$dir"/*; do
+      [ -f "$f" ] || continue
+      state=$(sed -n 1p "$f"); name=$(sed -n 2p "$f")
+      [ "$3" = booted ] && [ "$state" != Booted ] && continue
+      printf '%s{"udid":"%s","name":"%s","state":"%s","isAvailable":true,"deviceTypeIdentifier":"%s"}' "$sep" "$(basename "$f")" "$name" "$state" "$(sed -n 3p "$f")"
+      sep=,
+    done
+    echo ']}}';;
+  create) udid=$(uuidgen); printf 'Shutdown\n%s\n%s\n' "$2" "$3" > "$dir/$udid"; echo "$udid";;
+  boot|shutdown|rename|delete)
+    f="$dir/$2"; [ -f "$f" ] || { echo "Invalid device: $2" >&2; exit 1; }
+    case "$1" in
+      boot) printf 'Booted\n%s\n%s\n' "$(sed -n 2p "$f")" "$(sed -n 3p "$f")" > "$f.new";;
+      shutdown) printf 'Shutdown\n%s\n%s\n' "$(sed -n 2p "$f")" "$(sed -n 3p "$f")" > "$f.new";;
+      rename) printf '%s\n%s\n%s\n' "$(sed -n 1p "$f")" "$3" "$(sed -n 3p "$f")" > "$f.new";;
+      delete) [ "$(sed -n 1p "$f")" = Booted ] && { echo "Unable to delete a booted device" >&2; exit 1; }; rm "$f"; exit 0;;
+    esac
+    mv "$f.new" "$f";;
+  *) echo "unknown subcommand $1" >&2; exit 1;;
+esac
+"#;
+
+    /// Points the state's `xcrun` at a fake of its own.
+    pub(crate) fn fake_xcrun(st: &mut AppState) {
+        let dir = st.cfg.storage_dir.parent().unwrap().join("xcrun");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("xcrun");
+        std::fs::write(&bin, FAKE_XCRUN).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: bin });
+    }
+
+    /// The fake's devices, as (UDID, state, name, device type).
+    pub(crate) fn fake_devices(st: &AppState) -> Vec<(String, String, String, String)> {
+        let dir = st.cfg.xcrun.parent().unwrap().join("sim");
+        let mut out: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| {
+                let text = std::fs::read_to_string(e.path()).unwrap();
+                let l: Vec<&str> = text.lines().collect();
+                (e.file_name().to_string_lossy().into_owned(), l[0].into(), l[1].into(), l[2].into())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    pub(crate) fn simctl_log(st: &AppState) -> String {
+        std::fs::read_to_string(st.cfg.xcrun.parent().unwrap().join("simctl.log")).unwrap_or_default()
+    }
+
+    /// Boots a device the way an agent would, with the fake.
+    pub(crate) fn boot(st: &AppState, udid: &str) {
+        assert!(std::process::Command::new(&st.cfg.xcrun).args(["simctl", "boot", udid]).status().unwrap().success());
+    }
+
+    /// Calls the agent's `simulator_device` tool through Loft's MCP endpoint, as its claude would.
+    pub(crate) async fn ask_for_device(st: &AppState, agent_id: &str) -> Value {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "simulator_device", "arguments": {} } });
+        let res = crate::mcp::handle(State(st.clone()), axum::extract::Path(agent_id.to_string()), Json(req)).await;
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice::<Value>(&body).unwrap()["result"].clone()
+    }
+
+    async fn listed(st: &AppState) -> Value {
+        let body = axum::body::to_bytes(booted(State(st.clone())).await.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_gets_its_own_device_once_named_after_it_and_the_simulator_page_lists_agents_devices() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let b = crate::tasks::tests::agent(&st, "Tester");
+        // The user's own device, used last: agents' devices copy its model.
+        let mine = String::from_utf8(std::process::Command::new(&st.cfg.xcrun).args(["simctl", "create", "My iPhone", "com.apple.CoreSimulator.SimDeviceType.iPhone-17"]).output().unwrap().stdout).unwrap();
+        let mine = mine.trim().to_string();
+        boot(&st, &mine);
+
+        let first = ask_for_device(&st, &a.id).await;
+        let udid = st.db.agent_device(&a.id).unwrap().expect("the device is kept for the agent");
+        assert!(first["content"][0]["text"].as_str().unwrap().contains(&format!("`Builder (Loft)`, UDID `{udid}`")), "{first}");
+        assert_eq!(ask_for_device(&st, &a.id).await, first, "the same device every time");
+        assert_eq!(simctl_log(&st).matches("simctl create Builder").count(), 1, "created once:\n{}", simctl_log(&st));
+        let devices = fake_devices(&st);
+        let made = devices.iter().find(|d| d.0 == udid).unwrap();
+        assert_eq!((made.2.as_str(), made.3.as_str()), ("Builder (Loft)", "com.apple.CoreSimulator.SimDeviceType.iPhone-17"));
+
+        ask_for_device(&st, &b.id).await;
+        let b_udid = st.db.agent_device(&b.id).unwrap().unwrap();
+        assert_ne!(b_udid, udid, "each agent has its own");
+
+        // Only booted devices are listed: the agents' first, each with its agent, then the user's.
+        boot(&st, &udid);
+        let l = listed(&st).await;
+        let rows: Vec<(String, Value)> = l["devices"].as_array().unwrap().iter().map(|d| (d["udid"].as_str().unwrap().to_string(), d["agent"].clone())).collect();
+        assert_eq!(rows, [(udid.clone(), json!({ "id": a.id, "name": "Builder" })), (mine.clone(), Value::Null)]);
+        boot(&st, &b_udid);
+        let l = listed(&st).await;
+        let names: Vec<&str> = l["devices"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Builder (Loft)", "Tester (Loft)", "My iPhone"]);
+
+        // A renamed agent's device follows its name; one deleted outside Loft is replaced.
+        st.db.update_agent(&a.id, |x| x.name = "Shipper".into()).unwrap();
+        ask_for_device(&st, &a.id).await;
+        assert!(fake_devices(&st).iter().any(|d| d.0 == udid && d.2 == "Shipper (Loft)"));
+        std::fs::remove_file(st.cfg.xcrun.parent().unwrap().join("sim").join(&b_udid)).unwrap();
+        let again = ask_for_device(&st, &b.id).await;
+        let replaced = st.db.agent_device(&b.id).unwrap().unwrap();
+        assert_ne!(replaced, b_udid);
+        assert!(again["content"][0]["text"].as_str().unwrap().contains(&replaced));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_no_device_to_copy_the_newest_runtime_s_iphone_is_used_and_without_simctl_the_agent_is_told() {
+        let mut st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let none = ask_for_device(&st, &a.id).await;
+        assert_eq!(none["isError"], true);
+        assert!(none["content"][0]["text"].as_str().unwrap().contains("Couldn't run `xcrun simctl`"), "{none}");
+        assert_eq!(st.db.agent_device(&a.id).unwrap(), None);
+
+        fake_xcrun(&mut st);
+        ask_for_device(&st, &a.id).await;
+        assert_eq!(fake_devices(&st)[0].3, "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro");
+        assert!(simctl_log(&st).contains("create Builder (Loft) com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0"));
     }
 }

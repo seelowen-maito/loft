@@ -598,6 +598,11 @@ CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
 );
+-- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
+CREATE TABLE IF NOT EXISTS agent_devices (
+    agent_id TEXT PRIMARY KEY,
+    udid TEXT NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -960,7 +965,28 @@ impl Db {
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM agent_devices WHERE agent_id = ?1", [id])?;
         Ok(())
+    }
+
+    /// The UDID of the agent's Simulator device, if it has one.
+    pub fn agent_device(&self, agent_id: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT udid FROM agent_devices WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_agent_device(&self, agent_id: &str, udid: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO agent_devices (agent_id, udid) VALUES (?1, ?2)", params![agent_id, udid])?;
+        Ok(())
+    }
+
+    /// Every agent device, as (UDID, agent id).
+    pub fn agent_devices(&self) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT udid, agent_id FROM agent_devices")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     /// The agent's port range slot: the one it has while `usable` keeps it, else the lowest usable free one

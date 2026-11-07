@@ -6,10 +6,31 @@ import { cx } from "../lib/format";
 type Devices = { interactive: boolean; devices: Simulator[] };
 type Ripple = { id: number; x: number; y: number };
 
-/** The iOS Simulator on the loft machine: live video, and touch/keyboard input when AXe is installed. */
+const PICKED = "loft:simulator-device";
+
+/** What the picker shows: whose device it is first, then its model. */
+const label = (d: Simulator) => (d.agent ? `${d.agent.name} · ${d.runtime}` : `${d.name} · ${d.runtime}`);
+
+/** The iOS Simulator on the loft machine: live video, and touch/keyboard input when AXe is installed. Each agent
+ *  runs its own device; the picker switches between the booted ones. */
 export default function SimulatorPage() {
   const [data, setData] = useState<Devices | null>(null);
-  const [udid, setUdid] = useState<string>("");
+  // The device picked last, kept for this browser so a reload shows the same agent's device.
+  const [udid, setUdid] = useState<string>(() => {
+    try {
+      return localStorage.getItem(PICKED) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const pick = (u: string) => {
+    setUdid(u);
+    try {
+      localStorage.setItem(PICKED, u);
+    } catch {
+      /* private window: the pick lasts until reload */
+    }
+  };
 
   useEffect(() => {
     const load = () => api.simulators().then(setData).catch(() => setData({ interactive: false, devices: [] }));
@@ -25,18 +46,18 @@ export default function SimulatorPage() {
       <div className="flex w-full items-center gap-3">
         <h1 className="text-[15px] font-medium tracking-tight">Simulator</h1>
         {data && data.devices.length > 1 && (
-          <select className="input ml-auto w-auto" value={device?.udid} onChange={(e) => setUdid(e.target.value)}>
+          <select className="input ml-auto w-auto" aria-label="Device" value={device?.udid} onChange={(e) => pick(e.target.value)}>
             {data.devices.map((d) => (
-              <option key={d.udid} value={d.udid}>{d.name} · {d.runtime}</option>
+              <option key={d.udid} value={d.udid}>{label(d)}</option>
             ))}
           </select>
         )}
-        {data?.devices.length === 1 && device && <span className="ml-auto font-mono text-[11px] text-fg-3">{device.name} · {device.runtime}</span>}
+        {data?.devices.length === 1 && device && <span className="ml-auto font-mono text-[11px] text-fg-3">{label(device)}</span>}
       </div>
       {data === null ? (
         <div className="skeleton aspect-[9/19.5] h-full max-h-[75vh] rounded-[2.5rem]" />
       ) : !device ? (
-        <p className="text-fg-3">No simulator is running on this Mac. Ask an agent to build and run an iOS app, or boot one in Xcode.</p>
+        <p className="text-fg-3">No simulator is running on this Mac. Ask an agent to build and run an iOS app on its device, or boot one in Xcode.</p>
       ) : data.interactive ? (
         <LiveScreen key={device.udid} device={device} />
       ) : (

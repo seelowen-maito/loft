@@ -79,6 +79,7 @@ async fn serve() -> anyhow::Result<()> {
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
         storage_dir: root.join("agent-local-storage"),
+        xcrun: "xcrun".into(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
     std::fs::create_dir_all(&data_dir)?;

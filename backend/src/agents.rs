@@ -484,7 +484,7 @@ Each message starts a run that ends with your reply. Claude Code background work
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
 - Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install booted "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
+- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -527,6 +527,13 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
         ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
         range_var = crate::ports::RANGE_VAR,
+        device = match state.db.agent_device(&a.id).ok().flatten() {
+            Some(udid) => format!(
+                "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
+                var = crate::simulator::DEVICE_VAR
+            ),
+            None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
+        },
     )
 }
 
@@ -1061,6 +1068,11 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Its own Simulator device, once it has one (an earlier run asked for it).
+    match state.db.agent_device(&a.id)? {
+        Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),
+        None => cmd.env_remove(crate::simulator::DEVICE_VAR),
+    };
     // Run in each Bash command's shell: records its process session as the agent's, and sends kills through Loft.
     let storage = &state.cfg.storage_dir;
     write_agent_file(state, &a.id, "env.sh", &crate::processes::env_script(storage, &a.id, &exe))?;
@@ -1828,6 +1840,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
+printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
@@ -2040,6 +2053,46 @@ esac
         assert_eq!(ports_seen(&st, &c.id), ["20000 20000-20009"]);
         run(&st, &b.id, "again", 2).await;
         assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_runs_on_its_own_simulator_device_from_the_run_after_it_asks_and_it_goes_with_the_agent() {
+        use crate::simulator::tests::{ask_for_device, boot, fake_devices, fake_xcrun, simctl_log};
+        let (mut st, a) = fake_claude_state();
+        fake_xcrun(&mut st);
+        let other = crate::tasks::tests::agent(&st, "Other");
+        let devices_seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("device.log")).unwrap_or_default();
+        let last_system = |id: &str| {
+            let log = std::fs::read_to_string(workspace(&st, id).join("system.log")).unwrap();
+            log.rsplit("\n---\n").find(|p| !p.trim().is_empty()).unwrap().to_string()
+        };
+
+        run(&st, &a.id, "hello", 1).await;
+        assert_eq!(devices_seen(&a.id), "none\n");
+        let system = last_system(&a.id);
+        assert!(system.contains("You have none yet: call `mcp__loft__simulator_device`"), "{system}");
+        assert!(!system.contains("booted device") && !system.contains("simctl install booted"), "{system}");
+        assert!(simctl_log(&st).is_empty(), "no device until the agent needs one");
+
+        ask_for_device(&st, &a.id).await;
+        ask_for_device(&st, &other.id).await;
+        let udid = st.db.agent_device(&a.id).unwrap().unwrap();
+        run(&st, &a.id, "again", 2).await;
+        run(&st, &a.id, "and again", 3).await;
+        assert_eq!(devices_seen(&a.id), format!("none\n{udid}\n{udid}\n"), "the same device on every later run");
+        let system = last_system(&a.id);
+        assert!(system.contains(&format!("Your device's UDID is `{udid}` (also in `$LOFT_SIMULATOR_UDID`)")), "{system}");
+        assert!(system.contains("xcrun simctl install <udid>") && !system.contains("booted device"), "{system}");
+
+        // Deleted through the API (booted, as an agent leaves it), its device is deleted; the other agent's stays.
+        boot(&st, &udid);
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        let left: Vec<String> = fake_devices(&st).into_iter().map(|d| d.2).collect();
+        assert_eq!(left, ["Other (Loft)"]);
+        assert!(simctl_log(&st).contains(&format!("simctl delete {udid}")));
+        assert_eq!(st.db.agent_device(&a.id).unwrap(), None);
     }
 
     fn error_text(st: &AppState, id: &str) -> Option<String> {

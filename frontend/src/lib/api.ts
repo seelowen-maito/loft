@@ -518,7 +518,8 @@ export function grillError(e: unknown) {
   return m;
 }
 
-export type Simulator = { udid: string; name: string; runtime: string };
+/** A booted simulator; `agent` is the agent whose device it is, null for one the user booted. */
+export type Simulator = { udid: string; name: string; runtime: string; agent: { id: string; name: string } | null };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =
   | { action: "tap"; x: number; y: number }
