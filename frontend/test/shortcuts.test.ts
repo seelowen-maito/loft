@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   comboFromEvent, formatCombo, isReserved, isTyping, loadCombo, normalizeCombo, loadCombos, loadRecent, matchesCombo, nextNeedsYou, saveCombo, saveRecent,
-  shortcutAction, switcherAgents,
+  searchRows, shortcutAction, switcherAgents,
 } from "../src/lib/shortcuts.ts";
 
 function memory() {
@@ -156,4 +156,33 @@ test("typing filters by name, title, group and project", () => {
   assert.deepEqual(ids("dev"), ["dev", "mobile", "dine"]);
   assert.deepEqual(ids("d"), ["dine", "lead", "dev", "mobile"], "a name starting with it comes first");
   assert.deepEqual(ids("nobody"), []);
+});
+
+const rows = [
+  { id: "closed-push", title: "Push relay docs", number: 31, open: false, project: "loft" },
+  { id: "search", title: "Global search in the switcher", number: 108, open: true, project: "loft" },
+  { id: "push", title: "Send a push when an agent needs you", number: 12, open: true, project: "loft" },
+  { id: "loft-only", title: "Tidy the push settings", number: null, open: true, project: "homebase" },
+  { id: "api-push", title: "Push for bookings", number: 108, open: true, project: "api" },
+];
+
+test("search: every word in the title or project, open first, then titles starting with the query", () => {
+  const ids = (q: string, limit?: number) => searchRows(rows, q, limit).map((r) => r.id);
+  assert.deepEqual(ids("push"), ["api-push", "push", "loft-only", "closed-push"], "open first; among them titles starting with it");
+  assert.deepEqual(ids("PUSH"), ids("push"), "case-insensitive");
+  assert.deepEqual(ids("push homebase"), ["loft-only"], "the project counts as a word");
+  assert.deepEqual(ids("relay docs"), ["closed-push"], "a closed one shows when it matches");
+  assert.deepEqual(ids("push", 2), ["api-push", "push"], "at most `limit` rows");
+  assert.equal(searchRows([...rows, ...rows, ...rows], "push").length, 5, "about 5 by default");
+  assert.deepEqual(ids("nothing like it"), []);
+  assert.deepEqual(ids(""), [], "nothing typed: no rows");
+});
+
+test("search: #123 or 123 finds that number, open first", () => {
+  const ids = (q: string) => searchRows(rows, q).map((r) => r.id);
+  assert.deepEqual(ids("#108"), ["search", "api-push"]);
+  assert.deepEqual(ids("31"), ["closed-push"]);
+  assert.deepEqual(ids("#999"), []);
+  const same = [{ id: "old", title: "A", number: 7, open: false, project: "api" }, { id: "new", title: "B", number: 7, open: true, project: "loft" }];
+  assert.deepEqual(searchRows(same, "#7").map((r) => r.id), ["new", "old"]);
 });
