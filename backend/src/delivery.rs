@@ -973,7 +973,7 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
             v["spec"] = json!(d.spec);
             v["spec_id"] = json!(d.spec_id);
             v["local"] = json!(d.local);
-            v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped, "verdicts": t.verdicts })).collect::<Vec<_>>());
+            v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "verdicts": t.verdicts })).collect::<Vec<_>>());
             v
         })
         .collect();
@@ -1410,6 +1410,7 @@ mod tests {
         assert_eq!(v[1]["repo"], "o/r");
         assert_eq!(v[1]["current"]["number"], 10);
         assert_eq!(v[1]["tickets"][0]["verdicts"]["qa"], "pending");
+        assert_eq!(v[1]["tickets"][0]["id"], "", "a ticket kept in Loft carries its issue id");
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {

@@ -13,7 +13,8 @@ import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
-import { SpecBoard, SpecList, SpecPanel } from "./SpecViews";
+import { SpecPanel } from "./SpecViews";
+import { BoardPage, BOARD_VARIANTS } from "./SpecBoard";
 import type { DeliverySummary } from "../lib/specViews";
 import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
@@ -59,9 +60,10 @@ export default function TasksPage() {
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => parseFilters(params), [params]);
-  // Design preview: three takes on a spec view, `?specView=a|b|c` (see ./SpecViews).
+  // Design preview: the spec board (`?specView=b1|b2|b3`, see ./SpecBoard); a spec opens with its Delivery panel (`c`).
   const sv = params.get("specView");
-  const specView = sv === "a" || sv === "b" || sv === "c" ? sv : null;
+  const boardView = BOARD_VARIANTS.find((b) => b === sv) ?? null;
+  const specView = boardView || sv === "c" ? sv : null;
   const setFilter = useCallback(
     (change: Partial<IssueFilters>, replace = false) =>
       setParams((cur) => {
@@ -152,6 +154,19 @@ export default function TasksPage() {
 
   const selected = tasks?.find((t) => t.id === routeId) ?? null;
 
+  if (boardView && !routeId) {
+    // A spec opens with its Delivery panel, a ticket on its own page; both can come back to the board.
+    const go = (id: string) => { const n = new URLSearchParams(params); n.set("specView", "c"); n.set("board", boardView); navigate({ pathname: `/issues/${id}`, search: n.toString() }); };
+    return (
+      <div className="h-full overflow-hidden">
+        {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
+          <BoardPage variant={boardView} specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} filters={{ q: filters.q, group, project, agent: agentId }}
+            facets={{ teams, projects: groupProjectList, agents }} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={(n) => setParams(n)} openSpec={go} openTicket={go} />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="grid h-full grid-cols-[400px_minmax(0,1fr)] overflow-hidden max-lg:grid-cols-1">
       {/* list */}
@@ -174,15 +189,6 @@ export default function TasksPage() {
             </button>
             </div>
           </div>
-          {specView && (
-            <div className="flex items-center gap-1 font-mono text-[11px] text-fg-3" role="group" aria-label="Spec view">
-              Spec view:
-              {(["a", "b", "c"] as const).map((v) => (
-                <button key={v} onClick={() => setParams((cur) => { const n = new URLSearchParams(cur); n.set("specView", v); return n; }, { replace: true })} aria-pressed={specView === v} className={cx("rounded-full px-2 py-0.5", specView === v ? "bg-white/[0.08] text-fg" : "hover:text-fg")}>{v}</button>
-              ))}
-              <button onClick={() => setParams((cur) => { const n = new URLSearchParams(cur); n.delete("specView"); return n; }, { replace: true })} className="rounded-full px-2 py-0.5 hover:text-fg">off</button>
-            </div>
-          )}
           <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
             <Search className="size-3.5 text-fg-3" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
@@ -230,10 +236,7 @@ export default function TasksPage() {
               <div className="text-[13px]">No Loft issues yet. Agents add them as they work, or add one with +.</div>
             </div>
           )}
-          {specView === "a" && tasks && (
-            <SpecList specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} active={routeId} onOpen={(id) => navigate({ pathname: `/issues/${id}`, search: params.toString() })} />
-          )}
-          {specView !== "a" && groups.map((g) => {
+          {groups.map((g) => {
             if (!g.tasks.length) return null;
             const folded = g.key === "closed" && !showClosed;
             return (
@@ -260,11 +263,9 @@ export default function TasksPage() {
       {/* detail */}
       <section className={cx("min-h-0 overflow-y-auto", !routeId && "max-lg:hidden")}>
         {selected ? (
-          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={specView === "c" ? deliveries : null} />
+          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={specView ? deliveries : null} />
         ) : routeId && tasks ? (
           <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
-        ) : specView === "b" && tasks ? (
-          <SpecBoard specs={filtered.filter(isSpec)} tasks={tasks} deliveries={deliveries} agentById={agentById} onOpen={(id) => navigate({ pathname: `/issues/${id}`, search: params.toString() })} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center p-10 text-center text-fg-3">
             <ListTodo className="mb-3 size-8" />
@@ -305,11 +306,20 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
   );
 }
 
+/** The board's own URL again: its layout back in `specView`, the way out of a spec or ticket it opened. */
+function backToBoard(search: string): string {
+  const n = new URLSearchParams(search);
+  n.set("specView", n.get("board") ?? "b1");
+  n.delete("board");
+  return n.toString();
+}
+
 function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string>; deliveries: DeliverySummary[] | null }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
   // Links keep the list's filters (they're in the URL).
   const { search } = useLocation();
+  const board = new URLSearchParams(search).get("board");
   useEffect(() => {
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
@@ -334,6 +344,11 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries }: { 
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
+      {board && (
+        <Link to={{ pathname: "/issues", search: backToBoard(search) }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+          <ArrowLeft className="size-3" /> Back to the board
+        </Link>
+      )}
       <Link to={{ pathname: "/issues", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
         <ArrowLeft className="size-3" /> All issues
       </Link>
