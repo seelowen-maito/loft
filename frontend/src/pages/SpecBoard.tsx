@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, GitPullRequest, Search } from "lucide-react";
+import { ChevronRight, GitPullRequest } from "lucide-react";
 import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -8,9 +8,6 @@ import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx }
 
 /* The Specs board of the Issues page (`?view=specs`): spec cards in stage columns, each with its tickets inline (expandable).
  * The filters and options sit in a bar on top and live in the URL. */
-
-type Facets = { teams: string[]; projects: string[]; agents: Agent[] };
-type Filters = { q: string; group: string; project: string; agent: string };
 
 type View = Ctx & { specs: Task[]; o: BoardOptions; openSpec: (id: string) => void; openTicket: (id: string) => void };
 
@@ -124,31 +121,12 @@ export function ViewToggle({ params, setParams }: { params: URLSearchParams; set
   );
 }
 
-/** The filters and options, on top of the board; they all live in the URL. */
-function Bar2({ filters, facets, setFilter, query, setQuery, params, setParams, shown, total }: {
-  filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
-  params: URLSearchParams; setParams: (n: URLSearchParams) => void; shown: number; total: number;
-}) {
+/** The board's own options, under the page's shared filter bar; they all live in the URL. */
+function Options({ params, setParams }: { params: URLSearchParams; setParams: (n: URLSearchParams) => void }) {
   const o = parseBoard(params);
   const set = (c: Partial<BoardOptions>) => setParams(withBoard(params, c));
   return (
-    <div className="space-y-2 border-b border-line px-4 pb-3 pt-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <div><div className="font-mono text-[11px] text-fg-3">{shown === total ? `${total} specs` : `${shown} of ${total} specs`}</div></div>
-        <label className="flex min-w-[160px] flex-1 items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5 sm:max-w-xs">
-          <Search className="size-3.5 text-fg-3" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search specs, or #42" aria-label="Search specs" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
-        </label>
-        <select value={filters.group} onChange={(e) => setFilter({ group: e.target.value, project: "" })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
-          <option value="">All groups</option>{facets.teams.map((g) => <option key={g} value={g}>{g}</option>)}
-        </select>
-        <select value={filters.project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
-          <option value="">All projects</option>{facets.projects.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-        <select value={filters.agent} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
-          <option value="">All agents</option>{facets.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
-      </div>
+    <div className="border-b border-line px-4 pb-3 pt-3">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Spec state">
           {STAGES.map((st: { key: Stage; label: string }) => {
@@ -170,14 +148,12 @@ function Bar2({ filters, facets, setFilter, query, setQuery, params, setParams, 
   );
 }
 
-/** The whole page of the Specs board. `specs` are the spec issues the shared filters (search, group, project, agent) kept. */
-export function BoardPage({ specs, filters, facets, setFilter, query, setQuery, params, setParams, openSpec, openTicket, ...c }: Ctx & {
-  specs: Task[]; filters: Filters; facets: Facets; setFilter: (c: Partial<Filters>) => void; query: string; setQuery: (q: string) => void;
-  params: URLSearchParams; setParams: (n: URLSearchParams) => void; openSpec: (id: string) => void; openTicket: (id: string) => void;
+/** The whole page of the Specs board. `kept` are the specs the shared filters and the board's options let through (see `boardSpecs`). */
+export function BoardPage({ kept, params, setParams, openSpec, openTicket, ...c }: Ctx & {
+  kept: Task[]; params: URLSearchParams; setParams: (n: URLSearchParams) => void; openSpec: (id: string) => void; openTicket: (id: string) => void;
 }) {
   const o = parseBoard(params);
   const [all, setAll] = useState(false);
-  const kept = arrange(specs, c.deliveries, c.tasks, o).filter((s) => !filters.agent || deliveryOf(s, c.deliveries)?.agent_id === filters.agent || s.agent_id === filters.agent);
   // Shipped specs pile up: the newest few show, the rest on request.
   const shipped = kept.filter((s) => stageOf(s, deliveryOf(s, c.deliveries)) === "shipped");
   const hidden = all ? [] : shipped.slice(CAP);
@@ -185,7 +161,7 @@ export function BoardPage({ specs, filters, facets, setFilter, query, setQuery, 
   const v: View = { ...c, specs: shown, o, openSpec, openTicket };
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <Bar2 filters={filters} facets={facets} setFilter={setFilter} query={query} setQuery={setQuery} params={params} setParams={setParams} shown={kept.length} total={specs.length} />
+      <Options params={params} setParams={setParams} />
       {!c.deliveries.length && <div className="px-4 pt-3 font-mono text-[11px] text-fg-3">Loading Deliveries…</div>}
       <div className="flex min-h-0 flex-1 flex-col pt-3">
         <Cards {...v} />
@@ -193,4 +169,10 @@ export function BoardPage({ specs, filters, facets, setFilter, query, setQuery, 
       </div>
     </div>
   );
+}
+
+/** The specs on the board: `specs` (already through the shared filters), arranged by the board's options, and by agent
+ * (a spec's own, or its Delivery's). */
+export function boardSpecs(specs: Task[], deliveries: DeliverySummary[], tasks: Task[], o: BoardOptions, agent: string): Task[] {
+  return arrange(specs, deliveries, tasks, o).filter((s) => !agent || deliveryOf(s, deliveries)?.agent_id === agent || s.agent_id === agent);
 }
