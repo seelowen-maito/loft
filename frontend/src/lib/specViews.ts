@@ -91,6 +91,16 @@ export function withBoard(p: URLSearchParams, change: Partial<BoardOptions>): UR
   return n;
 }
 
+/** `p` with the board's open pane set to issue `id` (`up`: the spec it was opened from, for the back arrow), or closed with null. */
+export function withOpen(p: URLSearchParams, id: string | null, up?: string): URLSearchParams {
+  const n = new URLSearchParams(p);
+  n.delete("open");
+  n.delete("up");
+  if (id) n.set("open", id);
+  if (id && up) n.set("up", up);
+  return n;
+}
+
 /** Something the user must do on this spec: merge it, or a Delivery or ticket that needs a human. */
 export const needsMe = (stage: Stage, d: DeliverySummary | null) => stage === "ready" || d?.state === "needs_human" || !!d?.tickets.some((t) => t.state === "needs_human");
 
