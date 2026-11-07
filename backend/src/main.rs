@@ -13,6 +13,7 @@ mod grill;
 mod needs_you;
 mod planning;
 mod guard;
+mod kill_guard;
 mod mac_access;
 mod mcp;
 mod mentions;
@@ -47,8 +48,21 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::{AppState, Config, Runtime};
 
+fn main() -> anyhow::Result<()> {
+    // As the agents' Bash hook, claude runs this binary before every Bash call: answer before any setup.
+    if std::env::args().nth(1).as_deref() == Some(kill_guard::ARG) {
+        kill_guard::hook();
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
+    // Loft takes no arguments. Refuse any before opening the db or binding a port: an older binary run as a newer
+    // Loft's hook (`loft kill-guard`, or a later subcommand) must not start a whole server on every call.
+    if let Some(arg) = std::env::args().nth(1) {
+        anyhow::bail!("unknown argument {arg:?}: loft takes no arguments");
+    }
     tracing_subscriber::fmt().init();
     signing::ensure();
 
@@ -63,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
     std::fs::create_dir_all(&data_dir)?;
+    agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {
