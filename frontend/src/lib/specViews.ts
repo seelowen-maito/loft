@@ -104,6 +104,10 @@ export function withOpen(p: URLSearchParams, id: string | null, up?: string): UR
 /** Something the user must do on this spec: merge it, or a Delivery or ticket that needs a human. */
 export const needsMe = (stage: Stage, d: DeliverySummary | null) => stage === "ready" || d?.state === "needs_human" || !!d?.tickets.some((t) => t.state === "needs_human");
 
+/** Whether a spec is the agent's on the board: it owns the spec, or builds its Delivery. Any spec without an agent. */
+export const specOfAgent = (spec: Task, deliveries: DeliverySummary[], agent: string) =>
+  !agent || spec.agent_id === agent || deliveryOf(spec, deliveries)?.agent_id === agent;
+
 /** The specs the options keep, in the order they ask for. */
 export function arrange(specs: Task[], deliveries: DeliverySummary[], tasks: Task[], o: BoardOptions): Task[] {
   const info = (s: Task) => { const d = deliveryOf(s, deliveries); return { d, stage: stageOf(s, d) }; };

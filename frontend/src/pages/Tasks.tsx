@@ -138,9 +138,11 @@ export default function TasksPage() {
   // An agent outside the picked group is ignored, like an unknown one.
   const agentId = agents.length ? agentInGroup(filters.agent, group, agents) : filters.agent;
   const project = tasks && !groupProjectList.includes(filters.project) ? "" : filters.project;
-  const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
-  }, [tasks, filters.q, group, agents, project, agentId, mine, source, mirror?.login]);
+  // Every filter but the agent: the board matches an agent on its own (a spec's, or its Delivery's, see boardSpecs).
+  const anyAgent = useMemo(() => {
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, group, agents, project, mine, source, mirror?.login]);
+  const filtered = useMemo(() => anyAgent.filter((t) => !agentId || t.agent_id === agentId), [anyAgent, agentId]);
 
   const groups = useMemo(
     () =>
@@ -171,7 +173,7 @@ export default function TasksPage() {
     <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
   ) : null;
   const unread = groups[0].tasks.length;
-  const specs = useMemo(() => filtered.filter(isSpec), [filtered]);
+  const specs = useMemo(() => anyAgent.filter(isSpec), [anyAgent]);
   const kept = useMemo(() => (board ? boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId) : []), [board, specs, deliveries, tasks, params, agentId]);
   const count = board ? (kept.length === specs.length ? `${specs.length} specs` : `${kept.length} of ${specs.length} specs`) : filtered.length === (tasks ?? []).length ? `${filtered.length} issues` : `${filtered.length} of ${(tasks ?? []).length} issues`;
 
