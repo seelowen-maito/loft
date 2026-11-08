@@ -123,7 +123,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     }
     // Backups hold every chat: never inside Loft's folder, where the agents' workspaces are.
     let backups = crate::backup::dir(&s);
-    if state.cfg.storage_dir.parent().is_some_and(|loft| backups.starts_with(loft)) {
+    if state.cfg.storage_dir.parent().is_some_and(|loft| crate::backup::inside(&backups, loft)) {
         return Err(bad("Backups folder can't be inside Loft's folder, where agents can read it"));
     }
     s.github_token = match token {

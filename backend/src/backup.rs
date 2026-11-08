@@ -67,6 +67,10 @@ pub fn dir(s: &crate::settings::Settings) -> PathBuf {
 pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Result<Last> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root).with_context(|| format!("can't create {}", root.display()))?;
     let done = root.join(at.format(NAME).to_string());
+    // Back up now twice in the same second: the backup just made is as fresh, so it is the answer.
+    if done.join("loft.db").is_file() {
+        return Ok(found(root, at));
+    }
     let partial = done.with_extension("partial");
     let _ = std::fs::remove_dir_all(&partial);
     std::fs::DirBuilder::new().mode(0o700).create(&partial).with_context(|| format!("can't create {}", partial.display()))?;
@@ -115,10 +119,37 @@ fn list(root: &Path) -> Vec<NaiveDateTime> {
 
 /// The newest backup in `root`.
 pub fn newest(root: &Path) -> Option<Last> {
-    let at = list(root).into_iter().max()?;
+    list(root).into_iter().max().map(|at| found(root, at))
+}
+
+/// The backup in `root` made at `at`.
+fn found(root: &Path, at: NaiveDateTime) -> Last {
     let path = root.join(at.format(NAME).to_string());
     let size = |f: &str| std::fs::metadata(path.join(f)).map(|m| m.len()).unwrap_or(0);
-    Some(Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path })
+    Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path }
+}
+
+/// Whether `dir` is inside `loft` once symlinks are resolved. `dir` may not exist yet: its deepest
+/// existing folder is resolved and the rest added back.
+pub fn inside(dir: &Path, loft: &Path) -> bool {
+    resolved(dir).starts_with(resolved(loft))
+}
+
+fn resolved(p: &Path) -> PathBuf {
+    let mut rest = vec![];
+    let mut cur = p;
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, name| acc.join(name));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 /// Which backups to keep: the newest of each of the last 7 days that have one, and the newest of each
@@ -161,10 +192,16 @@ pub async fn run(state: &AppState) -> Status {
     let root = dir(&state.settings.get());
     let db = state.db.path().unwrap_or_default();
     let settings = db.with_file_name("settings.json");
+    let loft = state.cfg.storage_dir.parent().map(Path::to_path_buf);
     let r = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
-            let made = make(&db, &settings, &root, Local::now().naive_local());
+            // Settings checked this when it was saved, but a symlink can change since.
+            let made = if loft.is_some_and(|l| inside(&root, &l)) {
+                Err(anyhow::anyhow!("{} is inside Loft's folder, where agents can read it", root.display()))
+            } else {
+                make(&db, &settings, &root, Local::now().naive_local())
+            };
             if made.is_ok() {
                 prune(&root);
             }
@@ -264,23 +301,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_backup_made_while_loft_writes_is_complete_owner_only_and_restores_the_agents() {
+    async fn a_backup_made_while_loft_writes_has_every_committed_row_and_is_owner_only() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
         let root = temp().join("backups");
         let st = state_backing_up_to(&root);
+        // Enough data that the copy takes a while, all checkpointed into the database file: what the
+        // writer commits from here on lives only in the WAL, which a plain file copy would miss.
         for i in 0..20 {
             crate::tasks::tests::agent(&st, &format!("Agent {i}"));
         }
-        // Keep writing through Loft's own connection while the backup runs.
+        {
+            let c = st.db.conn();
+            c.execute_batch("CREATE TABLE filler(b BLOB); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000) INSERT INTO filler SELECT randomblob(8000) FROM n;").unwrap();
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
+        }
+        // Loft keeps writing through its own connection, before and during the backup.
+        let (written, stop) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let writer = {
-            let st = st.clone();
+            let (st, written, stop) = (st.clone(), written.clone(), stop.clone());
             std::thread::spawn(move || {
-                for i in 0..300 {
-                    crate::tasks::tests::agent(&st, &format!("During {i}"));
+                while !stop.load(Ordering::SeqCst) {
+                    crate::tasks::tests::agent(&st, &format!("During {}", written.load(Ordering::SeqCst)));
+                    written.fetch_add(1, Ordering::SeqCst);
                 }
             })
         };
+        while written.load(Ordering::SeqCst) < 20 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let before = written.load(Ordering::SeqCst);
         let s = run(&st).await;
+        let after = written.load(Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
         writer.join().unwrap();
+        assert!(after > before, "Loft wrote while the backup ran ({before} → {after})");
 
         assert!(s.error.is_none(), "{s:?}");
         let last = s.last.expect("a backup");
@@ -292,9 +347,26 @@ mod tests {
         let check: String = copy.conn().query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
         assert_eq!(check, "ok");
         let names: Vec<String> = copy.list_agents().unwrap().into_iter().map(|a| a.name).collect();
-        assert!((0..20).all(|i| names.contains(&format!("Agent {i}"))), "the agents made before are there: {names:?}");
+        let missing: Vec<String> = (0..20).map(|i| format!("Agent {i}")).chain((0..before).map(|i| format!("During {i}"))).filter(|n| !names.contains(n)).collect();
+        assert!(missing.is_empty(), "everything committed before the backup started is in it; missing {missing:?}");
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(last.path.join("settings.json")).unwrap()).unwrap();
         assert_eq!(settings["backup_dir"], serde_json::json!(root.to_string_lossy()));
+    }
+
+    #[tokio::test]
+    async fn two_backups_in_the_same_second_both_succeed_with_one_folder() {
+        let base = temp();
+        let st = state_backing_up_to(&base.join("backups"));
+        let db = st.db.path().unwrap();
+        let at = t("2026-11-08 03:00");
+        let a = make(&db, &base.join("none.json"), &base.join("backups"), at).unwrap();
+        let b = make(&db, &base.join("none.json"), &base.join("backups"), at).unwrap();
+        assert_eq!((a.path.clone(), a.bytes), (b.path, b.bytes));
+        // Back up now pressed twice at once.
+        let (x, y) = tokio::join!(run(&st), run(&st));
+        assert!(x.error.is_none() && y.error.is_none(), "{x:?} {y:?}");
+        let names: Vec<String> = std::fs::read_dir(base.join("backups")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".partial")), "{names:?}");
     }
 
     #[tokio::test]
@@ -407,6 +479,11 @@ mod tests {
         assert!(put("/Volumes/Disk/../../tmp".into()).await.is_err(), "with ..");
         let inside = st.cfg.storage_dir.join("agent-1/backups");
         assert!(put(inside.to_string_lossy().into()).await.is_err(), "agents could read it");
+        // A symlink outside that leads inside.
+        let link = temp().join("looks-outside");
+        std::fs::create_dir_all(st.cfg.storage_dir.join("agent-1")).unwrap();
+        std::os::unix::fs::symlink(st.cfg.storage_dir.join("agent-1"), &link).unwrap();
+        assert!(put(link.join("backups").to_string_lossy().into()).await.is_err(), "through a symlink");
         assert!(put("/Volumes/Disk/Loft backups".into()).await.is_ok());
         assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
         // A client that doesn't know the field keeps it.
