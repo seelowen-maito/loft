@@ -195,10 +195,20 @@ fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let tmp = path.with_file_name(format!("{}.{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("secret"), uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, text)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    // Created owner-only from the start (never 0644, even briefly); `create_new` refuses to reuse a file.
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Checks a `.p8` is a P-256 private key and stores it owner-only. The text never reaches a log.
@@ -411,6 +421,22 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn a_failed_secret_write_leaves_no_temp_file_and_a_good_one_is_owner_only() {
+        fake_apns();
+        // A directory in the way makes the final rename fail.
+        let blocked = key_dir().join("blocked.key");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(write_secret(&blocked, "x").is_err());
+        let temps = |prefix: &str| std::fs::read_dir(key_dir()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with(prefix)).count();
+        assert_eq!(temps("blocked.key."), 0, "temp file removed after the error");
+        std::fs::remove_dir(&blocked).unwrap();
+
+        let ok = key_dir().join("mode.key");
+        write_secret(&ok, "x").unwrap();
+        assert_eq!(std::fs::metadata(&ok).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn concurrent_secret_writes_do_not_collide() {
         fake_apns(); // points LOFT_APNS_DIR at the shared test folder
