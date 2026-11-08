@@ -344,13 +344,21 @@ test("a request that can't succeed costs no store command", async () => {
   assert.deepEqual(commands, []);
 });
 
-test("relay/ holds no one's own hosts or ids: every value comes from the environment", async () => {
+test("relay/ holds no one's own hosts or ids, bar the official relay: every value comes from the environment", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const files = (await readdir(new URL("../", import.meta.url), { recursive: true })).filter((f) => /\.(js|json|md)$/.test(f) && !f.includes("node_modules") && !f.startsWith("test"));
   const allowed = /^(appleid\.apple\.com|api(\.sandbox)?\.push\.apple\.com|developer\.apple\.com|openapi\.vercel\.sh|(loft-push-relay|<project>)\.vercel\.app|[\w.-]*example(\.(com|org))?|relay|127\.0\.0\.1)$/;
   for (const f of files) {
     const text = await readFile(new URL(`../${f}`, import.meta.url), "utf8");
-    for (const [, host] of text.matchAll(/https?:\/\/([^/\s"'`)<>:${]+)/g)) assert.match(host, allowed, `${f}: ${host}`);
+    for (const m of text.matchAll(/https?:\/\/([^/\s"'`)<>:${]+)/g)) {
+      const host = m[1];
+      if (host === "portal.get-loft.com") {
+        // The built-in default in backend/src/apns.rs: named only as the official relay, never as a value to set.
+        assert.match(text.slice(Math.max(0, m.index - 40), m.index), /the official relay \(`$/, `${f}: ${host}`);
+        continue;
+      }
+      assert.match(host, allowed, `${f}: ${host}`);
+    }
     for (const [id] of text.matchAll(/\b(com|is|io)\.[a-z0-9-]+\.[a-z0-9.-]+/g)) assert.match(id, /^com\.example\./, `${f}: ${id}`);
   }
 });
