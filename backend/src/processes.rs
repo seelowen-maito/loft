@@ -11,7 +11,8 @@
 //! PATH (for `xargs kill`, `find -exec kill`), that run `loft kill-as <tool> <args>`. That asks Loft
 //! (`POST /kill/<agent id>`), which finds the targets the way the tool would, signals the agent's own by PID and
 //! sends any other (another agent's, the user's apps and MCP servers, Loft itself) to the user as a permission
-//! request. Unanswered, it is refused. Kills that skip the functions (by path, through `sudo` or `builtin`, or a
+//! request. Only a caller running in one of the agent's sessions has any own: from anywhere else (a command holding
+//! another agent's URL), every target goes to the user. Unanswered, it is refused. Kills that skip the functions (by path, through `sudo` or `builtin`, or a
 //! `kill` in another shell) are the Bash hook's (kill_guard.rs): it refuses them and says to kill by name.
 
 use std::collections::{HashMap, HashSet};
@@ -394,7 +395,7 @@ enum Plan {
 
 async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     let storage = state.cfg.storage_dir.clone();
-    let tool = req.tool.clone();
+    let (tool, caller) = (req.tool.clone(), req.caller);
     // As the agent typed it, near enough: `pkill -f 'sleep 120'` mustn't read as a PID 120.
     let command = std::iter::once(req.tool.clone()).chain(req.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ");
     let Ok((plan, owners, procs)) = tokio::task::spawn_blocking(move || {
@@ -415,9 +416,13 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     }
     let me = std::process::id() as i32;
     let owner = |pid: i32| session_of(pid).and_then(|sid| owners.get(&sid));
+    // The URL names the agent, but only a caller in one of its sessions speaks for it: a command holding another
+    // agent's kill URL (a stale environment, a hand-written curl) gets none of that agent's processes as its own.
+    let inside = caller > 0 && owner(caller) == Some(&a.id);
     // Signal 0 only checks the process exists. A PID with no process gets the tool's own error.
-    let (own, foreign): (Vec<i32>, Vec<i32>) =
-        pids.into_iter().partition(|&pid| signal == 0 || session_of(pid).is_none() || (pid != me && owner(pid) == Some(&a.id)));
+    let (own, foreign): (Vec<i32>, Vec<i32>) = pids
+        .into_iter()
+        .partition(|&pid| signal == 0 || session_of(pid).is_none() || (inside && pid != me && owner(pid) == Some(&a.id)));
     send(&own, signal, &tool, &mut out);
     if foreign.is_empty() {
         return out;
@@ -440,7 +445,12 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
         list.push(format!("and {} more", foreign.len() - SHOWN));
     }
     let n = foreign.len();
-    let reason = format!("Stops {n} process{} {} didn't start: {}.", if n == 1 { "" } else { "es" }, a.name, list.join(", "));
+    let es = if n == 1 { "" } else { "es" };
+    let reason = if inside {
+        format!("Stops {n} process{es} {} didn't start: {}.", a.name, list.join(", "))
+    } else {
+        format!("A command outside {}'s runs (PID {caller}) asks to stop {n} process{es}: {}.", a.name, list.join(", "))
+    };
     let input = json!({ "command": command, "pids": foreign });
     let d = crate::agents::ask_permission_for(state, &a.id, "prompt", "Kill", input, &reason, "Kill".into(), ASK_TIMEOUT).await;
     if d.allow {
@@ -448,10 +458,12 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     } else {
         let pids = foreign.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
         let why = d.message.unwrap_or_else(|| "The user denied it.".into());
-        out.stderr += &format!(
-            "{tool}: Loft didn't stop {pids}: your runs didn't start {}, so it asked the user. {why} Stop only your own processes.\n",
-            if n == 1 { "it" } else { "them" }
-        );
+        let because = if inside {
+            format!("your runs didn't start {}", if n == 1 { "it" } else { "them" })
+        } else {
+            "this command doesn't run in one of your runs".to_string()
+        };
+        out.stderr += &format!("{tool}: Loft didn't stop {pids}: {because}, so it asked the user. {why} Stop only your own processes.\n");
         out.code = 1;
     }
     out
@@ -654,8 +666,15 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
+    /// A kill from a command in one of the agent's sessions, as `loft kill-as` sends it.
     async fn ask(st: &AppState, agent_id: &str, tool: &str, args: &[&str]) -> Value {
-        let req = KillRequest { tool: tool.into(), args: args.iter().map(|a| a.to_string()).collect(), caller: std::process::id() as i32 };
+        let caller = Sleeper::start(true);
+        record(&st.cfg.storage_dir, agent_id, caller.pid() as u32).unwrap();
+        ask_as(st, agent_id, caller.pid(), tool, args).await
+    }
+
+    async fn ask_as(st: &AppState, agent_id: &str, caller: i32, tool: &str, args: &[&str]) -> Value {
+        let req = KillRequest { tool: tool.into(), args: args.iter().map(|a| a.to_string()).collect(), caller };
         handle(State(st.clone()), UrlPath(agent_id.into()), Json(req)).await.0
     }
 
@@ -710,6 +729,38 @@ mod tests {
         assert_eq!(v["code"], 1);
         assert!(v["stderr"].as_str().unwrap().contains("No such process"), "{v}");
         assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_from_outside_the_agents_sessions_asks_even_about_its_own_processes() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        let server = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
+        // A command of another agent's holding this one's kill URL, then one of no agent's (Loft's own session).
+        let elsewhere = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &b.id, elsewhere.pid() as u32).unwrap();
+        let pid = server.pid().to_string();
+        for caller in [elsewhere.pid(), std::process::id() as i32, 0] {
+            let asking = tokio::spawn({
+                let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
+                async move { ask_as(&st, &id, caller, "kill", &["-9", &pid]).await }
+            });
+            until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+            let req = pending(&st, &a.id).remove(0);
+            assert!(req.reason.contains(&format!("A command outside {}'s runs (PID {caller})", a.name)), "{}", req.reason);
+            assert!(req.reason.contains(&format!("{pid} ({}'s:", a.name)), "{}", req.reason);
+            assert!(server.alive(), "it was stopped before the user answered");
+            crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+            let v = asking.await.unwrap();
+            assert_eq!(v["code"], 1, "{v}");
+            assert!(v["stderr"].as_str().unwrap().contains("doesn't run in one of your runs"), "{v}");
+            assert!(server.alive(), "caller {caller} stopped the agent's server");
+        }
+        // From its own session, the same kill needs no answer.
+        let v = ask(&st, &a.id, "kill", &["-9", &pid]).await;
+        assert_eq!(v["code"], 0, "{v}");
+        until("the server to stop", 5, || !server.alive()).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
