@@ -65,6 +65,8 @@ struct TaskDetailView: View {
                 }
             }
 
+            if t.hasDeliveryCard { DeliveryCardSection(task: t) }
+
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {
                 if let g = t.github {

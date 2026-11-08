@@ -39,7 +39,7 @@ pub(crate) struct Item {
     text: String,
     created_at: String,
     links: Vec<Value>,
-    pub(crate) actions: Vec<Value>,
+    actions: Vec<Value>,
     /// What a push says: names and titles only, never tool input or message text.
     push: (String, String),
     /// Grouping key: the GitHub repo's name for PR items, else the task's or agent's project.
@@ -154,6 +154,24 @@ fn open_task(task_id: &str) -> Value {
     json!({ "kind": "open", "label": "Open issue", "target": { "screen": "task", "task_id": task_id } })
 }
 
+/// The Loft issue of a Delivery's spec (or standalone ticket).
+fn delivery_issue<'a>(tasks: &'a [Task], d: &crate::db::Delivery) -> Option<&'a Task> {
+    if d.local {
+        tasks.iter().find(|t| t.id == d.spec_id)
+    } else {
+        tasks.iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+    }
+}
+
+/// Opens a Delivery's spec (or standalone ticket): its Loft issue, else its issue on GitHub.
+fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
+    match issue {
+        Some(t) => open_task(&t.id),
+        None if !d.local => json!({ "kind": "open", "label": "Open issue", "target": { "url": format!("https://github.com/{}/issues/{}", d.repo, d.spec) } }),
+        None => json!({ "kind": "open", "label": "Open Needs you", "target": { "screen": "needs_you" } }),
+    }
+}
+
 fn dismiss(id: &str) -> Value {
     action("dismiss", "Dismiss", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
 }
@@ -213,6 +231,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // Deliveries whose ticket (or final review) waits for the user after too many changes rounds: the Loft
+    // issue it blocked offers Resume.
+    let mut by_rounds = state.db.deliveries_in_state("running").map_err(e)?;
+    by_rounds.extend(state.db.deliveries_in_state("needs_human").map_err(e)?);
+    by_rounds.retain(crate::delivery::waits_for_user);
+
     // Tasks waiting for you, blocked or failed.
     for t in &tasks {
         let (urgency, reason) = match t.status.as_str() {
@@ -224,7 +248,16 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
         // The answer goes to the issue's agent (a failed issue runs again with it); with nobody on it, the client
         // asks for one (`agent_id`) or says it's kept as a note.
-        let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        let mut actions = vec![];
+        if t.status == "blocked"
+            && let Some(d) = by_rounds.iter().find(|d| crate::delivery::blocked_by_rounds(d, t))
+        {
+            actions.push(action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })));
+        }
+        actions.push(action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true })));
+        if t.status == "failed" && t.agent_id.is_some() {
+            actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
+        }
         actions.push(open_task(&t.id));
         actions.push(dismiss(&format!("task:{}:{}", t.id, t.status)));
         items.push(Item {
@@ -455,6 +488,79 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         }
     }
 
+    // Deliveries waiting on a step no agent is working on: only the user can bring them back.
+    for d in state.db.deliveries_in_state("stalled").map_err(e)? {
+        let id = crate::delivery::stalled_item_id(&d);
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let open = open_delivery(&d, issue);
+        items.push(Item {
+            kind: "delivery_stalled",
+            urgency: 2,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            reason: text(&crate::delivery::stalled_reason(&d), MAX_REASON),
+            text: String::new(),
+            created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
+            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![
+                action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                open,
+                dismiss(&id),
+            ],
+            push: ("Delivery stalled".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
+    // Deliveries Loft marked done (the spec PR ready, or a plan kept in Loft ready to Merge), until the PR
+    // merges or closes, or the plan is merged.
+    let prs = state.db.list_pull_requests(None).map_err(e)?;
+    for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| !d.done_at.is_empty()) {
+        let tracked = d.pr.and_then(|n| prs.iter().find(|p| p.slug.eq_ignore_ascii_case(&d.repo) && p.number == n));
+        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) {
+            continue;
+        }
+        let id = format!("done:{}:{}", d.repo, d.spec);
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let pr_url = d.pr.map(|n| tracked.map_or_else(|| format!("https://github.com/{}/pull/{n}", d.repo), |p| p.url.clone()));
+        let (reason, act, link) = match &pr_url {
+            Some(url) if !d.local => (
+                format!("Every ticket is closed and its reviews passed: {} #{} is ready for review.", if d.standalone { "PR" } else { "spec PR" }, d.pr.unwrap_or_default()),
+                json!({ "kind": "open", "label": "Open PR", "target": { "url": url } }),
+                json!({ "label": "Pull request", "url": url }),
+            ),
+            _ => (
+                format!("Every ticket is done and its reviews passed: merge `{}` into `{}`.", d.branch, d.base),
+                action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                Value::Null,
+            ),
+        };
+        let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
+        links.extend(Some(link).filter(|l| !l.is_null()));
+        items.push(Item {
+            kind: "delivery_done",
+            urgency: 1,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("Delivery done: {title}"), MAX_TITLE),
+            reason: text(&reason, MAX_REASON),
+            text: String::new(),
+            created_at: d.done_at.clone(),
+            links,
+            // The issue first: it's where the push opens.
+            actions: vec![open_delivery(&d, issue), act, dismiss(&id)],
+            push: ("Delivery done".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
     // Plans kept in Loft whose reviews all passed: Merge merges the spec branch into the project's own repo.
     for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| d.local) {
         let id = format!("merge:{}:{}", d.repo, d.spec);
@@ -484,7 +590,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     // opened here (they can be merged from the app), then the user's other ready PRs and review
     // requests found on GitHub (github_inbox).
     let mut seen_prs: HashSet<(String, i64)> = HashSet::new();
-    for p in state.db.list_pull_requests(None).map_err(e)? {
+    for p in prs {
         let checks = &p.checks;
         let n = |k: &str| checks[k].as_i64().unwrap_or(0);
         let ready = p.state == "open" && !p.draft && p.mergeable == Some(true) && ["clean", "unstable", "has_hooks"].contains(&p.mergeable_state.as_str()) && n("failed") == 0 && n("pending") == 0;

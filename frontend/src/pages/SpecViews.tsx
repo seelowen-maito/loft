@@ -5,7 +5,7 @@ import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
 import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
 
-/* The Issues page's spec views, behind `?specView=`: the boards (./SpecBoard) and a spec's own page opening with its timeline (c). They share these pieces. */
+/* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
 
 export const STAGE_TONE: Record<Stage, string> = { planned: "text-fg-3", delivery: "text-accent", ready: "text-warn", shipped: "text-merged", dropped: "text-fg-3" };
 export const TONE_TEXT = { good: "text-good", accent: "text-accent", warn: "text-warn", muted: "text-fg-3" } as const;

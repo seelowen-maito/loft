@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, deliveryOf, parseBoard, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, deliveryOf, parseBoard, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -48,10 +48,10 @@ test("a spec's tickets: its Delivery's, each with its own issue, else its sub-is
 });
 
 test("board options round-trip through the URL and keep the other params", () => {
-  const p = withBoard(new URLSearchParams("project=loft&specView=b1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  const p = withBoard(new URLSearchParams("project=loft&x=1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
   assert.equal(p.get("project"), "loft");
   assert.deepEqual(parseBoard(p), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
-  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&specView=b1", "defaults leave no trace");
+  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&x=1", "defaults leave no trace");
   assert.deepEqual(parseBoard(new URLSearchParams("stage=nope,ready")).stages, ["ready"]);
 });
 
@@ -85,4 +85,17 @@ test("the board's open pane is in the URL, with the spec it came from, and leave
   assert.equal(withOpen(p, "t1", "s1").toString(), "view=specs&project=loft&open=t1&up=s1");
   assert.equal(withOpen(withOpen(p, "t1", "s1"), "s1").toString(), "view=specs&project=loft&open=s1", "back to the spec drops the arrow");
   assert.equal(withOpen(withOpen(p, "t1", "s1"), null).toString(), "view=specs&project=loft", "closing leaves the board as it was");
+});
+
+test("on the board a spec is an agent's when it owns the spec or builds its Delivery", () => {
+  const ds = [del({ spec: 9, agent_id: "x" }), del({ spec: 10, agent_id: "y" })];
+  const delivered = spec({ gh: ["o/r", 9], agent_id: null });
+  const owned = spec({ gh: ["o/r", 10], agent_id: "x" });
+  const neither = spec({ gh: ["o/r", 10], agent_id: "z" });
+  const none = spec({ gh: ["o/r", 11], agent_id: null });
+  assert.ok(specOfAgent(delivered, ds, "x"), "no agent on the spec, but its Delivery's agent is x");
+  assert.ok(specOfAgent(owned, ds, "x"), "owned by x, though y delivers it");
+  assert.ok(!specOfAgent(neither, ds, "x"));
+  assert.ok(!specOfAgent(none, ds, "x"));
+  assert.ok([delivered, owned, neither, none].every((s) => specOfAgent(s, ds, "")), "no agent filter: every spec");
 });

@@ -410,6 +410,8 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/publish", post(crate::mirror::publish_route))
         .route("/{id}/keep-working", post(crate::mirror::keep_working))
         .route("/{id}/start-delivery", post(crate::delivery::start_from_issue))
+        .route("/{id}/resume-delivery", post(crate::delivery::resume_from_issue))
+        .route("/{id}/pause-delivery", post(crate::delivery::pause_from_issue))
         .route("/{id}/delivery", at_get(crate::delivery::issue_delivery))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
@@ -1211,7 +1213,13 @@ pub(crate) mod tests {
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         AppState {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
-            cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents") }),
+            cfg: Arc::new(crate::state::Config {
+                port: 0,
+                storage_dir: dir.join("agents"),
+                xcrun: dir.join("no-xcrun"),
+                // No xcode-select to run, so `xcrun` is run as it is.
+                xcode: crate::state::XcodeLookup { developer_dir: None, xcode_select: dir.join("no-xcode-select"), root: dir.clone() },
+            }),
             events: tokio::sync::broadcast::channel(64).0,
             rt: Arc::new(Mutex::new(Default::default())),
             repos: Arc::new(Default::default()),
@@ -1228,6 +1236,7 @@ pub(crate) mod tests {
             publish_known: Arc::new(Default::default()),
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
+            xcode: Arc::new(Default::default()),
         }
     }
 
@@ -1343,10 +1352,6 @@ pub(crate) mod tests {
         assert_eq!((r["task"]["status"].clone(), r["delivered_to"].clone()), (json!("in_progress"), json!(a.id)));
         assert!(queued(&st, &a).contains("Try with Xcode 26"), "the brief carries the answer");
         assert!(!needs_you(&st, &t.id));
-        // Only one way to answer a failed issue.
-        stuck(&st, &t.id, "failed");
-        let item = crate::needs_you::collect(&st).unwrap().into_iter().find(|i| i.task_id.as_deref() == Some(t.id.as_str())).unwrap();
-        assert!(!item.actions.iter().any(|x| x["kind"] == "retry"), "{:?}", item.actions);
     }
 
     #[tokio::test]

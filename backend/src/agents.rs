@@ -2,7 +2,7 @@
 //! workspace, streams its events into the chat log, and routes permission prompts
 //! to the UI through the Loft MCP server.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,10 @@ use crate::schedule;
 use crate::state::{AppState, Decision, Event};
 
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How long a tool call that waits for the user may run: the permission timeout plus a minute. It sets claude's
+/// MCP and Bash timeouts and the `timeout` the prompt tells agents to give a kill, so the three can't drift apart.
+pub const TOOL_WAIT: Duration = Duration::from_secs(PERMISSION_TIMEOUT.as_secs() + 60);
 
 /// How long claude gets to exit after its final result before it is stopped, and after SIGTERM before SIGKILL.
 #[cfg(not(test))]
@@ -271,6 +275,44 @@ pub async fn ask_permission(
     reason: &str,
     rule: String,
 ) -> Decision {
+    ask_permission_for(state, agent_id, source, tool_name, input, reason, rule, PERMISSION_TIMEOUT).await
+}
+
+/// Marks a request expired when it ends unanswered: at the timeout, or when whoever asked stops waiting (a kill
+/// whose command was stopped), so a later answer can't act on it.
+struct Unanswered<'a> {
+    state: &'a AppState,
+    id: String,
+    answered: bool,
+}
+
+impl Drop for Unanswered<'_> {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        self.state.rt.lock().unwrap().waiters.remove(&self.id);
+        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id) {
+            if r.status == "pending" {
+                r.status = "expired".into();
+                let _ = self.state.db.save_permission(&r);
+                self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
+            }
+        }
+    }
+}
+
+/// `ask_permission`, waiting at most `timeout` for the user.
+pub async fn ask_permission_for(
+    state: &AppState,
+    agent_id: &str,
+    source: &str,
+    tool_name: &str,
+    input: Value,
+    reason: &str,
+    rule: String,
+    timeout: Duration,
+) -> Decision {
     let req = PermissionRequest {
         id: uuid::Uuid::new_v4().to_string(),
         agent_id: agent_id.into(),
@@ -292,18 +334,15 @@ pub async fn ask_permission(
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
     set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
 
-    let decision = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
-        Ok(Ok(d)) => d,
-        _ => {
-            state.rt.lock().unwrap().waiters.remove(&req.id);
-            if let Ok(Some(mut r)) = state.db.get_permission(&req.id) {
-                r.status = "expired".into();
-                let _ = state.db.save_permission(&r);
-                state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
-            }
-            Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) }
+    let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
+    let decision = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(d)) => {
+            pending.answered = true;
+            d
         }
+        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) },
     };
+    drop(pending);
     if is_running(state, agent_id) {
         set_status(state, agent_id, "running", &prev);
     }
@@ -318,8 +357,9 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
         req.rule = r.trim().to_string();
     }
     let allow = decision != "deny";
-    // Explicit requests are always about config, so any grant persists.
-    let persist = decision == "allow_always" || (allow && req.source == "request");
+    // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
+    // is about those processes only: it is never saved.
+    let persist = req.tool_name != "Kill" && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -443,12 +483,12 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes by PID (`kill $pid`, saved from `$!`) or by port (`lsof -ti:<port> | xargs kill`), never with `pkill -f` or `killall` and a pattern: other agents run on this Mac and a pattern can match them. To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
-- Dev servers (web apps, APIs, docs sites): start them detached (see Runs), listening on all interfaces (`vite --host`, `next dev -H 0.0.0.0`, `python3 -m http.server --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac. Use the booted device (`xcrun simctl list devices booted`), or boot one with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install booted "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch booted <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io booted screenshot <file>.png` and read the image.{axe}
+- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
+- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -489,6 +529,16 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
             .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
             .unwrap_or_default(),
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
+        ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
+        range_var = crate::ports::RANGE_VAR,
+        tool_wait = TOOL_WAIT.as_millis(),
+        device = match state.db.agent_device(&a.id).ok().flatten() {
+            Some(udid) => format!(
+                "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
+                var = crate::simulator::DEVICE_VAR
+            ),
+            None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
+        },
     )
 }
 
@@ -572,9 +622,17 @@ fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool
 
 /// A Delivery wake on `ticket`: at a ticket boundary, the Fresh context setting applies just before the
 /// run, behind a running one if needed.
-pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String) {
+/// `wake` is the step it's for: when the run that takes it ends, Loft checks the step moved on.
+pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String, wake: crate::delivery::Wake) {
     let fresh = ticket_boundary(state, agent_id, ticket, builder);
-    start_with(state, agent_id, Some(prompt), "delivery", false, fresh);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake));
+}
+
+/// A Resume wake on `ticket`, the one its Delivery stalled on: the agent carries on with it, so it's never a
+/// ticket boundary, whatever the agent worked on meanwhile.
+pub fn resume_on_ticket(state: &AppState, agent_id: &str, ticket: &str, prompt: String, wake: crate::delivery::Wake) {
+    let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
+    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake));
 }
 
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
@@ -640,6 +698,11 @@ pub fn wake_for_user(state: &AppState, agent_id: &str, prompt: String) {
     start(state, agent_id, Some(prompt), "user", true);
 }
 
+/// A Delivery done wake: not the user's words, but its reply is news for them, so it's an Unread reply.
+pub fn wake_with_reply(state: &AppState, agent_id: &str, prompt: String) {
+    start(state, agent_id, Some(prompt), "delivery", true);
+}
+
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
 pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     let prompt = format!(
@@ -696,7 +759,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         name = from.name,
         id = from.id,
     );
-    start_with(state, &to.id, Some(prompt), "agent", false, fresh);
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None);
 }
 
 /// Deliver an FYI from one agent to another: it shows in the recipient's chat at once, marked as FYI,
@@ -732,12 +795,13 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
 
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
-    start_with(state, agent_id, text, trigger, for_user, false);
+    start_with(state, agent_id, text, trigger, for_user, false, None);
 }
 
 /// `start`; `fresh`: the prompt starts a new Delivery ticket, so the run that delivers it first applies
-/// the agent's Fresh context setting (`fresh_if_due`).
-fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool) {
+/// the agent's Fresh context setting (`fresh_if_due`). `delivery`: the Delivery step the prompt wakes the
+/// agent for, kept with the prompt (queued with it, then on the run that takes it).
+fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -753,9 +817,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
-                rt.queued.entry(agent_id.to_string()).or_default().push(prompt);
+                rt.queued.entry(agent_id.to_string()).or_default().push(prompt.clone());
                 if for_user {
                     rt.queued_for_user.insert(agent_id.to_string());
+                }
+                if let Some(w) = delivery {
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt)));
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -765,6 +832,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         }
         let kill = Arc::new(Notify::new());
         rt.running.insert(agent_id.to_string(), kill.clone());
+        if let Some(w) = delivery {
+            rt.delivery_running.entry(agent_id.to_string()).or_default().push(w);
+        }
         kill
     };
     let state = state.clone();
@@ -783,17 +853,22 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
-            if let Err(e) = run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
-                // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
-                if !delivered {
-                    let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+                Ok(failed) => failed,
+                Err(e) => {
+                    // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
+                    if !delivered {
+                        let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
+                    }
+                    add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
+                    set_status(&state, &agent_id, "error", &e.to_string());
+                    if for_user {
+                        mark_replied(&state, &agent_id);
+                    }
+                    true
                 }
-                add_msg(&state, &agent_id, None, "system", "error", &e.to_string(), json!({}));
-                set_status(&state, &agent_id, "error", &e.to_string());
-                if for_user {
-                    mark_replied(&state, &agent_id);
-                }
-            }
+            };
+            crate::delivery::run_ended(&state, &agent_id, failed).await;
             let next = {
                 let mut rt = state.rt.lock().unwrap();
                 match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
@@ -803,6 +878,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                             rt.grill_queued.insert(agent_id.clone(), g);
                         }
                         let u = rt.queued_for_user.remove(&agent_id);
+                        take_delivery_queue(&mut rt, &agent_id);
                         Some((q.join("\n\n"), "user", u))
                     }
                     (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
@@ -825,6 +901,13 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             emit_agent(&state, &a);
         }
     });
+}
+
+/// The run that takes the agent's queue takes the Delivery steps it was woken for.
+pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str) {
+    if let Some(w) = rt.delivery_queued.remove(agent_id) {
+        rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w.into_iter().map(|(w, _)| w));
+    }
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -907,26 +990,62 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
 }
 
-/// Where an agent's system prompt is written for claude to read. Not on claude's command line: every
-/// agent's prompt holds phrases like `vite --host`, so a `pkill -f` with one of them in any agent's
-/// command would match, and stop, every agent at once.
-fn system_prompt_file(state: &AppState, agent_id: &str) -> PathBuf {
-    state.cfg.storage_dir.join(".system-prompts").join(format!("{agent_id}.md"))
+/// Where claude reads one of an agent's files from: its system prompt (`md`), MCP config (`mcp.json`), settings
+/// (`settings.json`) and the script each Bash command runs first (`env.sh`, see processes.rs). None of them is on claude's command line: every agent's prompt holds phrases like
+/// `vite --host` and its MCP config the user's servers (`npx @playwright/mcp`), so a `pkill -f` with one of them in
+/// any agent's command would match, and stop, every agent at once.
+fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
+    state.cfg.storage_dir.join(AGENT_FILES).join(format!("{agent_id}.{kind}"))
 }
 
-/// Writes the agent's system prompt owner-only and returns its path.
-fn write_system_prompt(state: &AppState, a: &Agent) -> Result<PathBuf> {
+pub(crate) const AGENT_FILES: &str = ".agent-files";
+const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
+/// Where the agents' files were kept before they held more than the prompt.
+const OLD_AGENT_FILES: &str = ".system-prompts";
+
+/// Writes one of the agent's files owner-only (it may hold MCP tokens) and returns the path claude reads it at
+/// from the workspace, `../.agent-files/<id>.<kind>`: an absolute one would put the user's folders on argv.
+fn write_agent_file(state: &AppState, agent_id: &str, kind: &str, text: &str) -> Result<PathBuf> {
+    let path = agent_file(state, agent_id, kind);
+    write_private(&path, text)?;
+    Ok(PathBuf::from("..").join(AGENT_FILES).join(path.file_name().unwrap()))
+}
+
+/// Writes `text` to `path` readable by the user only, in a folder only they can open.
+pub fn write_private(path: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let path = system_prompt_file(state, &a.id);
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(&path, system_prompt(state, a))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(path)
+    std::fs::write(path, text)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
-fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::path::Path) -> Command {
+/// Deletes the folder older Loft builds kept the agents' files in, with any MCP tokens they left there.
+pub fn remove_old_agent_files(storage_dir: &Path) {
+    let _ = std::fs::remove_dir_all(storage_dir.join(OLD_AGENT_FILES));
+}
+
+/// Removes the files claude was started with, when the agent is deleted.
+pub fn remove_agent_files(state: &AppState, agent_id: &str) {
+    for kind in AGENT_FILE_KINDS {
+        let _ = std::fs::remove_file(agent_file(state, agent_id, kind));
+    }
+}
+
+/// This binary, which claude runs as the Bash hook and as the agent's `kill`, `pkill` and `killall`. Tests run as
+/// their own binary, so they use the loft binary cargo builds next to it.
+fn loft_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if cfg!(test) {
+        return Ok(exe.parent().and_then(Path::parent).map(|d| d.join("loft")).unwrap_or(exe));
+    }
+    Ok(exe)
+}
+
+/// The claude command for a run. Writing its files fails the run rather than putting them on argv.
+fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -941,57 +1060,85 @@ fn build_command(state: &AppState, a: &Agent, resume: bool, prompt_file: &std::p
 
     let mut allowed: Vec<String> = a.allowed_tools.clone();
     allowed.push("mcp__loft".into());
+    let mut disallowed = a.disallowed_tools.clone();
+    if a.max_subagents == Some(0) {
+        disallowed.push("Agent".into());
+    }
+    // The tool lists hold the user's own rules (`Bash(npm *)`), so they go in the settings file too; `--settings`
+    // applies despite `--setting-sources ""`. So does the hook that refuses kills Loft can't scope to the agent's
+    // own processes (`/bin/kill`, `sudo kill`, a `kill` in `sh -c`).
+    let exe = loft_exe()?;
+    let settings = json!({
+        "permissions": { "allow": allowed, "deny": disallowed },
+        "hooks": crate::kill_guard::hooks(&exe),
+    });
 
+    let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
         .arg("--append-system-prompt-file")
-        .arg(prompt_file)
+        .arg(write_agent_file(state, &a.id, "md", &system_prompt(state, a))?)
         .args(["--system-prompt-snapshot", "off"])
-        .args(["--mcp-config", &mcp_config])
+        .arg("--mcp-config")
+        .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
         // Isolate agents from the user's own Claude Code settings, hooks and plugins.
         .args(["--setting-sources", ""])
+        .arg("--settings")
+        .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
-        .args(["--name", &format!("loft · {}", a.name)])
-        .env("MCP_TOOL_TIMEOUT", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
+        .args(["--name", &a.name])
+        .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
+        // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
+        .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
+        .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
+        .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
+        // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
+        .env("PORT", ports.start().to_string())
+        .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Its own Simulator device, once it has one (an earlier run asked for it).
+    match state.db.agent_device(&a.id)? {
+        Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),
+        None => cmd.env_remove(crate::simulator::DEVICE_VAR),
+    };
+    // Run in each Bash command's shell: records its process session as the agent's, and sends kills through Loft.
+    let storage = &state.cfg.storage_dir;
+    write_agent_file(state, &a.id, "env.sh", &crate::processes::env_script(storage, &a.id, &exe))?;
+    crate::processes::write_shims(storage, &exe)?;
+    // Its own process session: Loft knows the run's processes by it, and a group kill (`kill 0`) in the agent's
+    // commands can't reach Loft.
+    unsafe {
+        cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
     if !a.model.is_empty() {
         cmd.args(["--model", &a.model]);
     }
     if !a.effort.is_empty() {
         cmd.args(["--effort", &a.effort]);
     }
-    cmd.arg("--allowedTools").arg(allowed.join(","));
     if !a.subagent_model.is_empty() {
         // FORCE makes the built-in Explore and Plan subagents follow it too.
         cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", &a.subagent_model).env("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "1");
     }
-    let mut disallowed = a.disallowed_tools.clone();
-    match a.max_subagents {
-        Some(0) => disallowed.push("Agent".into()),
-        Some(n) => {
-            cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
-        }
-        None => {}
-    }
-    if !disallowed.is_empty() {
-        cmd.arg("--disallowedTools").arg(disallowed.join(","));
+    if let Some(n @ 1..) = a.max_subagents {
+        cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
     }
     if resume {
         if let Some(sid) = &a.session_id {
             cmd.args(["--resume", sid]);
         }
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Points the agent at Claude session `sid`. A different session than its last one brings the running
@@ -1009,11 +1156,12 @@ fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
 }
 
 /// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<()> {
+/// Whether the run failed: claude reported an error, or exited without a result when nobody stopped it.
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
     let mut resume = true;
     loop {
         match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
-            RunOutcome::Done => return Ok(()),
+            RunOutcome::Done { failed } => return Ok(failed),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
                 *delivered = false;
@@ -1041,7 +1189,7 @@ async fn terminate(child: &mut tokio::process::Child) {
 }
 
 enum RunOutcome {
-    Done,
+    Done { failed: bool },
     StaleSession,
 }
 
@@ -1088,14 +1236,19 @@ async fn run_process(
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
-    let prompt_file = write_system_prompt(state, &agent)?;
-    let mut cmd = build_command(state, &agent, resume, &prompt_file);
+    let mut cmd = build_command(state, &agent, resume)?;
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
     }
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
+    // Its session id is its PID.
+    if let Some(pid) = child.id() {
+        if let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
+            tracing::warn!("agent {agent_id}: could not record its process session: {e}");
+        }
+    }
     {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
@@ -1117,6 +1270,8 @@ async fn run_process(
     // tool_use id -> (name, input), to recognise PR-opening calls when their results arrive
     let mut tool_calls: std::collections::HashMap<String, (String, Value)> = Default::default();
     let mut killed = false;
+    // Loft sent claude a SIGTERM itself (stop, new work over background tasks, or a claude that wouldn't exit).
+    let mut loft_stopped = false;
     // Claude Code background tasks (shells, monitors, background subagents) still running: id -> description.
     // claude -p stays alive for them and starts another turn when one finishes.
     let mut bg: Vec<(String, String)> = Vec::new();
@@ -1136,6 +1291,7 @@ async fn run_process(
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 killed = true;
                 None
             }
@@ -1158,12 +1314,14 @@ async fn run_process(
                 }
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
                 tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
                 terminate(&mut child).await;
+                loft_stopped = true;
                 None
             }
         };
@@ -1444,6 +1602,7 @@ async fn run_process(
         Err(_) => {
             tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
             terminate(&mut child).await;
+            loft_stopped = true;
             child.wait().await?
         }
     };
@@ -1454,9 +1613,9 @@ async fn run_process(
         }
         if !killed {
             let tail: String = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            // Loft logs every stop of its own above; a signal it didn't send came from another process.
+            // A SIGTERM Loft didn't send came from another process. Not SIGKILL: macOS ends a process out of memory with it.
             use std::os::unix::process::ExitStatusExt;
-            let outside = if matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)) || matches!(status.code(), Some(143 | 137)) {
+            let outside = if !loft_stopped && (status.signal() == Some(libc::SIGTERM) || status.code() == Some(143)) {
                 " It was stopped by a signal from outside Loft, for example a `pkill` or `kill` in some agent's command."
             } else {
                 ""
@@ -1498,7 +1657,7 @@ async fn run_process(
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
     }
-    Ok(RunOutcome::Done)
+    Ok(RunOutcome::Done { failed: run_error.is_some() })
 }
 
 // ---- scheduler --------------------------------------------------------
@@ -1567,6 +1726,19 @@ pub(crate) mod tests {
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn the_kill_timeout_the_prompt_names_is_the_one_claude_allows() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        let named = p.split("give that Bash call a `timeout` of ").nth(1).and_then(|r| r.split(':').next()).expect("a timeout in # Runs");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let env = |k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(env("BASH_MAX_TIMEOUT_MS").as_deref(), Some(named));
+        assert_eq!(env("MCP_TOOL_TIMEOUT").as_deref(), Some(named));
+        assert!(TOOL_WAIT > PERMISSION_TIMEOUT);
     }
 
     #[test]
@@ -1698,6 +1870,8 @@ pub(crate) mod tests {
 /// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
+    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
+    /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -1709,11 +1883,16 @@ case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
 esac;;
 esac
 while [ $# -gt 0 ]; do
+  case "$1" in --append-system-prompt|--allowedTools|--disallowedTools) echo "$1 on argv" >&2; exit 1;; esac
+  [ "$1" = --mcp-config ] && [ ! -f "$2" ] && echo 'mcp config on argv' >&2 && exit 1
   [ "$1" = --append-system-prompt-file ] && { cat "$2"; printf '\n---\n'; } >> system.log
+  [ "$1" = --settings ] && cat "$2" > settings.log
   printf '%s\n' "$1" >> argv.log
   [ "$1" = --resume ] && echo "$2" >> resumed.log
   shift
 done
+printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
+printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
@@ -1722,6 +1901,11 @@ case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
 case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *sigterm*) kill -TERM $$;; esac
+case "$prompt" in *exit-143*) exit 143;; esac
+case "$prompt" in *sigkill*) kill -KILL $$;; esac
+case "$prompt" in *exit-137*) exit 137;; esac
+case "$prompt" in *stuck-pipes*) exec >&-; sleep 3; exit 0;; esac
 case "$prompt" in *garbled*) printf '\377\n'; exit 0;; esac
 case "$prompt" in *chatty*)
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"On it."}]}}';;
@@ -1787,6 +1971,10 @@ esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
+case "$prompt" in *bash-cmd*)
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
+  echo "exit $?" >> bash.out;;
+esac
 reply=started
 case "$prompt" in *ask*) reply='Which one?';; esac
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$reply"'"}]}}'
@@ -1847,8 +2035,191 @@ esac
         let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
         assert!(system.contains("# Identity") && system.contains("vite --host"), "{system}");
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(system_prompt_file(&st, &a.id)).unwrap().permissions().mode() & 0o777, 0o600);
-        assert!(system.contains("never with `pkill -f` or `killall`"), "agents are told to stop processes by PID");
+        assert_eq!(std::fs::metadata(agent_file(&st, &a.id, "md")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(system.contains("Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`)"), "agents may stop their own processes any way");
+        assert!(!system.contains("never with `pkill -f`"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claude_s_files_are_private_relative_and_hold_the_tool_lists_and_the_kill_guard() {
+        let (st, mut a) = fake_claude_state();
+        a = st.db.update_agent(&a.id, |a| {
+            a.allowed_tools = vec!["Bash(npm *)".into()];
+            a.disallowed_tools = vec!["WebFetch".into()];
+            a.max_subagents = Some(0);
+        }).unwrap().unwrap();
+        run(&st, &a.id, "hello", 1).await;
+        // No path into the user's folders, and none of the user's rules, for a `pkill -f` to match.
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        let storage = st.cfg.storage_dir.to_string_lossy().to_string();
+        for text in [storage.as_str(), "agent-local-storage", "npm", "WebFetch", "loft ·"] {
+            assert!(!argv.contains(text), "{text:?} is on claude's command line:\n{argv}");
+        }
+        assert!(argv.contains(&format!("../.agent-files/{}.settings.json", a.id)), "{argv}");
+        // The fake read the settings file from that relative path.
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(workspace(&st, &a.id).join("settings.log")).unwrap()).unwrap();
+        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "Agent"] }));
+        let hook = &settings["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["matcher"], "Bash");
+        assert!(hook["hooks"][0]["command"].as_str().unwrap().ends_with("' kill-guard"), "{settings}");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for kind in AGENT_FILE_KINDS {
+            assert_eq!(mode(&agent_file(&st, &a.id, kind)), 0o600, "{kind}");
+        }
+        assert_eq!(mode(agent_file(&st, &a.id, "md").parent().unwrap()), 0o700);
+
+        // Deleting the agent removes them, even when its workspace stays.
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        for kind in AGENT_FILE_KINDS {
+            assert!(!agent_file(&st, &a.id, kind).exists(), "{kind} is left behind");
+        }
+        assert!(workspace(&st, &a.id).exists());
+    }
+
+    /// The `PORT` and `LOFT_PORT_RANGE` each of the agent's runs was started with, in order.
+    fn ports_seen(st: &AppState, id: &str) -> Vec<String> {
+        std::fs::read_to_string(workspace(st, id).join("ports.log")).unwrap_or_default().lines().map(String::from).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_agent_serves_on_its_own_port_range_on_every_run_until_it_is_deleted() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        run(&st, &a.id, "hello", 1).await;
+        run(&st, &b.id, "hello", 1).await;
+        run(&st, &a.id, "again", 2).await;
+        assert_eq!(ports_seen(&st, &a.id), ["20000 20000-20009", "20000 20000-20009"], "the same range on every run");
+        assert_eq!(ports_seen(&st, &b.id), ["20010 20010-20019"]);
+        let system = std::fs::read_to_string(workspace(&st, &a.id).join("system.log")).unwrap();
+        assert!(system.contains("only on your own ports, 20000–20009 (`$PORT` is the first, `$LOFT_PORT_RANGE` the whole range)"), "{system}");
+
+        // Deleted through the API, its range goes to the next new agent.
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        let c = crate::tasks::tests::agent(&st, "Newcomer");
+        run(&st, &c.id, "hello", 1).await;
+        assert_eq!(ports_seen(&st, &c.id), ["20000 20000-20009"]);
+        run(&st, &b.id, "again", 2).await;
+        assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_runs_on_its_own_simulator_device_from_the_run_after_it_asks_and_it_goes_with_the_agent() {
+        use crate::simulator::tests::{ask_for_device, boot, fake_devices, fake_xcrun, simctl_log};
+        let (mut st, a) = fake_claude_state();
+        fake_xcrun(&mut st);
+        let other = crate::tasks::tests::agent(&st, "Other");
+        let devices_seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("device.log")).unwrap_or_default();
+        let last_system = |id: &str| {
+            let log = std::fs::read_to_string(workspace(&st, id).join("system.log")).unwrap();
+            log.rsplit("\n---\n").find(|p| !p.trim().is_empty()).unwrap().to_string()
+        };
+
+        run(&st, &a.id, "hello", 1).await;
+        assert_eq!(devices_seen(&a.id), "none\n");
+        let system = last_system(&a.id);
+        assert!(system.contains("You have none yet: call `mcp__loft__simulator_device`"), "{system}");
+        assert!(!system.contains("booted device") && !system.contains("simctl install booted"), "{system}");
+        assert!(simctl_log(&st).is_empty(), "no device until the agent needs one");
+
+        ask_for_device(&st, &a.id).await;
+        ask_for_device(&st, &other.id).await;
+        let udid = st.db.agent_device(&a.id).unwrap().unwrap();
+        run(&st, &a.id, "again", 2).await;
+        run(&st, &a.id, "and again", 3).await;
+        assert_eq!(devices_seen(&a.id), format!("none\n{udid}\n{udid}\n"), "the same device on every later run");
+        let system = last_system(&a.id);
+        assert!(system.contains(&format!("Your device's UDID is `{udid}` (also in `$LOFT_SIMULATOR_UDID`)")), "{system}");
+        assert!(system.contains("xcrun simctl install <udid>") && !system.contains("booted device"), "{system}");
+
+        // Deleted through the API (booted, as an agent leaves it), its device is deleted; the other agent's stays.
+        boot(&st, &udid);
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()), opts).await.ok().unwrap();
+        let left: Vec<String> = fake_devices(&st).into_iter().map(|d| d.2).collect();
+        assert_eq!(left, ["Other (Loft)"]);
+        assert!(simctl_log(&st).contains(&format!("simctl delete {udid}")));
+        assert_eq!(st.db.agent_device(&a.id).unwrap(), None);
+    }
+
+    fn error_text(st: &AppState, id: &str) -> Option<String> {
+        st.db.list_messages(id, 50, None).unwrap().into_iter().find(|m| m.kind == "error").map(|m| m.content)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sigterm_from_outside_loft_is_named_in_the_error() {
+        for prompt in ["sigterm", "exit-143"] {
+            let (st, a) = fake_claude_state();
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            assert!(error_text(&st, &a.id).unwrap().contains("from outside Loft"), "{prompt}: {:?}", error_text(&st, &a.id));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sigkill_is_not_blamed_on_the_outside() {
+        // macOS ends a process that runs out of memory with SIGKILL, so it isn't named as some agent's kill.
+        for prompt in ["sigkill", "exit-137"] {
+            let (st, a) = fake_claude_state();
+            enqueue(&st, &a.id, Some(prompt.into()), "user");
+            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            let err = error_text(&st, &a.id).unwrap();
+            assert!(err.contains("without a result") && !err.contains("outside Loft"), "{prompt}: {err}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_file_write_fails_the_run_with_nothing_on_argv() {
+        let (st, a) = fake_claude_state();
+        // A file where the folder should be: none of claude's files can be written.
+        std::fs::create_dir_all(&st.cfg.storage_dir).unwrap();
+        std::fs::write(st.cfg.storage_dir.join(AGENT_FILES), "").unwrap();
+        enqueue(&st, &a.id, Some("hello".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        assert!(error_text(&st, &a.id).unwrap().contains("File exists"));
+        // claude never started: no prompt on argv instead.
+        assert!(!workspace(&st, &a.id).join("argv.log").exists());
+        assert!(!workspace(&st, &a.id).join("prompts.log").exists());
+    }
+
+    #[test]
+    fn the_old_agent_files_folder_is_deleted() {
+        let dir = std::env::temp_dir().join(format!("loft-old-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(OLD_AGENT_FILES)).unwrap();
+        std::fs::write(dir.join(OLD_AGENT_FILES).join("a.mcp.json"), "{\"token\":\"x\"}").unwrap();
+        std::fs::create_dir_all(dir.join(AGENT_FILES)).unwrap();
+        remove_old_agent_files(&dir);
+        assert!(!dir.join(OLD_AGENT_FILES).exists());
+        assert!(dir.join(AGENT_FILES).exists(), "the current folder stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_s_own_stops_are_not_blamed_on_the_outside() {
+        let (st, a) = fake_claude_state();
+        // claude closed its output without a result and stayed alive: Loft stops it.
+        enqueue(&st, &a.id, Some("stuck-pipes".into()), "user");
+        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        let err = error_text(&st, &a.id).unwrap();
+        assert!(err.contains("without a result") && !err.contains("outside Loft"), "{err}");
+
+        // Stop and restart.
+        let (st, a) = fake_claude_state();
+        enqueue(&st, &a.id, Some("busy".into()), "user");
+        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        stop(&st, &a.id);
+        until("the stop", 10, || !is_running(&st, &a.id)).await;
+        enqueue(&st, &a.id, Some("busy".into()), "user");
+        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        restart(&st, &a.id).await;
+        until("the restart", 10, || !is_running(&st, &a.id)).await;
+        let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
+        assert!(msgs.iter().all(|m| !m.content.contains("outside Loft")), "{msgs:?}");
     }
 
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
@@ -2320,6 +2691,45 @@ esac
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Restarted by user. The queued message runs next."));
     }
 
+    /// A Delivery wake's real run: one that ends without the step's call stalls the Delivery (failed or not),
+    /// and a Restart carries the wake over to the run it starts instead of stalling it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivery_runs_end_without_its_call_stalls_it() {
+        let (st, a) = fake_claude_state();
+        let save = |spec: i64| {
+            let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "o/r", "spec": spec, "state": "running", "current": spec + 1, "dev": a.id, "created_at": "" })).unwrap();
+            d.tickets.push(crate::db::DeliveryTicket { number: spec + 1, title: "T".into(), blocked_by: vec![], state: "started".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new() });
+            st.db.save_delivery(&d).unwrap();
+        };
+        let wake = |spec: i64, prompt: &str| {
+            let w = crate::delivery::Wake { repo: "o/r".into(), spec, step: crate::delivery::Step::Build { ticket: spec + 1, round: 0 } };
+            wake_on_ticket(&st, &a.id, &format!("o/r#{}", spec + 1), true, prompt.into(), w);
+        };
+        let stalled = |spec: i64| st.db.get_delivery("o/r", spec).unwrap().unwrap().stall_reason;
+        for (spec, prompt, why) in [(40, "build it", "no_call"), (50, "build it and fail", "run_failed")] {
+            save(spec);
+            wake(spec, prompt);
+            until("the Delivery to stall", 10, || !stalled(spec).is_empty()).await;
+            assert_eq!(stalled(spec), why);
+            idle(&st, &a.id).await;
+        }
+
+        save(60);
+        wake(60, "build it while busy");
+        until("the run to start", 10, || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default().contains("while busy")).await;
+        // The restarted run gets an FYI saying "busy", so it keeps going too.
+        st.db.add_pending_fyi(&a.id, "stay busy").unwrap();
+        assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
+        let prompts = || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default();
+        until("the restarted run to start", 10, || prompts().contains("restarted your last run")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(stalled(60), "", "the restarted run carries on with the step");
+        // Stopped from the agent's Stop without the call: now it stalls.
+        assert!(stop(&st, &a.id));
+        until("the Delivery to stall", 10, || !stalled(60).is_empty()).await;
+        assert_eq!(stalled(60), "no_call");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mention_reaches_the_agent_and_its_reply_comes_back() {
         let (st, orch) = fake_claude_state();
@@ -2690,7 +3100,7 @@ esac
     /// A Delivery wake on `key`, run to its end.
     async fn on_ticket(st: &AppState, id: &str, key: &str, builder: bool) {
         let runs = count(st, id, "run_end");
-        wake_on_ticket(st, id, key, builder, format!("work on {key}"));
+        wake_on_ticket(st, id, key, builder, format!("work on {key}"), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         until("the ticket's run", 10, || !is_running(st, id) && count(st, id, "run_end") == runs + 1).await;
     }
 
@@ -2758,7 +3168,7 @@ esac
         set(&st, &a.id, |a| a.fresh_context = "always".into());
         enqueue(&st, &a.id, Some("delegate".into()), "user");
         until("the run to start", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
-        wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into());
+        wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into(), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(count(&st, &a.id, "clear"), 0, "never during a run");
         let ws = workspace(&st, &a.id);

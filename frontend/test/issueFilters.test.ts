@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_FILTERS, filtersToParams, parseFilters, withFilters, type IssueFilters } from "../src/lib/issueFilters.ts";
+import { DEFAULT_FILTERS, filtersToParams, parseFilters, resolveFrom, withFilters, type IssueFilters } from "../src/lib/issueFilters.ts";
 
 const url = (f: IssueFilters) => filtersToParams(f).toString();
 const back = (s: string) => parseFilters(new URLSearchParams(s));
@@ -51,3 +51,17 @@ test("a filter changed in one view is still set in the other, and the view's own
 });
 
 function withView(p: URLSearchParams) { const n = new URLSearchParams(p); n.set("view", "specs"); return n; }
+
+test("coming from an agent page turns `from` into its group once, then the picked group sticks", () => {
+  const groupOf = (id: string) => ({ lead: "Dineout", solo: "" } as Record<string, string>)[id] ?? "";
+  const first = resolveFrom(new URLSearchParams("from=lead&view=specs"), groupOf);
+  assert.equal(first?.toString(), "view=specs&group=Dineout", "the group in place of `from`; the view stays");
+  assert.equal(resolveFrom(first!, groupOf), null, "`from` is gone, so it never applies again");
+  const picked = withFilters(first!, { group: "Loft" });
+  assert.equal(resolveFrom(picked, groupOf), null);
+  assert.equal(parseFilters(withFilters(picked, { q: "retry" })).group, "Loft", "another filter change keeps the picked group");
+  assert.equal(parseFilters(withFilters(first!, { group: "" })).group, "", "All groups can be picked");
+  assert.equal(resolveFrom(new URLSearchParams("from=solo"), groupOf)?.toString(), "", "an agent with no group: all groups");
+  assert.equal(resolveFrom(new URLSearchParams("from=gone&group=Loft"), groupOf)?.toString(), "", "an unknown agent: all groups");
+  assert.equal(resolveFrom(new URLSearchParams("q=x"), groupOf), null);
+});

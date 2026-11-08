@@ -62,3 +62,14 @@ export function withFilters(params: URLSearchParams, change: Partial<IssueFilter
   for (const [k, v] of filtersToParams({ ...parseFilters(params), ...change })) next.set(k, v);
   return next;
 }
+
+/** Coming from an agent page (the Issues tab links with `from=<agent id>`): `params` with that agent's group
+ *  (`groupOf`, "" for no group or an unknown agent: all groups) in place of `from`, so it applies once and later
+ *  URL changes keep whatever group is picked. Null when there's no `from`. */
+export function resolveFrom(params: URLSearchParams, groupOf: (agentId: string) => string): URLSearchParams | null {
+  const from = params.get("from");
+  if (from === null) return null;
+  const next = withFilters(params, { group: groupOf(from) });
+  next.delete("from");
+  return next;
+}
