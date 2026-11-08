@@ -139,9 +139,11 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
                 let mut it = args.iter();
                 while let Some(a) = it.next() {
                     if a.starts_with(['-', '+']) {
-                        // bash's `hash -p /bin/kill k` points `k` at the path that follows.
-                        if base(name) == "hash" && a.starts_with('-') && a.contains('p') {
-                            if let Some(path) = it.next() {
+                        // bash's `hash -p /bin/kill k` points `k` at the path: the text after the `p`
+                        // (`hash -p/bin/kill k`), or else the next word.
+                        if let Some((_, attached)) = a.split_once('p').filter(|_| base(name) == "hash" && a.starts_with('-')) {
+                            let path = if attached.is_empty() { it.next().map(String::as_str) } else { Some(attached) };
+                            if let Some(path) = path {
                                 f.add(scan(path, depth + 1, shell));
                             }
                         }
@@ -868,6 +870,10 @@ mod tests {
             "hash -p /bin/kill kill",
             "hash -p /bin/kill k",
             "hash -p /bin/kill k; k 12",
+            "hash -rp /bin/kill k",
+            "hash -p/bin/kill k",
+            "hash -p/bin/kill k; k 12",
+            "hash -rp/bin/kill k",
             "hash k=/bin/kill; k 12",
             "hash -r k=/usr/bin/pkill",
             "kill() { /bin/kill \"$@\"; }; kill 12",
@@ -904,6 +910,8 @@ mod tests {
             "alias killer=ls",
             "unfunction killjoy",
             "hash -d skill",
+            "hash -p /usr/bin/true t; t",
+            "hash -p/usr/bin/true t",
             "disable -f pkill_all",
             "functions skillset",
             "alias k=kill; k 12",
