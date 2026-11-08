@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Body;
@@ -20,7 +21,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::db::Agent;
-use crate::state::AppState;
+use crate::state::{AppState, XcodeLookup};
 
 /// The variable holding the UDID of the agent's device, in each of its runs once it has one.
 pub const DEVICE_VAR: &str = "LOFT_SIMULATOR_UDID";
@@ -41,17 +42,93 @@ fn valid_udid(u: &str) -> bool {
     !u.is_empty() && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-fn simctl(state: &AppState) -> Command {
-    let mut c = Command::new(&state.cfg.xcrun);
-    c.arg("simctl").stdin(Stdio::null());
-    c
+/// What the Simulator page and the `simulator_device` tool say when there is no Xcode to run `simctl` from.
+pub const NO_XCODE: &str = "Xcode is missing: xcode-select points at the Command Line Tools, which have no Simulator, and no Xcode was found in /Applications or /Volumes. Install Xcode, or start Loft with DEVELOPER_DIR set to your Xcode's Contents/Developer.";
+
+/// Which Xcode `xcrun` should use.
+#[derive(Debug, PartialEq, Clone)]
+pub enum Xcode {
+    /// The one `DEVELOPER_DIR` or `xcode-select` already picks.
+    Selected,
+    /// This one (its Contents/Developer), as `DEVELOPER_DIR`: `xcode-select` points at the Command Line Tools.
+    At(PathBuf),
+    /// `xcode-select` points at the Command Line Tools and there is no Xcode.
+    Missing,
 }
 
-async fn simctl_json(state: &AppState, args: &[&str]) -> Value {
-    match simctl(state).args(args).arg("-j").output().await {
+/// Finds Xcode the way `ios/scripts/test.sh` does: a `DEVELOPER_DIR` already set is used as is; when `xcode-select`
+/// points at the Command Line Tools, the first of /Applications/Xcode.app, /Applications/Xcode*.app,
+/// /Volumes/*/Xcode.app and /Volumes/*/xcode/Xcode.app.
+pub async fn find_xcode(lookup: &XcodeLookup) -> Xcode {
+    if lookup.developer_dir.is_some() {
+        return Xcode::Selected;
+    }
+    let selected = match Command::new(&lookup.xcode_select).arg("-p").stdin(Stdio::null()).output().await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        // No xcode-select to ask: xcrun says what's wrong, if anything.
+        _ => return Xcode::Selected,
+    };
+    if !selected.contains("CommandLineTools") {
+        return Xcode::Selected;
+    }
+    let sorted = |dir: PathBuf| {
+        let mut names: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        names.sort();
+        names
+    };
+    let apps = lookup.root.join("Applications");
+    let volumes = sorted(lookup.root.join("Volumes"));
+    let candidates = std::iter::once(apps.join("Xcode.app"))
+        .chain(sorted(apps).into_iter().filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("Xcode") && n.ends_with(".app"))))
+        .chain(volumes.iter().map(|v| v.join("Xcode.app")))
+        .chain(volumes.iter().map(|v| v.join("xcode/Xcode.app")));
+    candidates.map(|x| x.join("Contents/Developer")).find(|d| d.is_dir()).map_or(Xcode::Missing, Xcode::At)
+}
+
+/// How long a [`find_xcode`] result is reused: the Simulator page runs simctl about 4 times a second, and a newly
+/// installed Xcode is still found within a minute.
+const XCODE_TTL: Duration = Duration::from_secs(60);
+
+/// The last [`find_xcode`] result, and when it was found.
+#[derive(Default)]
+pub struct XcodeCache(tokio::sync::Mutex<Option<(Instant, Xcode)>>);
+
+/// The Xcode `xcrun` should use, looked up at most once per [`XCODE_TTL`].
+pub async fn xcode(state: &AppState) -> Xcode {
+    let mut cached = state.xcode.0.lock().await;
+    if let Some((_, x)) = cached.as_ref().filter(|(at, _)| at.elapsed() < XCODE_TTL) {
+        return x.clone();
+    }
+    let x = find_xcode(&state.cfg.xcode).await;
+    *cached = Some((Instant::now(), x.clone()));
+    x
+}
+
+/// `xcrun simctl`, with the Xcode it needs; `Err(NO_XCODE)` when there is none.
+async fn simctl(state: &AppState) -> Result<Command, String> {
+    let mut c = Command::new(&state.cfg.xcrun);
+    match xcode(state).await {
+        Xcode::Selected => {}
+        Xcode::At(dir) => {
+            c.env("DEVELOPER_DIR", dir);
+        }
+        Xcode::Missing => return Err(NO_XCODE.into()),
+    }
+    c.arg("simctl").stdin(Stdio::null());
+    Ok(c)
+}
+
+/// A `simctl … -j` listing: null when simctl failed, `Err(NO_XCODE)` when there is no Xcode.
+async fn simctl_json(state: &AppState, args: &[&str]) -> Result<Value, String> {
+    Ok(match simctl(state).await?.args(args).arg("-j").output().await {
         Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
         _ => Value::Null,
-    }
+    })
+}
+
+/// Runs `simctl` with these arguments.
+async fn run_simctl<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(state: &AppState, args: I) -> Result<std::process::Output, String> {
+    simctl(state).await?.args(args).output().await.map_err(|e| format!("Couldn't run xcrun: {e}"))
 }
 
 /// The devices in a `simctl list devices -j`, with the runtime each runs.
@@ -62,8 +139,12 @@ fn devices(list: &Value) -> Vec<(&str, &Value)> {
 
 /// Booted simulators and whether they can be controlled: `{ interactive, devices: [{ udid, name, runtime, agent }] }`.
 /// `agent` (`{ id, name }`) is the agent whose device it is, or null for one the user booted; agents' come first.
+/// With no Xcode to run simctl from, no devices and an `error` saying so.
 pub async fn booted(State(state): State<AppState>) -> Response {
-    let v = simctl_json(&state, &["list", "devices", "booted"]).await;
+    let v = match simctl_json(&state, &["list", "devices", "booted"]).await {
+        Ok(v) => v,
+        Err(e) => return Json(json!({ "interactive": false, "devices": [], "error": e })).into_response(),
+    };
     let names: HashMap<String, String> = state.db.list_agents().unwrap_or_default().into_iter().map(|a| (a.id, a.name)).collect();
     let owners: HashMap<String, String> = state.db.agent_devices().unwrap_or_default().into_iter().collect();
     let mut list = Vec::new();
@@ -89,14 +170,14 @@ pub async fn agent_device(state: &AppState, agent: &Agent) -> Result<(String, St
     static CREATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one = CREATING.lock().await;
     let name = device_name(agent);
-    let all = simctl_json(state, &["list", "devices"]).await;
+    let all = simctl_json(state, &["list", "devices"]).await?;
     if all.is_null() {
         return Err("Couldn't run `xcrun simctl`. Is Xcode installed, and selected with `xcode-select`?".into());
     }
     if let Some(udid) = state.db.agent_device(&agent.id).map_err(|e| e.to_string())? {
         if let Some((_, d)) = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid.as_str()) {
             if d["name"] != name.as_str() {
-                let _ = simctl(state).args(["rename", &udid, &name]).output().await;
+                let _ = run_simctl(state, ["rename", &udid, &name]).await;
             }
             return Ok((udid, name));
         }
@@ -104,7 +185,7 @@ pub async fn agent_device(state: &AppState, agent: &Agent) -> Result<(String, St
     let Some((kind, runtime)) = new_device_kind(state, &all).await else {
         return Err("No iOS Simulator runtime is installed. Add one in Xcode (Settings > Components).".into());
     };
-    let out = simctl(state).args(["create", &name, &kind, &runtime]).output().await.map_err(|e| format!("Couldn't run simctl: {e}"))?;
+    let out = run_simctl(state, ["create", &name, &kind, &runtime]).await?;
     let udid = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || !valid_udid(&udid) {
         return Err(format!("Couldn't create a Simulator device: {}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -123,7 +204,7 @@ async fn new_device_kind(state: &AppState, all: &Value) -> Option<(String, Strin
     if let Some((r, d)) = last {
         return Some((d["deviceTypeIdentifier"].as_str()?.to_string(), r.to_string()));
     }
-    let runtimes = simctl_json(state, &["list", "runtimes"]).await;
+    let runtimes = simctl_json(state, &["list", "runtimes"]).await.ok()?;
     // Runtimes are listed oldest first, and each one's device types newest first.
     runtimes["runtimes"].as_array()?.iter().rev().filter(|r| r["platform"] == "iOS" && r["isAvailable"] == true).find_map(|r| {
         let t = r["supportedDeviceTypes"].as_array()?.iter().find(|t| t["productFamily"] == "iPhone")?;
@@ -135,8 +216,8 @@ async fn new_device_kind(state: &AppState, all: &Value) -> Option<(String, Strin
 pub async fn delete_agent_device(state: &AppState, agent_id: &str) {
     let Ok(Some(udid)) = state.db.agent_device(agent_id) else { return };
     // A booted device can't be deleted.
-    let _ = simctl(state).args(["shutdown", &udid]).output().await;
-    match simctl(state).args(["delete", &udid]).output().await {
+    let _ = run_simctl(state, ["shutdown", &udid]).await;
+    match run_simctl(state, ["delete", &udid]).await {
         Ok(o) if o.status.success() => {}
         Ok(o) => tracing::warn!("couldn't delete Simulator device {udid}: {}", String::from_utf8_lossy(&o.stderr).trim()),
         Err(e) => tracing::warn!("couldn't delete Simulator device {udid}: {e}"),
@@ -153,7 +234,7 @@ pub struct Which {
 pub async fn screenshot(State(state): State<AppState>, Query(q): Query<Which>) -> Response {
     let device = q.udid.filter(|u| valid_udid(u)).unwrap_or_else(|| "booted".into());
     let path = std::env::temp_dir().join(format!("loft-sim-{}.jpg", uuid::Uuid::new_v4()));
-    let out = simctl(&state).args(["io", &device, "screenshot", "--type=jpeg"]).arg(&path).output().await;
+    let out = async { simctl(&state).await?.args(["io", &device, "screenshot", "--type=jpeg"]).arg(&path).output().await.map_err(|e| format!("Couldn't run xcrun: {e}")) }.await;
     let bytes = std::fs::read(&path);
     let _ = std::fs::remove_file(&path);
     match (out, bytes) {
@@ -165,7 +246,7 @@ pub async fn screenshot(State(state): State<AppState>, Query(q): Query<Which>) -
             let msg = msg.lines().filter(|l| !l.starts_with("Note:")).collect::<Vec<_>>().join(" ");
             err(StatusCode::NOT_FOUND, if msg.trim().is_empty() { "No simulator is booted".into() } else { msg })
         }
-        (Err(e), _) => err(StatusCode::NOT_FOUND, format!("Couldn't run xcrun: {e}")),
+        (Err(e), _) => err(StatusCode::NOT_FOUND, e),
     }
 }
 
@@ -229,9 +310,9 @@ async fn screen_points(state: &AppState, udid: &str) -> Option<(f64, f64)> {
     if let Some(s) = cache.lock().unwrap().get(udid) {
         return Some(*s);
     }
-    let all = simctl_json(state, &["list", "devices"]).await;
+    let all = simctl_json(state, &["list", "devices"]).await.ok()?;
     let type_id = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid)?.1["deviceTypeIdentifier"].as_str()?.to_string();
-    let types = simctl_json(state, &["list", "devicetypes"]).await;
+    let types = simctl_json(state, &["list", "devicetypes"]).await.ok()?;
     let bundle = types["devicetypes"].as_array()?.iter().find(|t| t["identifier"] == type_id.as_str())?["bundlePath"].as_str()?.to_string();
     let plist = PathBuf::from(bundle).join("Contents/Resources/capabilities.plist");
     let out = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&plist).output().await.ok()?;
@@ -354,7 +435,47 @@ esac
         let bin = dir.join("xcrun");
         std::fs::write(&bin, FAKE_XCRUN).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: bin });
+        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: bin, xcode: st.cfg.xcode.clone() });
+    }
+
+    /// A fake `xcode-select` printing `selected` for `-p` and logging each call, and a temp root for /Applications and
+    /// /Volumes, beside the fake `xcrun`, with nothing found yet. Returns the root.
+    pub(crate) fn fake_xcode_select(st: &mut AppState, selected: &str, developer_dir: Option<PathBuf>) -> PathBuf {
+        let dir = st.cfg.storage_dir.parent().unwrap().join("xcode");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = dir.join("xcode-select");
+        std::fs::write(&bin, format!("#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/xcode-select.log\"\necho '{selected}'\n")).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let xcode = XcodeLookup { developer_dir, xcode_select: bin, root: root.clone() };
+        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode });
+        st.xcode = Default::default();
+        root
+    }
+
+    /// Ages the Xcode last found past [`XCODE_TTL`], so the next simctl looks again.
+    fn expire_xcode(st: &AppState) {
+        if let Some((at, _)) = st.xcode.0.try_lock().unwrap().as_mut() {
+            *at = Instant::now().checked_sub(XCODE_TTL).unwrap();
+        }
+    }
+
+    /// How many times `xcode-select -p` was asked.
+    fn xcode_lookups(st: &AppState) -> usize {
+        std::fs::read_to_string(st.cfg.xcode.xcode_select.parent().unwrap().join("xcode-select.log")).unwrap_or_default().lines().count()
+    }
+
+    /// Makes the fake `xcrun` fail as the Command Line Tools' does unless run with `DEVELOPER_DIR=<expected>`.
+    fn needs_developer_dir(st: &AppState, expected: &std::path::Path) {
+        let here = st.cfg.xcrun.parent().unwrap();
+        std::fs::write(here.join("expect"), expected.to_str().unwrap()).unwrap();
+        let check = "[ \"$DEVELOPER_DIR\" = \"$(cat \"$(dirname \"$0\")/expect\")\" ] || { echo 'xcrun: error: unable to find utility \"simctl\"' >&2; exit 72; }\n";
+        std::fs::write(&st.cfg.xcrun, FAKE_XCRUN.replacen("\n", &format!("\n{check}"), 1)).unwrap();
+    }
+
+    fn mkdir(p: PathBuf) -> PathBuf {
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 
     /// The fake's devices, as (UDID, state, name, device type).
@@ -454,5 +575,89 @@ esac
         ask_for_device(&st, &a.id).await;
         assert_eq!(fake_devices(&st)[0].3, "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro");
         assert!(simctl_log(&st).contains("create Builder (Loft) com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_xcode_select_on_the_command_line_tools_simctl_runs_with_the_xcode_found_or_says_xcode_is_missing() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let root = fake_xcode_select(&mut st, "/Library/Developer/CommandLineTools", None);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+
+        // No Xcode anywhere: the page and the tool say so, and xcrun isn't run.
+        let l = listed(&st).await;
+        assert_eq!(l["devices"], json!([]));
+        assert!(l["error"].as_str().unwrap().starts_with("Xcode is missing"), "{l}");
+        let none = ask_for_device(&st, &a.id).await;
+        assert_eq!(none["isError"], true);
+        assert!(none["content"][0]["text"].as_str().unwrap().starts_with("Xcode is missing"), "{none}");
+        assert_eq!(simctl_log(&st), "");
+
+        // An Xcode installed in /Applications: once the last lookup is stale, simctl runs with it as DEVELOPER_DIR, and the
+        // agent is told to do the same.
+        let beta = mkdir(root.join("Applications/Xcode-beta.app/Contents/Developer"));
+        needs_developer_dir(&st, &beta);
+        expire_xcode(&st);
+        let got = ask_for_device(&st, &a.id).await;
+        let text = got["content"][0]["text"].as_str().unwrap();
+        let udid = st.db.agent_device(&a.id).unwrap().expect("the device was made");
+        assert!(text.contains(&udid) && text.contains(&format!("DEVELOPER_DIR={}", beta.display())), "{got}");
+        assert!(std::process::Command::new(&st.cfg.xcrun).args(["simctl", "boot", &udid]).env("DEVELOPER_DIR", &beta).status().unwrap().success());
+        let l = listed(&st).await;
+        assert_eq!(l["devices"][0]["udid"], udid.as_str(), "{l}");
+        assert!(l["error"].is_null());
+
+        // Xcode.app comes before other Xcodes, and /Applications before /Volumes.
+        mkdir(root.join("Volumes/Ext/Xcode.app/Contents/Developer"));
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(beta.clone()));
+        let main = mkdir(root.join("Applications/Xcode.app/Contents/Developer"));
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(main));
+        std::fs::remove_dir_all(root.join("Applications")).unwrap();
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(root.join("Volumes/Ext/Xcode.app/Contents/Developer")));
+        std::fs::remove_dir_all(root.join("Volumes/Ext/Xcode.app")).unwrap();
+        let nested = mkdir(root.join("Volumes/Ext/xcode/Xcode.app/Contents/Developer"));
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(nested));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_developer_dir_already_set_or_an_xcode_already_selected_is_used_as_is() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let set = Some(PathBuf::from("/Volumes/Ext/Xcode.app/Contents/Developer"));
+        let root = fake_xcode_select(&mut st, "/Library/Developer/CommandLineTools", set);
+        mkdir(root.join("Applications/Xcode.app/Contents/Developer"));
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::Selected);
+        let log = st.cfg.xcode.xcode_select.parent().unwrap().join("xcode-select.log");
+        assert!(!log.exists(), "xcode-select isn't asked");
+
+        fake_xcode_select(&mut st, "/Applications/Xcode.app/Contents/Developer", None);
+        assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::Selected);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "-p\n");
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let got = ask_for_device(&st, &a.id).await;
+        assert!(!got["content"][0]["text"].as_str().unwrap().contains("DEVELOPER_DIR"), "{got}");
+        assert!(listed(&st).await["error"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_simctl_calls_look_xcode_up_once_until_the_lookup_is_stale() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let root = fake_xcode_select(&mut st, "/Library/Developer/CommandLineTools", None);
+        let xc = mkdir(root.join("Applications/Xcode.app/Contents/Developer"));
+        needs_developer_dir(&st, &xc);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+
+        for _ in 0..3 {
+            assert!(listed(&st).await["error"].is_null());
+        }
+        let got = ask_for_device(&st, &a.id).await;
+        assert!(got["content"][0]["text"].as_str().unwrap().contains(&format!("DEVELOPER_DIR={}", xc.display())), "{got}");
+        assert_eq!(xcode_lookups(&st), 1, "one lookup for every simctl call within the TTL");
+
+        expire_xcode(&st);
+        listed(&st).await;
+        listed(&st).await;
+        assert_eq!(xcode_lookups(&st), 2, "looked up again once stale");
     }
 }

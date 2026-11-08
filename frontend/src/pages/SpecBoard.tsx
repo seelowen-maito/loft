@@ -3,7 +3,7 @@ import { ChevronRight, GitPullRequest } from "lucide-react";
 import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
-import { STAGES, arrange, deliveryOf, parseBoard, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specRef, type BoardOptions, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
+import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specRef, type BoardOptions, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
 /* The Specs board of the Issues page (`?view=specs`): spec cards in stage columns, each with its tickets inline (expandable).
@@ -172,7 +172,7 @@ export function BoardPage({ kept, params, setParams, openSpec, openTicket, ...c 
 }
 
 /** The specs on the board: `specs` (already through the shared filters), arranged by the board's options, and by agent
- * (a spec's own, or its Delivery's). */
+ * (a spec's own, or its Delivery's): the shared agent filter doesn't apply to `specs` before this. */
 export function boardSpecs(specs: Task[], deliveries: DeliverySummary[], tasks: Task[], o: BoardOptions, agent: string): Task[] {
-  return arrange(specs, deliveries, tasks, o).filter((s) => !agent || deliveryOf(s, deliveries)?.agent_id === agent || s.agent_id === agent);
+  return arrange(specs, deliveries, tasks, o).filter((s) => specOfAgent(s, deliveries, agent));
 }

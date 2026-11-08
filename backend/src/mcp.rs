@@ -341,10 +341,16 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
         }
         "simulator_device" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match crate::simulator::agent_device(state, &me).await {
-                Ok((udid, name)) => text(format!(
-                    "Your Simulator device is `{name}`, UDID `{udid}`. Use it for every simctl, xcodebuild and AXe call; from your next run it is also in `${}`.",
-                    crate::simulator::DEVICE_VAR
-                )),
+                Ok((udid, name)) => {
+                    let mut t = format!(
+                        "Your Simulator device is `{name}`, UDID `{udid}`. Use it for every simctl, xcodebuild and AXe call; from your next run it is also in `${}`.",
+                        crate::simulator::DEVICE_VAR
+                    );
+                    if let crate::simulator::Xcode::At(dir) = crate::simulator::xcode(state).await {
+                        t += &format!(" `xcode-select` points at the Command Line Tools, so run xcrun and xcodebuild with `DEVELOPER_DIR={}`.", dir.display());
+                    }
+                    text(t)
+                }
                 Err(e) => tool_error(e),
             },
             _ => tool_error("agent not found"),

@@ -124,7 +124,7 @@ When Apple answers **410**, or **400 BadDeviceToken / DeviceTokenNotForTopic**, 
 - `badge` is the "needs you" count.
 - `thread-id` groups a phone's notifications by agent. `apns-collapse-id` is the item id (hashed if longer than 64 bytes).
 - `time-sensitive` is used for urgency 3 (needs the *Time Sensitive Notifications* capability in the app); everything else is `active`.
-- `target` has the same shape as a "needs you" `open` action.
+- `target` has the same shape as a "needs you" `open` action. The iPhone opens a `target.url` only when it is `https` on `github.com` or on the host of the Loft it is connected to; any other link just opens the app.
 - Test pushes carry `type: "test"`.
 - No silent or background pushes.
 

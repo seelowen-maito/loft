@@ -80,6 +80,7 @@ async fn serve() -> anyhow::Result<()> {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
         storage_dir: root.join("agent-local-storage"),
         xcrun: "xcrun".into(),
+        xcode: state::XcodeLookup::system(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
     std::fs::create_dir_all(&data_dir)?;
@@ -105,6 +106,7 @@ async fn serve() -> anyhow::Result<()> {
         publish_known: Arc::new(planning::Known::default()),
         mirror: Arc::new(Default::default()),
         listings: Arc::new(Default::default()),
+        xcode: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     {

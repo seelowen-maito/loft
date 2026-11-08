@@ -5,7 +5,7 @@ import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:c
 import { createServer as createH2 } from "node:http2";
 import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
 import { kv as makeKv } from "../lib/kv.js";
-import { push } from "../lib/relay.js";
+import { push, BIND } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
 const BUNDLE = "com.example.loft";
@@ -23,7 +23,9 @@ const expiries = new Map();
 let failing = null; // a command the store answers with an error
 const members = (key) => sets.get(key) ?? new Set();
 const run = ([cmd, key, ...args]) => {
-  if (cmd === "SET" && args[1] === "EX") expiries.set(key, args[2]);
+  if (cmd === "EVAL") return bind(key, args);
+  if (cmd === "SET" && args.indexOf("EX") > 0) expiries.set(key, args[args.indexOf("EX") + 1]);
+  if (cmd === "EXPIRE") expiries.set(key, args[0]);
   if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
   if (cmd === "GET") return store.get(key) ?? null;
   if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k) || sets.delete(k)).length;
@@ -34,6 +36,17 @@ const run = ([cmd, key, ...args]) => {
   if (cmd === "SISMEMBER") return members(key).has(args[0]) ? 1 : 0;
   if (cmd === "EXISTS") return store.has(key) ? 1 : 0;
   if (cmd === "INCR") return (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
+  return 1;
+};
+/** The relay's one script (BIND), as Redis runs it. */
+const bind = (script, [n, ...rest]) => {
+  assert.equal(script, BIND);
+  const [[owner, seconds, device], [holds, list]] = [rest.slice(n), rest.slice(0, n)];
+  const holder = run(["GET", holds]);
+  if (holder === null) run(["SET", holds, owner, "EX", seconds]);
+  else if (holder === owner) run(["EXPIRE", holds, seconds]);
+  else return 0;
+  if (list) (run(["SADD", list, device]), run(["EXPIRE", list, seconds]));
   return 1;
 };
 const kvServer = createServer((req, res) => {
@@ -245,6 +258,44 @@ const keyFrom = async (res) => (await res.text()).match(/lrk_[A-Za-z0-9_-]{43}/)
 const pushWith = (key) =>
   push(new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload: { aps: { alert: "hi" } } }) }), env, Date.UTC(2026, 10, 6, 12));
 const idsOn = (html) => [...html.matchAll(/name="id" value="([0-9a-f]{64})"/g)].map((m) => m[1]);
+
+test("a device belongs to the account that first pushed to it: its other keys can push, another account's get 403", async () => {
+  const session = await signInAs();
+  const mac = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const laptop = await keyFrom(await createAccountKey(post("/keys", { name: "MacBook" }, session), env));
+  const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, await signInAs("999.other")), env));
+  assert.equal((await pushWith(mac)).status, 200);
+  assert.equal((await pushWith(laptop)).status, 200, "a second Loft on the same account shares the phone");
+  const refused = await pushWith(theirs);
+  assert.equal(refused.status, 403);
+  assert.match((await refused.json()).error, /belongs to another account/);
+  assert.equal(pushed.length, 2, "the refused push wasn't forwarded");
+  const device = sha256(DEVICE);
+  assert.equal(store.get(`device-owner:${device}`), "account:001234.abcdef");
+  assert.equal(expiries.get(`device-owner:${device}`), 30 * 86400);
+  assert.deepEqual([...sets.get("account-devices:001234.abcdef")], [device]);
+  const everything = [...store.keys(), ...store.values(), ...sets.keys(), ...[...sets.values()].flatMap((m) => [...m])];
+  assert.ok(!everything.some((v) => v.includes(DEVICE)), "only the token's hash is stored");
+});
+
+test("deleting an account frees its devices, but not one that went to another account after expiring", async () => {
+  const session = await signInAs();
+  const mine = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, await signInAs("999.other")), env));
+  const later = await keyFrom(await createAccountKey(post("/keys", { name: "Later" }, await signInAs("777.later")), env));
+  assert.equal((await pushWith(mine)).status, 200);
+  assert.equal((await pushWith(theirs)).status, 403);
+  assert.equal((await deleteAs(session)).status, 200);
+  assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.startsWith("device-owner:") || k.includes("001234.abcdef")), "its binding and its list are gone");
+  assert.equal((await pushWith(theirs)).status, 200, "the phone is free for the next account");
+
+  // 999.other's binding expires and 777.later takes the phone: deleting 999.other leaves 777.later's binding alone.
+  store.delete(`device-owner:${sha256(DEVICE)}`);
+  assert.equal((await pushWith(later)).status, 200);
+  await deleteAccount(makeKv(env), "999.other");
+  assert.equal(store.get(`device-owner:${sha256(DEVICE)}`), "account:777.later");
+  assert.equal((await pushWith(theirs)).status, 401);
+});
 
 test("the key list shows each key's name, created and last-used dates, never the key", async () => {
   const session = await signInAs();

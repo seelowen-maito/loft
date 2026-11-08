@@ -766,7 +766,7 @@ mod tests {
         let st = crate::mirror::tests::state();
         let projects = st.settings.boot().projects_dir.clone();
         // Agents' workspaces inside the projects folder, as with ~/dev/loft/agent-local-storage.
-        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage"), xcrun: "no-xcrun".into() };
+        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage"), xcrun: "no-xcrun".into(), xcode: st.cfg.xcode.clone() };
         let st = crate::state::AppState { cfg: std::sync::Arc::new(cfg), ..st };
         let fake = crate::github::tests::own_fake(&st);
         let git_in = |d: &std::path::Path, args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap().status.success());

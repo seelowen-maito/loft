@@ -8,10 +8,15 @@ enum PushDestination: Equatable {
     case needsYou
     case url(URL)
 
-    /// Push payload: `{ aps: {…}, needs_you_id, type, target: {screen, agent_id?, task_id?, url?} }`.
-    static func from(_ info: [AnyHashable: Any]) -> PushDestination? {
+    /// Push payload: `{ aps: {…}, needs_you_id, type, target: {screen, agent_id?, task_id?, url?} }`. `loftHost` is
+    /// the host of the Loft the app is connected to: a `url` target opens only when it's trusted (`opens(_:loftHost:)`),
+    /// and any other link just opens the app, like a push with no target.
+    static func from(_ info: [AnyHashable: Any], loftHost: String? = nil) -> PushDestination? {
         if let t = info["target"] as? [String: Any] {
-            if let s = t["url"] as? String, let u = URL(string: s), u.scheme == "https" { return .url(u) }
+            if let s = t["url"] as? String {
+                guard let u = URL(string: s), opens(u, loftHost: loftHost) else { return nil }
+                return .url(u)
+            }
             if (t["screen"] as? String) == "task", let id = t["task_id"] as? String { return .task(taskId: id) }
             // The summary push a phone gets at the rate limit.
             if (t["screen"] as? String) == "needs_you" { return .needsYou }
@@ -20,6 +25,13 @@ enum PushDestination: Equatable {
         if info["needs_you_id"] != nil { return .needsYou }
         // A test push ("type": "test") has no target: tapping it just opens the app.
         return nil
+    }
+
+    /// Whether a push's link may be opened: `https` on github.com (the pull request and issue links Loft sends) or on
+    /// the connected Loft's host. A stranger's relay key must not be able to open any page on the phone.
+    static func opens(_ url: URL, loftHost: String?) -> Bool {
+        guard url.scheme?.lowercased() == "https", let host = url.host()?.lowercased() else { return false }
+        return host == "github.com" || host == loftHost?.lowercased()
     }
 
     /// The "Needs you" item a notification is about, so a push and a local notification for the same item show once.

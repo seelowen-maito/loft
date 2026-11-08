@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupProjects, inGroup } from "../src/lib/team.ts";
+import { agentInGroup, groupAgents, groupProjects, inGroup } from "../src/lib/team.ts";
 
 const agents = [
   { id: "lead", project: "dine/api", group: "Dineout", projects: ["dine/api", "dine/web"] },
@@ -24,4 +24,19 @@ test("the project choices narrow to the group's projects", () => {
   assert.deepEqual(groupProjects("Dineout", agents, known), ["dine/api", "dine/pos"]);
   assert.deepEqual(groupProjects("", agents, known), known);
   assert.deepEqual(groupProjects("Nobody", agents, known), []);
+});
+
+test("the agent choices narrow to the group's agents", () => {
+  assert.deepEqual(groupAgents("Dineout", agents).map((a) => a.id), ["lead", "dev"]);
+  assert.deepEqual(groupAgents("", agents).map((a) => a.id), ["lead", "dev", "solo", "loft"], "all groups: every agent");
+  assert.deepEqual(groupAgents("Nobody", agents), []);
+});
+
+test("switching group keeps an agent in it and clears one outside it", () => {
+  assert.equal(agentInGroup("dev", "Dineout", agents), "dev");
+  assert.equal(agentInGroup("loft", "Dineout", agents), "", "an agent of another group");
+  assert.equal(agentInGroup("solo", "Dineout", agents), "", "an agent with no group");
+  assert.equal(agentInGroup("loft", "", agents), "loft", "all groups keeps any agent");
+  assert.equal(agentInGroup("gone", "", agents), "", "an unknown agent");
+  assert.equal(agentInGroup("", "Dineout", agents), "");
 });

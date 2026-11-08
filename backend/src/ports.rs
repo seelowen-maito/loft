@@ -72,7 +72,7 @@ mod tests {
         let mut st = crate::tasks::tests::state();
         let a = range(&st, "a").unwrap();
         // Loft now serves inside a's range (and its web app one port up, in the next): both move on.
-        st.cfg = Arc::new(crate::state::Config { port: 20009, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone() });
+        st.cfg = Arc::new(crate::state::Config { port: 20009, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() });
         let moved = range(&st, "a").unwrap();
         assert!(!moved.contains(&20009) && !moved.contains(&20010), "{moved:?}");
         assert_ne!(moved, a);
