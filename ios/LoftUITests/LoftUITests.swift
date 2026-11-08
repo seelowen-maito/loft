@@ -757,7 +757,10 @@ final class LoftUITests: XCTestCase {
         app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
         app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
-        XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
+        // The Owner row sits below the fold on the detail screen.
+        let owner = text(containing: "octo-dev", app)
+        for _ in 0..<4 where !owner.waitForExistence(timeout: 1) { app.swipeUp() }
+        XCTAssertTrue(owner.appears(timeout: 5), "its owner")
         XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
         // #146: the Lead answers, from a script.
         app.tabBars.buttons["Chat"].tap()
