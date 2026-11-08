@@ -67,9 +67,12 @@ settings. Without the portal's settings below, the page says
 "The push portal isn't configured", `POST /api/pair` answers `503 {portal: false}` (Loft then offers only pasting a key),
 and the relay works as before: the portal is optional.
 
-**Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, expires_in: 600}`, at most 5 per IP per
-hour). Loft opens `<relay address>/connect?code=…` (the same as `PORTAL_URL`): signed out, the page offers Sign in with Apple and brings the user back;
-signed in, **Allow** makes a key for the account and parks it under the hash of the secret (the code is in the link; the secret never leaves the Loft). `POST /api/pair-poll` with `{code, secret}`
+**Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, confirm, expires_in: 600}`, at most 5 per IP per
+hour). `confirm` is a 6-character confirmation code derived from the secret's hash; Loft shows it in Settings → Push
+notifications next to **Sign in**. Loft opens `<relay address>/connect?code=…` (the same as `PORTAL_URL`): signed out, the page offers Sign in with Apple and brings the user back;
+signed in, the page asks for that confirmation code (it never shows it, so someone sent the link can't read it off
+the page; case, spaces and dashes don't matter). A wrong code issues no key; the 5th wrong one ends the sign-in code
+("Press Sign in in Loft again"). With the right code, **Allow** makes a key for the account and parks it under the hash of the secret (the code is in the link; the secret never leaves the Loft). `POST /api/pair-poll` with `{code, secret}`
 answers `202` while waiting, `200 {key}` exactly once after Allow, then `404` (also for an expired or unknown code). Until
 it's collected, the new key waits in the store, readable only with the secret, for at most the code's 10 minutes.
 
@@ -137,7 +140,8 @@ repo, so anyone can run their own.
 **Test it end to end**
 
 11. Open `PORTAL_URL`: **Sign in with Apple** comes back to "Your keys". Create a key, then revoke it.
-12. In a Loft with no `.p8` of its own: Settings → Push notifications → **Sign in** → Allow on the portal. Settings then
+12. In a Loft with no `.p8` of its own: Settings → Push notifications → **Sign in** → type the code Settings shows and
+    Allow on the portal. Settings then
     says "Using the Loft relay". Press **Send test push** next to a phone.
 13. On the portal, **Delete my account** (sign in again to confirm): the Loft's next push fails with `401`, and
     appleid.apple.com → Sign in with Apple no longer lists the portal.

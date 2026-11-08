@@ -152,12 +152,20 @@ export function PushSettings() {
                 <button type="button" className="btn-primary" disabled={busy} onClick={signIn}>
                   <ExternalLink className="size-3.5" /> Sign in
                 </button>
-                {status.signing_in && portalLink && (
+                {status.signing_in && (portalLink || status.signin_code) && (
                   <span className="text-[12px] text-fg-3">
-                    Waiting for you to allow it on the portal.{" "}
-                    <a className="underline hover:text-fg" href={portalLink} target="_blank" rel="noreferrer">
-                      Open the page again
-                    </a>
+                    {status.signin_code ? (
+                      <>
+                        Type <span className="font-mono text-[13px] tracking-[0.2em] text-fg">{status.signin_code}</span> on the portal, then Allow.{" "}
+                      </>
+                    ) : (
+                      "Waiting for you to allow it on the portal. "
+                    )}
+                    {portalLink && (
+                      <a className="underline hover:text-fg" href={portalLink} target="_blank" rel="noreferrer">
+                        Open the page again
+                      </a>
+                    )}
                   </span>
                 )}
               </div>

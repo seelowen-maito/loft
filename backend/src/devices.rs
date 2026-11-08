@@ -156,6 +156,8 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         "relay_key": apns::relay_key_present(),
         // Sign in was pressed and the code isn't allowed yet.
         "signing_in": crate::signin::waiting(),
+        // The confirmation code the user types on the portal's Allow page, while a sign-in waits.
+        "signin_code": crate::signin::confirmation(),
         // The relay address in use (saved, else the environment), and the saved one the Settings field shows. The
         // portal's pages are at the same address.
         "relay_url": apns::relay_url(&state),

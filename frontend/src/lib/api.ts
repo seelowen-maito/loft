@@ -270,6 +270,8 @@ export type PushStatus = {
   relay_key: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
+  /** While Sign in waits: the confirmation code the user types on the portal's Allow page (null from a relay that gives none). */
+  signin_code: string | null;
   /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */
   relay_url: string | null;
   /** The address saved in Settings ("" when none: the environment's, if any, is used). */
@@ -602,7 +604,7 @@ export const api = {
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string }) =>
     req<PushStatus>("PUT", "/push", b),
   /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
-  pushSignIn: () => req<{ url: string }>("POST", "/push/signin"),
+  pushSignIn: () => req<{ url: string; confirm: string | null }>("POST", "/push/signin"),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),

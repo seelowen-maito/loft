@@ -453,7 +453,7 @@ pub(crate) mod tests {
                 async move {
                     let code = uuid::Uuid::new_v4().simple().to_string()[..22].to_string();
                     log.lock().unwrap().codes.insert(code.clone(), false);
-                    axum::Json(json!({ "code": code, "secret": format!("s-{code}"), "expires_in": 600 }))
+                    axum::Json(json!({ "code": code, "secret": format!("s-{code}"), "confirm": confirm_of(&code), "expires_in": 600 }))
                 }
             }))
             .route("/api/pair-poll", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
@@ -495,6 +495,11 @@ pub(crate) mod tests {
     pub(crate) fn fake_apns_relay() -> String {
         fake_apns();
         std::env::var("LOFT_RELAY_URL").unwrap()
+    }
+
+    /// The fake relay's confirmation code for `code`.
+    pub(crate) fn confirm_of(code: &str) -> String {
+        code[..6].to_ascii_uppercase()
     }
 
     /// The user allows `code` on the (fake) portal.
