@@ -72,8 +72,6 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
 
-export const roleLabel = (role: string) => ROLES.find((r) => r.value === role)?.label ?? role;
-
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
 export type Message = {

@@ -1,4 +1,4 @@
-/** The Issues page's spec views: which Delivery a spec has and where it stands. Pure, so the three views agree. */
+/** The Issues page's spec views: which Delivery a spec has and where it stands. Pure, so the board, its URL options and a spec's own page agree. */
 import type { IssueDelivery, Task } from "./api";
 
 /** `GET /api/deliveries/summary`: a spec's Delivery, with the spec it belongs to. */
@@ -70,7 +70,6 @@ export function ticketsOf(spec: Task, d: DeliverySummary | null, tasks: Task[]):
 
 export type SortKey = "activity" | "progress";
 export type BoardOptions = { stages: Stage[]; hideShipped: boolean; showDropped: boolean; byProject: boolean; sort: SortKey; dense: boolean; needsMe: boolean };
-export const DEFAULT_BOARD: BoardOptions = { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false };
 
 export function parseBoard(p: URLSearchParams): BoardOptions {
   const stages = (p.get("stage") ?? "").split(",").filter((s): s is Stage => STAGES.some((x) => x.key === s));

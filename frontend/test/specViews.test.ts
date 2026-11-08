@@ -48,10 +48,10 @@ test("a spec's tickets: its Delivery's, each with its own issue, else its sub-is
 });
 
 test("board options round-trip through the URL and keep the other params", () => {
-  const p = withBoard(new URLSearchParams("project=loft&specView=b1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  const p = withBoard(new URLSearchParams("project=loft&x=1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
   assert.equal(p.get("project"), "loft");
   assert.deepEqual(parseBoard(p), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
-  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&specView=b1", "defaults leave no trace");
+  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&x=1", "defaults leave no trace");
   assert.deepEqual(parseBoard(new URLSearchParams("stage=nope,ready")).stages, ["ready"]);
 });
 
