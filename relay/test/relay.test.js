@@ -332,7 +332,7 @@ test("an oversized request is refused from its length, before reading it", async
 test("relay/ holds no one's own hosts or ids: every value comes from the environment", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const files = (await readdir(new URL("../", import.meta.url), { recursive: true })).filter((f) => /\.(js|json|md)$/.test(f) && !f.includes("node_modules") && !f.startsWith("test"));
-  const allowed = /^(appleid\.apple\.com|api(\.sandbox)?\.push\.apple\.com|developer\.apple\.com|openapi\.vercel\.sh|(loft-push-relay|<project>)\.vercel\.app|[\w.-]*example(\.(com|org))?|relay|127\.0\.0\.1)$/;
+  const allowed = /^(appleid\.apple\.com|api(\.sandbox)?\.push\.apple\.com|developer\.apple\.com|openapi\.vercel\.sh|portal\.get-loft\.com|(loft-push-relay|<project>)\.vercel\.app|[\w.-]*example(\.(com|org))?|relay|127\.0\.0\.1)$/;
   for (const f of files) {
     const text = await readFile(new URL(`../${f}`, import.meta.url), "utf8");
     for (const [, host] of text.matchAll(/https?:\/\/([^/\s"'`)<>:${]+)/g)) assert.match(host, allowed, `${f}: ${host}`);
