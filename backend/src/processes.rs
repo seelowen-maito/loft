@@ -318,7 +318,9 @@ pub fn cli() -> ! {
         eprintln!("{tool}: {e}");
         std::process::exit(126);
     };
-    let body = json!({ "tool": tool, "args": args, "caller": std::process::id() });
+    // Where the command runs: a relative path in an option (`pkill -F server.pid`) is read from there.
+    let cwd = std::env::current_dir().ok();
+    let body = json!({ "tool": tool, "args": args, "caller": std::process::id(), "cwd": cwd });
     match post(&url, &body.to_string()) {
         Ok(v) => {
             print!("{}", v["stdout"].as_str().unwrap_or_default());
@@ -361,6 +363,9 @@ pub struct KillRequest {
     /// The `loft kill-as` process, which runs in the agent's command.
     #[serde(default)]
     caller: i32,
+    /// The caller's working directory, where `pgrep` and `killall` run so relative paths read as the agent meant.
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 /// What the agent's command prints and exits with.
@@ -491,10 +496,12 @@ fn send(pids: &[i32], signal: i32, tool: &str, out: &mut Output) {
 
 fn plan(req: &KillRequest, procs: &[Proc]) -> Plan {
     let caller_side = ancestors(procs, req.caller);
+    // Without a directory that exists, Loft's own, as before.
+    let cwd = req.cwd.as_deref().filter(|d| d.is_absolute() && d.is_dir());
     match req.tool.as_str() {
         "kill" => plan_kill(&req.args, req.caller, procs),
-        "pkill" => plan_pkill(&req.args, &caller_side),
-        "killall" => plan_killall(&req.args, &caller_side),
+        "pkill" => plan_pkill(&req.args, &caller_side, cwd),
+        "killall" => plan_killall(&req.args, &caller_side, cwd),
         t => Plan::Done(Output::error(2, format!("{t}: not a kill command\n"))),
     }
 }
@@ -509,7 +516,7 @@ fn plan_kill(args: &[String], caller: i32, procs: &[Proc]) -> Plan {
     let mut rest = args;
     match args.first().map(String::as_str) {
         None => return Plan::Done(Output::error(2, KILL_USAGE.into())),
-        Some("-l" | "-L") => return Plan::Done(run("/bin/kill", args)),
+        Some("-l" | "-L") => return Plan::Done(run("/bin/kill", args, None)),
         Some("-s" | "-n") => {
             let Some(s) = args.get(1) else { return Plan::Done(Output::error(2, KILL_USAGE.into())) };
             let Some(sig) = signal_of(s) else { return bad_signal(s) };
@@ -558,14 +565,14 @@ fn names() -> String {
 
 /// `pkill [-signal] <pgrep options> pattern`: the processes `pgrep` finds with the same options, but the caller and
 /// what it runs under, which pkill leaves out too.
-fn plan_pkill(args: &[String], caller_side: &HashSet<i32>) -> Plan {
+fn plan_pkill(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -> Plan {
     let (signal, rest) = match args.first().and_then(|a| signal_of(a.strip_prefix('-')?)) {
         Some(sig) => (sig, &args[1..]),
         None => (libc::SIGTERM, args),
     };
     // `-I` asks before each kill, which no one can answer here.
     let rest: Vec<String> = rest.iter().filter(|a| *a != "-I").cloned().collect();
-    let found = run("/usr/bin/pgrep", &rest);
+    let found = run("/usr/bin/pgrep", &rest, cwd);
     if found.code != 0 {
         return Plan::Done(Output { stdout: String::new(), stderr: found.stderr.replace("pgrep", "pkill"), code: found.code });
     }
@@ -575,11 +582,11 @@ fn plan_pkill(args: &[String], caller_side: &HashSet<i32>) -> Plan {
 
 /// `killall [-signal] [options] name...`: what `killall -s` (show only) lists with the same options, but the caller
 /// and what it runs under. `-s` and `-l` themselves only print.
-fn plan_killall(args: &[String], caller_side: &HashSet<i32>) -> Plan {
+fn plan_killall(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -> Plan {
     if args.iter().any(|a| a == "-s" || a == "-l") {
-        return Plan::Done(run("/usr/bin/killall", args));
+        return Plan::Done(run("/usr/bin/killall", args, cwd));
     }
-    let shown = run("/usr/bin/killall", &[&["-s".to_string()], args].concat());
+    let shown = run("/usr/bin/killall", &[&["-s".to_string()], args].concat(), cwd);
     if shown.code != 0 {
         return Plan::Done(shown);
     }
@@ -600,9 +607,13 @@ fn plan_killall(args: &[String], caller_side: &HashSet<i32>) -> Plan {
     Plan::Signal { signal, pids, out: Output::default() }
 }
 
-/// Runs a command that only looks processes up or prints (`pgrep`, `killall -s`, `kill -l`).
-fn run(bin: &str, args: &[String]) -> Output {
-    match std::process::Command::new(bin).args(args).output() {
+/// Runs a command that only looks processes up or prints (`pgrep`, `killall -s`, `kill -l`), in `cwd` if given.
+fn run(bin: &str, args: &[String], cwd: Option<&Path>) -> Output {
+    let mut cmd = std::process::Command::new(bin);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    match cmd.args(args).output() {
         Ok(o) => Output {
             code: o.status.code().unwrap_or(1),
             stdout: String::from_utf8_lossy(&o.stdout).into(),
@@ -674,7 +685,11 @@ mod tests {
     }
 
     async fn ask_as(st: &AppState, agent_id: &str, caller: i32, tool: &str, args: &[&str]) -> Value {
-        let req = KillRequest { tool: tool.into(), args: args.iter().map(|a| a.to_string()).collect(), caller };
+        ask_in(st, agent_id, caller, None, tool, args).await
+    }
+
+    async fn ask_in(st: &AppState, agent_id: &str, caller: i32, cwd: Option<&Path>, tool: &str, args: &[&str]) -> Value {
+        let req = KillRequest { tool: tool.into(), args: args.iter().map(|a| a.to_string()).collect(), caller, cwd: cwd.map(Path::to_path_buf) };
         handle(State(st.clone()), UrlPath(agent_id.into()), Json(req)).await.0
     }
 
@@ -886,6 +901,32 @@ mod tests {
         assert_eq!(v["code"], 1, "{v}");
     }
 
+    #[tokio::test]
+    async fn pkill_reads_a_relative_pidfile_from_the_callers_folder_or_else_loft_s() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let caller = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &a.id, caller.pid() as u32).unwrap();
+        let server = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
+        let dir = st.cfg.storage_dir.join("ws");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A name Loft's own folder doesn't have.
+        let file = format!("{}.pid", uuid::Uuid::new_v4().simple());
+        std::fs::write(dir.join(&file), format!("{}\n", server.pid())).unwrap();
+
+        // No folder, or one that doesn't exist: pgrep looks in Loft's, as before, and finds no such file.
+        for cwd in [None, Some(dir.join("gone").as_path())] {
+            let v = ask_in(&st, &a.id, caller.pid(), cwd, "pkill", &["-F", &file]).await;
+            assert!(v["stderr"].as_str().unwrap().contains("pkill: Cannot open pidfile") && v["code"] != 0, "{cwd:?}: {v}");
+            assert!(server.alive());
+        }
+        let v = ask_in(&st, &a.id, caller.pid(), Some(&dir), "pkill", &["-F", &file]).await;
+        assert_eq!(v["code"], 0, "{v}");
+        until("the server to stop", 5, || !server.alive()).await;
+        assert!(pending(&st, &a.id).is_empty());
+    }
+
     #[test]
     fn the_request_shows_the_command_with_its_quoting() {
         assert_eq!(shell_word("-f"), "-f");
@@ -996,7 +1037,8 @@ mod tests {
         let start = format!("nohup /bin/sh ./{name}.sh > /dev/null 2>&1 &\necho $! > server.pid\n");
         let server = || std::fs::read_to_string(ws.join("server.pid")).unwrap().trim().parse::<i32>().unwrap();
 
-        for stop in [format!("pkill -f {name}"), "kill $(cat server.pid)".into(), format!("echo $(cat server.pid) | xargs kill")] {
+        // `pkill -F` reads the pidfile from the command's folder, the workspace, not Loft's.
+        for stop in [format!("pkill -f {name}"), "pkill -F server.pid".into(), "kill $(cat server.pid)".into(), format!("echo $(cat server.pid) | xargs kill")] {
             let out = bash(&st, &a.id, &start).await;
             assert!(out.contains("exit 0"), "{out}");
             let pid = server();
