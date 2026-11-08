@@ -44,6 +44,25 @@ pub struct Config {
     pub storage_dir: PathBuf,
     /// `xcrun`, which runs `simctl` (simulator.rs). Tests point it at a fake.
     pub xcrun: PathBuf,
+    /// How `xcrun` finds Xcode (simulator.rs). Tests fake it.
+    pub xcode: XcodeLookup,
+}
+
+/// Where Xcode is looked for when `xcode-select` points at the Command Line Tools, which have no `simctl`.
+#[derive(Clone)]
+pub struct XcodeLookup {
+    /// `DEVELOPER_DIR` as Loft was started with it: used as is when set.
+    pub developer_dir: Option<PathBuf>,
+    pub xcode_select: PathBuf,
+    /// Where `/Applications` and `/Volumes` are: `/`, or a temp dir in tests.
+    pub root: PathBuf,
+}
+
+impl XcodeLookup {
+    pub fn system() -> Self {
+        let developer_dir = std::env::var_os("DEVELOPER_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+        Self { developer_dir, xcode_select: "xcode-select".into(), root: "/".into() }
+    }
 }
 
 #[derive(Clone, Default)]

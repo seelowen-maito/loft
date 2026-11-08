@@ -3,7 +3,7 @@ import { CornerDownLeft, Delete, House, Lock, Send } from "lucide-react";
 import { api, type Simulator, type SimulatorInput } from "../lib/api";
 import { cx } from "../lib/format";
 
-type Devices = { interactive: boolean; devices: Simulator[] };
+type Devices = { interactive: boolean; devices: Simulator[]; error?: string };
 type Ripple = { id: number; x: number; y: number };
 
 const PICKED = "loft:simulator-device";
@@ -56,6 +56,8 @@ export default function SimulatorPage() {
       </div>
       {data === null ? (
         <div className="skeleton aspect-[9/19.5] h-full max-h-[75vh] rounded-[2.5rem]" />
+      ) : data.error ? (
+        <p className="text-fg-3">{data.error}</p>
       ) : !device ? (
         <p className="text-fg-3">No simulator is running on this Mac. Ask an agent to build and run an iOS app on its device, or boot one in Xcode.</p>
       ) : data.interactive ? (

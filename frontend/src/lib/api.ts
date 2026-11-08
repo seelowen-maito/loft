@@ -542,7 +542,7 @@ export type SimulatorInput =
   | { action: "button"; name: "home" | "lock" };
 
 export const api = {
-  simulators: () => req<{ interactive: boolean; devices: Simulator[] }>("GET", "/simulator"),
+  simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   simulatorInput: (udid: string, input: SimulatorInput) => req<{ ok: boolean }>("POST", "/simulator/input", { udid, ...input }),
   info: () => req<Info>("GET", "/info"),
   update: () => req<UpdateStatus>("GET", "/update"),
