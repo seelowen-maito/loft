@@ -121,7 +121,7 @@ function GithubUsage() {
 }
 
 /** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
-function Backups({ folder, onFolder }: { folder: string; onFolder: (v: string) => void }) {
+function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
   const [s, setS] = useState<BackupStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -170,6 +170,7 @@ function Backups({ folder, onFolder }: { folder: string; onFolder: (v: string) =
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
+        {folderErr && <p className="text-[12.5px] text-bad">{folderErr}</p>}
       </Section>
     </div>
   );
@@ -275,6 +276,7 @@ export default function SettingsPage() {
   const [token, setToken] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
 
@@ -304,10 +306,20 @@ export default function SettingsPage() {
   const save = async () => {
     setSaving(true);
     setErr(null);
+    setFolderErr(null);
     try {
-      const v = await api.saveSettings({ ...draft, github_token: token });
+      // The backups folder goes on its own, after the rest: a folder the server refuses fails only that field.
+      let v = await api.saveSettings({ ...draft, github_token: token, backup_dir: undefined });
+      if (draft.backup_dir !== v.settings.backup_dir) {
+        try {
+          // No github_token: the view's is blank, and blank would clear it.
+          v = await api.saveSettings({ ...v.settings, github_token: undefined, backup_dir: draft.backup_dir });
+        } catch (e) {
+          setFolderErr((e as Error).message);
+        }
+      }
       setView(v);
-      setDraft(v.settings);
+      setDraft({ ...v.settings, backup_dir: draft.backup_dir });
       setToken(undefined);
       window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
     } catch (e) {
@@ -398,7 +410,7 @@ export default function SettingsPage() {
           </Field>
         </Section>
 
-        <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} />
+        <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
 
         <GithubUsage />
         <Spend />

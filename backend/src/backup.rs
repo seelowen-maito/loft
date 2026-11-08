@@ -129,14 +129,14 @@ fn found(root: &Path, at: NaiveDateTime) -> Last {
     Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path }
 }
 
-/// Why `dir` can't hold backups, if it can't: in Loft's folder agents can read every chat, and in the
-/// projects folder the GitHub token in `settings.json` could be committed to a repo and pushed.
-pub fn refuse(dir: &Path, loft: Option<&Path>, projects: &Path) -> Option<&'static str> {
+/// Why `dir` can't hold backups, if it can't: in Loft's folder agents can read every chat, and in a git
+/// work tree the GitHub token in `settings.json` could be committed and pushed.
+pub fn refuse(dir: &Path, loft: Option<&Path>) -> Option<&'static str> {
     if loft.is_some_and(|l| inside(dir, l)) {
         return Some("Backups folder can't be inside Loft's folder, where agents can read it");
     }
-    if inside(dir, projects) {
-        return Some("Backups folder can't be inside the projects folder, where it could be committed to a repo");
+    if resolved(dir).ancestors().any(|a| a.join(".git").exists()) {
+        return Some("Backups folder can't be inside a git repository, where it could be committed and pushed");
     }
     None
 }
@@ -205,12 +205,11 @@ pub async fn run(state: &AppState) -> Status {
     let db = state.db.path().unwrap_or_default();
     let settings = db.with_file_name("settings.json");
     let loft = state.cfg.storage_dir.parent().map(Path::to_path_buf);
-    let projects = state.settings.get().projects_dir;
     let r = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             // Settings checked this when it was saved, but a symlink can change since.
-            let made = if let Some(why) = refuse(&root, loft.as_deref(), &projects) {
+            let made = if let Some(why) = refuse(&root, loft.as_deref()) {
                 Err(anyhow::anyhow!("{why}: {}", root.display()))
             } else {
                 make(&db, &settings, &root, Local::now().naive_local())
@@ -406,12 +405,14 @@ mod tests {
         let s = now(State(st.clone())).await.expect("a good backup").0;
         assert!(s.error.is_none() && s.last.is_some(), "a good backup clears the error");
 
-        // A folder that became unsafe after Settings saved it (here: the projects folder moved over it).
-        let mut set = st.settings.get();
-        set.projects_dir = base.clone();
-        st.settings.save(set).unwrap();
+        // A folder that became unsafe after Settings saved it: a repo was made around it. The backup
+        // fails and says why; Settings still saves everything else.
+        std::fs::create_dir_all(base.join(".git")).unwrap();
         let s = run(&st).await;
-        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("projects folder")), "{s:?}");
+        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("git repository")), "{s:?}");
+        let body = serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "claude_bin": "claude-other", "backup_dir": st.settings.get().backup_dir });
+        assert!(crate::api::put_settings(State(st.clone()), Json(body)).await.is_ok(), "other settings still save");
+        assert_eq!(st.settings.get().claude_bin, "claude-other");
 
         // A database that isn't there fails without leaving a half-made folder.
         let root = base.join("missing-db");
@@ -499,7 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft_or_projects() {
+    async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft_or_a_repo() {
         let st = crate::tasks::tests::state();
         let put = |dir: String| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "backup_dir": dir })));
         assert!(put("backups".into()).await.is_err(), "relative");
@@ -511,11 +512,16 @@ mod tests {
         std::fs::create_dir_all(st.cfg.storage_dir.join("agent-1")).unwrap();
         std::os::unix::fs::symlink(st.cfg.storage_dir.join("agent-1"), &link).unwrap();
         assert!(put(link.join("backups").to_string_lossy().into()).await.is_err(), "through a symlink");
-        // A projects folder outside Loft's: its repos can't hold backups either.
-        let projects = temp();
-        let in_repo = |dir: PathBuf| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": projects, "backup_dir": dir })));
-        assert!(in_repo(projects.join("some-repo/backups")).await.is_err(), "the token could be committed");
-        assert!(in_repo(temp().join("backups")).await.is_ok());
+        // Inside a git work tree, wherever it is.
+        let repo = temp();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let in_repo = put(repo.join("docs/backups").to_string_lossy().into()).await;
+        assert!(in_repo.is_err_and(|e| e.1.contains("git repository")), "the token could be committed");
+        // The projects folder is no reason to refuse: with it set to ~, the default folder still saves.
+        let home = dirs::home_dir().unwrap();
+        let at_home = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": home, "backup_dir": "" }))).await;
+        assert!(at_home.is_ok(), "{:?}", at_home.err());
+        assert_eq!(st.settings.get().projects_dir, home);
         assert!(put("/Volumes/Disk/Loft backups".into()).await.is_ok());
         assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
         // A client that doesn't know the field keeps it.

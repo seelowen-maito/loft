@@ -121,8 +121,11 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
     }
-    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them.
-    if let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent(), &s.projects_dir) {
+    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
+    // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
+    if s.backup_dir != state.settings.get().backup_dir
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+    {
         return Err(bad(why));
     }
     s.github_token = match token {
