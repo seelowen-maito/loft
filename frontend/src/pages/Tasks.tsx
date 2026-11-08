@@ -4,7 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
-import { parseFilters, withFilters, type IssueFilters } from "../lib/issueFilters";
+import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -121,11 +121,15 @@ export default function TasksPage() {
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
   const teams = useMemo(() => [...new Set(agents.map(teamOf).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [agents]);
-  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`.
+  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`, once.
   const from = params.get("from");
   useEffect(() => {
-    const a = from && agentById.get(from);
-    if (from && agents.length) setParams((cur) => withFilters(cur, { group: a ? teamOf(a) : "" }), { replace: true });
+    if (!from || !agents.length) return;
+    const groupOf = (id: string) => {
+      const a = agentById.get(id);
+      return a ? teamOf(a) : "";
+    };
+    setParams((cur) => resolveFrom(cur, groupOf) ?? cur, { replace: true });
   }, [from, agents.length, agentById, setParams]);
   // A group, agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
   const group = agents.length && !teams.includes(filters.group) ? "" : filters.group;
