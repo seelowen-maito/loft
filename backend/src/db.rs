@@ -34,10 +34,27 @@ pub struct Delivery {
     pub pr: Option<i64>,
     /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
     /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
-    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready; a plan kept in Loft
-    /// waits for Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready,
-    /// merged or closed).
+    /// "needs_human" (too many final rounds), "stalled" (the run woken for its step ended without the
+    /// step's call: see `resume_to`), "paused" (the user paused it: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
+    /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
+    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
+    #[serde(default)]
+    pub resume_to: String,
+    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
+    /// lost when Loft restarted).
+    #[serde(default)]
+    pub stall_reason: String,
+    /// When it stalled (RFC 3339): a new stall is a new Needs you item.
+    #[serde(default)]
+    pub stalled_at: String,
+    /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
+    /// item and the planner's wake, once. Empty before.
+    #[serde(default)]
+    pub done_at: String,
+    /// The tech-debt issues its final Code Review filed ("#77", or "Loft issue <id>"), for the done summary.
+    #[serde(default)]
+    pub tech_debt: Vec<String>,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -53,6 +70,10 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
+    /// ticket or final review waiting for the user hands them to the Dev.
+    #[serde(default)]
+    pub last_notes: String,
     /// Made from a spec PR recorded before Deliveries: its tickets' states weren't recorded, so GitHub
     /// says whether they're closed.
     #[serde(default)]
@@ -84,6 +105,19 @@ impl Delivery {
 
     pub fn ticket_mut(&mut self, n: i64) -> Option<&mut DeliveryTicket> {
         self.tickets.iter_mut().find(|t| t.number == n)
+    }
+
+    /// The state its step is in: a stalled or paused one's is the state it goes back to.
+    pub fn step_state(&self) -> &str {
+        if matches!(self.state.as_str(), "stalled" | "paused") { &self.resume_to } else { &self.state }
+    }
+
+    /// Back to the state it stalled or paused in, if it did.
+    pub fn unstall(&mut self) {
+        if matches!(self.state.as_str(), "stalled" | "paused") {
+            self.state = std::mem::take(&mut self.resume_to);
+        }
+        (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
     }
 }
 
@@ -1409,11 +1443,17 @@ impl Db {
                 branch: String::new(),
                 pr: Some(pr),
                 state: if has(&settled) { "settled" } else { "planned" }.into(),
+                resume_to: String::new(),
+                stall_reason: String::new(),
+                stalled_at: String::new(),
+                done_at: String::new(),
+                tech_debt: vec![],
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                last_notes: String::new(),
                 migrated: true,
                 standalone: false,
                 local: false,

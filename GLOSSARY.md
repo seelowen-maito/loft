@@ -32,6 +32,18 @@ _Avoid_: Job, type, flag
 Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers, closes it when they pass, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
 _Avoid_: Build, run, pipeline
 
+**Stalled**:
+A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled, and tells only the user, until the user resumes it.
+_Avoid_: Stuck, failed, paused
+
+**Paused**:
+A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
+_Avoid_: Stopped, cancelled, on hold
+
+**Resume**:
+The user's action that restarts a stalled or paused Delivery, or a ticket that needs the user after too many change rounds: Loft first checks GitHub for what is already done, then wakes only the agent the step still waits on.
+_Avoid_: Retry, restart
+
 **Role brief**:
 The fixed instructions Loft writes for a role and sends with that role's wake in a Delivery. An agent's standing instructions add to it but can't change how the Delivery works.
 _Avoid_: Role prompt, template

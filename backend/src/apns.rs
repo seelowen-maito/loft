@@ -63,8 +63,8 @@ pub struct QuietHours {
 }
 
 /// Every type a device can ask for, and the ones on by default.
-pub const KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "pr_review"];
-pub const DEFAULT_KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck"];
+pub const KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck", "task_failed", "pr_ready", "pr_review", "delivery_stalled", "delivery_done"];
+pub const DEFAULT_KINDS: &[&str] = &["permission", "task_approval", "task_blocked", "question", "grill_round", "stuck", "delivery_stalled", "delivery_done"];
 
 /// A kind under its current name: app builds from before rounds ask for `grill_question`.
 pub fn kind(k: &str) -> &str {

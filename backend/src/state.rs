@@ -26,6 +26,8 @@ pub enum Event {
     TaskComment { comment: serde_json::Value },
     /// Loft published issues on a project's repo.
     Issues { project: String },
+    /// A Delivery changed: its state, its tickets or who has them.
+    Delivery { repo: String, spec: i64 },
     /// The "needs you" list changed: its size, how many are urgent, and the item ids.
     NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
 }
@@ -98,6 +100,15 @@ pub struct Runtime {
     /// agents whose next run starts a Delivery ticket they haven't worked on: Loft first clears their
     /// context if their Fresh context setting says so
     pub fresh_before: std::collections::HashSet<String>,
+    /// agent id -> the Delivery steps its queued work was woken for, each with the queued prompt that wakes
+    /// for it (None for a step moved back from an ended or restarted run): the run that takes the queue takes
+    /// them, and Pause drops a paused Delivery's (delivery::pause)
+    pub delivery_queued: HashMap<String, Vec<(crate::delivery::Wake, Option<String>)>>,
+    /// agent id -> the Delivery steps its current run was woken for, checked when it ends (delivery::run_ended)
+    pub delivery_running: HashMap<String, Vec<crate::delivery::Wake>>,
+    /// Needs you item ids that became news at this start-up (Deliveries stalled by the restart): the pusher's
+    /// first look pushes them, unlike the items already waiting
+    pub news_at_start: std::collections::HashSet<String>,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)

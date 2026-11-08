@@ -603,6 +603,10 @@ pub(crate) async fn restart_run(state: AppState, id: String, by: &'static str) -
                 rt.queued_for_user.insert(id.clone());
             }
         }
+        // The next run picks up the same work, so the Delivery steps it was woken for wait for that run's end.
+        if let Some(w) = rt.delivery_running.remove(&id) {
+            rt.delivery_queued.entry(id.clone()).or_default().extend(w.into_iter().map(|w| (w, None)));
+        }
         rt.restarting.insert(id.clone(), by);
     }
     stop_agent(State(state), Path(id)).await
@@ -621,6 +625,7 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
         rt.queued.remove(&id);
         rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
+        rt.delivery_queued.remove(&id);
         rt.fresh_before.remove(&id);
     }
     let a = agents::clear_context(&state, &id, "Context cleared. Long-term memory carries over.", json!({})).ok_or_else(not_found)?;
@@ -677,6 +682,7 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
+        rt.delivery_queued.remove(id);
         rt.fresh_before.remove(id);
     }
     // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.
