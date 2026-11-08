@@ -52,6 +52,9 @@ final class LoftStore {
     private(set) var deliveries: [String: IssueDelivery] = [:]
     /// Issues whose Delivery card is on screen, with how many: only these reload on reconnects and `delivery` events.
     private var deliveryCards: [String: Int] = [:]
+    /// Bumped by each Delivery load and action reply per issue: a load applies its answer only if nothing newer
+    /// started or landed meanwhile, so a late, older answer can't put a Resumed card back to Stalled.
+    private var deliveryGen: [String: Int] = [:]
     /// Plan views by parent task id, for the chat's plan cards. Kept here rather than in the card: the chat's lazy
     /// list drops a card's state when it scrolls out of view, and a card that comes back short and loads again moves
     /// the bottom-anchored list, which scrolls it out again, round and round.
@@ -893,7 +896,15 @@ final class LoftStore {
     /// Load issue `taskId`'s Delivery for its card.
     func loadDelivery(_ taskId: String) async throws {
         guard let api else { throw APIError.notConfigured }
-        deliveries[taskId] = try await api.issueDelivery(taskId: taskId)
+        let gen = bumpDeliveryGen(taskId)
+        let d = try await api.issueDelivery(taskId: taskId)
+        if deliveryGen[taskId] == gen { deliveries[taskId] = d }
+    }
+
+    private func bumpDeliveryGen(_ taskId: String) -> Int {
+        let gen = deliveryGen[taskId, default: 0] + 1
+        deliveryGen[taskId] = gen
+        return gen
     }
 
     /// Issue `taskId`'s Delivery card came on screen: it stays live from `delivery` events and reconnects until
@@ -913,6 +924,8 @@ final class LoftStore {
     func deliveryAction(_ taskId: String, _ action: IssueDeliveryAction) async throws -> String? {
         do {
             let r = try await requireTasks().issueDeliveryAction(taskId: taskId, action)
+            // Newer than any load already on its way.
+            _ = bumpDeliveryGen(taskId)
             deliveries[taskId] = r.delivery
             return r.message
         } catch {

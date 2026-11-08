@@ -190,4 +190,53 @@ final class DeliveryCardTests: XCTestCase {
         try await store.refresh()
         XCTAssertEqual(api.deliveryLoads, loads + 1, "the other copy still reloads")
     }
+
+    /// A connected store with issue "s" loaded, whose Delivery has stalled. Deactivate it when done.
+    @MainActor
+    private func stalledStore(_ api: MockAPI) async throws -> LoftStore {
+        api.taskList = [HBTask(id: "s", title: "Spec", description: "", kind: "work", status: "inbox", priority: "normal", project: "", agentId: nil,
+                               parentId: nil, dependsOn: [], dueAt: nil, createdBy: "user", note: "", summary: "", error: "",
+                               createdAt: .now, updatedAt: .now, startedAt: nil, completedAt: nil, labels: ["spec"],
+                               github: .init(repo: "octo/site", number: 40, url: "https://github.com/octo/site/issues/40", state: "open"))]
+        api.deliveryOf["s"] = try delivery(#"{"state":"stalled","stall_reason":"run_failed","started":true,"can_resume":true,"agent_id":"dev","agent_name":"Dev","pr":7}"#)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("snap-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let store = LoftStore(api: api, cache: SnapshotStore(url: url))
+        store.activate()
+        for _ in 0..<100 where store.connection != .connected || store.task("s") == nil { try await Task.sleep(for: .milliseconds(20)) }
+        return store
+    }
+
+    /// Loads that answer out of order: the older one, landing last, doesn't put the card back to Stalled.
+    @MainActor
+    func testAnOlderLoadLandingLateKeepsTheNewerDelivery() async throws {
+        let api = MockAPI()
+        let store = try await stalledStore(api)
+        defer { store.deactivate() }
+        api.deliveryDelays = [.milliseconds(300), .zero]
+        let older = Task { try await store.loadDelivery("s") }
+        for _ in 0..<100 where api.deliveryLoads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        api.deliveryOf["s"] = try delivery(#"{"state":"running","started":true,"can_pause":true,"agent_id":"dev","agent_name":"Dev","pr":7}"#)
+        try await store.loadDelivery("s")
+        XCTAssertEqual(store.deliveries["s"]?.state, "running")
+        try await older.value
+        XCTAssertEqual(store.deliveries["s"]?.state, "running", "the older answer is dropped")
+    }
+
+    /// A load started before Resume that answers after it doesn't overwrite Resume's reply.
+    @MainActor
+    func testALoadStartedBeforeAnActionDoesntOverwriteItsReply() async throws {
+        let api = MockAPI()
+        let store = try await stalledStore(api)
+        defer { store.deactivate() }
+        api.deliveryDelays = [.milliseconds(300)]
+        let older = Task { try await store.loadDelivery("s") }
+        for _ in 0..<100 where api.deliveryLoads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        api.deliveryReply = try JSONCoding.decoder.decode(IssueDeliveryReply.self, from: Data(#"{"ok":true,"message":"Resumed spec #40.","state":"running","started":true,"can_pause":true,"agent_id":"dev","agent_name":"Dev","pr":7}"#.utf8))
+        let message = try await store.deliveryAction("s", .resume)
+        XCTAssertEqual(message, "Resumed spec #40.")
+        XCTAssertEqual(store.deliveries["s"]?.state, "running")
+        try await older.value
+        XCTAssertEqual(store.deliveries["s"]?.state, "running", "the load from before Resume is dropped")
+    }
 }
