@@ -46,6 +46,12 @@ Every error body is `{"error": "…"}`.
 20 pushes per minute and 1,000 per day per relay key. They're fixed windows (the clock minute and the UTC day),
 counted in the store under the key's hash. Every authorized request counts, whether or not it's forwarded.
 
+Refused keys are limited per address, so guessing keys stays expensive: each `401` counts against the caller's
+address (the first `x-forwarded-for` entry, stored only as its hash, `limit:badKeys:<hash>:<hour>`). After 60 in one
+clock hour, every push from that address gets `429` with `Retry-After` until the next hour, even one with a valid key,
+and before its key is looked up. Pushes with a valid key never count, and other addresses aren't affected. A Loft
+still pushing with a revoked key counts too, so its address can hit this limit: give it a new key.
+
 ## One account per device
 
 The first push the relay forwards to a device token binds that device to the key's account, or to the key itself for
@@ -67,7 +73,7 @@ their created and last-used dates (`relay-key-used:<hash>`, set on each authoriz
 deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked.
 From one address (the first `x-forwarded-for` entry, stored only as a hash), at most 5 sign-ins (`/auth/start` and
 Delete my account), 5 returns from Apple (`/auth/callback`) and 5 key creations (`/keys` and Allow on `/connect`) are
-taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These limits, and `/api/pair`'s, trust
+taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These limits, `/api/pair`'s and the refused-key limit, trust
 `x-forwarded-for`: Vercel sets it. Hosting the relay anywhere else, put it behind a proxy that overwrites that header
 with the caller's address, or anyone can set it and skip the limits. Requests without it all share one count.
 **Delete my account** (`/account/delete`) asks the user to sign in with Apple once more: only the account's own Apple

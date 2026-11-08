@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer as createH2 } from "node:http2";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { createKey, push, MAX_PAYLOAD_BYTES, BOUND_SECONDS } from "../lib/relay.js";
+import { createKey, push, MAX_PAYLOAD_BYTES, BOUND_SECONDS, BAD_KEYS_PER_HOUR } from "../lib/relay.js";
 import { host } from "../lib/apns.js";
 
 const BUNDLE = "com.example.loft";
@@ -96,11 +96,11 @@ beforeEach(() => {
 // What the operator's script does for each user.
 const newKey = () => createKey(env, "a test install");
 const payload = { aps: { alert: { title: "Web Dev needs your approval", body: "Bash" }, sound: "default", badge: 3 }, type: "permission" };
-const send = (token, body, raw, now) =>
+const send = (token, body, raw, now, ip) =>
   push(
     new Request("http://relay/api/push", {
       method: "POST",
-      headers: token ? { authorization: `Bearer ${token}` } : {},
+      headers: { ...(token && { authorization: `Bearer ${token}` }), ...(ip && { "x-forwarded-for": ip }) },
       body: raw ?? JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload, ...body }),
     }),
     env,
@@ -153,7 +153,7 @@ test("a missing, malformed or unknown relay key is refused, and nothing reaches 
     assert.equal(res.status, 401, String(key));
     assert.deepEqual(await res.json(), { error: "a valid relay key is required" });
   }
-  assert.equal(commands.length, commandsBefore, "a malformed key costs no store lookup");
+  assert.ok(!commands.slice(commandsBefore).some((c) => c.includes("relay-key:")), "a malformed key costs no key lookup");
   const unknown = await send(`lrk_${"a".repeat(43)}`);
   assert.equal(unknown.status, 401, "well formed but never created");
   assert.equal(production.seen.length, 0);
@@ -223,7 +223,7 @@ test("no payload or device token is written to the store or to the logs", async 
   }
   // Only hashed keys, counters keyed by those hashes, and which key holds the device, by the token's hash.
   assert.ok(
-    commands.every((c) => /^\["(SET|GET)","relay-key:[0-9a-f]{64}"|^\["SET","relay-key-used:[0-9a-f]{64}","[\d-]+T[\d:.]+Z"|^\["(INCR|EXPIRE)","limit:\w+:[0-9a-f]{64}:\d+"|^\["SET","device-owner:[0-9a-f]{64}","key:[0-9a-f]{64}","NX","EX",\d+\]$|^\["(GET|EXPIRE)","device-owner:[0-9a-f]{64}"/.test(c)),
+    commands.every((c) => /^\["(SET|GET)","relay-key:[0-9a-f]{64}"|^\["SET","relay-key-used:[0-9a-f]{64}","[\d-]+T[\d:.]+Z"|^\["(INCR|EXPIRE|GET)","limit:\w+:[0-9a-f]{64}:\d+"|^\["SET","device-owner:[0-9a-f]{64}","key:[0-9a-f]{64}","NX","EX",\d+\]$|^\["(GET|EXPIRE)","device-owner:[0-9a-f]{64}"/.test(c)),
     commands.join("\n"),
   );
 });
@@ -304,6 +304,41 @@ test("the 1,001st push in a day from one key is refused until the next day", asy
   assert.deepEqual(await over.json(), { error: "too many requests: at most 1000 per day" });
   assert.equal((await send(await newKey(), { device_token: OTHER_DEVICE }, undefined, day + 51 * 60_000)).status, 200, "another key");
   assert.equal((await send(token, {}, undefined, day + 24 * HOUR)).status, 200, "the next day");
+});
+
+test("past 60 refused keys in an hour, one address gets 429 even with a good key; other addresses and the next hour don't", async () => {
+  const [max, seconds] = BAD_KEYS_PER_HOUR;
+  assert.deepEqual([max, seconds], [60, 3600]);
+  const [ip, other] = ["203.0.113.7", "198.51.100.4"];
+  const good = await newKey();
+  const unknown = `lrk_${"c".repeat(43)}`;
+  for (let i = 0; i < max; i++) {
+    const res = await send(i % 2 ? unknown : "garbage", {}, undefined, T0 + i * 1000, `${ip}, 10.0.0.1`);
+    assert.equal(res.status, 401, `refusal ${i + 1}`);
+  }
+  for (const key of [unknown, good]) {
+    const before = commands.length;
+    const over = await send(key, {}, undefined, T0 + 30 * 60_000, ip);
+    assert.equal(over.status, 429, key === good ? "a valid key from that address" : "another bad key");
+    assert.deepEqual(await over.json(), { error: "too many refused relay keys: at most 60 per hour from one address" });
+    assert.equal(over.headers.get("retry-after"), "1800");
+    assert.ok(!commands.slice(before).some((c) => c.includes("relay-key:")), "refused before any key lookup");
+  }
+  assert.equal(production.seen.length, 0, "nothing reached Apple");
+  assert.equal((await send(unknown, {}, undefined, T0 + 30 * 60_000, other)).status, 401, "another address still gets 401");
+  assert.equal((await send(good, {}, undefined, T0 + 30 * 60_000, other)).status, 200, "and a good key from it pushes");
+  assert.equal((await send(good, {}, undefined, T0 + HOUR, ip)).status, 200, "the next hour starts over");
+  const written = [...commands, ...store.keys(), ...store.values()].join("\n");
+  assert.ok(!written.includes(ip) && !written.includes(other), "the store never sees an address");
+  assert.ok(store.has(`limit:badKeys:${sha256(ip)}:${Math.floor(T0 / 1000 / seconds)}`), "only its hash");
+});
+
+test("a valid key's pushes never count against its address", async () => {
+  const token = await newKey();
+  const ip = "192.0.2.55";
+  for (let i = 0; i < 20; i++) assert.equal((await send(token, {}, undefined, T0 + 2 * HOUR + i * 1000, ip)).status, 200);
+  assert.ok(![...store.keys()].some((k) => k.startsWith(`limit:badKeys:${sha256(ip)}:`)), "no refusal was counted");
+  assert.equal((await send("garbage", {}, undefined, T0 + 2 * HOUR, ip)).status, 401, "a bad key from it is still only a 401");
 });
 
 test("a relay missing a setting refuses everything instead of guessing", async () => {

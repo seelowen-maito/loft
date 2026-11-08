@@ -12,6 +12,9 @@ export const MAX_PAYLOAD_BYTES = 4096;
 /** What one relay key can ask for: [requests, window in seconds]. */
 export const LIMITS = { pushesPerMinute: [20, 60], pushesPerDay: [1000, 86400] };
 
+/** How many refused keys (401s) one IP gets per window before every push from it is refused: [requests, seconds]. */
+export const BAD_KEYS_PER_HOUR = [60, 3600];
+
 /** A relay key: `lrk_` and 32 random bytes, base64url. */
 const KEY = /^lrk_[A-Za-z0-9_-]{43}$/;
 
@@ -32,6 +35,20 @@ async function overLimit(store, name, who, now) {
   if ((await store.hit(`limit:${name}:${who}:${window}`, seconds)) <= max) return null;
   const retry = (window + 1) * seconds - Math.floor(now / 1000);
   return json(429, { error: `too many requests: at most ${max} per ${seconds === 60 ? "minute" : "day"}` }, { "retry-after": String(retry) });
+}
+
+/**
+ * The refused keys from `ip` (already a hash) this hour: `over` is a 429 with Retry-After once there were
+ * BAD_KEYS_PER_HOUR of them, else null; `count` adds one refusal. Reading costs one store call and never counts.
+ */
+async function badKeys(store, ip, now) {
+  const [max, seconds] = BAD_KEYS_PER_HOUR;
+  const window = Math.floor(now / 1000 / seconds);
+  const name = `limit:badKeys:${ip}:${window}`;
+  const count = () => store.hit(name, seconds);
+  if (Number((await store.get(name)) ?? 0) < max) return { over: null, count };
+  const retry = (window + 1) * seconds - Math.floor(now / 1000);
+  return { over: json(429, { error: `too many refused relay keys: at most ${max} per hour from one address` }, { "retry-after": String(retry) }), count };
 }
 
 /** Settings the relay can't work without. Without LOFT_BUNDLE_ID, for one, the bundle id check would pass anything. */
@@ -89,16 +106,20 @@ function invalid(b, env) {
  * priority?, collapse_id?}`. When Apple answered: 200 `{apple_status, reason, apns_id}` (a 410, or a 400 with
  * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`,
  * 403 for a device bound to another account, 429 with Retry-After over a limit. Every authorized request counts,
- * forwarded or not.
+ * forwarded or not. Refused keys count per IP (its hash only, from the first x-forwarded-for address, as /api/pair):
+ * past BAD_KEYS_PER_HOUR every push from that IP gets 429 until the next hour, before its key is looked up.
  */
 export async function push(request, env = process.env, now = Date.now(), appleTimeoutMs = undefined) {
   const broken = unconfigured(env);
   if (broken) return broken;
   const store = makeKv(env);
+  const ip = sha256((request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim());
+  const refusals = await badKeys(store, ip, now);
+  if (refusals.over) return refusals.over;
   const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  // Anything not shaped like a key is refused before it costs a store lookup.
+  // Anything not shaped like a key is refused before it costs a key lookup.
   const record = key && KEY.test(key) ? await store.get(hashed(key)) : null;
-  if (!record) return json(401, { error: "a valid relay key is required" });
+  if (!record) return (await refusals.count(), json(401, { error: "a valid relay key is required" }));
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
