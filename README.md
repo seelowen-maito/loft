@@ -86,7 +86,11 @@ tailscale serve --bg 7420
 
 With Tailscale, dev servers that agents start are linked by this machine's tailnet name instead of `localhost`.
 
-The `ios/` folder has a native iPhone app for agent status, approvals, issues and chat, over the same address. Join the beta on [TestFlight](https://testflight.apple.com/join/w2rCtJYD), or build it yourself: see [ios/README.md](ios/README.md).
+The `ios/` folder has a native iPhone app for agent status, approvals, tasks and chat, over the same address. See [ios/README.md](ios/README.md).
+
+## How agents run
+
+Each agent runs headless Claude Code in its own folder under `agent-local-storage/`. Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
 ## Development
 
