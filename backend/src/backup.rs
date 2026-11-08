@@ -280,9 +280,14 @@ pub async fn get(State(state): State<AppState>) -> Json<Status> {
     Json(s)
 }
 
-/// `POST /api/backups`: Back up now. Answers once it's done, with the result.
+/// `POST /api/backups`: Back up now. Answers once it's done: the status, or a 500 with the error (which
+/// `GET` then shows too).
 pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
-    Ok(Json(run(&state).await))
+    let s = run(&state).await;
+    match s.error {
+        Some(e) => Err(crate::api::ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.message)),
+        None => Ok(Json(s)),
+    }
 }
 
 #[cfg(test)]
@@ -388,15 +393,17 @@ mod tests {
         // A file where the backups folder should be.
         std::fs::write(base.join("taken"), "").unwrap();
         let st = state_backing_up_to(&base.join("taken"));
-        let s = run(&st).await;
+        let Err(crate::api::ApiError(code, message)) = now(State(st.clone())).await else { panic!("Back up now answers an error") };
+        assert_eq!(code, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(message.contains("can't create"), "{message}");
+        let s = get(State(st.clone())).await.0;
         assert!(s.last.is_none());
-        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("can't create")), "{s:?}");
-        assert!(st.rt.lock().unwrap().backup.error.is_some(), "Settings and Needs you see it");
+        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("can't create")), "Settings and Needs you see it: {s:?}");
 
         let mut set = st.settings.get();
         set.backup_dir = base.join("ok").to_string_lossy().into();
         st.settings.save(set).unwrap();
-        let s = run(&st).await;
+        let s = now(State(st.clone())).await.expect("a good backup").0;
         assert!(s.error.is_none() && s.last.is_some(), "a good backup clears the error");
 
         // A folder that became unsafe after Settings saved it (here: the projects folder moved over it).

@@ -140,6 +140,8 @@ function Backups({ folder, onFolder }: { folder: string; onFolder: (v: string) =
       setS(await api.backUpNow());
     } catch (e) {
       setErr((e as Error).message);
+      // The failure is recorded: show the last good backup next to it.
+      api.backups().then(setS).catch(() => {});
     } finally {
       setBusy(false);
     }
@@ -165,7 +167,7 @@ function Backups({ folder, onFolder }: { folder: string; onFolder: (v: string) =
             {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
           </p>
         )}
-        <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk or iCloud Drive to survive this Mac's disk. To restore, see docs/backups.md.">
+        <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
       </Section>
