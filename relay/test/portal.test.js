@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
 import { home, start, callback, createAccountKey, revokeAccountKey, signOut, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { approve } from "../lib/pairing.js";
 import { kv as makeKv } from "../lib/kv.js";
 import { push } from "../lib/relay.js";
 
@@ -522,13 +523,15 @@ const forged = (req, headers) => {
 };
 const FORGERIES = [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "https://evil.example.com" }, {}];
 
-test("a form posted from another site is refused with 403 and changes nothing", async () => {
+test("a form posted from another site is refused with 403 and changes nothing; the portal's own passes", async () => {
   const session = await signInAs();
   const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
   const before = JSON.stringify([...store]);
   const id = sha256(key);
+  // Sign out last: it ends the session the others use.
+  const forms = [[approve, "/connect", { code: "x", name: "Evil" }], [createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}], [signOut, "/signout", {}]];
   for (const headers of FORGERIES) {
-    for (const [handler, path, form] of [[createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}], [signOut, "/signout", {}]]) {
+    for (const [handler, path, form] of forms) {
       const res = await handler(forged(post(path, form, session), headers), env);
       assert.equal(res.status, 403, `${path} ${JSON.stringify(headers)}`);
       assert.match(await res.text(), /didn't come from this portal/);
@@ -538,7 +541,11 @@ test("a form posted from another site is refused with 403 and changes nothing", 
   assert.equal(JSON.stringify([...store]), before, "nothing was written, not even a rate-limit count");
   assert.equal((await pushWith(key)).status, 200, "the key still works");
   // The portal's own origin passes, with or without Sec-Fetch-Site.
-  assert.equal((await createAccountKey(forged(post("/keys", { name: "Own" }, session), { origin: "https://portal.example.com" }), env)).status, 200);
+  for (const [handler, path, form] of forms) {
+    for (const headers of [{ "sec-fetch-site": "same-origin" }, { origin: "https://portal.example.com" }]) {
+      assert.notEqual((await handler(forged(post(path, form, session), headers), env)).status, 403, `${path} ${JSON.stringify(headers)}`);
+    }
+  }
 });
 
 test("the session, state and delete cookies are __Host- cookies: Secure, HttpOnly, SameSite=Lax, Path=/, no Domain", async () => {
