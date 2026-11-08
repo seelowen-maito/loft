@@ -836,6 +836,30 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(loft.value as? String, "Collapsed")
     }
 
+    /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.
+    func testReplyingToAnIssueWithNobodyOnItAsksForAnAgent() {
+        let app = launch()
+        app.buttons["needsYouSeeAll"].firstMatch.tap()
+        let row = any("needsYou-task_failed", app)
+        let reply = row.buttons["Reply on the issue"]
+        XCTAssertTrue(any("needsYou-permission", app).appears(timeout: 5))
+        for _ in 0..<6 where !reply.isHittable { app.swipeUp() }
+        reply.tap()
+        let agent = any("needsYouAnswerAgent", app)
+        XCTAssertTrue(agent.appears(timeout: 5))
+        XCTAssertTrue(text(containing: "kept as a note only", app).exists)
+        agent.tap()
+        app.buttons["QA Agent"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "takes the issue", app).appears(timeout: 5))
+        app.textFields["needsYouAnswerField"].tap()
+        app.typeText("Install Xcode 27 first")
+        app.buttons["needsYouAnswerSend"].tap()
+        let notice = any("needsYouNotice", app)
+        XCTAssertTrue(notice.appears(timeout: 5))
+        XCTAssertEqual(notice.label, "Sent to QA Agent")
+        XCTAssertFalse(any("needsYou-task_failed", app).exists, "the item clears")
+    }
+
     func testAnAttachedTaskGoesWithTheMessageAndShowsAsAChip() {
         let app = launch()
         openOrchestratorChat(app)
