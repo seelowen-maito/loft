@@ -189,12 +189,12 @@ pub fn remove_relay_key() -> Result<()> {
     }
 }
 
-/// Writes `text` to `path` in the key folder, owner-only, through a temporary `<name>.tmp` beside it.
+/// Writes `text` to `path` in the key folder, owner-only, through a uniquely named temporary file beside it, so concurrent writes never share one.
 fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     let dir = key_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("secret")));
+    let tmp = path.with_file_name(format!("{}.{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("secret"), uuid::Uuid::new_v4()));
     std::fs::write(&tmp, text)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     std::fs::rename(&tmp, path)?;
@@ -411,6 +411,28 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn concurrent_secret_writes_do_not_collide() {
+        fake_apns(); // points LOFT_APNS_DIR at the shared test folder
+        let path = key_dir().join("race.key");
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        write_secret(&path, &format!("secret-{i}")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("secret-"));
+        let leftovers = std::fs::read_dir(key_dir()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("race.key.")).count();
+        assert_eq!(leftovers, 0, "no temp files left behind");
+    }
+
     #[test]
     fn the_built_in_relay_is_the_official_one_and_passes_the_address_check() {
         // Tests use a fake relay instead (see `relay_url`), so the built-in default is checked here.
