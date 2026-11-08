@@ -16,7 +16,7 @@ struct DeliveryCardSection: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 Text(intro(d, number)).font(.subheadline).foregroundStyle(.secondary)
-                if let line = d?.stateLine {
+                if let line = d?.line {
                     Text(line.text)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(color(line.tone))

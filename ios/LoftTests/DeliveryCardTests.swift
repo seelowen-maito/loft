@@ -17,15 +17,15 @@ final class DeliveryCardTests: XCTestCase {
     func testASpecCardShowsProgressStateAndSkippedTickets() throws {
         let d = try delivery(Self.spec)
         XCTAssertEqual(d.progressLine(issue: 333), "#340 iOS Delivery card is with Dev on spec PR #334. 1 of 3 tickets done.")
-        XCTAssertEqual(d.stateLine?.tone, .stalled)
-        XCTAssertEqual(d.stateLine?.text, "Stalled: its run was lost when Loft restarted.")
+        XCTAssertEqual(d.line?.tone, .stalled)
+        XCTAssertEqual(d.line?.text, "Stalled: its run was lost when Loft restarted.")
         XCTAssertEqual(d.skippedTickets.map(\.number), [341])
         XCTAssertTrue(!d.showsPause && d.showsResume)
     }
 
     func testEachStateReadsLikeTheWebCard() throws {
         func line(_ state: String, _ extra: String = "") throws -> String? {
-            try delivery(#"{"state":"\#(state)","started":\#(state != "planned"),"agent_id":null,"agent_name":null,"pr":null\#(extra)}"#).stateLine?.text
+            try delivery(#"{"state":"\#(state)","started":\#(state != "planned"),"agent_id":null,"agent_name":null,"pr":null\#(extra)}"#).line?.text
         }
         XCTAssertNil(try line("planned"), "nothing before it started")
         XCTAssertEqual(try line("running"), "Running.")
@@ -58,6 +58,22 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertEqual(gone.progressLine(issue: 7), "Started on PR #12; the agent building it is gone. #7 closes when the PR merges.")
     }
 
+    /// The server words the line: the card shows it as is, and only maps its tone to a colour.
+    func testTheServersStateLineShowsAsIs() throws {
+        let d = try delivery(#"{"state":"stalled","stall_reason":"no_call","state_line":{"tone":"stalled","text":"Stalled: reworded on the server."},"started":true,"agent_id":null,"agent_name":null,"pr":null}"#)
+        XCTAssertEqual(d.line?.tone, .stalled)
+        XCTAssertEqual(d.line?.text, "Stalled: reworded on the server.")
+        let waits = try delivery(#"{"state":"running","state_line":{"tone":"needs_you","text":"Needs you."},"started":true,"agent_id":null,"agent_name":null,"pr":null}"#)
+        XCTAssertEqual(waits.line?.tone, .needsYou)
+        let new = try delivery(#"{"state":"blocked","state_line":{"tone":"blocked","text":"Blocked: a new state."},"started":true,"agent_id":null,"agent_name":null,"pr":null}"#)
+        XCTAssertEqual(new.line?.tone, .running, "a tone this build doesn't know takes running's colour")
+        XCTAssertEqual(new.line?.text, "Blocked: a new state.")
+        let planned = try delivery(#"{"state":"planned","state_line":null,"started":false,"agent_id":null,"agent_name":null,"pr":null}"#)
+        XCTAssertNil(planned.line)
+        // An older backend sends no state_line: today's wording (testEachStateReadsLikeTheWebCard has each state).
+        XCTAssertEqual(try delivery(Self.spec).line?.text, "Stalled: its run was lost when Loft restarted.")
+    }
+
     func testAButtonsAnswerCarriesTheDeliveryAndWhatItDid() throws {
         let r = try JSONCoding.decoder.decode(IssueDeliveryReply.self, from: Data(#"{"ok":true,"message":"Paused spec #333.","state":"paused","started":true,"can_resume":true,"agent_id":"dev","agent_name":"Dev","pr":334}"#.utf8))
         XCTAssertEqual(r.message, "Paused spec #333.")
@@ -72,7 +88,7 @@ final class DeliveryCardTests: XCTestCase {
             let json = #"{"ok":true,"duplicate":\#(duplicate),"ticket":50,"state":"running","stall_reason":null,"can_pause":true,"can_resume":false,"needs_human":false,"started":true,"agent_id":"dev","agent_name":"Dev","pr":51}"#
             let r = try JSONCoding.decoder.decode(IssueDeliveryReply.self, from: Data(json.utf8))
             XCTAssertNil(r.message)
-            XCTAssertEqual(r.delivery.stateLine?.text, "Running.")
+            XCTAssertEqual(r.delivery.line?.text, "Running.")
             XCTAssertEqual(r.delivery.progressLine(issue: 50), "With Dev on PR #51. Its reviewers look at it next; #50 closes when the PR merges.")
             XCTAssertTrue(r.delivery.showsPause && !r.delivery.showsResume)
         }
@@ -136,7 +152,7 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertEqual(api.deliveryLoads, loads, "events about other Deliveries leave it alone")
         store.apply(.delivery(repo: "Octo/Site", spec: 40))
         for _ in 0..<100 where store.deliveries["s"]?.state != "stalled" { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertEqual(store.deliveries["s"]?.stateLine?.text, "Stalled: the run Loft woke for its step failed.")
+        XCTAssertEqual(store.deliveries["s"]?.line?.text, "Stalled: the run Loft woke for its step failed.")
     }
 
     /// A card that left the screen is forgotten: reconnects and `delivery` events stop reloading it, until it's back.

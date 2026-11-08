@@ -33,6 +33,20 @@ test("a ticket or the final review waiting for the user is Needs you, over runni
   assert.equal(at("stalled", { stall_reason: "no_call", needs_human: true })?.tone, "stalled", "a stalled one says so");
 });
 
+test("the server's state line shows as is", () => {
+  const line = (state_line: { tone: string; text: string } | null) => deliveryStateLine({ state: "stalled", started: true, stall_reason: "no_call", state_line });
+  assert.deepEqual(line({ tone: "stalled", text: "Stalled: reworded on the server." }), { tone: "stalled", text: "Stalled: reworded on the server." });
+  assert.deepEqual(line({ tone: "needs_you", text: "Needs you." }), { tone: "needs_you", text: "Needs you." });
+  assert.deepEqual(line({ tone: "blocked", text: "Blocked: a new state." }), { tone: "running", text: "Blocked: a new state." }, "an unknown tone takes running's colour");
+  assert.equal(line(null), null);
+  assert.equal(deliveryStateLine({ state: "planned", started: false, state_line: { tone: "running", text: "x" } }), null, "not before it started");
+});
+
+test("an older server without a state line gets today's wording", () => {
+  assert.equal(at("stalled", { stall_reason: "restart" })?.text, "Stalled: its run was lost when Loft restarted.");
+  assert.deepEqual(deliveryStateLine({ state: "running", started: true }), { tone: "running", text: "Running." });
+});
+
 test("Resume shows only on a stalled or paused Delivery, or a ticket or final review waiting for the user", () => {
   const card = (state: string, can_resume: boolean, started = true) => deliveryButtons({ started, can_resume }).resume;
   assert.equal(card("stalled", true), true);

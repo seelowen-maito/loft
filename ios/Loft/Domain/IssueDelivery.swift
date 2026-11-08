@@ -14,11 +14,18 @@ struct IssueDelivery: Codable, Hashable {
         var number: Int
         var title: String
     }
+    /// The card's state line as the server words it: `tone` is running, stalled, paused, needs_you, final or done.
+    struct StateLine: Codable, Hashable {
+        var tone: String
+        var text: String
+    }
 
     /// planned | running | final_review | final_fixes | needs_human | stalled | paused | ready | settled | merged
     var state: String
     /// Why it stalled: run_failed, no_call or restart; nil unless stalled.
     var stallReason: String? = nil
+    /// The server's state line; nil before it started, and from a backend older than `state_line`.
+    var stateLine: StateLine? = nil
     /// Pause applies: it's running (its final review and fixes included), and no ticket waits for the user.
     var canPause: Bool? = nil
     /// Resume applies: it's stalled or paused, or a ticket or its final review waits for the user.
@@ -34,12 +41,15 @@ struct IssueDelivery: Codable, Hashable {
     var tickets: [Ticket]? = nil
 
     /// How a card's state line reads: the colour it takes.
-    enum Tone: String { case running, stalled, paused, needsYou, final, done }
+    enum Tone: String { case running, stalled, paused, needsYou = "needs_you", final, done }
 
-    /// The card's state line, or nil before it started. Waiting for the user (a ticket after too many change
-    /// rounds, or the final review) wins over running. The same words as the web card (deliveryState.ts).
-    var stateLine: (tone: Tone, text: String)? {
+    /// The line the card shows, or nil before it started: the server's `state_line` as is (a tone this build
+    /// doesn't know takes running's colour). A backend older than it sends none, so it's worded here like the web
+    /// card's fallback (deliveryState.ts): waiting for the user (a ticket after too many change rounds, or the
+    /// final review) wins over running.
+    var line: (tone: Tone, text: String)? {
         guard started else { return nil }
+        if let stateLine { return (Tone(rawValue: stateLine.tone) ?? .running, stateLine.text) }
         switch state {
         case "stalled": return (.stalled, "Stalled: \(Self.stallWhy(stallReason)).")
         case "paused": return (.paused, "Paused: Loft sends no wakes until you resume it.")

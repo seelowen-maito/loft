@@ -106,6 +106,8 @@ export type IssueDelivery = {
   state: string;
   /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
   stall_reason?: string | null;
+  /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
+  state_line?: { tone: string; text: string } | null;
   /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
   can_pause?: boolean;
   /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
