@@ -232,17 +232,6 @@ enum FixtureNeedsYou {
      "path": "/api/tasks/dbc521e2-042c-4485-a15d-956c162919ed/comments"
     },
     {
-     "body": {
-      "reopen": true,
-      "send": true,
-      "text": ""
-     },
-     "kind": "retry",
-     "label": "Reopen and send",
-     "method": "POST",
-     "path": "/api/tasks/dbc521e2-042c-4485-a15d-956c162919ed/comments"
-    },
-    {
      "kind": "open",
      "label": "Open issue",
      "target": {
@@ -259,10 +248,7 @@ enum FixtureNeedsYou {
     }
    ],
    "age_seconds": 0,
-   "agent": {
-    "id": "qa",
-    "name": "QA Agent"
-   },
+   "agent": null,
    "created_at": "2026-10-23T14:37:36.763444+00:00",
    "id": "task:dbc521e2-042c-4485-a15d-956c162919ed:failed",
    "links": [

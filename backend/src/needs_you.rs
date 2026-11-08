@@ -39,7 +39,7 @@ pub(crate) struct Item {
     text: String,
     created_at: String,
     links: Vec<Value>,
-    actions: Vec<Value>,
+    pub(crate) actions: Vec<Value>,
     /// What a push says: names and titles only, never tool input or message text.
     push: (String, String),
     /// Grouping key: the GitHub repo's name for PR items, else the task's or agent's project.
@@ -222,10 +222,9 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
+        // The answer goes to the issue's agent (a failed issue runs again with it); with nobody on it, the client
+        // asks for one (`agent_id`) or says it's kept as a note.
         let mut actions = vec![action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
-        if t.status == "failed" && t.agent_id.is_some() {
-            actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
-        }
         actions.push(open_task(&t.id));
         actions.push(dismiss(&format!("task:{}:{}", t.id, t.status)));
         items.push(Item {

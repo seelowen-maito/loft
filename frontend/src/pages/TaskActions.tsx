@@ -495,8 +495,11 @@ export function ClosedOnGithubCard({ task: t }: { task: Task }) {
 }
 
 /** The comment box under a task's thread. */
-export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Agent; agents: Agent[] }) {
+export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent?: Agent; agents: Agent[] }) {
   const [text, setText] = useState("");
+  // Nobody on the issue: pick who gets it, as a hand-off does, or keep it as a note.
+  const [picked, setPicked] = useState("");
+  const agent = onIt ?? agents.find((a) => a.id === picked);
   const box = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(box, text, 2);
   const [send, setSend] = useState(true);
@@ -506,6 +509,8 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const finished = FINISHED.includes(t.status);
+  // A failed issue always runs again with what you send; done or cancelled ones only when you ask.
+  const rerun = t.status === "failed" || (finished && reopen);
   // "@" in the box (comment or note) offers agents to mention; Escape closes it until the text changes.
   const [menuIndex, setMenuIndex] = useState(0);
   const [closedAt, setClosedAt] = useState<string | null>(null);
@@ -523,6 +528,7 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
   useEffect(() => {
     setText("");
     setReopen(false);
+    setPicked("");
     setError(null);
   }, [t.id]);
   useEffect(() => {
@@ -539,9 +545,10 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
     try {
       const sending = !!agent && send;
       const posting = !!t.github && github;
-      const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && finished && reopen });
+      const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && rerun, agent_id: onIt ? undefined : agent?.id });
       setText("");
       setReopen(false);
+      setPicked("");
       setNote(
         r.task ? `Reopened; ${agent!.name} is on it${r.queued ? " after its current run" : ""}.`
         : r.delivered_to ? `Sent to ${agent!.name}${r.queued ? "; it reads it after its current run" : ""}.`
@@ -555,7 +562,7 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
     }
   };
 
-  const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : finished && reopen ? "Reopen and send" : `Send to ${agent.name}`;
+  const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : rerun ? "Reopen and send" : `Send to ${agent.name}`;
   return (
     <div className="space-y-2">
       {flat.length > 0 && <MentionMenu groups={groups} index={Math.min(menuIndex, flat.length - 1)} marks={marks} onHover={setMenuIndex} onPick={pick} />}
@@ -592,13 +599,19 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
         <div className="flex flex-wrap items-center gap-3">
-          {agent && (
+          {!onIt && (
+            <select value={picked} onChange={(e) => setPicked(e.target.value)} className="chip bg-ink-850 text-[11px]" aria-label="Agent to send it to">
+              <option value="">Nobody: keep it as a note</option>
+              {agents.map((a) => <option key={a.id} value={a.id}>Send to {a.name}</option>)}
+            </select>
+          )}
+          {onIt && (
             <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2">
               <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} className="accent-[var(--color-accent)]" />
-              Send to {agent.name}
+              Send to {onIt.name}
             </label>
           )}
-          {agent && send && finished && (
+          {agent && send && finished && t.status !== "failed" && (
             <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run it again with this comment as the instruction">
               <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} className="accent-[var(--color-accent)]" />
               Reopen and run again

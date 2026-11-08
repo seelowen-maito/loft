@@ -599,8 +599,9 @@ export const api = {
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
-   * `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
+   * `reopen`: run a finished task again with it (a failed one always runs again); `agent_id`: on a task with nobody on it,
+   * hand it to this agent. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean; agent_id?: string }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
