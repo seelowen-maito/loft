@@ -1251,6 +1251,11 @@ impl Db {
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
     }
 
+    /// The database file, for backups (backup.rs), which read it through a connection of their own.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
+    }
+
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.
     #[cfg(test)]
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {

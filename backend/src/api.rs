@@ -106,6 +106,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
     // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
     let keep_push = body.get("push").is_none();
+    let keep_backup_dir = body.get("backup_dir").is_none();
     let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
     if keep_push {
         s.push = state.settings.get().push;
@@ -113,9 +114,19 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
         // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
         s.push.relay_url = state.settings.get().push.relay_url;
     }
+    if keep_backup_dir {
+        s.backup_dir = state.settings.get().backup_dir;
+    }
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
+    }
+    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
+    // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
+    if s.backup_dir != state.settings.get().backup_dir
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+    {
+        return Err(bad(why));
     }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),

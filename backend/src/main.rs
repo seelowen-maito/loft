@@ -2,6 +2,7 @@ mod agents;
 mod apns;
 mod api;
 mod avatar;
+mod backup;
 mod db;
 mod delivery;
 mod file_search;
@@ -131,6 +132,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
+    tokio::spawn(backup::scheduler(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))
@@ -139,6 +141,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
         .route("/settings", get(api::get_settings).put(api::put_settings))
+        .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
         .route("/repos", get(api::list_repos))
