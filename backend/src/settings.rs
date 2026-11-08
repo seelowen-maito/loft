@@ -35,6 +35,8 @@ pub struct Settings {
     /// `own` (yours go straight, agents' wait) or `all` (everything goes straight). Was the per-project fallback.
     pub comment_approval_default: String,
     pub push: Push,
+    /// Where the daily backups go (see backup.rs). Empty: `~/Library/Application Support/Loft/backups`.
+    pub backup_dir: String,
 }
 
 impl Settings {
@@ -83,6 +85,7 @@ impl Default for Settings {
             comment_approval: Default::default(),
             comment_approval_default: "ask".into(),
             push: Push::default(),
+            backup_dir: String::new(),
         }
     }
 }
@@ -123,6 +126,10 @@ impl Store {
         }
         if s.claude_bin.trim().is_empty() {
             bail!("Claude command can't be empty");
+        }
+        let backups = Path::new(s.backup_dir.trim());
+        if !s.backup_dir.trim().is_empty() && (!backups.is_absolute() || backups.components().any(|c| c == std::path::Component::ParentDir)) {
+            bail!("Backups folder must be a full path, like /Volumes/Disk/Loft backups");
         }
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&s)?)?;

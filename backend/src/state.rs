@@ -138,6 +138,8 @@ pub struct Runtime {
     pub github_inbox: Vec<crate::github_inbox::GhPr>,
     /// macOS folder requests in Loft's name that wait on an answer (mac_access.rs)
     pub tcc: crate::mac_access::Requests,
+    /// The backups folder, its newest backup and the last attempt's error (backup.rs)
+    pub backup: crate::backup::Status,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
 }

@@ -677,6 +677,41 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // Backups failing, with no good one for two days. One item until a good backup.
+    let backup = state.rt.lock().unwrap().backup.clone();
+    if let Some(err) = &backup.error
+        && backup.last.as_ref().is_none_or(|l| chrono::Local::now() - l.at >= chrono::Duration::hours(crate::backup::ALERT_AFTER_HOURS))
+    {
+        let id = format!("backup:{}", backup.last.as_ref().map(|l| l.at.to_rfc3339()).unwrap_or_default());
+        let since = match &backup.last {
+            Some(l) => format!("The last good one is from {}.", l.at.format("%b %-d, %H:%M")),
+            None => "There is no good backup yet.".into(),
+        };
+        let mut actions = vec![action("retry", "Back up now", "POST", "/api/backups".into(), json!({}))];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#backups", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "backup_failed",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Loft's backups are failing", MAX_TITLE),
+            reason: text(&format!("{since} {}", first_line(&err.message)), MAX_REASON),
+            text: text(&format!("{}
+
+Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
+            created_at: err.at.with_timezone(&Utc).to_rfc3339(),
+            links: vec![],
+            actions,
+            push: ("Loft's backups are failing".to_string(), since),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
     let dismissed: HashSet<String> = state.db.dismissed_needs_you().map_err(e)?.into_iter().collect();
     items.retain(|i| !dismissed.contains(&i.id));
     // Most urgent first; within the same urgency, the longest waiting first.

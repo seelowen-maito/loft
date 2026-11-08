@@ -1,0 +1,416 @@
+//! Backups of Loft's database (`.loft/loft.db`) and `settings.json`: one a day while Loft runs, plus
+//! Back up now in Settings. Each is a dated folder in the backups folder, owner-only, made with SQLite's
+//! `VACUUM INTO` (a consistent copy while Loft writes, never a file copy of the live WAL database).
+//! Restoring one is manual: see docs/backups.md.
+
+use std::collections::HashSet;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use axum::Json;
+use axum::extract::State;
+use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone};
+use rusqlite::{Connection, OpenFlags};
+use serde::Serialize;
+
+use crate::api::ApiResult;
+use crate::state::AppState;
+
+/// Under the home folder, when Settings names no other.
+const DEFAULT_DIR: &str = "Library/Application Support/Loft/backups";
+/// A backup's folder name: when it was made, in local time.
+const NAME: &str = "%Y-%m-%d_%H%M%S";
+const KEEP_DAILY: usize = 7;
+const KEEP_WEEKLY: usize = 4;
+/// A day's backup waits for no agent to be running, but not past this since the last one.
+const FORCE_AFTER_HOURS: i64 = 36;
+/// After a failure, the daily backup tries again no sooner than this.
+const RETRY_AFTER_MINUTES: i64 = 60;
+/// A failure shows in Needs you once the last good backup is older than this.
+pub const ALERT_AFTER_HOURS: i64 = 48;
+
+/// What Settings and Needs you show: the backups folder, the newest good backup in it, and the last
+/// attempt's error (cleared by a good one).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Status {
+    pub dir: PathBuf,
+    pub last: Option<Last>,
+    pub error: Option<Failure>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Last {
+    pub at: DateTime<Local>,
+    /// The database and settings together.
+    pub bytes: u64,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Failure {
+    pub message: String,
+    pub at: DateTime<Local>,
+}
+
+/// The backups folder Settings names, or the default one.
+pub fn dir(s: &crate::settings::Settings) -> PathBuf {
+    match s.backup_dir.trim() {
+        "" => dirs::home_dir().unwrap_or_default().join(DEFAULT_DIR),
+        d => PathBuf::from(d),
+    }
+}
+
+/// Backs up `db` (and `settings`, when there is one) into a new folder under `root` named for `at`, and
+/// checks the copy. Blocking. The folder appears only once it's complete.
+pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Result<Last> {
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root).with_context(|| format!("can't create {}", root.display()))?;
+    let done = root.join(at.format(NAME).to_string());
+    let partial = done.with_extension("partial");
+    let _ = std::fs::remove_dir_all(&partial);
+    std::fs::DirBuilder::new().mode(0o700).create(&partial).with_context(|| format!("can't create {}", partial.display()))?;
+    let made = (|| -> Result<u64> {
+        let out = partial.join("loft.db");
+        // Never create: a missing database is an error, not an empty backup.
+        let src = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        src.execute("VACUUM INTO ?1", [out.to_string_lossy()])?;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
+        let check: String = Connection::open_with_flags(&out, OpenFlags::SQLITE_OPEN_READ_ONLY)?.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if check != "ok" {
+            bail!("the copy failed its integrity check: {check}");
+        }
+        let mut bytes = std::fs::metadata(&out)?.len();
+        if settings.exists() {
+            let to = partial.join("settings.json");
+            std::fs::copy(settings, &to)?;
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))?;
+            bytes += std::fs::metadata(&to)?.len();
+        }
+        Ok(bytes)
+    })();
+    let bytes = match made.and_then(|b| std::fs::rename(&partial, &done).map(|_| b).map_err(Into::into)) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(e);
+        }
+    };
+    Ok(Last { at: local(at), bytes, path: done })
+}
+
+fn local(at: NaiveDateTime) -> DateTime<Local> {
+    Local.from_local_datetime(&at).earliest().unwrap_or_else(|| at.and_utc().with_timezone(&Local))
+}
+
+/// The backups in `root`, by when they were made. Anything else there (other files, unfinished
+/// `.partial` folders) is never counted or touched.
+fn list(root: &Path) -> Vec<NaiveDateTime> {
+    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    rd.flatten()
+        .filter(|e| e.path().join("loft.db").is_file())
+        .filter_map(|e| NaiveDateTime::parse_from_str(&e.file_name().to_string_lossy(), NAME).ok())
+        .collect()
+}
+
+/// The newest backup in `root`.
+pub fn newest(root: &Path) -> Option<Last> {
+    let at = list(root).into_iter().max()?;
+    let path = root.join(at.format(NAME).to_string());
+    let size = |f: &str| std::fs::metadata(path.join(f)).map(|m| m.len()).unwrap_or(0);
+    Some(Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path })
+}
+
+/// Which backups to keep: the newest of each of the last 7 days that have one, and the newest of each
+/// of the last 4 weeks that have one.
+fn keep(mut times: Vec<NaiveDateTime>) -> HashSet<NaiveDateTime> {
+    times.sort_unstable_by(|a, b| b.cmp(a));
+    let mut kept = HashSet::new();
+    let (mut days, mut weeks) = (vec![], vec![]);
+    for t in times {
+        let (day, week) = (t.date(), (t.iso_week().year(), t.iso_week().week()));
+        if days.len() < KEEP_DAILY && !days.contains(&day) {
+            days.push(day);
+            kept.insert(t);
+        }
+        if weeks.len() < KEEP_WEEKLY && !weeks.contains(&week) {
+            weeks.push(week);
+            kept.insert(t);
+        }
+    }
+    kept
+}
+
+/// Deletes the backups in `root` that `keep` doesn't keep.
+pub fn prune(root: &Path) {
+    let times = list(root);
+    let kept = keep(times.clone());
+    for t in times.into_iter().filter(|t| !kept.contains(t)) {
+        if let Err(e) = std::fs::remove_dir_all(root.join(t.format(NAME).to_string())) {
+            tracing::warn!("deleting an old backup: {e}");
+        }
+    }
+}
+
+/// One backup at a time, whether the day's or Back up now.
+static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Makes a backup now and prunes old ones, then records the result for Settings and Needs you.
+pub async fn run(state: &AppState) -> Status {
+    let _one = RUNNING.lock().await;
+    let root = dir(&state.settings.get());
+    let db = state.db.path().unwrap_or_default();
+    let settings = db.with_file_name("settings.json");
+    let r = {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let made = make(&db, &settings, &root, Local::now().naive_local());
+            if made.is_ok() {
+                prune(&root);
+            }
+            (made, newest(&root))
+        })
+        .await
+    };
+    let (made, last) = r.unwrap_or_else(|e| (Err(anyhow::anyhow!("backup task failed: {e}")), None));
+    let mut rt = state.rt.lock().unwrap();
+    let s = &mut rt.backup;
+    s.dir = root;
+    s.last = last;
+    match made {
+        Ok(_) => s.error = None,
+        Err(e) => {
+            tracing::warn!("backup failed: {e:#}");
+            s.error = Some(Failure { message: format!("{e:#}"), at: Local::now() });
+        }
+    }
+    s.clone()
+}
+
+/// Whether the day's backup should run now: none yet today, Loft quiet (or the last one too old to keep
+/// waiting), and no failure within the retry wait.
+fn due(s: &Status, now: DateTime<Local>, quiet: bool) -> bool {
+    if s.error.as_ref().is_some_and(|e| now - e.at < chrono::Duration::minutes(RETRY_AFTER_MINUTES)) {
+        return false;
+    }
+    match &s.last {
+        None => true,
+        Some(l) if l.at.date_naive() == now.date_naive() => false,
+        Some(l) => quiet || now - l.at >= chrono::Duration::hours(FORCE_AFTER_HOURS),
+    }
+}
+
+/// The day's backup. Looks at the backups folder at start and whenever Settings points elsewhere;
+/// otherwise each tick reads only what the last backup recorded.
+pub async fn scheduler(state: AppState) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
+    loop {
+        tick.tick().await;
+        let root = dir(&state.settings.get());
+        if state.rt.lock().unwrap().backup.dir != root {
+            let r = root.clone();
+            let last = tokio::task::spawn_blocking(move || newest(&r)).await.unwrap_or(None);
+            state.rt.lock().unwrap().backup = Status { dir: root, last, error: None };
+        }
+        let go = {
+            let rt = state.rt.lock().unwrap();
+            due(&rt.backup, Local::now(), rt.running.is_empty())
+        };
+        if go {
+            run(&state).await;
+        }
+    }
+}
+
+/// `GET /api/backups`: the folder, the last backup and the last error.
+pub async fn get(State(state): State<AppState>) -> Json<Status> {
+    let mut s = state.rt.lock().unwrap().backup.clone();
+    // Before the first tick, or right after Settings moved the folder.
+    s.dir = dir(&state.settings.get());
+    Json(s)
+}
+
+/// `POST /api/backups`: Back up now. Answers once it's done, with the result.
+pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
+    Ok(Json(run(&state).await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    fn t(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    fn temp() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("loft-backup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A state whose backups go to a temp folder, never the real one.
+    fn state_backing_up_to(root: &Path) -> AppState {
+        let st = crate::tasks::tests::state();
+        let mut s = st.settings.get();
+        s.backup_dir = root.to_string_lossy().into();
+        st.settings.save(s).unwrap();
+        st
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().mode() & 0o777
+    }
+
+    #[tokio::test]
+    async fn a_backup_made_while_loft_writes_is_complete_owner_only_and_restores_the_agents() {
+        let root = temp().join("backups");
+        let st = state_backing_up_to(&root);
+        for i in 0..20 {
+            crate::tasks::tests::agent(&st, &format!("Agent {i}"));
+        }
+        // Keep writing through Loft's own connection while the backup runs.
+        let writer = {
+            let st = st.clone();
+            std::thread::spawn(move || {
+                for i in 0..300 {
+                    crate::tasks::tests::agent(&st, &format!("During {i}"));
+                }
+            })
+        };
+        let s = run(&st).await;
+        writer.join().unwrap();
+
+        assert!(s.error.is_none(), "{s:?}");
+        let last = s.last.expect("a backup");
+        assert!(last.path.starts_with(&root) && last.bytes > 0);
+        assert_eq!((mode(&root), mode(&last.path)), (0o700, 0o700));
+        assert_eq!((mode(&last.path.join("loft.db")), mode(&last.path.join("settings.json"))), (0o600, 0o600));
+
+        let copy = crate::db::Db::open(&last.path.join("loft.db")).unwrap();
+        let check: String = copy.conn().query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(check, "ok");
+        let names: Vec<String> = copy.list_agents().unwrap().into_iter().map(|a| a.name).collect();
+        assert!((0..20).all(|i| names.contains(&format!("Agent {i}"))), "the agents made before are there: {names:?}");
+        let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(last.path.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["backup_dir"], serde_json::json!(root.to_string_lossy()));
+    }
+
+    #[tokio::test]
+    async fn a_failed_backup_is_recorded_until_a_good_one_and_leaves_nothing_behind() {
+        let base = temp();
+        // A file where the backups folder should be.
+        std::fs::write(base.join("taken"), "").unwrap();
+        let st = state_backing_up_to(&base.join("taken"));
+        let s = run(&st).await;
+        assert!(s.last.is_none());
+        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("can't create")), "{s:?}");
+        assert!(st.rt.lock().unwrap().backup.error.is_some(), "Settings and Needs you see it");
+
+        let mut set = st.settings.get();
+        set.backup_dir = base.join("ok").to_string_lossy().into();
+        st.settings.save(set).unwrap();
+        let s = run(&st).await;
+        assert!(s.error.is_none() && s.last.is_some(), "a good backup clears the error");
+
+        // A database that isn't there fails without leaving a half-made folder.
+        let root = base.join("missing-db");
+        let err = make(&base.join("nope.db"), &base.join("nope.json"), &root, t("2026-11-08 03:00")).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no .partial folder is left");
+    }
+
+    #[test]
+    fn retention_keeps_seven_daily_and_four_weekly() {
+        // Two backups a day (03:00 and 15:00) for 60 days, up to Sunday 2026-11-08.
+        let end = t("2026-11-08 15:00");
+        let all: Vec<NaiveDateTime> = (0..120).map(|i| end - chrono::Duration::hours(12 * i)).collect();
+        let mut kept: Vec<NaiveDateTime> = keep(all).into_iter().collect();
+        kept.sort();
+        let want: Vec<NaiveDateTime> = [
+            // The newest of each of the 3 weeks before this one (ISO weeks end on Sunday).
+            "2026-10-18 15:00", "2026-10-25 15:00",
+            "2026-11-01 15:00",
+            // The newest of each of the last 7 days; today's is this week's too.
+            "2026-11-02 15:00", "2026-11-03 15:00", "2026-11-04 15:00", "2026-11-05 15:00", "2026-11-06 15:00", "2026-11-07 15:00", "2026-11-08 15:00",
+        ].iter().map(|s| t(s)).collect();
+        assert_eq!(kept, want);
+    }
+
+    #[test]
+    fn prune_deletes_only_old_backups() {
+        let root = temp();
+        let end = t("2026-11-08 03:00");
+        for i in 0..40 {
+            let d = root.join((end - chrono::Duration::days(i)).format(NAME).to_string());
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("loft.db"), "x").unwrap();
+        }
+        std::fs::write(root.join("notes.txt"), "mine").unwrap();
+        std::fs::create_dir_all(root.join("2020-01-01_000000.partial")).unwrap();
+        prune(&root);
+        assert_eq!(list(&root).len(), 10, "7 days + the 3 earlier weeks");
+        assert!(root.join("notes.txt").exists() && root.join("2020-01-01_000000.partial").exists(), "anything else is left alone");
+        assert_eq!(newest(&root).unwrap().at.naive_local(), end);
+    }
+
+    #[test]
+    fn the_days_backup_waits_for_a_quiet_moment_but_not_forever() {
+        let now = local(t("2026-11-08 10:00"));
+        let at = |s: &str| Status { last: Some(Last { at: local(t(s)), bytes: 1, path: PathBuf::new() }), ..Default::default() };
+        assert!(due(&Status::default(), now, false), "never backed up: at once");
+        assert!(!due(&at("2026-11-08 01:00"), now, true), "one today already");
+        assert!(due(&at("2026-11-07 20:00"), now, true), "a new day, quiet");
+        assert!(!due(&at("2026-11-07 20:00"), now, false), "a new day, agents busy: waits");
+        assert!(due(&at("2026-11-06 20:00"), now, false), "36 hours: no more waiting");
+        let mut failed = at("2026-11-07 20:00");
+        failed.error = Some(Failure { message: "disk gone".into(), at: now - chrono::Duration::minutes(10) });
+        assert!(!due(&failed, now, true), "just failed: waits an hour");
+        failed.error.as_mut().unwrap().at = now - chrono::Duration::minutes(61);
+        assert!(due(&failed, now, true));
+    }
+
+    #[test]
+    fn failures_show_in_needs_you_after_two_days_without_a_good_backup() {
+        let st = crate::tasks::tests::state();
+        let items = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "backup_failed").cloned().collect::<Vec<_>>();
+        let now = Local::now();
+        let set = |last_hours_ago: Option<i64>, failed: bool| {
+            st.rt.lock().unwrap().backup = Status {
+                dir: "/Volumes/Gone/backups".into(),
+                last: last_hours_ago.map(|h| Last { at: now - chrono::Duration::hours(h), bytes: 1, path: PathBuf::new() }),
+                error: failed.then(|| Failure { message: "can't create /Volumes/Gone/backups".into(), at: Local::now() }),
+            };
+        };
+        set(Some(47), true);
+        assert!(items(&st).is_empty(), "a good one within two days: not yet");
+        set(Some(49), false);
+        assert!(items(&st).is_empty(), "no failure: nothing to say");
+        set(Some(49), true);
+        let i = items(&st);
+        assert_eq!(i.len(), 1);
+        assert_eq!((i[0]["urgency"].clone(), i[0]["actions"][0]["path"].clone()), (serde_json::json!(1), serde_json::json!("/api/backups")));
+        assert!(i[0]["text"].as_str().unwrap().contains("/Volumes/Gone/backups"));
+        let id = i[0]["id"].clone();
+        set(Some(49), true);
+        assert_eq!(items(&st)[0]["id"], id, "the same item while retries keep failing");
+        set(None, true);
+        assert_eq!(items(&st).len(), 1, "never a good one");
+    }
+
+    #[tokio::test]
+    async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft() {
+        let st = crate::tasks::tests::state();
+        let put = |dir: String| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "backup_dir": dir })));
+        assert!(put("backups".into()).await.is_err(), "relative");
+        assert!(put("/Volumes/Disk/../../tmp".into()).await.is_err(), "with ..");
+        let inside = st.cfg.storage_dir.join("agent-1/backups");
+        assert!(put(inside.to_string_lossy().into()).await.is_err(), "agents could read it");
+        assert!(put("/Volumes/Disk/Loft backups".into()).await.is_ok());
+        assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
+        // A client that doesn't know the field keeps it.
+        let _ = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir }))).await.unwrap();
+        assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
+    }
+}
