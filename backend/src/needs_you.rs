@@ -246,6 +246,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
+        // The answer goes to the issue's agent (a failed issue runs again with it); with nobody on it, the client
+        // asks for one (`agent_id`) or says it's kept as a note.
         let mut actions = vec![];
         if t.status == "blocked"
             && let Some(d) = by_rounds.iter().find(|d| crate::delivery::blocked_by_rounds(d, t))

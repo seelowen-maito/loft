@@ -143,6 +143,7 @@ export function PushSettings() {
           </div>
         ) : (
           <>
+            {status.relay_refused && <p className="text-[12.5px] text-bad">Your relay key no longer works: Sign in again. Pushes through the relay are paused.</p>}
             <p className="text-[12px] text-fg-3">
               Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
               and are never stored. {portal ? "Press Sign in and allow it on the portal; or paste a relay key." : "Paste the relay key you were given."}

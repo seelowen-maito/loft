@@ -10,6 +10,7 @@
     { "source": "/keys", "destination": "/api/keys" },
     { "source": "/connect", "destination": "/api/connect" },
     { "source": "/keys/revoke", "destination": "/api/revoke" },
-    { "source": "/account/delete", "destination": "/api/account-delete" }
+    { "source": "/account/delete", "destination": "/api/account-delete" },
+    { "source": "/signout", "destination": "/api/signout" }
   ]
 }

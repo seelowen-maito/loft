@@ -130,11 +130,11 @@ final class LoftStore {
     /// `text` is the user's words for answer and retry.
     /// Returns false when it had already been handled (404/409: answered elsewhere, or the item is gone): not an error.
     @discardableResult
-    func perform(_ action: NeedsYouAction, text: String? = nil) async throws -> Bool {
+    func perform(_ action: NeedsYouAction, text: String? = nil, agentId: String? = nil) async throws -> Bool {
         let api = try requireWrite()
         guard let method = action.method, let path = action.path else { return true }
         do {
-            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString))
+            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString, agentId: agentId))
         } catch APIError.server(let status, _) where status == 404 || status == 409 {
             await refreshNeedsYou()
             return false

@@ -134,7 +134,7 @@ test("a relay key is a secret: only its hash and label are stored", async () => 
 
 test("the only endpoint that hands out keys is the portal's: behind Sign in with Apple, or a code a signed-in user approved", async () => {
   const { readdir } = await import("node:fs/promises");
-  assert.deepEqual((await readdir(new URL("../api/", import.meta.url))).sort(), ["account-delete.js", "auth-callback.js", "auth-start.js", "connect.js", "keys.js", "pair-poll.js", "pair.js", "portal.js", "push.js", "revoke.js"]);
+  assert.deepEqual((await readdir(new URL("../api/", import.meta.url))).sort(), ["account-delete.js", "auth-callback.js", "auth-start.js", "connect.js", "keys.js", "pair-poll.js", "pair.js", "portal.js", "push.js", "revoke.js", "signout.js"]);
 });
 
 test("a push is forwarded to Apple's host for its environment, with the Loft topic and the payload unchanged", async () => {
@@ -447,13 +447,29 @@ test("an oversized request is refused from its length, before reading it", async
   assert.equal(res.status, 413);
 });
 
-test("relay/ holds no one's own hosts or ids: every value comes from the environment", async () => {
+test("a request declaring an oversized body costs no store command", async () => {
+  commands.length = 0;
+  const validShape = `lrk_${"A".repeat(43)}`;
+  const res = await push(new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${validShape}`, "content-length": "999999" }, body: "{}" }), env);
+  assert.equal(res.status, 413);
+  assert.deepEqual(commands, []);
+});
+
+test("relay/ holds no one's own hosts or ids, bar the official relay: every value comes from the environment", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const files = (await readdir(new URL("../", import.meta.url), { recursive: true })).filter((f) => /\.(js|json|md)$/.test(f) && !f.includes("node_modules") && !f.startsWith("test"));
-  const allowed = /^(appleid\.apple\.com|api(\.sandbox)?\.push\.apple\.com|developer\.apple\.com|openapi\.vercel\.sh|portal\.get-loft\.com|(loft-push-relay|<project>)\.vercel\.app|[\w.-]*example(\.(com|org))?|relay|127\.0\.0\.1)$/;
+  const allowed = /^(appleid\.apple\.com|api(\.sandbox)?\.push\.apple\.com|developer\.apple\.com|openapi\.vercel\.sh|(loft-push-relay|<project>)\.vercel\.app|[\w.-]*example(\.(com|org))?|relay|127\.0\.0\.1)$/;
   for (const f of files) {
     const text = await readFile(new URL(`../${f}`, import.meta.url), "utf8");
-    for (const [, host] of text.matchAll(/https?:\/\/([^/\s"'`)<>:${]+)/g)) assert.match(host, allowed, `${f}: ${host}`);
+    for (const m of text.matchAll(/https?:\/\/([^/\s"'`)<>:${]+)/g)) {
+      const host = m[1];
+      if (host === "portal.get-loft.com") {
+        // The built-in default in backend/src/apns.rs: named only as the official relay, never as a value to set.
+        assert.match(text.slice(Math.max(0, m.index - 40), m.index), /the official relay \(`$/, `${f}: ${host}`);
+        continue;
+      }
+      assert.match(host, allowed, `${f}: ${host}`);
+    }
     for (const [id] of text.matchAll(/\b(com|is|io)\.[a-z0-9-]+\.[a-z0-9.-]+/g)) assert.match(id, /^com\.example\./, `${f}: ${id}`);
   }
 });

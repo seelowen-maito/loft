@@ -69,6 +69,10 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 { "kind": "answer", "label": "Answer", "method": "POST", "path": "/api/agents/<id>/messages",
   "body": { "text": "", "meta": { "grill": { "role": "answer", "session_id": "…", "question_id": "…" } } } }
 { "kind": "answer", "label": "Reply on the issue", "method": "POST", "path": "/api/tasks/<id>/comments", "body": { "text": "", "send": true } }
+// The reply goes to the issue's agent and hands the turn back: blocked or waiting_approval moves to in_progress,
+// failed runs again with the reply. The item clears at once. When the item has no `agent`, ask which agent to
+// send it to and add `"agent_id"` (the agent takes the issue); without one the reply is kept as a private note and
+// the response's `delivered_to` is null, so say so (and dismiss the item if the user wants it gone).
 
 // Navigation, no request: `target` is { screen: "chat", agent_id } | { screen: "task", task_id } | { url }.
 { "kind": "open", "label": "Open chat", "target": { "screen": "chat", "agent_id": "…" } }

@@ -266,8 +266,10 @@ export const portalHome = (s: Pick<PushStatus, "relay_url" | "signin">): string 
 /** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
 export type PushStatus = {
   path: "own_key" | "relay" | "none";
-  /** Whether a relay key is stored. */
+  /** Whether a relay key is stored and the relay hasn't refused it. */
   relay_key: boolean;
+  /** The relay answered 401 to the stored key: pushes through it stopped until the user signs in again or pastes a new key. */
+  relay_refused: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
   /** While Sign in waits: the confirmation code the user types on the portal's Allow page (null from a relay that gives none). */
@@ -611,8 +613,9 @@ export const api = {
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
-   * `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
+   * `reopen`: run a finished task again with it (a failed one always runs again); `agent_id`: on a task with nobody on it,
+   * hand it to this agent. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean; agent_id?: string }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
