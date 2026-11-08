@@ -132,7 +132,8 @@ repo, so anyone can run their own.
 
 10. Settings → Push notifications → **Relay address**: `PORTAL_URL` (`https://<project>.vercel.app`); the portal is at
     the same address. Or `LOFT_RELAY_URL` for a scripted install. Either overrides `RELAY_URL` in `backend/src/apns.rs`,
-    the official relay (`https://portal.get-loft.com`).
+    which points at the official relay (`https://portal.get-loft.com`): that's the default, never a value for your own
+    relay.
 
 **Test it end to end**
 
