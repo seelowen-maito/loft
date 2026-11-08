@@ -116,6 +116,8 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   }
   const refused = invalid(b, env);
   if (refused) return refused;
+  // Hex has no case for Apple: one spelling, so another case of a bound token is the same device.
+  const token = b.device_token.toLowerCase();
   // The payload is forwarded exactly as it came.
   const body = JSON.stringify(b.payload);
   if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) return tooBig();
@@ -124,11 +126,11 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   try {
     account = JSON.parse(record).account;
   } catch {}
-  if (!(await bound(store, b.device_token, account ? `account:${account}` : `key:${who}`, account)))
+  if (!(await bound(store, token, account ? `account:${account}` : `key:${who}`, account)))
     return json(403, { error: "this device belongs to another account: only that account's relay keys can push to it" });
   let apple;
   try {
-    apple = await send(env, { deviceToken: b.device_token, environment: b.environment, priority: b.priority ?? 10, collapseId: b.collapse_id, body }, appleTimeoutMs);
+    apple = await send(env, { deviceToken: token, environment: b.environment, priority: b.priority ?? 10, collapseId: b.collapse_id, body }, appleTimeoutMs);
   } catch (e) {
     // The kind of failure only: never the payload, the device token or the key.
     console.error(`push relay: ${e.key ? "the APNs key can't be used" : e.timeout ? "Apple timed out" : "Apple unreachable"} (${e.code ?? e.name})`);

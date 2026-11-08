@@ -51,7 +51,7 @@ counted in the store under the key's hash. Every authorized request counts, whet
 The first push the relay forwards to a device token binds that device to the key's account, or to the key itself for
 a key made with the script (no account). From then on only that account's keys push to it: the Lofts signed in to one
 account share the phone, and a key of any other account gets `403` ("this device belongs to another account") and
-isn't forwarded. The binding is `device-owner:<sha256 of the token>` in the store, never the token. Each push to the
+isn't forwarded. The binding is `device-owner:<sha256 of the lower-case token>` in the store, never the token. Each push to the
 device keeps it 30 days more; after 30 days without one it expires, and the next push binds the device again.
 Deleting an account on the portal deletes its bindings (it lists its devices' hashes under `account-devices:<id>`). Revoking
 a key made with the script leaves its devices bound until they expire; deleting their `device-owner:*` entries frees

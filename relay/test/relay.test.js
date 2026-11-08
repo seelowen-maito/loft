@@ -238,6 +238,12 @@ test("the first push to a device binds it to its key: another key's push gets 40
   assert.equal(refused.status, 403);
   assert.deepEqual(await refused.json(), { error: "this device belongs to another account: only that account's relay keys can push to it" });
   assert.equal(production.seen.length, 1, "the refused push wasn't forwarded");
+  for (const spelling of [DEVICE.toUpperCase(), "A1a1".repeat(16)]) {
+    assert.equal((await send(theirs, { device_token: spelling })).status, 403, `${spelling} is the same device`);
+  }
+  assert.equal(production.seen.length, 1, "no spelling of it was forwarded");
+  assert.equal((await send(mine, { device_token: DEVICE.toUpperCase() })).status, 200, "the key holding it pushes in any case");
+  assert.equal(production.seen.at(-1).path, `/3/device/${DEVICE}`, "Apple gets the token lower-case");
   assert.equal((await send(mine)).status, 200, "the key holding it still pushes");
   assert.equal((await send(theirs, { device_token: OTHER_DEVICE })).status, 200, "another phone is free");
   assert.ok(![...store.keys(), ...store.values()].some((v) => v.toLowerCase().includes(DEVICE)), "only the token's hash is stored");
