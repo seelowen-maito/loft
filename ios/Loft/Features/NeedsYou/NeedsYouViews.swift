@@ -222,7 +222,8 @@ private struct NeedsYouNotice: View {
                 .accessibilityIdentifier("needsYouNotice")
                 .task(id: n) {
                     UIAccessibility.post(notification: .announcement, argument: n)
-                    try? await Task.sleep(for: .seconds(2))
+                    // A cancelled wait (this copy left the screen) must not clear it for the copy that shows it.
+                    guard (try? await Task.sleep(for: .seconds(2))) != nil, store.needsYouNotice == n else { return }
                     store.needsYouNotice = nil
                 }
         }
