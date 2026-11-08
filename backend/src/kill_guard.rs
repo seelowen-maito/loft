@@ -135,12 +135,24 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
             // Only a name that is exactly kill, pkill or killall counts: `unset skills` or `alias skillcheck=...`
             // stop nothing.
             "unset" | "unfunction" | "unhash" | "disable" | "enable" | "alias" | "hash" | "functions" => {
-                for a in args.iter().filter(|a| !a.starts_with(['-', '+'])) {
-                    let (n, value) = a.split_once('=').filter(|_| base(name) == "alias").unzip();
+                let maps = matches!(base(name), "alias" | "hash");
+                let mut it = args.iter();
+                while let Some(a) = it.next() {
+                    if a.starts_with(['-', '+']) {
+                        // bash's `hash -p /bin/kill k` points `k` at the path that follows.
+                        if base(name) == "hash" && a.starts_with('-') && a.contains('p') {
+                            if let Some(path) = it.next() {
+                                f.add(scan(path, depth + 1, shell));
+                            }
+                        }
+                        continue;
+                    }
+                    let (n, value) = a.split_once('=').filter(|_| maps).unzip();
                     let n = n.unwrap_or(a.as_str());
                     // zsh's `unset 'functions[kill]'` removes the function too.
                     f.unscoped |= KILLS.contains(&n) || subscript(n).is_some_and(|k| KILLS.contains(&k));
-                    // What an alias runs: `alias k=/bin/kill` reaches the real kill under another name.
+                    // What an alias or a hashed name runs: `alias k=/bin/kill` and zsh's `hash k=/bin/kill` reach
+                    // the real kill under another name.
                     if let Some(value) = value {
                         f.add(scan(value, depth + 1, shell));
                     }
@@ -228,7 +240,6 @@ fn base(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or_default()
 }
 
-/// The name a `NAME=value` (or `NAME+=value`) word assigns.
 /// The key of an element of a zsh special parameter that holds functions or aliases (`functions[kill]`,
 /// `dis_functions[kill]`, `aliases[kill]`), quotes removed.
 fn subscript(w: &str) -> Option<&str> {
@@ -237,6 +248,7 @@ fn subscript(w: &str) -> Option<&str> {
     params.contains(&param).then(|| key.trim_matches(['"', '\'', '\\']))
 }
 
+/// The name a `NAME=value` (or `NAME+=value`) word assigns.
 fn assignment(w: &str) -> Option<&str> {
     let (k, _) = w.split_once('=')?;
     let k = k.strip_suffix('+').unwrap_or(k);
@@ -854,6 +866,10 @@ mod tests {
             "disable -f kill; kill 12",
             "alias k=/bin/kill; k 12",
             "hash -p /bin/kill kill",
+            "hash -p /bin/kill k",
+            "hash -p /bin/kill k; k 12",
+            "hash k=/bin/kill; k 12",
+            "hash -r k=/usr/bin/pkill",
             "kill() { /bin/kill \"$@\"; }; kill 12",
             "function kill { command kill \"$@\"; }",
         ] {
