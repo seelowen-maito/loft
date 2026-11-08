@@ -328,6 +328,13 @@ fn brief(state: &AppState, t: &Task, note: &str) -> String {
 
 /// Hand a task to an agent and start it (or queue it behind the agent's current run).
 /// `by` is the agent delegating it, or None when the user started it.
+fn refuse_spec(t: &Task) -> Result<(), ApiError> {
+    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
+        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
+    }
+    Ok(())
+}
+
 pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: Option<&Agent>) -> Result<(Task, bool), ApiError> {
     let mut t = state.db.get_task(id)?.ok_or_else(not_found)?;
     if is_active(&t) {
@@ -336,9 +343,7 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     if is_closed(&t) {
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is {}. Reopen it before running it again.", t.status)));
     }
-    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
-        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
-    }
+    refuse_spec(&t)?;
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
     let ts = now();
@@ -696,6 +701,8 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         if agent.is_none() {
             return Err(bad("This task has no agent. Run it with an agent instead."));
         }
+        // What `execute` would refuse, before the task is touched: a refused rerun leaves it as it was.
+        refuse_spec(&t)?;
         let mut reopened = t.clone();
         reopened.status = "ready".into();
         state.db.save_task(&reopened)?;
@@ -1340,6 +1347,20 @@ pub(crate) mod tests {
         stuck(&st, &t.id, "failed");
         let item = crate::needs_you::collect(&st).unwrap().into_iter().find(|i| i.task_id.as_deref() == Some(t.id.as_str())).unwrap();
         assert!(!item.actions.iter().any(|x| x["kind"] == "retry"), "{:?}", item.actions);
+    }
+
+    #[tokio::test]
+    async fn a_refused_rerun_leaves_the_failed_issue_failed() {
+        let st = state();
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        let (t, _) = create(&st, &json!({ "title": "Settings", "agent_id": a.id, "labels": ["spec"] }), "user").unwrap();
+        stuck(&st, &t.id, "failed");
+        let before = st.db.list_task_comments(&t.id, 50, None).unwrap().len();
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), comment("Try again", true, false)).await.is_err());
+        assert_eq!(status_of(&st, &t.id), "failed");
+        assert_eq!(st.db.list_task_comments(&t.id, 50, None).unwrap().len(), before, "no Reopened entry");
+        assert!(needs_you(&st, &t.id), "still waiting on you");
     }
 
     #[tokio::test]
