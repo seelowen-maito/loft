@@ -171,7 +171,7 @@ fn relay_key_path() -> PathBuf {
     key_dir().join("relay-key")
 }
 
-/// Marks the stored relay key as refused by the relay (a 401), so no more pushes go out with it.
+/// Holds the hash of the relay key the relay refused (a 401), so no more pushes go out with that key.
 fn refused_path() -> PathBuf {
     key_dir().join("relay-key-refused")
 }
@@ -181,13 +181,22 @@ pub fn relay_key_present() -> bool {
     relay_key_path().is_file() && !relay_key_refused()
 }
 
-/// The relay answered 401 to the stored key: it was revoked or never existed. Signing in or pasting a new key clears it.
+/// The relay answered 401 to the stored key: it was revoked or never existed. A different key (signing in, pasting one) is not refused, whatever an older answer said.
 pub fn relay_key_refused() -> bool {
-    relay_key_path().is_file() && refused_path().is_file()
+    let Ok(key) = std::fs::read_to_string(relay_key_path()) else {
+        return false;
+    };
+    std::fs::read_to_string(refused_path()).is_ok_and(|h| h == key_hash(&key))
 }
 
-fn clear_refused() {
-    let _ = std::fs::remove_file(refused_path());
+fn key_hash(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(key.trim().as_bytes()))
+}
+
+/// Remembers that the relay refused `key`.
+fn mark_refused(key: &str) -> Result<()> {
+    write_secret(&refused_path(), &key_hash(key))
 }
 
 /// Checks a relay key's shape (`lrk_` and 43 base64url characters) and stores it owner-only. It never
@@ -198,13 +207,10 @@ pub fn store_relay_key(key: &str) -> Result<()> {
     if !ok {
         bail!("That isn't a relay key: it starts with lrk_ and is 47 characters long.");
     }
-    write_secret(&relay_key_path(), key)?;
-    clear_refused();
-    Ok(())
+    write_secret(&relay_key_path(), key)
 }
 
 pub fn remove_relay_key() -> Result<()> {
-    clear_refused();
     match std::fs::remove_file(relay_key_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -436,7 +442,8 @@ async fn via_relay(state: &AppState, base: &str, device: &Device, push: &Push) -
         },
         401 => {
             // Stop at once: each refused key counts toward the relay's per-address limit, which would 429 every Loft behind this address.
-            write_secret(&refused_path(), "")?;
+            // The hash is of the key this push used: a new key stored meanwhile is not refused by this late answer.
+            mark_refused(&key)?;
             bail!("The push relay doesn't accept this relay key: sign in again")
         }
         429 => bail!("The push relay's limit for this install is reached; later pushes go through"),
@@ -465,9 +472,24 @@ pub(crate) mod tests {
         // Its own key folder, so the shared relay key stays good for the other tests.
         THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(std::env::temp_dir().join(format!("loft-apns-refused-{}", uuid::Uuid::new_v4()))));
         store_relay_key(RELAY_KEY).unwrap();
-        // A 429 or a network error never marks the key refused.
+        // A network error, a 429 or a 5xx never marks the key refused.
         let _ = via_relay(&st, "http://127.0.0.1:9", &d, &p).await;
         assert!(relay_key_present() && !relay_key_refused());
+        for (title, status) in [("Limited", "limit"), ("Refused", "503")] {
+            let err = via_relay(
+                &st,
+                &relay,
+                &d,
+                &Push {
+                    title: title.into(),
+                    ..a_push()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains(status), "{err:#}");
+            assert!(relay_key_present() && !relay_key_refused(), "{title}");
+        }
 
         // A key the relay doesn't know: one call, then none.
         store_relay_key(REVOKED).unwrap();
@@ -480,10 +502,27 @@ pub(crate) mod tests {
         assert!(send(&st, &d, &p).await.is_err());
         assert_eq!(calls(), before + 1, "no further relay call with a refused key");
 
-        // A new key clears it.
+        // A new key is not refused.
         store_relay_key(RELAY_KEY).unwrap();
         assert!(relay_key_present() && !relay_key_refused());
         assert_eq!(route(&st), Route::Relay);
+    }
+
+    #[test]
+    fn a_late_401_for_an_old_key_does_not_refuse_the_new_one() {
+        THIS_TEST_DIR.with(|d| {
+            *d.borrow_mut() =
+                Some(std::env::temp_dir().join(format!("loft-apns-race-{}", uuid::Uuid::new_v4())))
+        });
+        let old = "lrk_revoked-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaa";
+        store_relay_key(old).unwrap();
+        // The new key is stored while the push with the old one is still on the wire; then its 401 lands.
+        store_relay_key(RELAY_KEY).unwrap();
+        mark_refused(old).unwrap();
+        assert!(relay_key_present() && !relay_key_refused());
+        // The same answer for the key in use does refuse it.
+        mark_refused(RELAY_KEY).unwrap();
+        assert!(relay_key_refused() && !relay_key_present());
     }
 
     #[test]
@@ -617,6 +656,9 @@ pub(crate) mod tests {
                     log.lock().unwrap().pushes.push((auth.clone(), body.clone()));
                     if auth != format!("Bearer {RELAY_KEY}") {
                         return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "a valid relay key is required" })));
+                    }
+                    if body["payload"]["aps"]["alert"]["title"].as_str().is_some_and(|t| t.starts_with("Limited")) {
+                        return (StatusCode::TOO_MANY_REQUESTS, axum::Json(json!({ "error": "limit reached" })));
                     }
                     if body["payload"]["aps"]["alert"]["title"].as_str().is_some_and(|t| t.starts_with("Refused")) {
                         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "error": "busy" })));
