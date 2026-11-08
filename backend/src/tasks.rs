@@ -1352,6 +1352,10 @@ pub(crate) mod tests {
         assert_eq!((r["task"]["status"].clone(), r["delivered_to"].clone()), (json!("in_progress"), json!(a.id)));
         assert!(queued(&st, &a).contains("Try with Xcode 26"), "the brief carries the answer");
         assert!(!needs_you(&st, &t.id));
+        // Only one way to answer a failed issue.
+        stuck(&st, &t.id, "failed");
+        let item = crate::needs_you::collect(&st).unwrap().into_iter().find(|i| i.task_id.as_deref() == Some(t.id.as_str())).unwrap();
+        assert!(!item.actions.iter().any(|x| x["kind"] == "retry"), "{:?}", item.actions);
     }
 
     #[tokio::test]

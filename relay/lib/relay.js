@@ -136,11 +136,11 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const store = makeKv(env);
   const refusals = badKeys(store, sha256(ipOf(request)), now);
   const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  // A body declared far over the payload's cap is refused before any store command.
+  // Anything not shaped like a key, or declaring a body far over the payload's cap, is refused before any store command.
+  if (!key || !KEY.test(key)) return json(401, { error: "a valid relay key is required" });
   if (Number(request.headers.get("content-length") ?? 0) > MAX_PAYLOAD_BYTES * 2) return tooBig();
-  // The address's refusals and the key's record in one round trip. Anything not shaped like a key costs no key lookup.
-  const wellFormed = key && KEY.test(key);
-  const [refusalsSoFar, record] = await store.pipeline([["GET", refusals.name], ...(wellFormed ? [["GET", hashed(key)]] : [])]);
+  // The address's refusals and the key's record in one round trip.
+  const [refusalsSoFar, record] = await store.pipeline([["GET", refusals.name], ["GET", hashed(key)]]);
   const over = refusals.over(refusalsSoFar);
   if (over) return over;
   if (!record) return (await refusals.count(), json(401, { error: "a valid relay key is required" }));
