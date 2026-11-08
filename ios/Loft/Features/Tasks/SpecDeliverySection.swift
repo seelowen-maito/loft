@@ -26,7 +26,10 @@ struct SpecDeliverySection: View {
                             .accessibilityIdentifier("deliveryState")
                         Spacer()
                         if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
-                            Link(destination: url) { Label("Spec PR #\(pr)", systemImage: "arrow.triangle.pull") .font(.subheadline) }
+                            Link(destination: url) {
+                                HStack(spacing: 4) { Image(systemName: "arrow.triangle.pull"); Text("Spec PR #\(pr)") }.font(.subheadline)
+                            }
+                            .buttonStyle(.borderless)
                                 .accessibilityIdentifier("specPRLink")
                         }
                     }
@@ -130,8 +133,11 @@ private struct TicketRow: View {
             if !ticket.verdicts.isEmpty {
                 HStack(spacing: 8) {
                     ForEach(ticket.verdicts.sorted { $0.key < $1.key }, id: \.key) { role, v in
-                        Label("\(role) \(v == "pass" ? "passed" : "waiting")", systemImage: v == "pass" ? "checkmark.circle.fill" : "clock")
-                            .font(.caption2).foregroundStyle(v == "pass" ? Theme.working : .secondary)
+                        HStack(spacing: 3) {
+                            Image(systemName: v == "pass" ? "checkmark.circle.fill" : "clock")
+                            Text("\(role) \(v == "pass" ? "passed" : "waiting")")
+                        }
+                        .font(.caption2).foregroundStyle(v == "pass" ? Theme.working : .secondary)
                     }
                 }
             }

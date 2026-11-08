@@ -81,7 +81,7 @@ struct TaskDetailView: View {
                         .accessibilityIdentifier("issueGitHubLink")
                     }
                     LabeledContent("State on GitHub", value: g.state == "closed" ? "Closed" : "Open")
-                    if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
+                    if let sub = g.subIssues, !SpecViews.isSpec(t) { LabeledContent("Sub-issues", value: sub) }
                 } else {
                     LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
                     // Its project's repo gets it as a GitHub issue; the server says why when it can't.

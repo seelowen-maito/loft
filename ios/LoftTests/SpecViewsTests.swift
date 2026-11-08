@@ -88,6 +88,10 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertFalse(SpecViews.canStartDelivery(s, delivery("running")))
         s.github?.state = "closed"
         XCTAssertFalse(SpecViews.canStartDelivery(s, nil))
+        s.github?.state = "open"; s.status = "done"
+        XCTAssertFalse(SpecViews.canStartDelivery(s, nil), "closed in Loft")
+        var plain = spec(); plain.labels = []
+        XCTAssertFalse(SpecViews.canStartDelivery(plain, nil), "not a spec")
         var local = spec(); local.labels = ["spec"]; local.github = nil
         XCTAssertFalse(SpecViews.canStartDelivery(local, nil), "a plan kept in Loft has no GitHub issue to start from")
     }
