@@ -1,6 +1,6 @@
 // The relay's key-value store: Upstash Redis (Vercel KV) over its REST API, so the relay has no dependencies.
-// It only ever holds hashed relay keys, when each was last used, counters keyed by those hashes and the portal's accounts:
-// never a payload or a device token.
+// It only ever holds hashed relay keys, when each was last used, counters keyed by those hashes, the portal's accounts
+// and which account each device (by its token's hash) belongs to: never a payload or a device token.
 
 export function kv(env) {
   const url = env.KV_REST_API_URL;

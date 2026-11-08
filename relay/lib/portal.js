@@ -210,7 +210,7 @@ export async function startDelete(request, env = process.env, now = Date.now()) 
 }
 
 /**
- * Deletes `account` and its keys. The account and every key read beforehand go in one transaction, which also reads
+ * Deletes `account`, its keys and its devices' bindings. The account and every key read beforehand go in one transaction, which also reads
  * any key made since; once the account is gone `makeAccountKey` undoes its own key, so those are the last ones.
  * A failure part way leaves the set holding whatever is left, so signing in again shows those keys and deleting
  * again finishes the job.
@@ -222,6 +222,12 @@ export async function deleteAccount(store, account) {
   const drop = ids?.length ? [["SREM", set, ...ids]] : [];
   const answers = await store.transaction([["DEL", `account:${account}`, ...records(ids)], ...drop, ["SMEMBERS", set]]);
   await store.transaction([["DEL", set, ...records(answers.at(-1))]]);
+  // Its keys are gone, so its devices are free: each one it still holds (one may have expired and gone to another).
+  const devices = `account-devices:${account}`;
+  const [hashes] = await store.pipeline([["SMEMBERS", devices]]);
+  const owners = hashes?.length ? await store.pipeline(hashes.map((h) => ["GET", `device-owner:${h}`])) : [];
+  const held = (hashes ?? []).filter((h, i) => owners[i] === `account:${account}`).map((h) => `device-owner:${h}`);
+  await store.transaction([["DEL", devices, ...held]]);
 }
 
 /** Back from Apple on the way to deleting: only the account that asked can be deleted. */

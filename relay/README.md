@@ -2,7 +2,7 @@
 
 Forwards Loft's pushes to Apple for installs that hold a **relay key** and have no APNs key of their own (ADR 0002).
 It holds the operator's Apple key, serves only the official Loft app's bundle id, and only forwards: payloads and
-device tokens are never stored or logged, and only hashes of relay keys are kept. It's login-only: a key comes from
+device tokens are never stored or logged, and only hashes of relay keys and device tokens are kept. It's login-only: a key comes from
 the **push portal** (below), after Sign in with Apple, or from the operator's `scripts/create-key.js`.
 
 Plain JavaScript Vercel functions with no dependencies and no build step. The store is Upstash Redis (Vercel KV) over
@@ -31,7 +31,7 @@ its REST API.
 |---|---|
 | `200 {"apple_status", "reason", "apns_id"}` | Apple answered. A `410`, or a `400` with `BadDeviceToken` or `DeviceTokenNotForTopic`, means the phone is gone: remove it. |
 | `401` | No relay key, one not shaped like a key (`lrk_` and 43 characters), or one the store doesn't have (never made, or revoked). |
-| `403` | Another bundle id: use your own APNs key for your own build. |
+| `403` | Another bundle id: use your own APNs key for your own build. Or the device belongs to another account (below). |
 | `413` | The payload is over 4 KB. |
 | `429` | Over a limit; `Retry-After` says in how many seconds to try again. |
 | `400` | A malformed request. |
@@ -45,6 +45,17 @@ Every error body is `{"error": "…"}`.
 
 20 pushes per minute and 1,000 per day per relay key. They're fixed windows (the clock minute and the UTC day),
 counted in the store under the key's hash. Every authorized request counts, whether or not it's forwarded.
+
+## One account per device
+
+The first push the relay forwards to a device token binds that device to the key's account, or to the key itself for
+a key made with the script (no account). From then on only that account's keys push to it: the Lofts signed in to one
+account share the phone, and a key of any other account gets `403` ("this device belongs to another account") and
+isn't forwarded. The binding is `device-owner:<sha256 of the token>` in the store, never the token. Each push to the
+device keeps it 30 days more; after 30 days without one it expires, and the next push binds the device again.
+Deleting an account on the portal deletes its bindings (it lists its devices' hashes under `account-devices:<id>`). Revoking
+a key made with the script leaves its devices bound until they expire; deleting their `device-owner:*` entries frees
+them sooner.
 
 ## The push portal (ADR 0003)
 
@@ -60,7 +71,7 @@ taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These
 `x-forwarded-for`: Vercel sets it. Hosting the relay anywhere else, put it behind a proxy that overwrites that header
 with the caller's address, or anyone can set it and skip the limits. Requests without it all share one count.
 **Delete my account** (`/account/delete`) asks the user to sign in with Apple once more: only the account's own Apple
-ID confirms it. Then the account, its keys and their last-used dates are deleted, and the token Apple just gave is
+ID confirms it. Then the account, its keys, their last-used dates and its devices' bindings are deleted, and the token Apple just gave is
 revoked (`/auth/revoke`), which ends Sign in with Apple for the portal. No Apple token is ever stored. If Apple
 refuses the revocation, the account is still deleted and the page says how to remove the portal in the Apple ID
 settings. Without the portal's settings below, the page says

@@ -1,6 +1,6 @@
 // The push relay (ADR 0002): forwards the pushes of installs that hold a relay key to Apple. It only forwards:
-// payloads and device tokens are never stored or logged, and only hashes of relay keys are kept. Keys are made by
-// the operator (scripts/create-key.js); there's no endpoint that hands them out.
+// payloads and device tokens are never stored or logged, and only hashes of relay keys and device tokens are kept.
+// Keys are made by the operator (scripts/create-key.js) or the portal; this file hands none out.
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
@@ -54,6 +54,23 @@ export async function createKey(env, label, now = Date.now()) {
   return key;
 }
 
+/** How long a device stays bound to its account after the last push to it. */
+export const BOUND_SECONDS = 30 * 86400;
+
+/**
+ * Binds the device behind `token` to `owner` (an account, or an operator key with none) on the first push to it, and
+ * keeps the binding while pushes keep coming: true when `owner` may push to it. The store keys it by the token's hash.
+ * An account's devices are listed (`account-devices:<id>`) so deleting the account can unbind them.
+ */
+async function bound(store, token, owner, account) {
+  const device = sha256(token);
+  const [, holder] = await store.transaction([["SET", `device-owner:${device}`, owner, "NX", "EX", BOUND_SECONDS], ["GET", `device-owner:${device}`]]);
+  if (holder !== owner) return false;
+  const listed = account ? [["SADD", `account-devices:${account}`, device], ["EXPIRE", `account-devices:${account}`, BOUND_SECONDS]] : [];
+  await store.transaction([["EXPIRE", `device-owner:${device}`, BOUND_SECONDS], ...listed]);
+  return true;
+}
+
 /** Why a push request's body can't be forwarded, as the answer to give, or null when it can. */
 function invalid(b, env) {
   const bad = (error) => json(400, { error });
@@ -71,7 +88,8 @@ function invalid(b, env) {
  * `POST /api/push`, with `Authorization: Bearer <relay key>` and `{device_token, environment, bundle_id, payload,
  * priority?, collapse_id?}`. When Apple answered: 200 `{apple_status, reason, apns_id}` (a 410, or a 400 with
  * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`,
- * 429 with Retry-After over a limit. Every authorized request counts, forwarded or not.
+ * 403 for a device bound to another account, 429 with Retry-After over a limit. Every authorized request counts,
+ * forwarded or not.
  */
 export async function push(request, env = process.env, now = Date.now(), appleTimeoutMs = undefined) {
   const broken = unconfigured(env);
@@ -79,7 +97,8 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   const store = makeKv(env);
   const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
   // Anything not shaped like a key is refused before it costs a store lookup.
-  if (!key || !KEY.test(key) || !(await store.exists(hashed(key)))) return json(401, { error: "a valid relay key is required" });
+  const record = key && KEY.test(key) ? await store.get(hashed(key)) : null;
+  if (!record) return json(401, { error: "a valid relay key is required" });
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));
   if (limited) return limited;
@@ -100,6 +119,13 @@ export async function push(request, env = process.env, now = Date.now(), appleTi
   // The payload is forwarded exactly as it came.
   const body = JSON.stringify(b.payload);
   if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) return tooBig();
+  // A portal key pushes for its account, so its account's other Lofts share the phone; an operator key, for itself.
+  let account;
+  try {
+    account = JSON.parse(record).account;
+  } catch {}
+  if (!(await bound(store, b.device_token, account ? `account:${account}` : `key:${who}`, account)))
+    return json(403, { error: "this device belongs to another account: only that account's relay keys can push to it" });
   let apple;
   try {
     apple = await send(env, { deviceToken: b.device_token, environment: b.environment, priority: b.priority ?? 10, collapseId: b.collapse_id, body }, appleTimeoutMs);
