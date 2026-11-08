@@ -4,6 +4,7 @@
 
 import { createHash, createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
+import { ipOf } from "./ip.js";
 import { newKey, MAX_KEYS, USED_SECONDS } from "./relay.js";
 
 export const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_KEY_P8", "PORTAL_URL", "SESSION_SECRET", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
@@ -139,7 +140,7 @@ const toApple = (env, now, deleting) => {
  * page saying when to try again. Vercel sets the first x-forwarded-for address; the store holds only its hash.
  */
 export async function limited(store, request, what, now) {
-  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  const ip = ipOf(request);
   const hour = Math.floor(now / 3600000);
   if ((await store.hit(`limit:${what}:${createHash("sha256").update(ip).digest("hex")}:${hour}`, 3600)) <= PER_HOUR) return null;
   const retry = (hour + 1) * 3600 - Math.floor(now / 1000);

@@ -5,7 +5,7 @@ import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:c
 import { createServer as createH2 } from "node:http2";
 import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
 import { kv as makeKv } from "../lib/kv.js";
-import { push } from "../lib/relay.js";
+import { push, BIND } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
 const BUNDLE = "com.example.loft";
@@ -23,6 +23,7 @@ const expiries = new Map();
 let failing = null; // a command the store answers with an error
 const members = (key) => sets.get(key) ?? new Set();
 const run = ([cmd, key, ...args]) => {
+  if (cmd === "EVAL") return bind(key, args);
   if (cmd === "SET" && args.indexOf("EX") > 0) expiries.set(key, args[args.indexOf("EX") + 1]);
   if (cmd === "EXPIRE") expiries.set(key, args[0]);
   if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
@@ -35,6 +36,17 @@ const run = ([cmd, key, ...args]) => {
   if (cmd === "SISMEMBER") return members(key).has(args[0]) ? 1 : 0;
   if (cmd === "EXISTS") return store.has(key) ? 1 : 0;
   if (cmd === "INCR") return (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
+  return 1;
+};
+/** The relay's one script (BIND), as Redis runs it. */
+const bind = (script, [n, ...rest]) => {
+  assert.equal(script, BIND);
+  const [[owner, seconds, device], [holds, list]] = [rest.slice(n), rest.slice(0, n)];
+  const holder = run(["GET", holds]);
+  if (holder === null) run(["SET", holds, owner, "EX", seconds]);
+  else if (holder === owner) run(["EXPIRE", holds, seconds]);
+  else return 0;
+  if (list) (run(["SADD", list, device]), run(["EXPIRE", list, seconds]));
   return 1;
 };
 const kvServer = createServer((req, res) => {

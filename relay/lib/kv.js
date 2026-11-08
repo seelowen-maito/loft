@@ -36,6 +36,8 @@ export function kv(env) {
     exists: async (key) => (await command("EXISTS", key)) === 1,
     /** Runs `commands` in one round trip and returns their results; not atomic, so for reads. */
     pipeline: async (commands) => each(await call("/pipeline", commands)),
+    /** Runs the Lua `script` with `keys` and `args` (EVAL), atomically, in one round trip; returns what it returns. */
+    eval: (script, keys, args) => command("EVAL", script, keys.length, ...keys, ...args),
     /** Runs `commands` as one transaction (MULTI/EXEC): all of them or none. */
     transaction: async (commands) => each(await call("/multi-exec", commands)),
     /** Adds one to `key` and returns the count; the key expires `seconds` after its first hit. One round trip, so a

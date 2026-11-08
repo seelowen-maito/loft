@@ -49,7 +49,7 @@ counted in the store under the key's hash. Every authorized request counts, whet
 Refused keys are limited per address, so guessing keys stays expensive: each `401` counts against the caller's
 address (the first `x-forwarded-for` entry, stored only as its hash, `limit:badKeys:<hash>:<hour>`). After 60 in one
 clock hour, every push from that address gets `429` with `Retry-After` until the next hour, even one with a valid key,
-and before its key is looked up. Pushes with a valid key never count, and other addresses aren't affected. A Loft
+which is neither used nor counted. Pushes with a valid key never count, and other addresses aren't affected. A Loft
 still pushing with a revoked key counts too, so its address can hit this limit: give it a new key.
 
 ## One account per device

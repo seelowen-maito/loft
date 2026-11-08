@@ -4,6 +4,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
+import { ipOf } from "./ip.js";
 import { send } from "./apns.js";
 
 /** Apple's limit for an alert's payload. */
@@ -38,17 +39,20 @@ async function overLimit(store, name, who, now) {
 }
 
 /**
- * The refused keys from `ip` (already a hash) this hour: `over` is a 429 with Retry-After once there were
- * BAD_KEYS_PER_HOUR of them, else null; `count` adds one refusal. Reading costs one store call and never counts.
+ * The refused keys from `ip` (already a hash) this hour, with `name` the counter to read: `over(read)` is a 429 with
+ * Retry-After once the counter read BAD_KEYS_PER_HOUR, else null; `count` adds one refusal. Reading never counts.
  */
-async function badKeys(store, ip, now) {
+function badKeys(store, ip, now) {
   const [max, seconds] = BAD_KEYS_PER_HOUR;
   const window = Math.floor(now / 1000 / seconds);
   const name = `limit:badKeys:${ip}:${window}`;
   const count = () => store.hit(name, seconds);
-  if (Number((await store.get(name)) ?? 0) < max) return { over: null, count };
-  const retry = (window + 1) * seconds - Math.floor(now / 1000);
-  return { over: json(429, { error: `too many refused relay keys: at most ${max} per hour from one address` }, { "retry-after": String(retry) }), count };
+  const over = (read) => {
+    if (Number(read ?? 0) < max) return null;
+    const retry = (window + 1) * seconds - Math.floor(now / 1000);
+    return json(429, { error: `too many refused relay keys: at most ${max} per hour from one address` }, { "retry-after": String(retry) });
+  };
+  return { name, over, count };
 }
 
 /** Settings the relay can't work without. Without LOFT_BUNDLE_ID, for one, the bundle id check would pass anything. */
@@ -81,12 +85,28 @@ export const BOUND_SECONDS = 30 * 86400;
  */
 async function bound(store, token, owner, account) {
   const device = sha256(token);
-  const [, holder] = await store.transaction([["SET", `device-owner:${device}`, owner, "NX", "EX", BOUND_SECONDS], ["GET", `device-owner:${device}`]]);
-  if (holder !== owner) return false;
-  const listed = account ? [["SADD", `account-devices:${account}`, device], ["EXPIRE", `account-devices:${account}`, BOUND_SECONDS]] : [];
-  await store.transaction([["EXPIRE", `device-owner:${device}`, BOUND_SECONDS], ...listed]);
-  return true;
+  const keys = [`device-owner:${device}`, ...(account ? [`account-devices:${account}`] : [])];
+  return (await store.eval(BIND, keys, [owner, BOUND_SECONDS, device])) === 1;
 }
+
+/**
+ * `bound` in one atomic round trip. KEYS: the device's owner, then its account's list when it has one; ARGV: the owner,
+ * the seconds to keep it, the device. Binds a device nobody holds; refreshes it (and lists it) only for its holder, so
+ * a refused push leaves another account's binding as it was. 1 when the owner holds it, else 0.
+ */
+export const BIND = `local holder = redis.call("GET", KEYS[1])
+if holder == false then
+  redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+elseif holder == ARGV[1] then
+  redis.call("EXPIRE", KEYS[1], ARGV[2])
+else
+  return 0
+end
+if KEYS[2] then
+  redis.call("SADD", KEYS[2], ARGV[3])
+  redis.call("EXPIRE", KEYS[2], ARGV[2])
+end
+return 1`;
 
 /** Why a push request's body can't be forwarded, as the answer to give, or null when it can. */
 function invalid(b, env) {
@@ -107,18 +127,19 @@ function invalid(b, env) {
  * BadDeviceToken or DeviceTokenNotForTopic, means the caller removes the phone). Refused by the relay: 4xx `{error}`,
  * 403 for a device bound to another account, 429 with Retry-After over a limit. Every authorized request counts,
  * forwarded or not. Refused keys count per IP (its hash only, from the first x-forwarded-for address, as /api/pair):
- * past BAD_KEYS_PER_HOUR every push from that IP gets 429 until the next hour, before its key is looked up.
+ * past BAD_KEYS_PER_HOUR every push from that IP gets 429 until the next hour, whatever its key.
  */
 export async function push(request, env = process.env, now = Date.now(), appleTimeoutMs = undefined) {
   const broken = unconfigured(env);
   if (broken) return broken;
   const store = makeKv(env);
-  const ip = sha256((request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim());
-  const refusals = await badKeys(store, ip, now);
-  if (refusals.over) return refusals.over;
+  const refusals = badKeys(store, sha256(ipOf(request)), now);
   const key = (request.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  // Anything not shaped like a key is refused before it costs a key lookup.
-  const record = key && KEY.test(key) ? await store.get(hashed(key)) : null;
+  // The address's refusals and the key's record in one round trip. Anything not shaped like a key costs no key lookup.
+  const wellFormed = key && KEY.test(key);
+  const [refusalsSoFar, record] = await store.pipeline([["GET", refusals.name], ...(wellFormed ? [["GET", hashed(key)]] : [])]);
+  const over = refusals.over(refusalsSoFar);
+  if (over) return over;
   if (!record) return (await refusals.count(), json(401, { error: "a valid relay key is required" }));
   const who = sha256(key);
   const limited = (await overLimit(store, "pushesPerMinute", who, now)) ?? (await overLimit(store, "pushesPerDay", who, now));

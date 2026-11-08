@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer as createH2 } from "node:http2";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { createKey, push, MAX_PAYLOAD_BYTES, BOUND_SECONDS, BAD_KEYS_PER_HOUR } from "../lib/relay.js";
+import { createKey, push, MAX_PAYLOAD_BYTES, BOUND_SECONDS, BAD_KEYS_PER_HOUR, BIND } from "../lib/relay.js";
 import { host } from "../lib/apns.js";
 
 const BUNDLE = "com.example.loft";
@@ -12,10 +12,12 @@ const OTHER_DEVICE = "b2".repeat(32);
 const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 const P8 = privateKey.export({ type: "pkcs8", format: "pem" });
 
-// The store: Upstash's REST API, keeping every command it gets. Expiries run on a clock the tests move with `later`.
+// The store: Upstash's REST API, keeping every command it gets and the path of each request (one round trip each).
+// Expiries run on a clock the tests move with `later`.
 const store = new Map();
 const sets = new Map();
 const commands = [];
+const requests = [];
 const deadlines = new Map();
 let clock = 0;
 const expire = (key, seconds) => deadlines.set(key, clock + Number(seconds));
@@ -25,6 +27,8 @@ const later = (seconds) => {
   for (const [key, at] of deadlines) if (at <= clock) (store.delete(key), sets.delete(key), deadlines.delete(key));
 };
 const run = ([cmd, key, ...args]) => {
+  // The relay's one script (BIND) runs as the commands it makes, which are kept instead.
+  if (cmd === "EVAL") return bind(key, args);
   commands.push(JSON.stringify([cmd, key, ...args]));
   if (cmd === "SET") {
     if (args.includes("NX") && store.has(key)) return null;
@@ -39,11 +43,23 @@ const run = ([cmd, key, ...args]) => {
   if (cmd === "SADD") return (sets.set(key, (sets.get(key) ?? new Set()).add(args[0])), 1);
   return null;
 };
+/** BIND, as Redis runs it. */
+const bind = (script, [n, ...rest]) => {
+  assert.equal(script, BIND, "the only script the relay runs");
+  const [[owner, seconds, device], [holds, list]] = [rest.slice(n), rest.slice(0, n)];
+  const holder = run(["GET", holds]);
+  if (holder === null) run(["SET", holds, owner, "EX", seconds]);
+  else if (holder === owner) run(["EXPIRE", holds, seconds]);
+  else return 0;
+  if (list) (run(["SADD", list, device]), run(["EXPIRE", list, seconds]));
+  return 1;
+};
 const kvServer = createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
   req.on("end", () => {
     if (req.headers.authorization !== "Bearer kv-secret") return res.writeHead(401).end();
+    requests.push(req.url);
     const parsed = JSON.parse(body);
     const out = req.url === "/" ? { result: run(parsed) } : parsed.map((c) => ({ result: run(c) }));
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
@@ -223,7 +239,7 @@ test("no payload or device token is written to the store or to the logs", async 
   }
   // Only hashed keys, counters keyed by those hashes, and which key holds the device, by the token's hash.
   assert.ok(
-    commands.every((c) => /^\["(SET|GET)","relay-key:[0-9a-f]{64}"|^\["SET","relay-key-used:[0-9a-f]{64}","[\d-]+T[\d:.]+Z"|^\["(INCR|EXPIRE|GET)","limit:\w+:[0-9a-f]{64}:\d+"|^\["SET","device-owner:[0-9a-f]{64}","key:[0-9a-f]{64}","NX","EX",\d+\]$|^\["(GET|EXPIRE)","device-owner:[0-9a-f]{64}"/.test(c)),
+    commands.every((c) => /^\["(SET|GET)","relay-key:[0-9a-f]{64}"|^\["SET","relay-key-used:[0-9a-f]{64}","[\d-]+T[\d:.]+Z"|^\["(INCR|EXPIRE|GET)","limit:\w+:[0-9a-f]{64}:\d+"|^\["SET","device-owner:[0-9a-f]{64}","key:[0-9a-f]{64}","EX",\d+\]$|^\["(GET|EXPIRE)","device-owner:[0-9a-f]{64}"/.test(c)),
     commands.join("\n"),
   );
 });
@@ -322,7 +338,8 @@ test("past 60 refused keys in an hour, one address gets 429 even with a good key
     assert.equal(over.status, 429, key === good ? "a valid key from that address" : "another bad key");
     assert.deepEqual(await over.json(), { error: "too many refused relay keys: at most 60 per hour from one address" });
     assert.equal(over.headers.get("retry-after"), "1800");
-    assert.ok(!commands.slice(before).some((c) => c.includes("relay-key:")), "refused before any key lookup");
+    // Its key is read with the address's refusals, in one round trip, but the key is never used or counted.
+    assert.ok(!commands.slice(before).some((c) => /relay-key-used:|limit:pushes|device-owner:/.test(c)), "refused before its key is used");
   }
   assert.equal(production.seen.length, 0, "nothing reached Apple");
   assert.equal((await send(unknown, {}, undefined, T0 + 30 * 60_000, other)).status, 401, "another address still gets 401");
@@ -331,6 +348,19 @@ test("past 60 refused keys in an hour, one address gets 429 even with a good key
   const written = [...commands, ...store.keys(), ...store.values()].join("\n");
   assert.ok(!written.includes(ip) && !written.includes(other), "the store never sees an address");
   assert.ok(store.has(`limit:badKeys:${sha256(ip)}:${Math.floor(T0 / 1000 / seconds)}`), "only its hash");
+});
+
+test("a forwarded push costs five store round trips: refusals and key, two limits, last used, binding", async () => {
+  const [token, other] = [await newKey(), await newKey()];
+  requests.length = 0;
+  assert.equal((await send(token)).status, 200);
+  assert.deepEqual(requests, ["/pipeline", "/pipeline", "/pipeline", "/", "/"]);
+  requests.length = 0;
+  assert.equal((await send(other)).status, 403, "a refused push too");
+  assert.equal(requests.length, 5);
+  requests.length = 0;
+  assert.equal((await send("garbage")).status, 401);
+  assert.deepEqual(requests, ["/pipeline", "/pipeline"], "a bad key: the refusals read, then one more counted");
 });
 
 test("a valid key's pushes never count against its address", async () => {

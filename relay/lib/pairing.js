@@ -8,6 +8,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
+import { ipOf } from "./ip.js";
 import { incomplete, accountOf, appleButton, capped, cookie, cookieOf, esc, limited, makeAccountKey, notConfigured, page, redirect } from "./portal.js";
 
 const CODE_SECONDS = 600;
@@ -42,7 +43,7 @@ const same = (a, b) => {
 export async function pair(request, env = process.env, now = Date.now()) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
   const store = makeKv(env);
-  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  const ip = ipOf(request);
   if ((await store.hit(`limit:pair:${sha256(ip)}:${Math.floor(now / 3600000)}`, 3600)) > CODES_PER_HOUR) return json(429, { error: `at most ${CODES_PER_HOUR} sign-ins per hour` });
   const code = randomBytes(16).toString("base64url");
   const secret = randomBytes(16).toString("base64url");
