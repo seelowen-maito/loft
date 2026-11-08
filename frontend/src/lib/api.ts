@@ -257,8 +257,10 @@ export const portalHome = (s: Pick<PushStatus, "relay_url" | "signin">): string 
 /** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
 export type PushStatus = {
   path: "own_key" | "relay" | "none";
-  /** Whether a relay key is stored. */
+  /** Whether a relay key is stored and the relay hasn't refused it. */
   relay_key: boolean;
+  /** The relay answered 401 to the stored key: pushes through it stopped until the user signs in again or pastes a new key. */
+  relay_refused: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
   /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */

@@ -73,6 +73,10 @@ pub fn kind(k: &str) -> &str {
 
 /// Where the key lives; tests point it elsewhere with LOFT_APNS_DIR.
 pub fn key_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(d) = tests::THIS_TEST_DIR.with(|d| d.borrow().clone()) {
+        return d;
+    }
     std::env::var_os("LOFT_APNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Loft").join("apns"))
@@ -167,8 +171,23 @@ fn relay_key_path() -> PathBuf {
     key_dir().join("relay-key")
 }
 
+/// Marks the stored relay key as refused by the relay (a 401), so no more pushes go out with it.
+fn refused_path() -> PathBuf {
+    key_dir().join("relay-key-refused")
+}
+
+/// A relay key is stored and the relay hasn't refused it.
 pub fn relay_key_present() -> bool {
-    relay_key_path().is_file()
+    relay_key_path().is_file() && !relay_key_refused()
+}
+
+/// The relay answered 401 to the stored key: it was revoked or never existed. Signing in or pasting a new key clears it.
+pub fn relay_key_refused() -> bool {
+    relay_key_path().is_file() && refused_path().is_file()
+}
+
+fn clear_refused() {
+    let _ = std::fs::remove_file(refused_path());
 }
 
 /// Checks a relay key's shape (`lrk_` and 43 base64url characters) and stores it owner-only. It never
@@ -179,10 +198,13 @@ pub fn store_relay_key(key: &str) -> Result<()> {
     if !ok {
         bail!("That isn't a relay key: it starts with lrk_ and is 47 characters long.");
     }
-    write_secret(&relay_key_path(), key)
+    write_secret(&relay_key_path(), key)?;
+    clear_refused();
+    Ok(())
 }
 
 pub fn remove_relay_key() -> Result<()> {
+    clear_refused();
     match std::fs::remove_file(relay_key_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -412,7 +434,11 @@ async fn via_relay(state: &AppState, base: &str, device: &Device, push: &Push) -
             Some(s) => Ok((s as u16, v["reason"].as_str().unwrap_or("").to_string())),
             None => bail!("The push relay's answer had no status from Apple"),
         },
-        401 => bail!("The push relay doesn't accept this relay key"),
+        401 => {
+            // Stop at once: each refused key counts toward the relay's per-address limit, which would 429 every Loft behind this address.
+            write_secret(&refused_path(), "")?;
+            bail!("The push relay doesn't accept this relay key: sign in again")
+        }
         429 => bail!("The push relay's limit for this install is reached; later pushes go through"),
         s => bail!("The push relay refused the push: {s} {}", v["error"].as_str().unwrap_or("")),
     }
@@ -425,6 +451,41 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn a_401_stops_relay_pushes_until_a_new_key_is_stored() {
+        let st = crate::tasks::tests::state();
+        let relay = fake_apns_relay();
+        let log = relayed();
+        let d = Device { token: "ab".repeat(32), environment: "production".into(), ..Default::default() };
+        let p = Push { title: "t".into(), body: "b".into(), badge: None, thread_id: None, time_sensitive: false, collapse_id: None, custom: json!({}) };
+        const REVOKED: &str = "lrk_revoked-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaa";
+        // Only this test uses the revoked key, so its calls can be counted in the log the other tests share.
+        let calls = || log.lock().unwrap().pushes.iter().filter(|(auth, _)| auth.contains(REVOKED)).count();
+
+        // Its own key folder, so the shared relay key stays good for the other tests.
+        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(std::env::temp_dir().join(format!("loft-apns-refused-{}", uuid::Uuid::new_v4()))));
+        store_relay_key(RELAY_KEY).unwrap();
+        // A 429 or a network error never marks the key refused.
+        let _ = via_relay(&st, "http://127.0.0.1:9", &d, &p).await;
+        assert!(relay_key_present() && !relay_key_refused());
+
+        // A key the relay doesn't know: one call, then none.
+        store_relay_key(REVOKED).unwrap();
+        let before = calls();
+        let err = via_relay(&st, &relay, &d, &p).await.unwrap_err();
+        assert!(format!("{err:#}").contains("sign in again"), "{err:#}");
+        assert_eq!(calls(), before + 1);
+        assert!(relay_key_refused() && !relay_key_present());
+        assert_eq!(route(&st), Route::Off);
+        assert!(send(&st, &d, &p).await.is_err());
+        assert_eq!(calls(), before + 1, "no further relay call with a refused key");
+
+        // A new key clears it.
+        store_relay_key(RELAY_KEY).unwrap();
+        assert!(relay_key_present() && !relay_key_refused());
+        assert_eq!(route(&st), Route::Relay);
+    }
+
     #[test]
     fn a_failed_secret_write_leaves_no_temp_file_and_a_good_one_is_owner_only() {
         fake_apns();
@@ -492,6 +553,11 @@ pub(crate) mod tests {
 
     /// Requests the fake APNs server got: (device token, headers we check, body).
     pub(crate) type Seen = std::sync::Arc<Mutex<Vec<(String, Value, Value)>>>;
+
+    thread_local! {
+        /// A key folder for the current test alone, for tests that change keys the others rely on.
+        pub(crate) static THIS_TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
 
     /// The relay key every test install holds (stored with the test `.p8` when the fakes start).
     pub(crate) const RELAY_KEY: &str = "lrk_test-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -625,6 +691,10 @@ pub(crate) mod tests {
             seen
         })
         .clone()
+    }
+
+    pub(crate) fn a_push() -> Push {
+        Push { title: "t".into(), body: "b".into(), badge: None, thread_id: None, time_sensitive: false, collapse_id: None, custom: json!({}) }
     }
 
     /// Settings with push configured, for a test state.
