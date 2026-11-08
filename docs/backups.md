@@ -7,8 +7,8 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
   (after 36 hours it stops waiting for a quiet moment). Settings → Backups → **Back up now** makes one at once.
 - **How:** SQLite's `VACUUM INTO`, a consistent copy while Loft writes, then `PRAGMA integrity_check` on the copy.
 - **Where:** `~/Library/Application Support/Loft/backups`, or the folder set in Settings → Backups (a full
-  path outside the Loft folder, such as an external disk or an iCloud Drive folder). Each backup is a folder
-  named for when it was made, `2026-11-08_031500/`, holding `loft.db` and `settings.json`.
+  path outside the Loft folder, symlinks resolved, such as an external disk or an iCloud Drive folder). Each backup is a folder
+  named for when it was made, `2026-11-08_031500/`, holding `loft.db` and `settings.json`. Back up now twice in the same second returns the one just made.
 - **Privacy:** owner-only: folders `0700`, files `0600`. `settings.json` holds your GitHub token if you saved one.
 - **Retention:** the newest backup of each of the last 7 days, and of each of the last 4 weeks. Older ones
   are deleted. Anything else in the folder is left alone.
