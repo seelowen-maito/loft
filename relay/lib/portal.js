@@ -244,7 +244,8 @@ export async function signOut(request, env = process.env, now = Date.now()) {
   const refused = crossSite(request, env);
   if (refused) return refused;
   const cookieValue = cookieOf(request, "session");
-  if (cookieValue) await makeKv(env).setEx(sessionEnded(cookieValue), "1", SESSION_SECONDS);
+  // Only a genuine session is recorded, for as long as it has left; a forged cookie costs no store command.
+  if (unseal(env, "session", cookieValue, now)) await makeKv(env).setEx(sessionEnded(cookieValue), "1", Number(cookieValue.split(".")[1]) - Math.floor(now / 1000));
   return redirect("/", cookie("session", "", 0));
 }
 

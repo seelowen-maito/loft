@@ -611,3 +611,18 @@ test("Sign out clears the session cookie, shows the sign-in page, and the old co
   assert.doesNotMatch(await (await home(get("/", session), env)).text(), /Sign out/);
   assert.equal((await createAccountKey(post("/keys", { name: "Late" }, session), env)).status, 303);
 });
+
+test("Sign out with a forged or expired cookie writes nothing to the store, and a real one lasts only as long as the session", async () => {
+  const session = await signInAs();
+  const before = JSON.stringify([...store]);
+  for (const bad of ["__Host-session=garbage", `${session.replace(/.$/, "x")}`, "__Host-session=a.9999999999.b"]) {
+    const res = await signOut(post("/signout", {}, bad), env);
+    assert.equal(res.status, 303);
+    assert.match(res.headers.getSetCookie().join(), /^__Host-session=; Max-Age=0/);
+  }
+  assert.equal(JSON.stringify([...store]), before);
+  const now = Date.now() + 3 * 86400 * 1000;
+  await signOut(post("/signout", {}, session), env, now);
+  const [ttl] = [...expiries].filter(([k]) => k.startsWith("session-ended:")).map(([, v]) => Number(v));
+  assert.ok(ttl > 3.9 * 86400 && ttl <= 4 * 86400, `ttl ${ttl}`);
+});
