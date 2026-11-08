@@ -16,7 +16,7 @@ struct DeliveryCardSection: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 Text(intro(d, number)).font(.subheadline).foregroundStyle(.secondary)
-                if let line = d?.stateLine {
+                if let line = d?.line {
                     Text(line.text)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(color(line.tone))
@@ -47,6 +47,12 @@ struct DeliveryCardSection: View {
             Text("Delivery")
         }
         .task(id: task.id) { try? await store.loadDelivery(task.id) }
+        .onAppear { store.showDeliveryCard(task.id) }
+        .onDisappear { store.hideDeliveryCard(task.id) }
+        .onChange(of: task.id) { old, new in
+            store.hideDeliveryCard(old)
+            store.showDeliveryCard(new)
+        }
     }
 
     /// What it does before it starts; who has it once it did.

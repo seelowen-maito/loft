@@ -20,6 +20,10 @@ use crate::state::{AppState, Decision, Event};
 
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// How long a tool call that waits for the user may run: the permission timeout plus a minute. It sets claude's
+/// MCP and Bash timeouts and the `timeout` the prompt tells agents to give a kill, so the three can't drift apart.
+pub const TOOL_WAIT: Duration = Duration::from_secs(PERMISSION_TIMEOUT.as_secs() + 60);
+
 /// How long claude gets to exit after its final result before it is stopped, and after SIGTERM before SIGKILL.
 #[cfg(not(test))]
 const EXIT_GRACE: Duration = Duration::from_secs(10);
@@ -479,7 +483,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of 960000: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -527,6 +531,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
         ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
         range_var = crate::ports::RANGE_VAR,
+        tool_wait = TOOL_WAIT.as_millis(),
         device = match state.db.agent_device(&a.id).ok().flatten() {
             Some(udid) => format!(
                 "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
@@ -1086,9 +1091,9 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
         .args(["--name", &a.name])
-        .env("MCP_TOOL_TIMEOUT", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
+        .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
-        .env("BASH_MAX_TIMEOUT_MS", (PERMISSION_TIMEOUT.as_millis() + 60_000).to_string())
+        .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
         .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
@@ -1721,6 +1726,19 @@ pub(crate) mod tests {
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn the_kill_timeout_the_prompt_names_is_the_one_claude_allows() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        let named = p.split("give that Bash call a `timeout` of ").nth(1).and_then(|r| r.split(':').next()).expect("a timeout in # Runs");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let env = |k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(env("BASH_MAX_TIMEOUT_MS").as_deref(), Some(named));
+        assert_eq!(env("MCP_TOOL_TIMEOUT").as_deref(), Some(named));
+        assert!(TOOL_WAIT > PERMISSION_TIMEOUT);
     }
 
     #[test]

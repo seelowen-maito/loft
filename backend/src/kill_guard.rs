@@ -132,12 +132,41 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
             }
             "eval" => f.add(scan(&args.join(" "), depth + 1, shell)),
             // Removing or replacing Loft's functions, or pointing the name at the real command.
-            "unset" | "unfunction" | "disable" | "enable" | "alias" | "hash" | "functions" => {
-                f.unscoped |= args.iter().any(|a| a.contains("kill"));
+            // Only a name that is exactly kill, pkill or killall counts: `unset skills` or `alias skillcheck=...`
+            // stop nothing.
+            "unset" | "unfunction" | "unhash" | "disable" | "enable" | "alias" | "hash" | "functions" => {
+                let maps = matches!(base(name), "alias" | "hash");
+                let mut it = args.iter();
+                while let Some(a) = it.next() {
+                    if a.starts_with(['-', '+']) {
+                        // bash's `hash -p /bin/kill k` points `k` at the path: the text after the `p`
+                        // (`hash -p/bin/kill k`), or else the next word.
+                        if let Some((_, attached)) = a.split_once('p').filter(|_| base(name) == "hash" && a.starts_with('-')) {
+                            let path = if attached.is_empty() { it.next().map(String::as_str) } else { Some(attached) };
+                            if let Some(path) = path {
+                                f.add(scan(path, depth + 1, shell));
+                            }
+                        }
+                        continue;
+                    }
+                    let (n, value) = a.split_once('=').filter(|_| maps).unzip();
+                    let n = n.unwrap_or(a.as_str());
+                    // zsh's `unset 'functions[kill]'` removes the function too.
+                    f.unscoped |= KILLS.contains(&n) || subscript(n).is_some_and(|k| KILLS.contains(&k));
+                    // What an alias or a hashed name runs: `alias k=/bin/kill` and zsh's `hash k=/bin/kill` reach
+                    // the real kill under another name.
+                    if let Some(value) = value {
+                        f.add(scan(value, depth + 1, shell));
+                    }
+                }
                 f.path |= name == "unset" && args.iter().any(|a| a == "PATH" || a == "path");
             }
             "export" | "typeset" | "declare" | "local" | "readonly" => f.path |= args.iter().any(|a| sets_path(a)),
-            _ => {}
+            // zsh's `functions[kill]='/bin/kill "$@"'` redefines Loft's kill.
+            _ => {
+                let key = name.split_once('=').and_then(|(k, _)| subscript(k.strip_suffix('+').unwrap_or(k)));
+                f.unscoped |= key.is_some_and(|k| KILLS.contains(&k));
+            }
         }
     }
     f
@@ -211,6 +240,14 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
 
 fn base(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or_default()
+}
+
+/// The key of an element of a zsh special parameter that holds functions or aliases (`functions[kill]`,
+/// `dis_functions[kill]`, `aliases[kill]`), quotes removed.
+fn subscript(w: &str) -> Option<&str> {
+    let (param, key) = w.strip_suffix(']')?.split_once('[')?;
+    let params = ["functions", "dis_functions", "functions_source", "aliases", "dis_aliases", "galiases"];
+    params.contains(&param).then(|| key.trim_matches(['"', '\'', '\\']))
 }
 
 /// The name a `NAME=value` (or `NAME+=value`) word assigns.
@@ -807,11 +844,38 @@ mod tests {
             // Loft's functions removed or replaced.
             "unset -f kill; kill 123",
             "unset -f pkill killall",
+            "unset -f kill",
+            "unset -fv -- kill",
+            "unfunction pkill",
+            "alias kill=/bin/kill",
+            "alias pkill='command pkill'",
+            "alias -g killall=true",
+            "alias k='sudo kill'",
+            "hash -d killall",
+            "functions +x kill",
+            "unset 'functions[kill]'",
+            "unset \"functions[pkill]\"",
+            "unset -v 'functions[killall]'",
+            "unset 'functions[\"kill\"]'",
+            "unset 'dis_functions[kill]'",
+            "unset 'aliases[kill]'",
+            "unhash -f kill",
+            "unhash kill; kill 12",
+            "functions[kill]='/bin/kill \"$@\"'; kill 12",
+            "aliases[pkill]='command pkill'",
             "unfunction kill; kill 123",
             "disable kill",
             "disable -f kill; kill 12",
             "alias k=/bin/kill; k 12",
             "hash -p /bin/kill kill",
+            "hash -p /bin/kill k",
+            "hash -p /bin/kill k; k 12",
+            "hash -rp /bin/kill k",
+            "hash -p/bin/kill k",
+            "hash -p/bin/kill k; k 12",
+            "hash -rp/bin/kill k",
+            "hash k=/bin/kill; k 12",
+            "hash -r k=/usr/bin/pkill",
             "kill() { /bin/kill \"$@\"; }; kill 12",
             "function kill { command kill \"$@\"; }",
         ] {
@@ -831,6 +895,30 @@ mod tests {
             "env -C /tmp kill 12",
             "unset FOO; kill 12",
             "unalias ll; kill 12",
+        ] {
+            assert!(!unscoped(cmd), "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn unsets_and_aliases_of_other_names_run() {
+        // A name that merely contains "kill" leaves Loft's kill alone.
+        for cmd in [
+            "unset skills",
+            "unset -f install_skills",
+            "alias skillcheck='cargo test'",
+            "alias killer=ls",
+            "unfunction killjoy",
+            "hash -d skill",
+            "hash -p /usr/bin/true t; t",
+            "hash -p/usr/bin/true t",
+            "disable -f pkill_all",
+            "functions skillset",
+            "alias k=kill; k 12",
+            "unset 'functions[skill]'",
+            "unhash -f skillcheck",
+            "functions[skillcheck]='cargo test'",
+            "arr[kill]=1",
         ] {
             assert!(!unscoped(cmd), "should run: {cmd}");
         }

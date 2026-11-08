@@ -11,6 +11,7 @@ import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
 import { deliveryButtons, deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
 import { useServerEvents, type ServerEvent } from "../lib/events";
+import { latestOnly } from "../lib/latest";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -147,24 +148,35 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
 }
 
 /** The issue's Delivery, loaded once and again whenever the server says it changed (here, on another device,
- *  or from Loft moving it on), so the card stays live. */
+ *  or from Loft moving it on), so the card stays live. Only the newest load or action answer is shown, and
+ *  nothing after unmount: one Resume saves the Delivery several times, and an older answer mustn't land last.
+ *  A burst of events makes one reload, 150 ms after the last. */
 function useIssueDelivery(t: Task) {
   const [d, setD] = useState<IssueDelivery | null>(null);
-  const reload = useCallback(() => {
-    api.issueDelivery(t.id).then(setD).catch(() => {});
-  }, [t.id]);
-  useEffect(reload, [reload]);
+  const [latest] = useState(() => latestOnly<IssueDelivery | null>(setD));
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const reload = useCallback(() => latest.load(api.issueDelivery(t.id)), [t.id, latest]);
+  useEffect(() => {
+    latest.start();
+    reload();
+    return () => {
+      clearTimeout(timer.current);
+      latest.stop();
+    };
+  }, [latest, reload]);
   const repo = t.github?.repo.toLowerCase();
   const number = t.github?.number;
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {
-        if (e.type === "delivery" && e.repo.toLowerCase() === repo && e.spec === number) reload();
+        if (e.type !== "delivery" || e.repo.toLowerCase() !== repo || e.spec !== number) return;
+        clearTimeout(timer.current);
+        timer.current = setTimeout(reload, 150);
       },
       [repo, number, reload],
     ),
   );
-  return [d, setD, reload] as const;
+  return [d, latest.set, reload] as const;
 }
 
 const TONE: Record<DeliveryTone, string> = {

@@ -1593,7 +1593,29 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
     })
 }
 
-/// What an issue page shows of its Delivery: its state (with why it stalled, whether Pause and Resume apply, and
+/// A Delivery card's state line, `{ tone, text }`, or null before it started: the web and iOS cards show it as
+/// is and only map its tone (running, stalled, paused, needs_you, final or done) to a colour. Waiting for the
+/// user (a ticket after too many change rounds, or the final review) wins over running.
+fn state_line(d: &Delivery) -> Value {
+    let stalled;
+    let (tone, text) = match d.state.as_str() {
+        "planned" => return Value::Null,
+        "stalled" => {
+            stalled = format!("Stalled: {}.", stall_why(&d.stall_reason));
+            ("stalled", stalled.as_str())
+        }
+        "paused" => ("paused", "Paused: Loft sends no wakes until you resume it."),
+        "needs_human" => ("needs_you", "Needs you: too many rounds of changes in the final review."),
+        "final_review" => ("final", "Final review: the Code reviewer is reviewing the whole PR."),
+        "final_fixes" => ("final", "Final review: the Dev is fixing what the Code reviewer found."),
+        "ready" | "settled" | "merged" => ("done", "Done: every review passed."),
+        _ if d.tickets.iter().any(|t| t.state == "needs_human") => ("needs_you", "Needs you: a ticket had too many rounds of changes."),
+        _ => ("running", "Running."),
+    };
+    json!({ "tone": tone, "text": text })
+}
+
+/// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
 /// whether a ticket or its final review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
 fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let dev = state.db.get_agent(&d.dev).ok().flatten();
@@ -1601,6 +1623,7 @@ fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
+        "state_line": state_line(d),
         "can_pause": pausable(d),
         "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
         "needs_human": d.state == "needs_human" || d.tickets.iter().any(|t| t.state == "needs_human"),
@@ -2149,6 +2172,37 @@ mod tests {
         assert_eq!(v[1]["current"]["number"], 10);
         assert_eq!(v[1]["tickets"][0]["verdicts"]["qa"], "pending");
         assert_eq!(v[1]["tickets"][0]["id"], "", "a ticket kept in Loft carries its issue id");
+    }
+
+    /// The card's state line comes from the server, for every state and stall reason: none before it started.
+    #[tokio::test]
+    async fn issue_delivery_carries_the_state_line() {
+        let st = crate::planning::tests::state();
+        let (mut t, _) = crate::tasks::create(&st, &serde_json::json!({ "title": "Spec" }), "user").unwrap();
+        t.github = Some(crate::db::GithubLink { repo: "o/r".into(), number: 9, state: "open".into(), ..Default::default() });
+        st.db.save_task(&t).unwrap();
+        let line = |state: &str, reason: &str, tickets: Vec<DeliveryTicket>| {
+            let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": state, "stall_reason": reason, "created_at": "" })).unwrap();
+            d.tickets = tickets;
+            st.db.save_delivery(&d).unwrap();
+            let st = st.clone();
+            let id = t.id.clone();
+            async move { issue_delivery(State(st), Path(id)).await.unwrap().0["state_line"].clone() }
+        };
+        let says = |tone: &str, text: &str| serde_json::json!({ "tone": tone, "text": text });
+        assert_eq!(line("planned", "", vec![]).await, Value::Null);
+        assert_eq!(line("running", "", vec![ticket(10, "", "review")]).await, says("running", "Running."));
+        assert_eq!(line("running", "", vec![ticket(10, "", "needs_human")]).await, says("needs_you", "Needs you: a ticket had too many rounds of changes."));
+        assert_eq!(line("stalled", "run_failed", vec![]).await, says("stalled", "Stalled: the run Loft woke for its step failed."));
+        assert_eq!(line("stalled", "no_call", vec![]).await, says("stalled", "Stalled: the run Loft woke for its step ended without its call."));
+        assert_eq!(line("stalled", "restart", vec![ticket(10, "", "needs_human")]).await, says("stalled", "Stalled: its run was lost when Loft restarted."));
+        assert_eq!(line("paused", "", vec![]).await, says("paused", "Paused: Loft sends no wakes until you resume it."));
+        assert_eq!(line("needs_human", "", vec![]).await, says("needs_you", "Needs you: too many rounds of changes in the final review."));
+        assert_eq!(line("final_review", "", vec![]).await, says("final", "Final review: the Code reviewer is reviewing the whole PR."));
+        assert_eq!(line("final_fixes", "", vec![]).await, says("final", "Final review: the Dev is fixing what the Code reviewer found."));
+        for done in ["ready", "settled", "merged"] {
+            assert_eq!(line(done, "", vec![]).await, says("done", "Done: every review passed."), "{done}");
+        }
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
