@@ -132,8 +132,17 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
             }
             "eval" => f.add(scan(&args.join(" "), depth + 1, shell)),
             // Removing or replacing Loft's functions, or pointing the name at the real command.
+            // Only a name that is exactly kill, pkill or killall counts: `unset skills` or `alias skillcheck=...`
+            // stop nothing.
             "unset" | "unfunction" | "disable" | "enable" | "alias" | "hash" | "functions" => {
-                f.unscoped |= args.iter().any(|a| a.contains("kill"));
+                for a in args.iter().filter(|a| !a.starts_with(['-', '+'])) {
+                    let (n, value) = a.split_once('=').filter(|_| base(name) == "alias").unzip();
+                    f.unscoped |= KILLS.contains(&n.unwrap_or(a.as_str()));
+                    // What an alias runs: `alias k=/bin/kill` reaches the real kill under another name.
+                    if let Some(value) = value {
+                        f.add(scan(value, depth + 1, shell));
+                    }
+                }
                 f.path |= name == "unset" && args.iter().any(|a| a == "PATH" || a == "path");
             }
             "export" | "typeset" | "declare" | "local" | "readonly" => f.path |= args.iter().any(|a| sets_path(a)),
@@ -807,6 +816,15 @@ mod tests {
             // Loft's functions removed or replaced.
             "unset -f kill; kill 123",
             "unset -f pkill killall",
+            "unset -f kill",
+            "unset -fv -- kill",
+            "unfunction pkill",
+            "alias kill=/bin/kill",
+            "alias pkill='command pkill'",
+            "alias -g killall=true",
+            "alias k='sudo kill'",
+            "hash -d killall",
+            "functions +x kill",
             "unfunction kill; kill 123",
             "disable kill",
             "disable -f kill; kill 12",
@@ -831,6 +849,24 @@ mod tests {
             "env -C /tmp kill 12",
             "unset FOO; kill 12",
             "unalias ll; kill 12",
+        ] {
+            assert!(!unscoped(cmd), "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn unsets_and_aliases_of_other_names_run() {
+        // A name that merely contains "kill" leaves Loft's kill alone.
+        for cmd in [
+            "unset skills",
+            "unset -f install_skills",
+            "alias skillcheck='cargo test'",
+            "alias killer=ls",
+            "unfunction killjoy",
+            "hash -d skill",
+            "disable -f pkill_all",
+            "functions skillset",
+            "alias k=kill; k 12",
         ] {
             assert!(!unscoped(cmd), "should run: {cmd}");
         }
