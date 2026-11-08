@@ -19,7 +19,7 @@ final class DigestTests: XCTestCase {
             a("agent.failed", "docs", "Docs Agent failed: link checker crashed", minutesAgo: 90), // before you left
         ], pullRequests: [], agents: agents)
         XCTAssertEqual(d.lines.map(\.agentName), ["QA Agent", "Backend Agent"], "problems first; started/messaged and old items left out")
-        XCTAssertEqual(d.lines.first?.text, "Task blocked: “Test the integrated flow”")
+        XCTAssertEqual(d.lines.first?.text, "Issue blocked: “Test the integrated flow”")
         XCTAssertTrue(d.lines.first!.needsYou)
         XCTAssertFalse(d.lines.first!.failed, "blocked is amber, not red")
         XCTAssertEqual(d.lines.last?.text, "Finished “Inspect existing architecture”")

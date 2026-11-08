@@ -47,6 +47,10 @@ final class LoftStore {
     /// A short note for the Needs you list ("Already done").
     var needsYouNotice: String?
     private(set) var pullRequests: [PullRequest] = []
+    /// The Delivery of each issue whose page loaded its card, by Loft issue id (absent: none, or not loaded).
+    /// A `delivery` event reloads the ones it's about, so an open card stays live.
+    private(set) var deliveries: [String: IssueDelivery] = [:]
+    private var deliveryCards: Set<String> = []
     /// Plan views by parent task id, for the chat's plan cards. Kept here rather than in the card: the chat's lazy
     /// list drops a card's state when it scrolls out of view, and a card that comes back short and loads again moves
     /// the bottom-anchored list, which scrolls it out again, round and round.
@@ -185,6 +189,33 @@ final class LoftStore {
     /// connection is left as it was; a relaunch starts from it again.
     private(set) var isDemo = false
 
+    /// The address that opens the demo instead of a server (App Review types it in). Matched on the text alone,
+    /// before any request: case, spaces, a trailing slash and the https:// prefix don't matter.
+    static let demoAddress = "demo-loft-dev.get-loft.com"
+
+    nonisolated static func isDemoAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["https://", "http://"] where s.hasPrefix(prefix) { s.removeFirst(prefix.count) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s == demoAddress
+    }
+
+    /// Connects to what was typed on the connect screen: the demo for the demo address (no request at all), the
+    /// server otherwise, saved for next time. False when it isn't an address.
+    @discardableResult
+    func connect(address: String) -> Bool {
+        if Self.isDemoAddress(address) {
+            enterDemo()
+            return true
+        }
+        guard let url = LiveLoftAPI.normalize(address) else { return false }
+        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
+        UserDefaults.standard.removeObject(forKey: "serverURL-override")
+        configure(LiveLoftAPI(baseURL: url))
+        activate()
+        return true
+    }
+
     func enterDemo() {
         deactivate()
         isDemo = true
@@ -314,6 +345,8 @@ final class LoftStore {
         if let o = orchestratorId { await refreshGrill(o) }
         if info.supports(.grill) { await loadGrillPhrases() }
         if info.supports(.needsYou) { await refreshNeedsYou() }
+        // A reconnect may have missed `delivery` events: open cards catch up.
+        for id in deliveryCards { try? await loadDelivery(id) }
         scheduleSave()
     }
 
@@ -433,11 +466,11 @@ final class LoftStore {
             upsert(&tasks, t)
             if let before, before.status != t.status {
                 switch t.state {
-                case .done: notifier.post(.taskOutcome, title: "Task done", body: t.title, whenActive: isActive,
+                case .done: notifier.post(.taskOutcome, title: "Issue done", body: t.title, whenActive: isActive,
                                           target: ["screen": "task", "task_id": t.id])
-                case .failed: notifier.post(.taskOutcome, title: "Task failed", body: t.title, whenActive: isActive,
+                case .failed: notifier.post(.taskOutcome, title: "Issue failed", body: t.title, whenActive: isActive,
                                             itemId: NeedsYouKey.task(t.id, "failed"), target: ["screen": "task", "task_id": t.id])
-                case .blocked: notifier.post(.taskOutcome, title: "Task blocked", body: t.title, whenActive: isActive,
+                case .blocked: notifier.post(.taskOutcome, title: "Issue blocked", body: t.title, whenActive: isActive,
                                              itemId: NeedsYouKey.task(t.id, "blocked"), target: ["screen": "task", "task_id": t.id])
                 default: break
                 }
@@ -451,6 +484,11 @@ final class LoftStore {
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
         case .needsYou(_, let ids):
             if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+        case .delivery(let repo, let spec):
+            for id in deliveryCards {
+                guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
+                Task { try? await loadDelivery(id) }
+            }
         case .other:
             break
         }
@@ -530,7 +568,11 @@ final class LoftStore {
         for tick in 0..<(60 * 60 * 2) { // checked every half second
             guard keepWaiting() else { return nil }
             let a = agent(agentId)
-            let running = a?.running == true || a?.status == "running"
+            // A run that started after the message and has ended is over, whatever the agent's status says: its
+            // update can be missed (a reconnect, the app in the background), and the reply was then never read.
+            let after = conversation(agentId).filter { $0.id > id }
+            let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
+            let running = !runEnded && (a?.running == true || a?.status == "running")
             sawRun = sawRun || running
             let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
             // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.
@@ -786,7 +828,7 @@ final class LoftStore {
 
     private func requireTasks() throws -> LoftAPI {
         let api = try requireWrite()
-        guard supportsTasks else { throw APIError.unsupported("Tasks") }
+        guard supportsTasks else { throw APIError.unsupported("Issues") }
         return api
     }
 
@@ -845,6 +887,27 @@ final class LoftStore {
         if let m = r.message { insert(m) }
         scheduleSave()
         return nil
+    }
+
+    /// The Delivery card of issue `taskId`: loads its Delivery, and keeps it live from `delivery` events after.
+    func loadDelivery(_ taskId: String) async throws {
+        guard let api else { throw APIError.notConfigured }
+        deliveryCards.insert(taskId)
+        deliveries[taskId] = try await api.issueDelivery(taskId: taskId)
+    }
+
+    /// Start delivery, Pause or Resume on issue `taskId`'s Delivery card. Returns what the server says it did.
+    @discardableResult
+    func deliveryAction(_ taskId: String, _ action: IssueDeliveryAction) async throws -> String? {
+        do {
+            let r = try await requireTasks().issueDeliveryAction(taskId: taskId, action)
+            deliveries[taskId] = r.delivery
+            return r.message
+        } catch {
+            // Refused (it started elsewhere, or isn't stalled any more): show where it stands now.
+            try? await loadDelivery(taskId)
+            throw error
+        }
     }
 
     @discardableResult
@@ -926,7 +989,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []
+        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = []
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

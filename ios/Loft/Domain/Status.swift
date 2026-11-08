@@ -165,13 +165,13 @@ enum TaskFilter: String, CaseIterable, Identifiable {
 
     var emptyMessage: String {
         switch self {
-        case .all: "No tasks yet. Add one with the + button."
+        case .all: "No issues yet. Add one with the + button."
         case .inbox: "Your inbox is empty."
         case .ready: "Nothing is queued up for an agent."
-        case .inProgress: "No agent is working on a task right now."
+        case .inProgress: "No agent is working on an issue right now."
         case .blocked: "Nothing is blocked."
-        case .done: "No finished tasks yet."
-        case .failed: "No failed tasks."
+        case .done: "No finished issues yet."
+        case .failed: "No failed issues."
         }
     }
 }

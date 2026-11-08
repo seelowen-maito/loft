@@ -23,6 +23,7 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
@@ -30,6 +31,8 @@ import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
+import { teamBadge, teamOf } from "../../lib/team";
+import { HoverTip } from "../../components/HoverTip";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -180,8 +183,8 @@ export function Chat({
   const pickCommand = (name: string) => (alone || !typing ? runCommand(name) : replaceWord(typing, name));
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
-  // Only agents in the same project: the backend doesn't deliver to others.
-  const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
+  // Any agent, its own group's first: the backend prefers them too when two share a name.
+  const mentionable = agents.filter((a) => a.id !== agent.id).sort((a, b) => Number(teamOf(a) !== teamOf(agent)) - Number(teamOf(b) !== teamOf(agent)));
   const mention = useMention(agent.id, text, setText, mentionable);
   const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
@@ -391,9 +394,18 @@ export function Chat({
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
+            <h2 className="min-w-[7ch] truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
             {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
-            {agent.project && <span className="shrink-0 rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3">{agent.project}</span>}
+            {teamOf(agent) && (
+              <HoverTip
+                left
+                className={cx("shrink-0 whitespace-nowrap rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3", !teamBadge(agent).compact && "max-sm:hidden")}
+                tip={teamBadge(agent).all.map((p, i) => <span key={p} className="text-fg-2">{p}{i === 0 && <span className="text-accent"> · main</span>}</span>)}
+              >
+                <span className="max-sm:hidden">{teamBadge(agent).text}</span>
+                <span className="sm:hidden">{teamBadge(agent).compact}</span>
+              </HoverTip>
+            )}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
             <StatusPill agent={agent} elapsed />
@@ -410,12 +422,12 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <button className="btn" onClick={() => api.stop(agent.id)}>
-              <Square className="size-3 fill-current" /> Stop
+            <button className="btn" title="Stop" onClick={() => api.stop(agent.id)}>
+              <Square className="size-3 fill-current" /> <span className="max-sm:hidden">Stop</span>
             </button>
           ) : (
-            <button className="btn" onClick={() => api.run(agent.id)} title="Run an autonomous check-in now">
-              <Play className="size-3 fill-current" /> Wake
+            <button className="btn" onClick={() => api.run(agent.id)} title="Wake: run an autonomous check-in now">
+              <Play className="size-3 fill-current" /> <span className="max-sm:hidden">Wake</span>
             </button>
           )}
           <button
@@ -508,7 +520,7 @@ export function Chat({
                   {watch.kind === "waiting" && <span className="text-fg-3"> · {watch.minutes} min</span>}
                 </div>
                 <div className="truncate font-mono text-[11px] text-fg-3">
-                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the task." : "It may be stuck. Restart keeps queued messages."}
+                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the run." : "It may be stuck. Restart keeps queued messages."}
                 </div>
               </div>
               <button className="btn shrink-0" onClick={restart} disabled={restarting} title="Stops this run. Queued messages are kept and run next.">
@@ -599,6 +611,7 @@ export function Chat({
                 )}
                 <textarea
                   ref={composer}
+                  data-chat-input
                   value={text}
                   onChange={(e) => {
                     setText(e.target.value);
@@ -666,7 +679,12 @@ export function Chat({
           {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
-            <span className="max-md:hidden">↵ send · ⇧↵ newline · / commands</span>
+            {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
+            <span className="max-md:hidden">
+              ↵ send · ⇧↵ newline · / commands ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("switcher")}>{formatCombo(loadCombo("switcher"))} search</button> ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("sheet")}>? shortcuts</button>
+            </span>
             <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
           </div>
         </div>

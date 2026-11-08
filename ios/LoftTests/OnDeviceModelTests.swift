@@ -44,6 +44,34 @@ final class OnDeviceModelTests: XCTestCase {
         XCTAssertTrue(OnDeviceModel.Status.appleIntelligenceOff.text.contains("Turned off"))
         XCTAssertFalse(OnDeviceModel.Status.deviceNotEligible.isAvailable)
     }
+
+    private func status(_ reason: String?, languageSupported: Bool = true) -> OnDeviceModel.Status {
+        OnDeviceModel.status(unavailableReason: reason, languageSupported: languageSupported, language: "Icelandic")
+    }
+
+    func testKnownReasonsMapToTheirOwnWords() {
+        XCTAssertEqual(status(nil), .available)
+        XCTAssertEqual(status("appleIntelligenceNotEnabled"), .appleIntelligenceOff)
+        XCTAssertEqual(status("deviceNotEligible"), .deviceNotEligible)
+        XCTAssertEqual(status("modelNotReady"), .modelNotReady)
+        XCTAssertEqual(status("modelNotReady").text, "Getting ready (downloading)")
+    }
+
+    func testAnUnknownReasonIsShownAsTheSystemWroteItNeverAsADownload() {
+        let s = status("someNewReason")
+        XCTAssertEqual(s, .unavailable("someNewReason"))
+        XCTAssertEqual(s.text, "Unavailable (someNewReason)")
+        XCTAssertFalse(s.text.contains("downloading"))
+        XCTAssertFalse(s.isAvailable)
+    }
+
+    func testAnUnsupportedLanguageSaysSoInsteadOfDownloading() {
+        XCTAssertEqual(status("modelNotReady", languageSupported: false), .languageNotSupported("Icelandic"))
+        XCTAssertEqual(status("modelNotReady", languageSupported: false).text, "Not available in Icelandic")
+        // A clearer reason from the system still wins, and an available model stays available.
+        XCTAssertEqual(status("appleIntelligenceNotEnabled", languageSupported: false), .appleIntelligenceOff)
+        XCTAssertEqual(status(nil, languageSupported: false), .available)
+    }
 }
 
 private actor Flag {

@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var confirmStop = false
     @State private var actionError: APIError?
     @State private var confirmEndGrill = false
+    /// The open interview full screen over the chat (`InterviewView`).
+    @State private var showingInterview = false
     // Grill voice loop, all inside this chat: read the question, open the mic, catch spoken commands.
     @State private var composerControl: ComposerControl?
     /// The last question read aloud, so each is read once.
@@ -38,7 +40,7 @@ struct ChatView: View {
     @State private var quickAckTask: Task<String?, Never>?
     /// "Send to <agent>?" for a message to the Orchestrator that looks meant for one agent.
     @State private var routeSuggestion: RouteSuggestion?
-    /// A task picked in "Attach a task", sent with the next message (`meta.task_id`).
+    /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
@@ -173,6 +175,17 @@ struct ChatView: View {
                     .padding(.top, 6)
                     .background(.bar)
                 }
+                if grill != nil {
+                    Button { showingInterview = true } label: {
+                        Label("Open interview", systemImage: "arrow.up.left.and.arrow.down.right").frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 6)
+                    .background(.bar)
+                    .accessibilityHint("Shows one question at a time, full screen")
+                    .accessibilityIdentifier("openInterview")
+                }
                 RunWatchBar(agentId: agentId)
                 if let s = suggested, s.messageId == askingMessage?.id, draft.isEmpty, !s.replies.isEmpty {
                     SuggestedReplies(replies: s.replies) { r in
@@ -200,12 +213,12 @@ struct ChatView: View {
                         Spacer(minLength: 0)
                         Button { attached = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
                             .foregroundStyle(.secondary)
-                            .accessibilityLabel("Remove the attached task")
+                            .accessibilityLabel("Remove the attached issue")
                     }
                     .padding(.horizontal, Theme.gutter)
                     .background(.bar)
                     .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Attached task: \(t.title)")
+                    .accessibilityLabel("Attached issue: \(t.title)")
                     .accessibilityIdentifier("attachedTask")
                 }
                 if let t = talkText, !t.isEmpty {
@@ -271,7 +284,7 @@ struct ChatView: View {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
                     if let t = store.currentTask(for: agent.id) {
-                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current task", systemImage: "checklist") }
+                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current issue", systemImage: "checklist") }
                     }
                     // Interviews start when the agent asks; there's no mode to switch on. While one runs it can be paused or ended here.
                     if let s = grill {
@@ -352,6 +365,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
+        .fullScreenCover(isPresented: $showingInterview) { InterviewView(agent: agent) }
         .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
@@ -792,7 +806,7 @@ private struct MessageBubble: View {
                         .font(.body)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .foregroundStyle(isUser ? .white : .primary)
+                        .foregroundStyle(isUser ? Theme.onAccent : .primary)
                         .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
                                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     HStack(spacing: 6) {
@@ -851,7 +865,7 @@ struct ReadAloudBar: View {
                 Button { speaker.interrupt(.stop) } label: {
                     Label("Stop", systemImage: "stop.fill").frame(minWidth: 72, minHeight: 36)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityHint("Stops reading")
                 .accessibilityIdentifier("readAloudStop")
             }
@@ -935,7 +949,7 @@ private struct RouteSuggestionBar: View {
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("Send", action: send)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityIdentifier("routeSend")
             Button(action: dismiss) { Image(systemName: "xmark") }
                 .buttonStyle(.bordered)
@@ -1020,7 +1034,7 @@ private struct PendingBubble: View {
                 Text(message.text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.onAccent)
                     .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 if let failure = message.failure {
                     Label("Not sent: \(failure)", systemImage: "exclamationmark.circle")
@@ -1036,7 +1050,7 @@ private struct PendingBubble: View {
                         Button { Task { await store.retry(message) } } label: {
                             Label("Retry", systemImage: "arrow.clockwise").padding(.vertical, 6)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .disabled(!store.canWrite)
                         .accessibilityIdentifier("retrySend")
                     }

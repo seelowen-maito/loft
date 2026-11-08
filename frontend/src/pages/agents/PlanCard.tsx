@@ -43,7 +43,7 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
     <div className="rounded-2xl border border-line-strong bg-ink-850 p-4">
       <div className="flex items-center gap-2">
         <ListChecks className="size-4 text-accent" />
-        <Link to={`/tasks/${plan.task.id}`} className="min-w-0 flex-1 truncate text-[14px] font-medium hover:underline">
+        <Link to={`/issues/${plan.task.id}`} className="min-w-0 flex-1 truncate text-[14px] font-medium hover:underline">
           {plan.task.title}
         </Link>
         <span className="shrink-0 font-mono text-[11px] text-fg-3">
@@ -68,7 +68,7 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
           const line = s.status === "done" ? s.summary : ["failed", "blocked"].includes(s.status) ? s.error : s.note;
           return (
             <li key={s.id}>
-              <Link to={`/tasks/${s.id}`} className="flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
+              <Link to={`/issues/${s.id}`} className="flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
                 <CircleDot className={cx("mt-0.5 size-3.5 shrink-0", TONE[s.status])} />
                 <div className="min-w-0 flex-1">
                   <div className={cx("truncate text-[13px]", s.status === "cancelled" && "text-fg-3 line-through")}>{s.title}</div>

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, type To, useParams, useSearchParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound } from "lucide-react";
+import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
-import { filtersToParams, parseFilters, type IssueFilters } from "../lib/issueFilters";
+import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -13,6 +13,10 @@ import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
 import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
+import { SpecPanel } from "./SpecViews";
+import { BoardPage, ViewToggle, boardSpecs } from "./SpecBoard";
+import { parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
+import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -56,10 +60,15 @@ export default function TasksPage() {
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => parseFilters(params), [params]);
+  // The Specs board (`?view=specs`, see ./SpecBoard) instead of the list. Its open spec or ticket is `open=<id>`.
+  const board = params.get("view") === "specs";
   const setFilter = useCallback(
-    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => filtersToParams({ ...parseFilters(cur), ...change }), { replace }),
+    (change: Partial<IssueFilters>, replace = false) => setParams((cur) => withFilters(cur, change), { replace }),
     [setParams],
   );
+  const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
+  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}); }, []);
+  useEffect(() => { loadDeliveries(); }, [loadDeliveries]);
   const [query, setQuery] = useState(filters.q);
   // Back/forward to another search shows it in the box.
   useEffect(() => setQuery(filters.q), [filters.q]);
@@ -98,18 +107,42 @@ export default function TasksPage() {
           next[i] = e.task;
           return next;
         });
+      // The list doesn't show Deliveries; the board reloads them once after a burst of changes.
+      if (e.type === "task" && board) {
+        clearTimeout(reload.current);
+        reload.current = setTimeout(loadDeliveries, 1500);
+      }
       if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
-    }, []),
+    }, [loadDeliveries, board]),
   );
+  const reload = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(reload.current), []);
 
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
-  // An agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
-  const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
-  const project = tasks && !projects.includes(filters.project) ? "" : filters.project;
-  const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
-  }, [tasks, filters.q, project, agentId, mine, source, mirror?.login]);
+  const teams = useMemo(() => [...new Set(agents.map(teamOf).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [agents]);
+  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`, once.
+  const from = params.get("from");
+  useEffect(() => {
+    if (!from || !agents.length) return;
+    const groupOf = (id: string) => {
+      const a = agentById.get(id);
+      return a ? teamOf(a) : "";
+    };
+    setParams((cur) => resolveFrom(cur, groupOf) ?? cur, { replace: true });
+  }, [from, agents.length, agentById, setParams]);
+  // A group, agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
+  const group = agents.length && !teams.includes(filters.group) ? "" : filters.group;
+  const groupProjectList = useMemo(() => groupProjects(group, agents, projects), [group, agents, projects]);
+  const groupAgentList = useMemo(() => groupAgents(group, agents), [group, agents]);
+  // An agent outside the picked group is ignored, like an unknown one.
+  const agentId = agents.length ? agentInGroup(filters.agent, group, agents) : filters.agent;
+  const project = tasks && !groupProjectList.includes(filters.project) ? "" : filters.project;
+  // Every filter but the agent: the board matches an agent on its own (a spec's, or its Delivery's, see boardSpecs).
+  const anyAgent = useMemo(() => {
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, group, agents, project, mine, source, mirror?.login]);
+  const filtered = useMemo(() => anyAgent.filter((t) => !agentId || t.agent_id === agentId), [anyAgent, agentId]);
 
   const groups = useMemo(
     () =>
@@ -126,56 +159,99 @@ export default function TasksPage() {
     [filtered],
   );
 
-  const selected = tasks?.find((t) => t.id === routeId) ?? null;
+  // The open issue: on the board `open=` (or a /issues/:id link), in the list the route.
+  const openId = (board ? params.get("open") ?? routeId : routeId) ?? null;
+  const selected = tasks?.find((t) => t.id === openId) ?? null;
+  const up = board ? params.get("up") : null;
+  const openOnBoard = useCallback((id: string | null, from?: string) => navigate({ pathname: "/issues", search: withOpen(params, id, from).toString() }), [navigate, params]);
+  const to = (id: string): To => (board ? { pathname: "/issues", search: withOpen(params, id).toString() } : { pathname: `/issues/${id}`, search: params.toString() });
+  const detail = selected ? (
+    <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} deliveries={deliveries} to={to}
+      openTicket={(id) => (board ? openOnBoard(id, selected.id) : navigate(to(id)))}
+      onClose={board ? () => openOnBoard(null) : undefined} onBack={up && tasks?.some((t) => t.id === up) ? () => openOnBoard(up) : undefined} />
+  ) : openId && tasks ? (
+    <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
+  ) : null;
+  const unread = groups[0].tasks.length;
+  const specs = useMemo(() => anyAgent.filter(isSpec), [anyAgent]);
+  const kept = useMemo(() => (board ? boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId) : []), [board, specs, deliveries, tasks, params, agentId]);
+  const count = board ? (kept.length === specs.length ? `${specs.length} specs` : `${kept.length} of ${specs.length} specs`) : filtered.length === (tasks ?? []).length ? `${filtered.length} issues` : `${filtered.length} of ${(tasks ?? []).length} issues`;
 
-  return (
-    <div className="grid h-full grid-cols-[400px_minmax(0,1fr)] overflow-hidden max-lg:grid-cols-1">
-      {/* list */}
-      <aside className={cx("flex min-h-0 flex-col border-r border-line bg-ink-950", routeId && "max-lg:hidden")}>
-        <div className="space-y-3 px-4 pb-3 pt-5">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="eyebrow">Loft issues</div>
-              <div className="mt-1 font-mono text-[11px] text-fg-3">
-                {groups[0].tasks.length > 0 && <span className="text-warn">{groups[0].tasks.length} need you · </span>}
-                {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
-              </div>
-            </div>
-            <div className="flex items-center gap-1">
-            <button className="btn-ghost size-8 justify-center p-0" onClick={sync} aria-label="Refresh from GitHub" title="Refresh from GitHub">
-              <RefreshCw className={cx("size-4", syncing && "animate-spin")} />
-            </button>
-            <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
-              <Plus className="size-4" />
-            </button>
-            </div>
-          </div>
-          <label className="flex items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5">
-            <Search className="size-3.5 text-fg-3" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
-              {SOURCES.map((s) => (
-                <button key={s.key} onClick={() => setFilter({ source: s.key })} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
-                  {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
-                </button>
-              ))}
-            </div>
-            <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
-              <option value="">All projects</option>
-              {projects.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
-              <option value="">All agents</option>
-              {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-            <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
-              Created by me
-            </button>
+  // One header over both views, with the filters they share, so switching only changes the view below.
+  const header = (
+    <div className={cx("border-b border-line px-4 pb-3 pt-5", openId && !board && "max-lg:hidden")}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="eyebrow">Loft issues</div>
+          <div className="mt-1 font-mono text-[11px] text-fg-3">
+            {unread > 0 && <span className="text-warn">{unread} need you · </span>}
+            {(tasks ?? []).filter((t) => !["done", "cancelled"].includes(t.status)).length} open
           </div>
         </div>
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-6">
+        <div className="flex items-center gap-2">
+          <ViewToggle params={params} setParams={(n) => setParams(n)} />
+          <button className="btn-ghost size-8 justify-center p-0" onClick={sync} aria-label="Refresh from GitHub" title="Refresh from GitHub">
+            <RefreshCw className={cx("size-4", syncing && "animate-spin")} />
+          </button>
+          <button className="btn-primary size-8 justify-center p-0" onClick={() => setCreating(true)} aria-label="New Loft issue" title="New Loft issue">
+            <Plus className="size-4" />
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <label className="flex min-w-[160px] flex-1 items-center gap-2 rounded-xl border border-line-strong bg-ink-850 px-3 py-1.5 sm:max-w-xs">
+          <Search className="size-3.5 text-fg-3" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issues, or #42" aria-label="Search issues" className="w-full bg-transparent text-[13px] outline-none placeholder:text-fg-3" />
+        </label>
+        <div className="flex items-center gap-0.5 rounded-full border border-line bg-ink-900 p-0.5" role="group" aria-label="Source">
+          {SOURCES.map((s) => (
+            <button key={s.key} onClick={() => setFilter({ source: s.key })} aria-pressed={source === s.key} className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px]", source === s.key ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
+              {s.key !== "all" && <Origin github={s.key === "github"} />} {s.label}
+            </button>
+          ))}
+        </div>
+        <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "", agent: agentInGroup(agentId, e.target.value, agents) })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
+          <option value="">All groups</option>
+          {teams.map((g) => <option key={g} value={g}>{g}</option>)}
+        </select>
+        <select value={project} onChange={(e) => setFilter({ project: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Project">
+          <option value="">All projects</option>
+          {groupProjectList.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
+          <option value="">All agents</option>
+          {groupAgentList.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
+          Created by me
+        </button>
+        {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
+      </div>
+    </div>
+  );
+
+  if (board) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden">
+        {header}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
+            <BoardPage kept={kept} tasks={tasks} deliveries={deliveries} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
+          )}
+        </div>
+        {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
+        {creating && <NewTaskDialog agents={agents} projects={projects} onClose={() => setCreating(false)} />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+    {header}
+    <div className="grid min-h-0 flex-1 grid-cols-[400px_minmax(0,1fr)] overflow-hidden max-lg:grid-cols-1">
+      {/* list */}
+      <aside className={cx("flex min-h-0 flex-col border-r border-line bg-ink-950", routeId && "max-lg:hidden")}>
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 py-3 pb-6">
           {mirror?.projects.filter((p) => p.error).map((p) => (
             <div key={p.project} className="mx-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
               <span className="text-fg">Couldn't read {p.repo}.</span> {p.error}
@@ -209,7 +285,7 @@ export default function TasksPage() {
                 </button>
                 {!folded &&
                   g.tasks.slice(0, g.key === "closed" ? 50 : undefined).map((t) => (
-                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/tasks/${t.id}`, search: params.toString() })} />
+                    <TaskRow key={t.id} task={t} progress={specProgress(t, tasks ?? [])} agent={t.agent_id ? agentById.get(t.agent_id) : undefined} active={t.id === routeId} onOpen={() => navigate({ pathname: `/issues/${t.id}`, search: params.toString() })} />
                   ))}
               </section>
             );
@@ -219,11 +295,7 @@ export default function TasksPage() {
 
       {/* detail */}
       <section className={cx("min-h-0 overflow-y-auto", !routeId && "max-lg:hidden")}>
-        {selected ? (
-          <TaskDetail task={selected} tasks={tasks ?? []} agents={agents} agentById={agentById} repos={repos} />
-        ) : routeId && tasks ? (
-          <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
-        ) : (
+        {detail ?? (
           <div className="flex h-full flex-col items-center justify-center p-10 text-center text-fg-3">
             <ListTodo className="mb-3 size-8" />
             <div className="text-[13px]">Pick a Loft issue to see its details and thread.</div>
@@ -231,6 +303,7 @@ export default function TasksPage() {
         )}
       </section>
       {creating && <NewTaskDialog agents={agents} projects={projects} onClose={() => setCreating(false)} />}
+    </div>
     </div>
   );
 }
@@ -249,7 +322,7 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-fg-3">
           <span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span>
-          {t.github && <span className="text-fg-2">· #{t.github.number}</span>}
+          <span className="text-fg-2">· {t.github ? `#${t.github.number}` : "Loft"}</span>
           {progress && <span className="text-fg-2" title="Tickets done of this spec's tickets">· {progress.done}/{progress.total} done</span>}
           {agent && <>· {agent.name}</>}
           {t.project && <>· {t.project}</>}
@@ -263,7 +336,43 @@ function TaskRow({ task: t, agent, active, onOpen, progress }: { task: Task; age
   );
 }
 
-function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string> }) {
+/** The board's large modal over the full-width board: background click, ✕ or Esc close it; Tab stays inside and focus goes back to the card on close. Full screen at phone width. */
+function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  const box = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const from = document.activeElement as HTMLElement | null;
+    box.current?.focus();
+    return () => { if (from?.isConnected) from.focus(); };
+  }, []);
+  const onKey = (e: React.KeyboardEvent) => {
+    const el = e.target as HTMLElement;
+    if (e.key === "Escape") {
+      // Not while a field or another dialog (new issue, confirm…) has it.
+      if (e.defaultPrevented || el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || document.querySelectorAll('[role="dialog"]').length > 1) return;
+      e.stopPropagation();
+      close.current();
+    } else if (e.key === "Tab" && box.current) {
+      const f = [...box.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')];
+      if (f.length === 0) return e.preventDefault();
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && (el === first || el === box.current)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && el === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px] sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} role="dialog" aria-modal="true" aria-label="Issue" tabIndex={-1} onKeyDown={onKey}
+        className="h-full w-full animate-rise overflow-y-auto bg-ink-950 shadow-2xl outline-none sm:h-auto sm:max-h-full sm:max-w-[960px] sm:rounded-2xl sm:border sm:border-line-strong">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** An issue's page. In the board it's the modal over it: `onClose` is its ✕, `onBack` the arrow to the spec it was opened from. `to` is where a link to another issue goes. */
+function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, openTicket, onClose, onBack }: { task: Task; tasks: Task[]; agents: Agent[]; agentById: Map<string, Agent>; repos: Record<string, string>; deliveries: DeliverySummary[]; to: (id: string) => To; openTicket: (id: string) => void; onClose?: () => void; onBack?: () => void }) {
   const [thread, setThread] = useState<TaskComment[] | null>(null);
   const [editAsked, setEditAsked] = useState(0);
   // Links keep the list's filters (they're in the URL).
@@ -292,12 +401,26 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
   return (
     <div className="mx-auto max-w-[820px] space-y-6 px-6 py-6">
-      <Link to={{ pathname: "/tasks", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
-        <ArrowLeft className="size-3" /> All issues
-      </Link>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 empty:hidden">
+        {onBack && (
+          <button onClick={onBack} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+            <ArrowLeft className="size-3" /> Back to the spec
+          </button>
+        )}
+        {!onClose && (
+          <Link to={{ pathname: "/issues", search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg lg:hidden">
+            <ArrowLeft className="size-3" /> All issues
+          </Link>
+        )}
+        {onClose && (
+          <button onClick={onClose} className="btn-ghost -mr-2 ml-auto size-7 justify-center p-0" aria-label="Close" title="Close (Esc)">
+            <X className="size-4" />
+          </button>
+        )}
+      </div>
       <header className="space-y-2">
         {parent && (
-          <Link to={{ pathname: `/tasks/${parent.id}`, search }} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
+          <Link to={to(parent.id)} className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-3 hover:text-fg">
             {isSpec(parent) && parent.github ? `Part of spec #${parent.github.number}: ${parent.title}` : `Part of ${parent.title}`} <ChevronRight className="size-3" />
           </Link>
         )}
@@ -335,11 +458,12 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
           </div>
         )}
         <div className="pt-2">
-          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.map((a) => a.project.trim()).filter(Boolean)])].sort()} />
+          <TaskActions task={t} agents={agents} edit={editAsked} projects={[...new Set([...Object.keys(repos), ...agents.flatMap(projectsOf)])].sort()} />
         </div>
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
+      {isSpec(t) && <SpecPanel spec={t} tasks={tasks} deliveries={deliveries} agentById={agentById} openTicket={openTicket} />}
       {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
       {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
       {t.state === "open" && !t.agent_id && !isSpec(t) && !isStandaloneTicket(t) && agents.length > 0 && <HandOffCard key={t.id} task={t} agents={agents} />}
@@ -364,9 +488,9 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos }: { task: Task; 
 
       {(subtasks.length > 0 || deps.length > 0 || blocking.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
-          {subtasks.length > 0 && <TaskLinks title="Subtasks" tasks={subtasks} />}
-          {deps.length > 0 && <TaskLinks title="Blocked by" tasks={deps} />}
-          {blocking.length > 0 && <TaskLinks title="Blocking" tasks={blocking} />}
+          {subtasks.length > 0 && <TaskLinks title="Sub-issues" tasks={subtasks} to={to} />}
+          {deps.length > 0 && <TaskLinks title="Blocked by" tasks={deps} to={to} />}
+          {blocking.length > 0 && <TaskLinks title="Blocking" tasks={blocking} to={to} />}
         </div>
       )}
 
@@ -435,14 +559,13 @@ function Block({ title, text, tone }: { title: string; text: string; tone?: stri
   );
 }
 
-function TaskLinks({ title, tasks }: { title: string; tasks: Task[] }) {
-  const { search } = useLocation();
+function TaskLinks({ title, tasks, to }: { title: string; tasks: Task[]; to: (id: string) => To }) {
   return (
     <section>
       <div className="eyebrow mb-2">{title}</div>
       <div className="space-y-1">
         {tasks.map((x) => (
-          <Link key={x.id} to={{ pathname: `/tasks/${x.id}`, search }} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
+          <Link key={x.id} to={to(x.id)} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-white/[0.03]">
             <StateIcon task={x} className="size-3 shrink-0" />
             <span className="truncate">{x.title}</span>
           </Link>

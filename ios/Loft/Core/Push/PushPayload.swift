@@ -8,10 +8,15 @@ enum PushDestination: Equatable {
     case needsYou
     case url(URL)
 
-    /// Push payload: `{ aps: {…}, needs_you_id, type, target: {screen, agent_id?, task_id?, url?} }`.
-    static func from(_ info: [AnyHashable: Any]) -> PushDestination? {
+    /// Push payload: `{ aps: {…}, needs_you_id, type, target: {screen, agent_id?, task_id?, url?} }`. `loftHost` is
+    /// the host of the Loft the app is connected to: a `url` target opens only when it's trusted (`opens(_:loftHost:)`),
+    /// and any other link just opens the app, like a push with no target.
+    static func from(_ info: [AnyHashable: Any], loftHost: String? = nil) -> PushDestination? {
         if let t = info["target"] as? [String: Any] {
-            if let s = t["url"] as? String, let u = URL(string: s), u.scheme == "https" { return .url(u) }
+            if let s = t["url"] as? String {
+                guard let u = URL(string: s), opens(u, loftHost: loftHost) else { return nil }
+                return .url(u)
+            }
             if (t["screen"] as? String) == "task", let id = t["task_id"] as? String { return .task(taskId: id) }
             // The summary push a phone gets at the rate limit.
             if (t["screen"] as? String) == "needs_you" { return .needsYou }
@@ -22,6 +27,13 @@ enum PushDestination: Equatable {
         return nil
     }
 
+    /// Whether a push's link may be opened: `https` on github.com (the pull request and issue links Loft sends) or on
+    /// the connected Loft's host. A stranger's relay key must not be able to open any page on the phone.
+    static func opens(_ url: URL, loftHost: String?) -> Bool {
+        guard url.scheme?.lowercased() == "https", let host = url.host()?.lowercased() else { return false }
+        return host == "github.com" || host == loftHost?.lowercased()
+    }
+
     /// The "Needs you" item a notification is about, so a push and a local notification for the same item show once.
     static func itemId(_ info: [AnyHashable: Any]) -> String? { info["needs_you_id"] as? String }
 }
@@ -29,18 +41,21 @@ enum PushDestination: Equatable {
 /// The switches in Settings › Push. Each covers one or more of the server's kinds, which are the "Needs you"
 /// item types one to one (docs/push.md).
 enum PushKind: String, CaseIterable, Identifiable {
-    case permission, approval, blockedFailed = "blocked_failed", questions, stuck, prReady = "pr_ready", prReview = "pr_review"
+    case permission, approval, blockedFailed = "blocked_failed", questions, stuck, prReady = "pr_ready", prReview = "pr_review",
+         deliveryStalled = "delivery_stalled", deliveryDone = "delivery_done"
 
     var id: String { rawValue }
     var label: String {
         switch self {
         case .permission: "Permission requests"
-        case .approval: "Tasks waiting for approval"
-        case .blockedFailed: "Blocked or failed tasks"
+        case .approval: "Issues waiting for approval"
+        case .blockedFailed: "Blocked or failed issues"
         case .questions: "Questions and interviews"
         case .stuck: "Stuck agents"
         case .prReady: "PRs ready to merge"
         case .prReview: "PRs waiting for your review"
+        case .deliveryStalled: "Delivery stalled"
+        case .deliveryDone: "Delivery done"
         }
     }
     /// The server's kinds this switch turns on.
@@ -53,6 +68,8 @@ enum PushKind: String, CaseIterable, Identifiable {
         case .stuck: ["stuck"]
         case .prReady: ["pr_ready"]
         case .prReview: ["pr_review"]
+        case .deliveryStalled: ["delivery_stalled"]
+        case .deliveryDone: ["delivery_done"]
         }
     }
     /// On unless turned off, except PRs (the server's default leaves them out too).

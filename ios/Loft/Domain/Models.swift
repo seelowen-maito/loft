@@ -38,9 +38,22 @@ struct Agent: Codable, Identifiable, Hashable {
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
+    /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
+    var group: String? = nil
+    /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
+    var projects: [String]? = nil
 
-    /// Leads its project's team; it wears a captain hat.
+    /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
+
+    /// Its team: the group; empty when it has none (backend `Agent::team`).
+    var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
+
+    /// The projects it works in, main first: `projects`, else the one `project` from an older server.
+    var allProjects: [String] {
+        if let projects, !projects.isEmpty { return projects }
+        return (project ?? "").isEmpty ? [] : [project!]
+    }
 }
 
 /// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
@@ -261,6 +274,8 @@ struct PullRequest: Codable, Identifiable, Hashable {
     var state: String
     var draft: Bool?
     var createdAt: Date?
+    /// Label names; the verdicts are tests:green, qa:passed, security:passed and their failures.
+    var labels: [String]?
 }
 
 struct ServerInfo: Codable, Hashable {
@@ -397,6 +412,8 @@ enum ServerEvent {
     case grill(GrillSession)
     /// The "Needs you" list changed: refetch when `ids` differ from what's shown.
     case needsYou(count: Int, ids: [String])
+    /// The Delivery of spec (or standalone ticket) `repo#spec` changed: a card showing it reloads.
+    case delivery(repo: String, spec: Int)
     case other(String)
 
     private struct Envelope: Decodable { let type: String }
@@ -410,6 +427,7 @@ enum ServerEvent {
     private struct SystemBody: Decodable { let system: SystemReading }
     private struct GrillBody: Decodable { let session: GrillSession }
     private struct NeedsYouBody: Decodable { let count: Int; let ids: [String] }
+    private struct DeliveryBody: Decodable { let repo: String; let spec: Int }
 
     static func decode(_ data: Data) throws -> ServerEvent {
         let d = JSONCoding.decoder
@@ -427,6 +445,9 @@ enum ServerEvent {
         case "needs_you":
             let b = try d.decode(NeedsYouBody.self, from: data)
             return .needsYou(count: b.count, ids: b.ids)
+        case "delivery":
+            let b = try d.decode(DeliveryBody.self, from: data)
+            return .delivery(repo: b.repo, spec: b.spec)
         default: return .other(type)
         }
     }
