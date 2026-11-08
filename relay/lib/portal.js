@@ -4,6 +4,7 @@
 
 import { createHash, createHmac, createPrivateKey, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { kv as makeKv } from "./kv.js";
+import { ipOf } from "./ip.js";
 import { newKey, MAX_KEYS, USED_SECONDS } from "./relay.js";
 
 export const REQUIRED = ["APPLE_SERVICES_ID", "APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_KEY_P8", "PORTAL_URL", "SESSION_SECRET", "KV_REST_API_URL", "KV_REST_API_TOKEN"];
@@ -28,7 +29,7 @@ const STYLE = `@font-face{font-family:Geist;src:url(/fonts/Geist-Variable.woff2)
   `.title{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;margin-bottom:1rem}.title small{display:block;font:400 10.5px "Geist Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.14em;color:var(--fg-3)}h1{margin:0;font-size:22px;line-height:1.3;font-weight:500;letter-spacing:-.015em}.card h1{font-size:16px}.center .title{justify-content:center}.note{font-size:12px;color:var(--fg-3)}p{margin:0 0 1rem;color:var(--fg-2)}main>:last-child{margin-bottom:0}` +
   `a{color:var(--fg);text-decoration-color:var(--line-strong);text-underline-offset:3px}a:hover{text-decoration-color:var(--accent)}form{margin:0 0 1rem}label{display:block;color:var(--fg-2);font-size:13px}` +
   `input:not([type=hidden]){display:block;width:100%;margin-top:.4rem;padding:.55rem .75rem;font:inherit;font-size:14px;color:var(--fg);background:var(--ink-850);border:1px solid var(--line-strong);border-radius:.75rem;outline:0}input::placeholder{color:var(--fg-3)}input:focus{border-color:rgb(200 242 109/.5);box-shadow:0 0 0 3px rgb(200 242 109/.1)}` +
-  `button{font:inherit;font-size:13px;padding:.45rem .95rem;color:var(--fg);background:var(--ink-800);border:1px solid var(--line-strong);border-radius:999px;cursor:pointer}button:hover{background:var(--ink-700);border-color:rgb(255 255 255/.2)}button.primary{color:var(--ink-950);font-weight:500;background:var(--accent);border-color:var(--accent)}button.primary:hover{filter:brightness(1.1)}button.danger{color:var(--bad);border-color:rgb(242 125 109/.4);background:transparent}button.danger:hover{background:rgb(242 125 109/.1)}` +
+  `button{font:inherit;font-size:13px;padding:.45rem .95rem;color:var(--fg);background:var(--ink-800);border:1px solid var(--line-strong);border-radius:999px;cursor:pointer}button:hover{background:var(--ink-700);border-color:rgb(255 255 255/.2)}button.primary{color:var(--ink-950);font-weight:500;background:var(--accent);border-color:var(--accent)}button.primary:hover{filter:brightness(1.1)}button.danger{color:var(--bad);border-color:rgb(242 125 109/.4);background:transparent}p.bad{color:var(--bad)}button.danger:hover{background:rgb(242 125 109/.1)}` +
   `.apple{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;min-width:15rem;height:44px;padding:0 1.25rem;color:#000;background:#fff;border:1px solid #fff;border-radius:8px;font-size:17px;font-weight:500;text-decoration:none;white-space:nowrap}.apple:hover{background:#eee}.apple svg{height:20px;width:auto;fill:#000}` +
   `code{display:block;word-break:break-all;margin:0 0 1rem;padding:.8rem .9rem;font:13px/1.5 "Geist Mono",ui-monospace,"SF Mono",monospace;color:var(--accent);background:var(--ink-850);border:1px solid var(--line-strong);border-radius:.75rem;user-select:all}` +
   `.table{overflow-x:auto;margin:0 0 1rem;background:var(--ink-900);border:1px solid var(--line);border-radius:1rem}table{width:100%;border-collapse:collapse;font-size:14px}th{padding:.7rem 1rem;text-align:left;font:400 10.5px "Geist Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.14em;color:var(--fg-3);white-space:nowrap}td{padding:.95rem 1rem;text-align:left;border-top:1px solid var(--line);white-space:nowrap}td.mono{font:13px "Geist Mono",ui-monospace,monospace;color:var(--fg-3)}td:last-child,th:last-child{text-align:right}td form{margin:0}svg.i{height:15px;width:15px;margin-right:.55rem;vertical-align:-2px;fill:none;stroke:var(--fg-3);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}` +
@@ -188,7 +189,7 @@ const toApple = (env, now, deleting) => {
  * page saying when to try again. Vercel sets the first x-forwarded-for address; the store holds only its hash.
  */
 export async function limited(store, request, what, now) {
-  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  const ip = ipOf(request);
   const hour = Math.floor(now / 3600000);
   if ((await store.hit(`limit:${what}:${createHash("sha256").update(ip).digest("hex")}:${hour}`, 3600)) <= PER_HOUR) return null;
   const retry = (hour + 1) * 3600 - Math.floor(now / 1000);
@@ -277,7 +278,7 @@ export async function startDelete(request, env = process.env, now = Date.now()) 
 }
 
 /**
- * Deletes `account` and its keys. The account and every key read beforehand go in one transaction, which also reads
+ * Deletes `account`, its keys and its devices' bindings. The account and every key read beforehand go in one transaction, which also reads
  * any key made since; once the account is gone `makeAccountKey` undoes its own key, so those are the last ones.
  * A failure part way leaves the set holding whatever is left, so signing in again shows those keys and deleting
  * again finishes the job.
@@ -289,6 +290,12 @@ export async function deleteAccount(store, account) {
   const drop = ids?.length ? [["SREM", set, ...ids]] : [];
   const answers = await store.transaction([["DEL", `account:${account}`, ...records(ids)], ...drop, ["SMEMBERS", set]]);
   await store.transaction([["DEL", set, ...records(answers.at(-1))]]);
+  // Its keys are gone, so its devices are free: each one it still holds (one may have expired and gone to another).
+  const devices = `account-devices:${account}`;
+  const [hashes] = await store.pipeline([["SMEMBERS", devices]]);
+  const owners = hashes?.length ? await store.pipeline(hashes.map((h) => ["GET", `device-owner:${h}`])) : [];
+  const held = (hashes ?? []).filter((h, i) => owners[i] === `account:${account}`).map((h) => `device-owner:${h}`);
+  await store.transaction([["DEL", devices, ...held]]);
 }
 
 /** Back from Apple on the way to deleting: only the account that asked can be deleted. */

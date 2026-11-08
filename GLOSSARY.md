@@ -32,6 +32,18 @@ _Avoid_: Job, type, flag
 Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers, closes it when they pass, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
 _Avoid_: Build, run, pipeline
 
+**Stalled**:
+A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled, and tells only the user, until the user resumes it.
+_Avoid_: Stuck, failed, paused
+
+**Paused**:
+A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
+_Avoid_: Stopped, cancelled, on hold
+
+**Resume**:
+The user's action that restarts a stalled or paused Delivery, or a ticket that needs the user after too many change rounds: Loft first checks GitHub for what is already done, then wakes only the agent the step still waits on.
+_Avoid_: Retry, restart
+
 **Role brief**:
 The fixed instructions Loft writes for a role and sends with that role's wake in a Delivery. An agent's standing instructions add to it but can't change how the Delivery works.
 _Avoid_: Role prompt, template
@@ -51,6 +63,18 @@ _Avoid_: Note, knowledge
 **Unread reply**:
 The end of a run the user started (by a message or a schedule) that the user hasn't seen yet in that agent's chat. Runs started only by other agents never leave one.
 _Avoid_: Notification, new message, unread message
+
+**Agent process**:
+A process started by one of an agent's runs, including servers it left running in the background. Each run starts in its own process session, so Loft knows which agent owns which process. An agent may stop its own processes freely; stopping any other process needs the user's approval.
+_Avoid_: Agent job, child process
+
+**Port range**:
+The fixed set of local ports Loft gives one agent for its dev servers, the same across runs. An agent serves only on ports in its own range, so agents never collide.
+_Avoid_: Port pool, port block
+
+**Agent device**:
+The iOS Simulator device Loft creates for one agent the first time it needs one, named after the agent. The agent installs and runs apps only on its own device; the user picks which agent's device to watch.
+_Avoid_: Booted device, shared simulator
 
 **Subagent**:
 A short-lived Claude Code worker an agent starts inside a run for a side job (a search, a self-contained task). It ends with the run at the latest and never talks to the user.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generateKeyPairSync, createHash } from "node:crypto";
 import { start, callback, home } from "../lib/portal.js";
-import { pair, poll, connect, approve } from "../lib/pairing.js";
+import { pair, poll, connect, approve, CONFIRM_TRIES } from "../lib/pairing.js";
 import { push } from "../lib/relay.js";
 import { POST as pairEndpoint } from "../api/pair.js";
 
@@ -84,12 +84,16 @@ beforeEach(() => {
 const get = (path, cookies = "") => new Request(`https://portal.example.com${path}`, { headers: { cookie: cookies } });
 const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("="));
 let addresses = 0;
-const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) => new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip, "sec-fetch-site": "same-origin" }, body: new URLSearchParams(form) });
+// An Allow form carries the confirmation code its Loft shows, unless a test types its own.
+const post = (path, form, cookies = "", ip = `198.51.100.${addresses++ % 250}`) =>
+  new Request(`https://portal.example.com${path}`, { method: "POST", headers: { cookie: cookies, "x-forwarded-for": ip, "sec-fetch-site": "same-origin" }, body: new URLSearchParams({ ...(confirms.has(form.code) && { confirm: confirms.get(form.code) }), ...form }) });
 const asLoft = (path, body, ip = "203.0.113.7") => new Request(`https://relay.example.com${path}`, { method: "POST", headers: { "x-forwarded-for": ip }, body: JSON.stringify(body) });
 const secrets = new Map();
+const confirms = new Map();
 const newCode = async (ip) => {
-  const { code, secret } = await (await pair(asLoft("/api/pair", {}, ip), env, clock)).json();
+  const { code, secret, confirm } = await (await pair(asLoft("/api/pair", {}, ip), env, clock)).json();
   secrets.set(code, secret);
+  confirms.set(code, confirm);
   return code;
 };
 const pollFor = (code, secret = secrets.get(code)) => poll(asLoft("/api/pair-poll", { code, secret }), env);
@@ -161,6 +165,42 @@ test("malformed or over-long polls and connects make no store call", async () =>
   assert.equal((await poll(new Request("https://relay.example.com/api/pair-poll", { method: "POST", body: endless, duplex: "half" }), dead)).status, 404);
   assert.ok(pulled < 10, `read ${pulled} chunks`);
   assert.equal((await connect(get("/connect?code=short"), dead)).status, 404);
+});
+
+test("Allow needs the confirmation code the Loft shows; the page itself never shows it", async () => {
+  const code = await newCode();
+  const confirm = confirms.get(code);
+  assert.match(confirm, /^[A-HJKMNP-Z2-9]{6}$/);
+  const { cookies } = await signInAs();
+  const form = await (await connect(get(`/connect?code=${code}`, cookies), env)).text();
+  assert.match(form, /name="confirm"/);
+  assert.ok(!form.includes(confirm), "someone sent the link can't read the code off the page");
+  for (const wrong of ["", "ÄBCDEF", "ABCDEF"].filter((c) => c !== confirm)) {
+    const res = await approve(post("/connect", { code, name: "Mac", confirm: wrong }, cookies), env);
+    assert.equal(res.status, 400, wrong);
+    assert.match(await res.text(), /That isn&#39;t the code Loft shows. \d tr/);
+  }
+  assert.equal((await pollFor(code)).status, 202, "a wrong code issues no key and the sign-in still waits");
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 0);
+  // Typed in lowercase with a dash, as people do: still the code.
+  const typed = `${confirm.slice(0, 3)}-${confirm.slice(3)}`.toLowerCase();
+  assert.equal((await approve(post("/connect", { code, name: "Mac", confirm: typed }, cookies), env)).status, 200);
+  assert.equal((await pollFor(code)).status, 200, "the right code issues the key as before");
+});
+
+test("too many wrong confirmation codes end the sign-in code", async () => {
+  const code = await newCode();
+  const { cookies } = await signInAs();
+  const wrong = confirms.get(code) === "AAAAAA" ? "BBBBBB" : "AAAAAA";
+  for (let i = 1; i < CONFIRM_TRIES; i++) assert.equal((await approve(post("/connect", { code, name: "Mac", confirm: wrong }, cookies), env)).status, 400);
+  const last = await approve(post("/connect", { code, name: "Mac", confirm: wrong }, cookies), env);
+  assert.equal(last.status, 403);
+  assert.match(await last.text(), /Press Sign in in Loft again/);
+  // Dead: the right code is too late, the page says so, and the Loft stops waiting.
+  assert.equal((await approve(post("/connect", { code, name: "Mac" }, cookies), env)).status, 404);
+  assert.equal((await connect(get(`/connect?code=${code}`, cookies), env)).status, 404);
+  assert.equal((await pollFor(code)).status, 404);
+  assert.equal([...store.keys()].filter((k) => k.startsWith("relay-key:")).length, 0, "no key was made");
 });
 
 test("an unapproved or expired code returns no key", async () => {
