@@ -171,6 +171,8 @@ pub struct AppState {
     pub mirror: Arc<crate::mirror::Mirror>,
     /// What `@` file search last listed under each base.
     pub listings: Arc<crate::file_search::Listings>,
+    /// The Xcode `simctl` last found to run with.
+    pub xcode: Arc<crate::simulator::XcodeCache>,
 }
 
 impl AppState {

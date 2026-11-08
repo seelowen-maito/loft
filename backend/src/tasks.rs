@@ -1198,6 +1198,7 @@ pub(crate) mod tests {
             publish_known: Arc::new(Default::default()),
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
+            xcode: Arc::new(Default::default()),
         }
     }
 

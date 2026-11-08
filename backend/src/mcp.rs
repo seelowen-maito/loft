@@ -346,7 +346,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         "Your Simulator device is `{name}`, UDID `{udid}`. Use it for every simctl, xcodebuild and AXe call; from your next run it is also in `${}`.",
                         crate::simulator::DEVICE_VAR
                     );
-                    if let crate::simulator::Xcode::At(dir) = crate::simulator::find_xcode(&state.cfg.xcode).await {
+                    if let crate::simulator::Xcode::At(dir) = crate::simulator::xcode(state).await {
                         t += &format!(" `xcode-select` points at the Command Line Tools, so run xcrun and xcodebuild with `DEVELOPER_DIR={}`.", dir.display());
                     }
                     text(t)

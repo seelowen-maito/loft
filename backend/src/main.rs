@@ -106,6 +106,7 @@ async fn serve() -> anyhow::Result<()> {
         publish_known: Arc::new(planning::Known::default()),
         mirror: Arc::new(Default::default()),
         listings: Arc::new(Default::default()),
+        xcode: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     {

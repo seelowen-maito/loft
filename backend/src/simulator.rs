@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Body;
@@ -45,7 +46,7 @@ fn valid_udid(u: &str) -> bool {
 pub const NO_XCODE: &str = "Xcode is missing: xcode-select points at the Command Line Tools, which have no Simulator, and no Xcode was found in /Applications or /Volumes. Install Xcode, or start Loft with DEVELOPER_DIR set to your Xcode's Contents/Developer.";
 
 /// Which Xcode `xcrun` should use.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Xcode {
     /// The one `DEVELOPER_DIR` or `xcode-select` already picks.
     Selected,
@@ -84,10 +85,29 @@ pub async fn find_xcode(lookup: &XcodeLookup) -> Xcode {
     candidates.map(|x| x.join("Contents/Developer")).find(|d| d.is_dir()).map_or(Xcode::Missing, Xcode::At)
 }
 
+/// How long a [`find_xcode`] result is reused: the Simulator page runs simctl about 4 times a second, and a newly
+/// installed Xcode is still found within a minute.
+const XCODE_TTL: Duration = Duration::from_secs(60);
+
+/// The last [`find_xcode`] result, and when it was found.
+#[derive(Default)]
+pub struct XcodeCache(tokio::sync::Mutex<Option<(Instant, Xcode)>>);
+
+/// The Xcode `xcrun` should use, looked up at most once per [`XCODE_TTL`].
+pub async fn xcode(state: &AppState) -> Xcode {
+    let mut cached = state.xcode.0.lock().await;
+    if let Some((_, x)) = cached.as_ref().filter(|(at, _)| at.elapsed() < XCODE_TTL) {
+        return x.clone();
+    }
+    let x = find_xcode(&state.cfg.xcode).await;
+    *cached = Some((Instant::now(), x.clone()));
+    x
+}
+
 /// `xcrun simctl`, with the Xcode it needs; `Err(NO_XCODE)` when there is none.
 async fn simctl(state: &AppState) -> Result<Command, String> {
     let mut c = Command::new(&state.cfg.xcrun);
-    match find_xcode(&state.cfg.xcode).await {
+    match xcode(state).await {
         Xcode::Selected => {}
         Xcode::At(dir) => {
             c.env("DEVELOPER_DIR", dir);
@@ -419,7 +439,7 @@ esac
     }
 
     /// A fake `xcode-select` printing `selected` for `-p` and logging each call, and a temp root for /Applications and
-    /// /Volumes, beside the fake `xcrun`. Returns the root.
+    /// /Volumes, beside the fake `xcrun`, with nothing found yet. Returns the root.
     pub(crate) fn fake_xcode_select(st: &mut AppState, selected: &str, developer_dir: Option<PathBuf>) -> PathBuf {
         let dir = st.cfg.storage_dir.parent().unwrap().join("xcode");
         let root = dir.join("root");
@@ -429,7 +449,20 @@ esac
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let xcode = XcodeLookup { developer_dir, xcode_select: bin, root: root.clone() };
         st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode });
+        st.xcode = Default::default();
         root
+    }
+
+    /// Ages the Xcode last found past [`XCODE_TTL`], so the next simctl looks again.
+    fn expire_xcode(st: &AppState) {
+        if let Some((at, _)) = st.xcode.0.try_lock().unwrap().as_mut() {
+            *at = Instant::now().checked_sub(XCODE_TTL).unwrap();
+        }
+    }
+
+    /// How many times `xcode-select -p` was asked.
+    fn xcode_lookups(st: &AppState) -> usize {
+        std::fs::read_to_string(st.cfg.xcode.xcode_select.parent().unwrap().join("xcode-select.log")).unwrap_or_default().lines().count()
     }
 
     /// Makes the fake `xcrun` fail as the Command Line Tools' does unless run with `DEVELOPER_DIR=<expected>`.
@@ -560,9 +593,11 @@ esac
         assert!(none["content"][0]["text"].as_str().unwrap().starts_with("Xcode is missing"), "{none}");
         assert_eq!(simctl_log(&st), "");
 
-        // An Xcode in /Applications: simctl runs with it as DEVELOPER_DIR, and the agent is told to do the same.
+        // An Xcode installed in /Applications: once the last lookup is stale, simctl runs with it as DEVELOPER_DIR, and the
+        // agent is told to do the same.
         let beta = mkdir(root.join("Applications/Xcode-beta.app/Contents/Developer"));
         needs_developer_dir(&st, &beta);
+        expire_xcode(&st);
         let got = ask_for_device(&st, &a.id).await;
         let text = got["content"][0]["text"].as_str().unwrap();
         let udid = st.db.agent_device(&a.id).unwrap().expect("the device was made");
@@ -602,5 +637,27 @@ esac
         let got = ask_for_device(&st, &a.id).await;
         assert!(!got["content"][0]["text"].as_str().unwrap().contains("DEVELOPER_DIR"), "{got}");
         assert!(listed(&st).await["error"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_simctl_calls_look_xcode_up_once_until_the_lookup_is_stale() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let root = fake_xcode_select(&mut st, "/Library/Developer/CommandLineTools", None);
+        let xc = mkdir(root.join("Applications/Xcode.app/Contents/Developer"));
+        needs_developer_dir(&st, &xc);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+
+        for _ in 0..3 {
+            assert!(listed(&st).await["error"].is_null());
+        }
+        let got = ask_for_device(&st, &a.id).await;
+        assert!(got["content"][0]["text"].as_str().unwrap().contains(&format!("DEVELOPER_DIR={}", xc.display())), "{got}");
+        assert_eq!(xcode_lookups(&st), 1, "one lookup for every simctl call within the TTL");
+
+        expire_xcode(&st);
+        listed(&st).await;
+        listed(&st).await;
+        assert_eq!(xcode_lookups(&st), 2, "looked up again once stale");
     }
 }
