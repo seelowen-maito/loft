@@ -39,7 +39,7 @@ pub(crate) struct Item {
     text: String,
     created_at: String,
     links: Vec<Value>,
-    pub(crate) actions: Vec<Value>,
+    actions: Vec<Value>,
     /// What a push says: names and titles only, never tool input or message text.
     push: (String, String),
     /// Grouping key: the GitHub repo's name for PR items, else the task's or agent's project.
@@ -255,6 +255,9 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })));
         }
         actions.push(action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true })));
+        if t.status == "failed" && t.agent_id.is_some() {
+            actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
+        }
         actions.push(open_task(&t.id));
         actions.push(dismiss(&format!("task:{}:{}", t.id, t.status)));
         items.push(Item {

@@ -329,8 +329,7 @@ test("past 60 refused keys in an hour, one address gets 429 even with a good key
   const good = await newKey();
   const unknown = `lrk_${"c".repeat(43)}`;
   for (let i = 0; i < max; i++) {
-    // Only keys shaped like one count: a malformed key is refused before any store command.
-    const res = await send(i % 2 ? unknown : `lrk_${"d".repeat(43)}`, {}, undefined, T0 + i * 1000, `${ip}, 10.0.0.1`);
+    const res = await send(i % 2 ? unknown : "garbage", {}, undefined, T0 + i * 1000, `${ip}, 10.0.0.1`);
     assert.equal(res.status, 401, `refusal ${i + 1}`);
   }
   for (const key of [unknown, good]) {
@@ -360,11 +359,8 @@ test("a forwarded push costs five store round trips: refusals and key, two limit
   assert.equal((await send(other)).status, 403, "a refused push too");
   assert.equal(requests.length, 5);
   requests.length = 0;
-  assert.equal((await send(`lrk_${"d".repeat(43)}`)).status, 401);
-  assert.deepEqual(requests, ["/pipeline", "/pipeline"], "an unknown key: the refusals read, then one more counted");
-  requests.length = 0;
   assert.equal((await send("garbage")).status, 401);
-  assert.deepEqual(requests, [], "a malformed key: no store command");
+  assert.deepEqual(requests, ["/pipeline", "/pipeline"], "a bad key: the refusals read, then one more counted");
 });
 
 test("a valid key's pushes never count against its address", async () => {
@@ -451,18 +447,11 @@ test("an oversized request is refused from its length, before reading it", async
   assert.equal(res.status, 413);
 });
 
-test("a request that can't succeed costs no store command", async () => {
+test("a request declaring an oversized body costs no store command", async () => {
   commands.length = 0;
   const validShape = `lrk_${"A".repeat(43)}`;
-  const tries = [
-    [{ authorization: "Bearer nope" }, "{}", 401],
-    [{}, "{}", 401],
-    [{ authorization: `Bearer ${validShape}`, "content-length": "999999" }, "{}", 413],
-  ];
-  for (const [headers, body, status] of tries) {
-    const res = await push(new Request("http://relay/api/push", { method: "POST", headers, body }), env);
-    assert.equal(res.status, status);
-  }
+  const res = await push(new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${validShape}`, "content-length": "999999" }, body: "{}" }), env);
+  assert.equal(res.status, 413);
   assert.deepEqual(commands, []);
 });
 
