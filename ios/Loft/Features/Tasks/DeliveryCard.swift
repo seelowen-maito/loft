@@ -47,6 +47,12 @@ struct DeliveryCardSection: View {
             Text("Delivery")
         }
         .task(id: task.id) { try? await store.loadDelivery(task.id) }
+        .onAppear { store.showDeliveryCard(task.id) }
+        .onDisappear { store.hideDeliveryCard(task.id) }
+        .onChange(of: task.id) { old, new in
+            store.hideDeliveryCard(old)
+            store.showDeliveryCard(new)
+        }
     }
 
     /// What it does before it starts; who has it once it did.

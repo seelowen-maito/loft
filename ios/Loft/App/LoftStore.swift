@@ -50,7 +50,8 @@ final class LoftStore {
     /// The Delivery of each issue whose page loaded its card, by Loft issue id (absent: none, or not loaded).
     /// A `delivery` event reloads the ones it's about, so an open card stays live.
     private(set) var deliveries: [String: IssueDelivery] = [:]
-    private var deliveryCards: Set<String> = []
+    /// Issues whose Delivery card is on screen, with how many: only these reload on reconnects and `delivery` events.
+    private var deliveryCards: [String: Int] = [:]
     /// Plan views by parent task id, for the chat's plan cards. Kept here rather than in the card: the chat's lazy
     /// list drops a card's state when it scrolls out of view, and a card that comes back short and loads again moves
     /// the bottom-anchored list, which scrolls it out again, round and round.
@@ -346,7 +347,7 @@ final class LoftStore {
         if info.supports(.grill) { await loadGrillPhrases() }
         if info.supports(.needsYou) { await refreshNeedsYou() }
         // A reconnect may have missed `delivery` events: open cards catch up.
-        for id in deliveryCards { try? await loadDelivery(id) }
+        for id in deliveryCards.keys { try? await loadDelivery(id) }
         scheduleSave()
     }
 
@@ -485,7 +486,7 @@ final class LoftStore {
         case .needsYou(_, let ids):
             if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
         case .delivery(let repo, let spec):
-            for id in deliveryCards {
+            for id in deliveryCards.keys {
                 guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
                 Task { try? await loadDelivery(id) }
             }
@@ -889,11 +890,22 @@ final class LoftStore {
         return nil
     }
 
-    /// The Delivery card of issue `taskId`: loads its Delivery, and keeps it live from `delivery` events after.
+    /// Load issue `taskId`'s Delivery for its card.
     func loadDelivery(_ taskId: String) async throws {
         guard let api else { throw APIError.notConfigured }
-        deliveryCards.insert(taskId)
         deliveries[taskId] = try await api.issueDelivery(taskId: taskId)
+    }
+
+    /// Issue `taskId`'s Delivery card came on screen: it stays live from `delivery` events and reconnects until
+    /// `hideDeliveryCard`.
+    func showDeliveryCard(_ taskId: String) {
+        deliveryCards[taskId, default: 0] += 1
+    }
+
+    /// Issue `taskId`'s Delivery card left the screen: once no other copy shows it, it stops reloading.
+    func hideDeliveryCard(_ taskId: String) {
+        guard let n = deliveryCards[taskId] else { return }
+        deliveryCards[taskId] = n > 1 ? n - 1 : nil
     }
 
     /// Start delivery, Pause or Resume on issue `taskId`'s Delivery card. Returns what the server says it did.
@@ -989,7 +1001,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = []
+        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

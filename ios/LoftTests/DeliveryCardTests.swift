@@ -124,6 +124,7 @@ final class DeliveryCardTests: XCTestCase {
         store.activate()
         defer { store.deactivate() }
         for _ in 0..<100 where store.connection != .connected || store.task("s") == nil { try await Task.sleep(for: .milliseconds(20)) }
+        store.showDeliveryCard("s")
         try await store.loadDelivery("s")
         XCTAssertEqual(store.deliveries["s"]?.state, "running")
 
@@ -136,5 +137,41 @@ final class DeliveryCardTests: XCTestCase {
         store.apply(.delivery(repo: "Octo/Site", spec: 40))
         for _ in 0..<100 where store.deliveries["s"]?.state != "stalled" { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(store.deliveries["s"]?.stateLine?.text, "Stalled: the run Loft woke for its step failed.")
+    }
+
+    /// A card that left the screen is forgotten: reconnects and `delivery` events stop reloading it, until it's back.
+    @MainActor
+    func testAForgottenCardIsNotReloaded() async throws {
+        let api = MockAPI()
+        api.taskList = [HBTask(id: "s", title: "Spec", description: "", kind: "work", status: "inbox", priority: "normal", project: "", agentId: nil,
+                               parentId: nil, dependsOn: [], dueAt: nil, createdBy: "user", note: "", summary: "", error: "",
+                               createdAt: .now, updatedAt: .now, startedAt: nil, completedAt: nil, labels: ["spec"],
+                               github: .init(repo: "octo/site", number: 40, url: "https://github.com/octo/site/issues/40", state: "open"))]
+        api.deliveryOf["s"] = try delivery(#"{"state":"running","started":true,"can_pause":true,"agent_id":"dev","agent_name":"Dev","pr":7}"#)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("snap-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LoftStore(api: api, cache: SnapshotStore(url: url))
+        try await store.refresh()
+
+        store.showDeliveryCard("s")
+        try await store.loadDelivery("s")
+        var loads = api.deliveryLoads
+        try await store.refresh()
+        XCTAssertEqual(api.deliveryLoads, loads + 1, "a reconnect reloads the card on screen")
+
+        store.hideDeliveryCard("s")
+        loads = api.deliveryLoads
+        try await store.refresh()
+        store.apply(.delivery(repo: "octo/site", spec: 40))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(api.deliveryLoads, loads, "neither a reconnect nor an event reloads a card off screen")
+
+        // Two copies on screen: hiding one keeps it live.
+        store.showDeliveryCard("s")
+        store.showDeliveryCard("s")
+        store.hideDeliveryCard("s")
+        loads = api.deliveryLoads
+        try await store.refresh()
+        XCTAssertEqual(api.deliveryLoads, loads + 1, "the other copy still reloads")
     }
 }
