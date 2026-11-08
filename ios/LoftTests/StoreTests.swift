@@ -41,6 +41,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
+    func deliverySummaries() async throws -> [DeliverySummary] { [] }
     func tasks() async throws -> [HBTask] { try check(); return [] }
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
         HBTask(id: fields["id"]?.stringValue ?? "x", title: fields["title"]?.stringValue ?? "", description: "", kind: "todo", status: "inbox",

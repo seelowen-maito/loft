@@ -46,6 +46,8 @@ protocol LoftAPI: Sendable {
     func permissions() async throws -> [PermissionRequest]
     func decidePermission(id: String, decision: String) async throws
     func pullRequests() async throws -> [PullRequest]
+    /// Every spec's Delivery in one read (the web board's source).
+    func deliverySummaries() async throws -> [DeliverySummary]
     func tasks() async throws -> [HBTask]
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask
     func updateTask(id: String, _ fields: [String: JSONValue]) async throws -> HBTask
@@ -245,6 +247,7 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func pullRequests() async throws -> [PullRequest] { try await get("/pull-requests") }
+    func deliverySummaries() async throws -> [DeliverySummary] { try await get("/deliveries/summary") }
     func tasks() async throws -> [HBTask] { try await get("/tasks") }
 
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {

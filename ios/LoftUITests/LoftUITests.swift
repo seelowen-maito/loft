@@ -772,6 +772,50 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
     }
 
+    /// #148: the Issues tab switches to Specs (kept across launches), in sections by stage, with the shared filters.
+    func testSpecsListSectionsAndFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        for (stage, title) in [("planned", "Offline mode"), ("delivery", "Implement settings functionality"), ("ready", "Widget gallery"), ("shipped", "Dark theme")] {
+            XCTAssertTrue(any("specSection-\(stage)", app).appears(timeout: 5), stage)
+            XCTAssertTrue(any("specRow-\(title)", app).exists, title)
+        }
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who is on which ticket")
+        XCTAssertTrue(text(containing: "octo/loft#50", app).exists, "its repo")
+        XCTAssertTrue(text(containing: "Loft · garden", app).exists, "a plan kept in Loft")
+        XCTAssertFalse(any("specRow-Old idea", app).exists, "dropped is hidden")
+        XCTAssertFalse(app.buttons["taskRow-Renew the domain"].exists, "only specs")
+
+        app.buttons["Filter issues"].tap()
+        app.buttons["Show dropped"].tap()
+        for _ in 0..<3 where !any("specRow-Old idea", app).exists { app.swipeUp() }
+        XCTAssertTrue(any("specRow-Old idea", app).appears(timeout: 3))
+
+        // The group and project filters are the List's, and apply here.
+        app.buttons["Filter issues"].tap()
+        app.buttons["Loft"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Garden notes", app).exists, "no agent of the group works in garden")
+        app.buttons["Filter issues"].tap()
+        app.buttons["Any group"].tap()
+        app.buttons["Filter issues"].tap()
+        app.buttons["garden"].tap()
+        XCTAssertTrue(any("specRow-Garden notes", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Offline mode", app).exists)
+
+        // Kept across launches.
+        app.terminate()
+        app.launch()
+        app.tabBars.buttons["Issues"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+        // Back to the List, which the other tests expect on a fresh install.
+        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
+        XCTAssertTrue(app.buttons["taskFilter-all"].appears(timeout: 3))
+    }
+
     /// #149: a relaunch starts outside the demo with none of its changes, and the full-screen Talk view has the
     /// banner too, so Exit is one tap from there.
     func testARelaunchResetsTheDemoAndExitWorksFromFullScreen() {

@@ -39,6 +39,11 @@ final class LoftStore {
 
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
+    /// Every spec's Delivery, for the Specs view; loaded when it opens and after each issue change.
+    private(set) var deliveries: [DeliverySummary] = []
+    private var deliveriesRefresh: Task<Void, Never>?
+    /// Whether the Specs view is on screen, so live issue changes reload the Deliveries.
+    var specsOpen = false
     private(set) var permissions: [PermissionRequest] = []
     private(set) var activity: [ActivityItem] = []
     private(set) var activityHasMore = true
@@ -401,6 +406,17 @@ final class LoftStore {
         }
     }
 
+    /// Loads the Deliveries now; `soon` waits a moment so a burst of issue changes reads once.
+    func loadDeliveries(soon: Bool = false) {
+        guard supportsTasks else { return }
+        deliveriesRefresh?.cancel()
+        deliveriesRefresh = Task { [weak self] in
+            if soon { try? await Task.sleep(for: .seconds(1.5)) }
+            guard let self, let api = self.api, !Task.isCancelled else { return }
+            if let fresh = try? await api.deliverySummaries() { self.deliveries = fresh }
+        }
+    }
+
     private func refreshActivitySoon() {
         guard supportsActivity else { return }
         activityRefresh?.cancel()
@@ -470,6 +486,7 @@ final class LoftStore {
                 }
             }
             refreshActivitySoon()
+            if specsOpen { loadDeliveries(soon: true) }
         case .taskDeleted(let id):
             tasks.removeAll { $0.id == id }
         case .system(let r):
@@ -957,7 +974,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []
+        agents = []; tasks = []; deliveries = []; permissions = []; activity = []; pullRequests = []
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }
