@@ -33,16 +33,28 @@ export async function pair(request, env = process.env, now = Date.now()) {
   return json(200, { code, secret, expires_in: CODE_SECONDS });
 }
 
+/** The body as text, or null once it passes `limit` bytes: reading stops there, whatever content-length said. */
+async function upTo(request, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request.body ?? []) {
+    size += chunk.length;
+    if (size > limit) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString();
+}
+
 /** POST /api/pair-poll with `{code, secret}`: 200 `{key}` once, after the user approved it; 202 while it waits; else 404. */
 export async function poll(request, env = process.env) {
   if (!env.KV_REST_API_URL || !env.KV_REST_API_TOKEN) return json(500, { error: "the relay isn't configured" });
   // Two 22-character values fit in far less than this: a bigger body is refused unread.
   const gone = () => json(404, { error: "unknown or expired code" });
   if (Number(request.headers.get("content-length") ?? 0) > 1024) return gone();
-  const raw = await request.text();
+  const raw = await upTo(request, 1024);
   let body = null;
   try {
-    body = raw.length > 1024 ? null : JSON.parse(raw);
+    body = raw === null ? null : JSON.parse(raw);
   } catch {}
   const { code, secret } = body ?? {};
   if (typeof code !== "string" || !CODE.test(code) || typeof secret !== "string" || !SECRET.test(secret)) return gone();

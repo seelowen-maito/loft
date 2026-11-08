@@ -155,6 +155,11 @@ test("malformed or over-long polls and connects make no store call", async () =>
     assert.deepEqual(await res.json(), { error: "unknown or expired code" });
   }
   assert.equal((await poll(new Request("https://relay.example.com/api/pair-poll", { method: "POST", body: "not json" }), dead)).status, 404);
+  // With no content-length the body is read only until it passes 1 KB.
+  let pulled = 0;
+  const endless = new ReadableStream({ pull: (c) => (++pulled > 100 ? c.close() : c.enqueue(new TextEncoder().encode(" ".repeat(512)))) });
+  assert.equal((await poll(new Request("https://relay.example.com/api/pair-poll", { method: "POST", body: endless, duplex: "half" }), dead)).status, 404);
+  assert.ok(pulled < 10, `read ${pulled} chunks`);
   assert.equal((await connect(get("/connect?code=short"), dead)).status, 404);
 });
 
