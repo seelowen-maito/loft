@@ -816,6 +816,77 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["taskFilter-all"].appears(timeout: 3))
     }
 
+    private func openSpec(_ title: String, _ app: XCUIApplication) {
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        let row = any("specRow-\(title)", app)
+        for _ in 0..<3 where !row.exists { app.swipeUp() }
+        XCTAssertTrue(row.appears(timeout: 5), title)
+        row.tap()
+    }
+
+    /// #149: a spec's detail shows its Delivery and tickets with verdicts; a ticket opens its issue, with back to the spec.
+    func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Implement settings functionality", app)
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertEqual(any("deliveryState", app).label, "Running")
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who has which ticket")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("in review"))
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("security waiting"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("done"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("security passed"))
+        XCTAssertFalse(any("startDelivery", app).exists, "it has a Delivery")
+        XCTAssertFalse(any("mergeDelivery", app).exists, "it isn't ready")
+
+        any("ticketRow-Backend endpoints", app).tap()
+        XCTAssertTrue(app.navigationBars["Issue"].appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Implement backend endpoints", app).appears(timeout: 5), "the ticket's own issue")
+        XCTAssertFalse(any("deliveryState", app).exists, "a ticket's page has no Delivery")
+        back(app)
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5), "back to the spec")
+    }
+
+    /// #149: Start delivery shows for a spec without a Delivery, pending and then its result; Merge only for a plan kept in Loft that's ready.
+    func testStartDeliveryAndMergeAppearOnlyWhenTheyApply() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Offline mode", app)
+        XCTAssertFalse(any("deliveryState", app).exists, "no Delivery panel without a Delivery")
+        let start = any("startDelivery", app)
+        XCTAssertTrue(start.appears(timeout: 5))
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        start.tap()
+        XCTAssertTrue(text(containing: "Starting delivery…", app).appears(timeout: 3), "pending")
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 8), "then its Delivery")
+        XCTAssertFalse(any("startDelivery", app).exists, "started")
+        back(app)
+
+        // Ready on GitHub: it merges there, so neither button.
+        any("specRow-Widget gallery", app).tap()
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertFalse(any("startDelivery", app).exists)
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        back(app)
+
+        for _ in 0..<3 where !any("specRow-Garden notes", app).exists { app.swipeUp() }
+        any("specRow-Garden notes", app).tap()
+        let merge = any("mergeDelivery", app)
+        XCTAssertTrue(merge.appears(timeout: 5))
+        XCTAssertFalse(any("startDelivery", app).exists)
+        merge.tap()
+        XCTAssertTrue(text(containing: "Merging…", app).appears(timeout: 3), "pending")
+        XCTAssertTrue(any("deliveryResult", app).appears(timeout: 8), "then the result")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        // Back to the List, which the other tests expect on a fresh install.
+        back(app)
+        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
+    }
+
     /// #149: a relaunch starts outside the demo with none of its changes, and the full-screen Talk view has the
     /// banner too, so Exit is one tap from there.
     func testARelaunchResetsTheDemoAndExitWorksFromFullScreen() {

@@ -153,11 +153,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 spec("s6", "Garden notes", "ready", nil, project: "garden", minutes: 250),
             ]
             for i in taskList.indices where taskList[i].id == "s2" || taskList[i].id == "s3" { taskList[i].github?.state = "open" }
-            func ticket(_ n: Int, _ title: String, _ state: String) -> DeliverySummary.Ticket { .init(number: n, title: title, state: state) }
+            func ticket(_ n: Int, _ title: String, _ state: String, _ verdicts: [String: String]? = nil) -> DeliverySummary.Ticket { .init(number: n, title: title, state: state, verdicts: verdicts) }
             deliveryList = [
-                DeliverySummary(state: "running", agentName: "Backend Agent", repo: "octo/loft", spec: 42, specId: nil, local: false,
+                DeliverySummary(state: "running", agentName: "Backend Agent", repo: "octo/loft", spec: 42, specId: nil, local: false, pr: 47,
                                 current: .init(number: 43, title: "Backend endpoints"),
-                                tickets: [ticket(43, "Backend endpoints", "started"), ticket(44, "iOS screen", "open"), ticket(45, "Docs", "open"), ticket(46, "QA", "closed")]),
+                                tickets: [ticket(43, "Backend endpoints", "started"), ticket(44, "iOS screen", "open"), ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"]), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])]),
+                DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
+                                tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, current: nil,
                                 tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
             ]
@@ -716,7 +718,26 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
-    func deliverySummaries() async throws -> [DeliverySummary] { try check(); return deliveryList }
+    func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }
+    func startIssueDelivery(id: String) async throws {
+        try check()
+        try await Task.sleep(for: .milliseconds(800)) // long enough to see the pending state
+        try locked {
+            guard let t = taskList.first(where: { $0.id == id }), let g = t.github else { throw APIError.server(status: 404, message: "not found") }
+            deliveryList.append(DeliverySummary(state: "running", agentName: "Backend Agent", repo: g.repo, spec: g.number, specId: nil, local: false, pr: 70,
+                                                current: .init(number: 71, title: "First ticket"), tickets: [.init(number: 71, title: "First ticket", state: "started")]))
+        }
+    }
+    func mergeDelivery(repo: String, spec: Int) async throws -> String {
+        try check()
+        try await Task.sleep(for: .milliseconds(800))
+        return try locked {
+            guard let i = deliveryList.firstIndex(where: { $0.repo == repo && $0.spec == spec }) else { throw APIError.server(status: 404, message: "not found") }
+            deliveryList[i].state = "merged"
+            if let t = taskList.firstIndex(where: { $0.id == deliveryList[i].specId }) { taskList[t].status = "done" }
+            return "Merged ticket branch into main"
+        }
+    }
 
     func createTask(_ f: [String: JSONValue]) async throws -> HBTask {
         try check()

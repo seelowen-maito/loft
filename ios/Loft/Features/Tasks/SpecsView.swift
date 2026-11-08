@@ -39,8 +39,8 @@ struct SpecsView<Header: View>: View {
             }
         }
         .refreshable { try? await store.refresh(); store.loadDeliveries() }
-        .onAppear { store.specsOpen = true; store.loadDeliveries() }
-        .onDisappear { store.specsOpen = false }
+        .onAppear { store.deliveryWatchers += 1; store.loadDeliveries() }
+        .onDisappear { store.deliveryWatchers -= 1 }
     }
 }
 

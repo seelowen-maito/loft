@@ -65,6 +65,8 @@ struct TaskDetailView: View {
                 }
             }
 
+            if SpecViews.isSpec(t) { SpecDeliverySection(spec: t) }
+
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {
                 if let g = t.github {
@@ -151,6 +153,9 @@ struct TaskDetailView: View {
             Section {
                 if children.isEmpty {
                     Text("No sub-issues.").foregroundStyle(.secondary)
+                } else if SpecViews.isSpec(t) {
+                    // A spec's sub-issues are its tickets, listed above.
+                    EmptyView()
                 } else {
                     ForEach(children) { c in
                         NavigationLink(value: TaskRoute(id: c.id)) { TaskRow(task: c) }

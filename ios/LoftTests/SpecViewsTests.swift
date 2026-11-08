@@ -59,4 +59,43 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(d[0].current?.number, 148)
         XCTAssertEqual(d[0].tickets[0].state, "started")
     }
+
+    func testTicketsComeFromTheDeliveryWithTheirOwnIssueAndVerdicts() {
+        var d = delivery("running")
+        d.current = .init(number: 2, title: "b")
+        d.tickets = [.init(number: 1, title: "a", state: "closed", verdicts: ["qa": "pass"]), .init(number: 2, title: "b", state: "started")]
+        var own = spec(id: "own"); own.github = .init(repo: "o/r", number: 2, url: "", state: "open")
+        let lines = SpecViews.tickets(of: spec(), d, tasks: [own])
+        XCTAssertEqual(lines.map(\.number), [1, 2])
+        XCTAssertEqual(lines[0].verdicts, ["qa": "pass"])
+        XCTAssertNil(lines[0].taskId)
+        XCTAssertEqual(lines[1].taskId, "own")
+        XCTAssertTrue(lines[1].current)
+    }
+
+    func testWithoutADeliveryTicketsAreTheSubIssuesInLoft() {
+        var kid = spec("done", id: "k"); kid.parentId = "s"; kid.github = nil
+        var dropped = spec("cancelled", id: "x"); dropped.parentId = "s"
+        let lines = SpecViews.tickets(of: spec(), nil, tasks: [kid, dropped])
+        XCTAssertEqual(lines.map(\.taskId), ["k"])
+        XCTAssertEqual(lines[0].state, "closed")
+    }
+
+    func testStartDeliveryOnlyForAnOpenSpecWithoutAStartedDelivery() {
+        var s = spec(); s.labels = ["spec"]
+        XCTAssertTrue(SpecViews.canStartDelivery(s, nil))
+        XCTAssertTrue(SpecViews.canStartDelivery(s, delivery("planned")))
+        XCTAssertFalse(SpecViews.canStartDelivery(s, delivery("running")))
+        s.github?.state = "closed"
+        XCTAssertFalse(SpecViews.canStartDelivery(s, nil))
+        var local = spec(); local.labels = ["spec"]; local.github = nil
+        XCTAssertFalse(SpecViews.canStartDelivery(local, nil), "a plan kept in Loft has no GitHub issue to start from")
+    }
+
+    func testMergeOnlyForAReadyPlanKeptInLoft() {
+        XCTAssertTrue(SpecViews.canMerge(spec(), delivery("ready", local: true)))
+        XCTAssertFalse(SpecViews.canMerge(spec(), delivery("running", local: true)))
+        XCTAssertFalse(SpecViews.canMerge(spec(), delivery("ready")), "a spec on GitHub merges there")
+        XCTAssertFalse(SpecViews.canMerge(spec("done"), delivery("ready", local: true)))
+    }
 }

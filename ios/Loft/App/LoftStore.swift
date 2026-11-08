@@ -42,8 +42,8 @@ final class LoftStore {
     /// Every spec's Delivery, for the Specs view; loaded when it opens and after each issue change.
     private(set) var deliveries: [DeliverySummary] = []
     private var deliveriesRefresh: Task<Void, Never>?
-    /// Whether the Specs view is on screen, so live issue changes reload the Deliveries.
-    var specsOpen = false
+    /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
+    var deliveryWatchers = 0
     private(set) var permissions: [PermissionRequest] = []
     private(set) var activity: [ActivityItem] = []
     private(set) var activityHasMore = true
@@ -417,6 +417,21 @@ final class LoftStore {
         }
     }
 
+    /// Start delivery on a spec's issue; the Deliveries reload to show it.
+    func startDelivery(spec id: String) async throws {
+        try await requireTasks().startIssueDelivery(id: id)
+        try? await refresh()
+        loadDeliveries()
+    }
+
+    /// Merge a plan kept in Loft; returns the server's message.
+    func mergeDelivery(_ d: DeliverySummary) async throws -> String {
+        let message = try await requireTasks().mergeDelivery(repo: d.repo, spec: d.spec)
+        try? await refresh()
+        loadDeliveries()
+        return message
+    }
+
     private func refreshActivitySoon() {
         guard supportsActivity else { return }
         activityRefresh?.cancel()
@@ -486,7 +501,7 @@ final class LoftStore {
                 }
             }
             refreshActivitySoon()
-            if specsOpen { loadDeliveries(soon: true) }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .taskDeleted(let id):
             tasks.removeAll { $0.id == id }
         case .system(let r):
