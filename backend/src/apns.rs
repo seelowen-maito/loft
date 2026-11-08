@@ -199,7 +199,11 @@ fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     let result = (|| -> Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
         file.write_all(text.as_bytes())?;
         drop(file);
         std::fs::rename(&tmp, path)?;
@@ -428,13 +432,31 @@ pub(crate) mod tests {
         let blocked = key_dir().join("blocked.key");
         std::fs::create_dir_all(&blocked).unwrap();
         assert!(write_secret(&blocked, "x").is_err());
-        let temps = |prefix: &str| std::fs::read_dir(key_dir()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with(prefix)).count();
-        assert_eq!(temps("blocked.key."), 0, "temp file removed after the error");
+        let temps = |prefix: &str| {
+            std::fs::read_dir(key_dir())
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                })
+                .count()
+        };
+        assert_eq!(
+            temps("blocked.key."),
+            0,
+            "temp file removed after the error"
+        );
         std::fs::remove_dir(&blocked).unwrap();
 
         let ok = key_dir().join("mode.key");
         write_secret(&ok, "x").unwrap();
-        assert_eq!(std::fs::metadata(&ok).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&ok).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
