@@ -1,6 +1,7 @@
 //! User settings, edited on the Settings page and stored in `.loft/settings.json`.
 //! Most apply immediately; `RESTART_FIELDS` take effect on the next start.
 
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -103,6 +104,7 @@ pub struct Store {
 impl Store {
     pub fn load(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join("settings.json");
+        owner_only(&path)?;
         let s: Settings = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
@@ -132,8 +134,13 @@ impl Store {
             bail!("Backups folder must be a full path, like /Volumes/Disk/Loft backups");
         }
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&s)?)?;
+        let _ = std::fs::remove_file(&tmp);
+        // Owner-only from the first byte: it holds the GitHub token.
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        std::io::Write::write_all(&mut f, serde_json::to_string_pretty(&s)?.as_bytes())?;
+        drop(f);
         std::fs::rename(&tmp, &self.path)?;
+        owner_only(&self.path)?;
         *self.current.write().unwrap() = s;
         Ok(())
     }
@@ -166,6 +173,18 @@ impl Store {
     }
 }
 
+/// `.loft` 0700 and `settings.json` (when there is one) 0600: it holds the GitHub token. At start, for
+/// files made before, and on every save.
+fn owner_only(settings: &Path) -> Result<()> {
+    if let Some(dir) = settings.parent().filter(|d| d.is_dir()) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    if settings.exists() {
+        std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +201,31 @@ mod tests {
         let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", {old} }}"#));
         s.migrate_github_settings(&with_repo.iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap();
         s.get().auto_publish_all
+    }
+
+    #[test]
+    fn settings_and_their_folder_are_owner_only_at_start_and_on_save() {
+        use std::os::unix::fs::MetadataExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().mode() & 0o777;
+        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, format!(r#"{{ "projects_dir": {:?} }}"#, dir.join("projects"))).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = Store::load(&dir).unwrap();
+        assert_eq!((mode(&dir), mode(&file)), (0o700, 0o600), "made before: tightened at start");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        s.save(s.get()).unwrap();
+        assert_eq!(mode(&file), 0o600, "on save");
+        // A first start, with no settings yet, and the first save.
+        let fresh = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fresh).unwrap();
+        let s = Store::load(&fresh).unwrap();
+        let mut first = s.get();
+        first.projects_dir = dir.join("projects");
+        s.save(first).unwrap();
+        assert_eq!((mode(&fresh), mode(&fresh.join("settings.json"))), (0o700, 0o600));
     }
 
     #[test]

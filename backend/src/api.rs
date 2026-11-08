@@ -121,10 +121,9 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
     }
-    // Backups hold every chat: never inside Loft's folder, where the agents' workspaces are.
-    let backups = crate::backup::dir(&s);
-    if state.cfg.storage_dir.parent().is_some_and(|loft| crate::backup::inside(&backups, loft)) {
-        return Err(bad("Backups folder can't be inside Loft's folder, where agents can read it"));
+    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them.
+    if let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent(), &s.projects_dir) {
+        return Err(bad(why));
     }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),

@@ -129,6 +129,18 @@ fn found(root: &Path, at: NaiveDateTime) -> Last {
     Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path }
 }
 
+/// Why `dir` can't hold backups, if it can't: in Loft's folder agents can read every chat, and in the
+/// projects folder the GitHub token in `settings.json` could be committed to a repo and pushed.
+pub fn refuse(dir: &Path, loft: Option<&Path>, projects: &Path) -> Option<&'static str> {
+    if loft.is_some_and(|l| inside(dir, l)) {
+        return Some("Backups folder can't be inside Loft's folder, where agents can read it");
+    }
+    if inside(dir, projects) {
+        return Some("Backups folder can't be inside the projects folder, where it could be committed to a repo");
+    }
+    None
+}
+
 /// Whether `dir` is inside `loft` once symlinks are resolved. `dir` may not exist yet: its deepest
 /// existing folder is resolved and the rest added back.
 pub fn inside(dir: &Path, loft: &Path) -> bool {
@@ -193,12 +205,13 @@ pub async fn run(state: &AppState) -> Status {
     let db = state.db.path().unwrap_or_default();
     let settings = db.with_file_name("settings.json");
     let loft = state.cfg.storage_dir.parent().map(Path::to_path_buf);
+    let projects = state.settings.get().projects_dir;
     let r = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             // Settings checked this when it was saved, but a symlink can change since.
-            let made = if loft.is_some_and(|l| inside(&root, &l)) {
-                Err(anyhow::anyhow!("{} is inside Loft's folder, where agents can read it", root.display()))
+            let made = if let Some(why) = refuse(&root, loft.as_deref(), &projects) {
+                Err(anyhow::anyhow!("{why}: {}", root.display()))
             } else {
                 make(&db, &settings, &root, Local::now().naive_local())
             };
@@ -386,6 +399,13 @@ mod tests {
         let s = run(&st).await;
         assert!(s.error.is_none() && s.last.is_some(), "a good backup clears the error");
 
+        // A folder that became unsafe after Settings saved it (here: the projects folder moved over it).
+        let mut set = st.settings.get();
+        set.projects_dir = base.clone();
+        st.settings.save(set).unwrap();
+        let s = run(&st).await;
+        assert!(s.error.as_ref().is_some_and(|e| e.message.contains("projects folder")), "{s:?}");
+
         // A database that isn't there fails without leaving a half-made folder.
         let root = base.join("missing-db");
         let err = make(&base.join("nope.db"), &base.join("nope.json"), &root, t("2026-11-08 03:00")).unwrap_err();
@@ -472,7 +492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft() {
+    async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft_or_projects() {
         let st = crate::tasks::tests::state();
         let put = |dir: String| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "backup_dir": dir })));
         assert!(put("backups".into()).await.is_err(), "relative");
@@ -484,6 +504,11 @@ mod tests {
         std::fs::create_dir_all(st.cfg.storage_dir.join("agent-1")).unwrap();
         std::os::unix::fs::symlink(st.cfg.storage_dir.join("agent-1"), &link).unwrap();
         assert!(put(link.join("backups").to_string_lossy().into()).await.is_err(), "through a symlink");
+        // A projects folder outside Loft's: its repos can't hold backups either.
+        let projects = temp();
+        let in_repo = |dir: PathBuf| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": projects, "backup_dir": dir })));
+        assert!(in_repo(projects.join("some-repo/backups")).await.is_err(), "the token could be committed");
+        assert!(in_repo(temp().join("backups")).await.is_ok());
         assert!(put("/Volumes/Disk/Loft backups".into()).await.is_ok());
         assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
         // A client that doesn't know the field keeps it.
