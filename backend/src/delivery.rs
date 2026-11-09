@@ -544,8 +544,8 @@ fn lead_brief(state: &AppState, d: &Delivery, why: &str) -> String {
         "[Loft Delivery: {about}] This is not a message from the user. {why}\n\
          Tickets:\n{tickets}\n\
          Devs:\n{devs}\n\
-         - Hand out the ready tickets with `mcp__loft__assign_ticket` (ticket and the Dev's name). You may hand several ready tickets to different Devs at once; a blocked ticket is refused. Loft wakes the Dev with its brief, takes each ticket through review and closes it, and wakes you again when a ticket closes.\n\
-         - Hand out only what is ready now, and do nothing else on this Delivery: Loft coordinates it.",
+         - Hand out the ready tickets with `mcp__loft__assign_ticket` (ticket and the Dev's name). One ticket runs at a time: assign the next once the one in flight closes; a blocked ticket is refused. Loft wakes the Dev with its brief, takes each ticket through review and closes it, and wakes you again when a ticket closes.\n\
+         - Hand out one ready ticket, and do nothing else on this Delivery: Loft coordinates it.",
         about = subject(d),
         tickets = tickets.join("\n"),
         devs = devs.join("\n"),
@@ -577,6 +577,10 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let open: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
     if !open.is_empty() {
         return Err(format!("{name} is blocked by {}: assign it once they close.", open.join(", ")));
+    }
+    // One ticket at a time for now: the next one waits until the one in flight closes.
+    if let Some(x) = d.tickets.iter().find(|x| matches!(x.state.as_str(), "started" | "review" | "closing" | "needs_human")) {
+        return Err(format!("{name} can't be assigned yet: {} is still in flight. Assign it once that closes.", tag(&d, x)));
     }
     let key = args["dev"].as_str().unwrap_or("").trim();
     let agents = state.db.list_agents().map_err(|e| e.to_string())?;
@@ -708,7 +712,7 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "assign_ticket",
-        "description": "As the Lead on a Delivery: hand a ready ticket to a Dev of the team. Loft sets the ticket's agent and wakes the Dev with its brief. Hand several ready tickets to different Devs at once; a ticket still blocked by an open ticket is refused.",
+        "description": "As the Lead on a Delivery: hand a ready ticket to a Dev of the team. Loft sets the ticket's agent and wakes the Dev with its brief. One ticket runs at a time, and a ticket still blocked by an open ticket is refused.",
         "inputSchema": { "type": "object", "properties": {
             "ticket": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft." },
             "dev": { "type": "string", "description": "The Dev's name." }

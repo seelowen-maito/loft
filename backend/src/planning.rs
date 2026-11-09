@@ -2718,7 +2718,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn with_a_lead_the_delivery_runs_tickets_on_the_devs_it_assigns_them_to() {
+    async fn with_a_lead_the_delivery_runs_the_tickets_it_assigns_one_at_a_time() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-lead";
         let (a, m) = planned(&st, &fake, "dl-lead", vec![ticket("Store", &[]), ticket("API", &[]), ticket("UI", &["Store"])]).await;
@@ -2750,31 +2750,32 @@ pub(crate) mod tests {
         assert_eq!(tool(&st, &lead, "assign_ticket", assign(41, "Lofty")).await.unwrap_err(), "\"Lofty\" isn't a Dev on your team.");
         assert_eq!(tool(&st, &lead, "assign_ticket", assign(43, "First")).await.unwrap_err(), "#43 is blocked by #41: assign it once they close.");
 
-        // Two ready tickets at once, on two Devs.
+        // One ticket at a time: a second waits for the first to close.
         tool(&st, &lead, "assign_ticket", assign(41, "first")).await.unwrap();
-        tool(&st, &lead, "assign_ticket", assign(42, "Second")).await.unwrap();
         assert!(woken(&st, &first).last().is_some_and(|p| p.contains("build ticket #41 \"Store\"")));
-        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #42 \"API\"")));
-        assert_eq!((posts(&fake, slug, "issues/41/labels").len(), posts(&fake, slug, "issues/42/labels").len()), (1, 1));
-        assert!(tool(&st, &lead, "assign_ticket", assign(41, "Second")).await.unwrap_err().contains("already with a Dev"));
+        assert_eq!(posts(&fake, slug, "issues/41/labels").len(), 1);
+        assert!(tool(&st, &lead, "assign_ticket", assign(42, "Second")).await.unwrap_err().contains("#41 is still in flight"));
+        assert!(woken(&st, &second).is_empty());
         let shown = crate::delivery::delivery_json(&st, &delivery(&st, slug));
-        assert_eq!((shown["tickets"][0]["agent_name"].as_str(), shown["tickets"][1]["agent_name"].as_str(), &shown["waiting_for_lead"]), (Some("First"), Some("Second"), &json!([])));
+        assert_eq!((shown["tickets"][0]["agent_name"].as_str(), &shown["waiting_for_lead"]), (Some("First"), &json!([42])));
 
-        // Each submits its own; closing #41 wakes the Lead with #43 while #42 is still being built.
+        // Only its agent submits; closing #41 wakes the Lead with the tickets now ready.
         assert!(tool(&st, &second, "submit_ticket", json!({ "number": 41, "commits": ["abc1234"] })).await.unwrap_err().contains("is with First"));
         tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
         let w = woken(&st, &lead);
-        assert!(w.len() == 2 && w[1].contains("Ready to hand out now: #43"), "{w:?}");
+        assert!(w.len() == 2 && w[1].contains("Ready to hand out now: #42, #43"), "{w:?}");
         assert_eq!(delivery(&st, slug).state, "running");
-        tool(&st, &lead, "assign_ticket", assign(43, "First")).await.unwrap();
+        tool(&st, &lead, "assign_ticket", assign(42, "Second")).await.unwrap();
+        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #42 \"API\"")));
         tool(&st, &second, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", assign(43, "First")).await.unwrap();
         assert_eq!(delivery(&st, slug).state, "running", "#43 is still open");
         let out = tool(&st, &first, "submit_ticket", json!({ "number": 43, "commits": ["9999abcd"] })).await.unwrap();
         assert!(out.contains("spec PR #500 is now ready for review"), "{out}");
     }
 
     #[tokio::test]
-    async fn resuming_a_stalled_delivery_wakes_every_ticket_in_flight() {
+    async fn resuming_a_stalled_delivery_wakes_the_dev_the_lead_assigned() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-lead-resume";
         let (a, m) = planned(&st, &fake, "dl-lead-resume", vec![ticket("Store", &[]), ticket("API", &[])]).await;
@@ -2783,13 +2784,12 @@ pub(crate) mod tests {
         let second = busy(&st, "Second", "dl-lead-resume", "dev");
         press(&st, &a, &m).await.unwrap();
         tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
-        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
         crate::delivery::stall_lost_runs(&st);
         assert_eq!(delivery(&st, slug).state, "stalled");
         crate::delivery::resume(&st, slug, 40).await.unwrap();
         assert_eq!(delivery(&st, slug).state, "running");
         assert!(woken(&st, &first).last().is_some_and(|p| p.contains("build ticket #41") && p.contains("resume")), "{:?}", woken(&st, &first));
-        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #42") && p.contains("resume")), "{:?}", woken(&st, &second));
+        assert!(woken(&st, &second).is_empty());
     }
 
     #[tokio::test]
