@@ -106,6 +106,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
     // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
     let keep_push = body.get("push").is_none();
+    let keep_backup_dir = body.get("backup_dir").is_none();
     let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
     if keep_push {
         s.push = state.settings.get().push;
@@ -113,9 +114,19 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
         // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
         s.push.relay_url = state.settings.get().push.relay_url;
     }
+    if keep_backup_dir {
+        s.backup_dir = state.settings.get().backup_dir;
+    }
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
+    }
+    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
+    // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
+    if s.backup_dir != state.settings.get().backup_dir
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+    {
+        return Err(bad(why));
     }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),
@@ -449,8 +460,12 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
         return Err(ApiError(StatusCode::FORBIDDEN, "Loft's own agent can't be deleted.".into()));
     }
     agents::stop(&state, &id);
+    // With the processes it left running (detached servers), so nothing of it keeps running.
+    crate::processes::stop_all(&state.cfg.storage_dir, &id).await;
+    crate::simulator::delete_agent_device(&state, &id).await;
     state.db.delete_agent(&id)?;
     crate::uploads::remove_all(&state, &id);
+    agents::remove_agent_files(&state, &id);
     if q.purge_files {
         let _ = std::fs::remove_dir_all(workspace(&state, &id));
     }
@@ -599,6 +614,10 @@ pub(crate) async fn restart_run(state: AppState, id: String, by: &'static str) -
                 rt.queued_for_user.insert(id.clone());
             }
         }
+        // The next run picks up the same work, so the Delivery steps it was woken for wait for that run's end.
+        if let Some(w) = rt.delivery_running.remove(&id) {
+            rt.delivery_queued.entry(id.clone()).or_default().extend(w.into_iter().map(|w| (w, None)));
+        }
         rt.restarting.insert(id.clone(), by);
     }
     stop_agent(State(state), Path(id)).await
@@ -617,6 +636,7 @@ pub async fn reset_session(State(state): State<AppState>, Path(id): Path<String>
         rt.queued.remove(&id);
         rt.queued_for_user.remove(&id);
         rt.grill_queued.remove(&id);
+        rt.delivery_queued.remove(&id);
         rt.fresh_before.remove(&id);
     }
     let a = agents::clear_context(&state, &id, "Context cleared. Long-term memory carries over.", json!({})).ok_or_else(not_found)?;
@@ -673,6 +693,7 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         let mut rt = state.rt.lock().unwrap();
         rt.queued.remove(id);
         rt.grill_queued.remove(id);
+        rt.delivery_queued.remove(id);
         rt.fresh_before.remove(id);
     }
     // As for a new Session, the next run builds the memory index afresh. Its next run costs only what it adds.

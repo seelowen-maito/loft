@@ -8,7 +8,7 @@ struct SpecsView<Header: View>: View {
     @ViewBuilder let header: Header
 
     private func rows(_ stage: SpecStage) -> [HBTask] {
-        specs.filter { SpecViews.stage(of: $0, SpecViews.delivery(of: $0, in: store.deliveries)) == stage }
+        specs.filter { SpecViews.stage(of: $0, SpecViews.delivery(of: $0, in: store.deliverySummaries)) == stage }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
@@ -48,7 +48,7 @@ struct SpecRow: View {
     @Environment(LoftStore.self) private var store
     let spec: HBTask
 
-    private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliveries) }
+    private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
     private var stage: SpecStage { SpecViews.stage(of: spec, delivery) }
 
     private var badge: String? {

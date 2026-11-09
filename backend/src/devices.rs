@@ -153,9 +153,13 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     let route = apns::route(&state);
     Ok(Json(json!({
         "path": route.name(),
+        // A usable relay key; one the relay refused (a 401) reads as none, with `relay_refused` set so Settings says to sign in again.
         "relay_key": apns::relay_key_present(),
+        "relay_refused": apns::relay_key_refused(),
         // Sign in was pressed and the code isn't allowed yet.
         "signing_in": crate::signin::waiting(),
+        // The confirmation code the user types on the portal's Allow page, while a sign-in waits.
+        "signin_code": crate::signin::confirmation(),
         // The relay address in use (saved, else the environment), and the saved one the Settings field shows. The
         // portal's pages are at the same address.
         "relay_url": apns::relay_url(&state),
@@ -268,6 +272,24 @@ mod tests {
         assert_eq!(s["signin"], json!(true));
     }
 
+    #[tokio::test]
+    async fn a_refused_relay_key_shows_as_sign_in_again() {
+        use crate::apns::tests::THIS_TEST_DIR;
+        crate::apns::tests::fake_apns();
+        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(std::env::temp_dir().join(format!("loft-status-refused-{}", uuid::Uuid::new_v4()))));
+        let st = crate::tasks::tests::state();
+        let get = || async { status(State(st.clone()), HeaderMap::new()).await.unwrap().0 };
+        crate::apns::store_relay_key("lrk_revoked-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert_eq!((get().await["relay_key"].clone(), get().await["relay_refused"].clone()), (json!(true), json!(false)));
+        let (d, p) = (Device { token: "ab".repeat(32), environment: "production".into(), ..Default::default() }, crate::apns::tests::a_push());
+        assert!(crate::apns::send(&st, &d, &p).await.is_err());
+        let s = get().await;
+        assert_eq!((s["path"].clone(), s["relay_key"].clone(), s["relay_refused"].clone()), (json!("none"), json!(false), json!(true)));
+        assert!(!s.to_string().contains("lrk_"));
+        crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
+        assert_eq!((get().await["path"].clone(), get().await["relay_refused"].clone()), (json!("relay"), json!(false)));
+    }
+
     #[test]
     fn a_portal_address_saved_by_an_older_version_is_ignored() {
         let mut v = serde_json::to_value(crate::settings::Settings::default()).unwrap();
@@ -344,6 +366,10 @@ mod tests {
         let Json(d) = register(State(st.clone()), reg(&good)).await.unwrap();
         assert_eq!((d["kinds"].clone(), d["quiet_hours"]["start"].clone()), (json!(["permission"]), json!("22:00")));
         assert!(update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["everything"] })).unwrap())).await.is_err());
+        let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["delivery_stalled"] })).unwrap())).await.unwrap();
+        assert_eq!(d["kinds"], json!(["delivery_stalled"]), "a Delivery stalled push can be chosen on its own");
+        let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["delivery_done"] })).unwrap())).await.unwrap();
+        assert_eq!(d["kinds"], json!(["delivery_done"]), "so can a Delivery done push");
         // App builds from before rounds still ask for grill_question; it's stored under the new name.
         let Json(d) = update(State(st.clone()), Path(good.clone()), Json(serde_json::from_value(json!({ "kinds": ["permission", "grill_question"] })).unwrap())).await.unwrap();
         assert_eq!(d["kinds"], json!(["permission", "grill_round"]));

@@ -143,9 +143,9 @@ struct NeedsYouRow: View {
             assist = await OnDeviceFeatures.needsYouAssist(item)
         }
         .sheet(item: Binding(get: { answering.map(AnswerDraft.init) }, set: { answering = $0?.text })) { draft in
-            NeedsYouAnswerSheet(item: item, text: draft.text, sendLabel: item.type == "comment_approval" ? "Approve" : "Send") { text in
+            NeedsYouAnswerSheet(item: item, agents: store.agents, text: draft.text, sendLabel: item.type == "comment_approval" ? "Approve" : "Send") { text, agentId in
                 guard let a = item.answerAction else { return }
-                run(a, text: text)
+                reply(a, text: text, agentId: agentId)
             }
         }
         .errorAlert($error)
@@ -180,6 +180,25 @@ struct NeedsYouRow: View {
         }
     }
 
+    /// A reply on an issue says where it went: to an agent, or kept as a note only (and then the item goes too).
+    private func reply(_ a: NeedsYouAction, text: String, agentId: String?) {
+        guard a.isIssueReply else { return run(a, text: text) }
+        let to = item.agent?.name ?? store.agent(agentId)?.name
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                guard try await store.perform(a, text: text, agentId: agentId) else { store.needsYouNotice = "Already done"; return }
+                if let to {
+                    store.needsYouNotice = "Sent to \(to)"
+                } else {
+                    if let d = item.actions.first(where: { $0.kind == "dismiss" }) { _ = try await store.perform(d) }
+                    store.needsYouNotice = "Saved as a note only"
+                }
+            } catch { self.error = APIError.from(error) }
+        }
+    }
+
     private func run(_ a: NeedsYouAction, text: String? = nil) {
         Task {
             busy = true
@@ -203,7 +222,8 @@ private struct NeedsYouNotice: View {
                 .accessibilityIdentifier("needsYouNotice")
                 .task(id: n) {
                     UIAccessibility.post(notification: .announcement, argument: n)
-                    try? await Task.sleep(for: .seconds(2))
+                    // A cancelled wait (this copy left the screen) must not clear it for the copy that shows it.
+                    guard (try? await Task.sleep(for: .seconds(2))) != nil, store.needsYouNotice == n else { return }
                     store.needsYouNotice = nil
                 }
         }
@@ -218,9 +238,13 @@ private struct AnswerDraft: Identifiable {
 /// Write (or edit a suggested) reply; nothing goes until Send.
 private struct NeedsYouAnswerSheet: View {
     let item: NeedsYouItem
+    let agents: [Agent]
     @State var text: String
     var sendLabel = "Send"
-    let send: (String) -> Void
+    let send: (String, String?) -> Void
+    /// On an issue with nobody on it: who gets the reply. None keeps it as a note.
+    @State private var agentId: String?
+    private var asksForAgent: Bool { item.agent == nil && item.answerAction?.isIssueReply == true }
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -230,13 +254,24 @@ private struct NeedsYouAnswerSheet: View {
                 Section(item.type == "comment_approval" ? "Comment to post on GitHub" : "Your reply") {
                     TextField("Reply…", text: $text, axis: .vertical).lineLimit(2...8).accessibilityIdentifier("needsYouAnswerField")
                 }
+                if asksForAgent {
+                    Section {
+                        Picker("Send to", selection: $agentId) {
+                            Text("Nobody").tag(String?.none)
+                            ForEach(agents) { a in Text(a.name).tag(Optional(a.id)) }
+                        }
+                        .accessibilityIdentifier("needsYouAnswerAgent")
+                    } footer: {
+                        Text(agentId == nil ? "Nobody is on this issue: the reply is kept as a note only." : "The agent takes the issue and gets your reply.")
+                    }
+                }
             }
             .navigationTitle(item.agent?.name ?? "Reply")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sendLabel) { send(text); dismiss() }
+                    Button(sendLabel) { send(text, asksForAgent ? agentId : nil); dismiss() }
                         .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("needsYouAnswerSend")
                 }

@@ -2,7 +2,7 @@
 
 Forwards Loft's pushes to Apple for installs that hold a **relay key** and have no APNs key of their own (ADR 0002).
 It holds the operator's Apple key, serves only the official Loft app's bundle id, and only forwards: payloads and
-device tokens are never stored or logged, and only hashes of relay keys are kept. It's login-only: a key comes from
+device tokens are never stored or logged, and only hashes of relay keys and device tokens are kept. It's login-only: a key comes from
 the **push portal** (below), after Sign in with Apple, or from the operator's `scripts/create-key.js`.
 
 Plain JavaScript Vercel functions with no dependencies and no build step. The store is Upstash Redis (Vercel KV) over
@@ -31,7 +31,7 @@ its REST API.
 |---|---|
 | `200 {"apple_status", "reason", "apns_id"}` | Apple answered. A `410`, or a `400` with `BadDeviceToken` or `DeviceTokenNotForTopic`, means the phone is gone: remove it. |
 | `401` | No relay key, one not shaped like a key (`lrk_` and 43 characters), or one the store doesn't have (never made, or revoked). |
-| `403` | Another bundle id: use your own APNs key for your own build. |
+| `403` | Another bundle id: use your own APNs key for your own build. Or the device belongs to another account (below). |
 | `413` | The payload is over 4 KB. |
 | `429` | Over a limit; `Retry-After` says in how many seconds to try again. |
 | `400` | A malformed request. |
@@ -46,6 +46,23 @@ Every error body is `{"error": "…"}`.
 20 pushes per minute and 1,000 per day per relay key. They're fixed windows (the clock minute and the UTC day),
 counted in the store under the key's hash. Every authorized request counts, whether or not it's forwarded.
 
+Refused keys are limited per address, so guessing keys stays expensive: each `401` counts against the caller's
+address (the first `x-forwarded-for` entry, stored only as its hash, `limit:badKeys:<hash>:<hour>`). After 60 in one
+clock hour, every push from that address gets `429` with `Retry-After` until the next hour, even one with a valid key,
+which is neither used nor counted. Pushes with a valid key never count, and other addresses aren't affected. A Loft
+still pushing with a revoked key counts too, so its address can hit this limit: give it a new key.
+
+## One account per device
+
+The first push the relay forwards to a device token binds that device to the key's account, or to the key itself for
+a key made with the script (no account). From then on only that account's keys push to it: the Lofts signed in to one
+account share the phone, and a key of any other account gets `403` ("this device belongs to another account") and
+isn't forwarded. The binding is `device-owner:<sha256 of the lower-case token>` in the store, never the token. Each push to the
+device keeps it 30 days more; after 30 days without one it expires, and the next push binds the device again.
+Deleting an account on the portal deletes its bindings (it lists its devices' hashes under `account-devices:<id>`). Revoking
+a key made with the script leaves its devices bound until they expire; deleting their `device-owner:*` entries frees
+them sooner.
+
 ## The push portal (ADR 0003)
 
 A web page in the same project. `/` offers **Sign in with Apple**; Apple's answer comes back to `/auth/callback`, and
@@ -56,20 +73,23 @@ their created and last-used dates (`relay-key-used:<hash>`, set on each authoriz
 deletes a key, so its next push gets `401`. An account holds at most 5 keys: a 6th is refused until one is revoked.
 From one address (the first `x-forwarded-for` entry, stored only as a hash), at most 5 sign-ins (`/auth/start` and
 Delete my account), 5 returns from Apple (`/auth/callback`) and 5 key creations (`/keys` and Allow on `/connect`) are
-taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These limits, and `/api/pair`'s, trust
+taken per hour: the 6th gets `429` with `Retry-After` until the next hour. These limits, `/api/pair`'s and the refused-key limit, trust
 `x-forwarded-for`: Vercel sets it. Hosting the relay anywhere else, put it behind a proxy that overwrites that header
 with the caller's address, or anyone can set it and skip the limits. Requests without it all share one count.
 **Delete my account** (`/account/delete`) asks the user to sign in with Apple once more: only the account's own Apple
-ID confirms it. Then the account, its keys and their last-used dates are deleted, and the token Apple just gave is
+ID confirms it. Then the account, its keys, their last-used dates and its devices' bindings are deleted, and the token Apple just gave is
 revoked (`/auth/revoke`), which ends Sign in with Apple for the portal. No Apple token is ever stored. If Apple
 refuses the revocation, the account is still deleted and the page says how to remove the portal in the Apple ID
 settings. Without the portal's settings below, the page says
 "The push portal isn't configured", `POST /api/pair` answers `503 {portal: false}` (Loft then offers only pasting a key),
 and the relay works as before: the portal is optional.
 
-**Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, expires_in: 600}`, at most 5 per IP per
-hour). Loft opens `<relay address>/connect?code=…` (the same as `PORTAL_URL`): signed out, the page offers Sign in with Apple and brings the user back;
-signed in, **Allow** makes a key for the account and parks it under the hash of the secret (the code is in the link; the secret never leaves the Loft). `POST /api/pair-poll` with `{code, secret}`
+**Sign in from Loft.** `POST /api/pair` gives a Loft a one-time code (`{code, secret, confirm, expires_in: 600}`, at most 5 per IP per
+hour). `confirm` is a 6-character confirmation code derived from the secret's hash; Loft shows it in Settings → Push
+notifications next to **Sign in**. Loft opens `<relay address>/connect?code=…` (the same as `PORTAL_URL`): signed out, the page offers Sign in with Apple and brings the user back;
+signed in, the page asks for that confirmation code (it never shows it, so someone sent the link can't read it off
+the page; case, spaces and dashes don't matter). A wrong code issues no key; the 5th wrong one ends the sign-in code
+("Press Sign in in Loft again"). With the right code, **Allow** makes a key for the account and parks it under the hash of the secret (the code is in the link; the secret never leaves the Loft). `POST /api/pair-poll` with `{code, secret}`
 answers `202` while waiting, `200 {key}` exactly once after Allow, then `404` (also for an expired or unknown code). Until
 it's collected, the new key waits in the store, readable only with the secret, for at most the code's 10 minutes.
 
@@ -138,7 +158,8 @@ repo, so anyone can run their own.
 **Test it end to end**
 
 11. Open `PORTAL_URL`: **Sign in with Apple** comes back to "Your keys". Create a key, then revoke it.
-12. In a Loft with no `.p8` of its own: Settings → Push notifications → **Sign in** → Allow on the portal. Settings then
+12. In a Loft with no `.p8` of its own: Settings → Push notifications → **Sign in** → type the code Settings shows and
+    Allow on the portal. Settings then
     says "Using the Loft relay". Press **Send test push** next to a phone.
 13. On the portal, **Delete my account** (sign in again to confirm): the Loft's next push fails with `401`, and
     appleid.apple.com → Sign in with Apple no longer lists the portal.

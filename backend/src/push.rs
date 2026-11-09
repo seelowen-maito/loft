@@ -57,7 +57,7 @@ impl Pusher {
         }
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         let Ok(seen) = state.db.push_seen_among(&ids) else { return };
-        let fresh: Vec<&PushItem> = items.iter().filter(|i| !seen.contains(&i.id)).collect();
+        let mut fresh: Vec<&PushItem> = items.iter().filter(|i| !seen.contains(&i.id)).collect();
         if fresh.is_empty() {
             self.seeded = true;
             return;
@@ -67,10 +67,20 @@ impl Pusher {
             let _ = state.db.mark_push_seen(&i.id);
         }
         let devices = state.db.list_devices().unwrap_or_default();
-        if !self.seeded || devices.is_empty() || apns::route(state) == apns::Route::Off {
-            // What was already waiting at startup, or while push was off, isn't news.
+        // What became news at startup (a Delivery stalled by the restart) is pushed on the first look.
+        let news = if self.seeded { Default::default() } else { std::mem::take(&mut state.rt.lock().unwrap().news_at_start) };
+        if devices.is_empty() || apns::route(state) == apns::Route::Off {
+            // What came in while push was off isn't news later.
             self.seeded = true;
             return;
+        }
+        if !self.seeded {
+            // What was already waiting at startup isn't news.
+            self.seeded = true;
+            fresh.retain(|i| news.contains(&i.id));
+            if fresh.is_empty() {
+                return;
+            }
         }
         let now_min = { let n = Utc::now(); n.hour() * 60 + n.minute() };
         for d in &devices {
@@ -262,6 +272,34 @@ mod tests {
         crate::grill::mcp_call(&st, &lead, "grill_round", &serde_json::json!({ "questions": [] })).unwrap().unwrap();
         tick(&st, &mut p).await;
         assert_eq!(got(&seen, &now_kind).last().unwrap().1["aps"]["alert"]["title"], serde_json::json!("Lead: round 2"));
+    }
+
+    /// A Delivery stalled by the restart is news, though the first look takes what's waiting as old.
+    #[tokio::test]
+    async fn a_delivery_stalled_by_the_restart_is_pushed_on_the_first_look() {
+        let seen = crate::apns::tests::fake_apns();
+        let st = state();
+        crate::apns::tests::configure(&st);
+        let dev = agent(&st, "Dev");
+        let phone = format!("{}0a", "ab".repeat(31));
+        device(&st, &phone, crate::apns::DEFAULT_KINDS, None);
+        let mut d: crate::db::Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 40, "state": "final_review", "created_at": now() })).unwrap();
+        st.db.save_delivery(&d).unwrap();
+        (d.spec, d.state) = (50, "stalled".into());
+        (d.resume_to, d.stall_reason, d.stalled_at) = ("running".into(), "no_call".into(), now());
+        st.db.save_delivery(&d).unwrap();
+        permission(&st, "old", &dev.id);
+
+        crate::delivery::stall_lost_runs(&st);
+        let mut p = Pusher::default();
+        tick(&st, &mut p).await;
+        let pushes = got(&seen, &phone);
+        assert_eq!(pushes.len(), 1, "only the Delivery this start stalled: {pushes:?}");
+        let b = &pushes[0].1;
+        assert_eq!((b["type"].clone(), b["aps"]["alert"]["title"].clone(), b["aps"]["alert"]["body"].clone()), (serde_json::json!("delivery_stalled"), serde_json::json!("Delivery stalled"), serde_json::json!("spec #40")));
+        assert_eq!(b["target"], serde_json::json!({ "url": "https://github.com/o/r/issues/40" }));
+        tick(&st, &mut p).await;
+        assert_eq!(got(&seen, &phone).len(), 1, "once");
     }
 
     #[tokio::test]

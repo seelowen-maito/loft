@@ -757,10 +757,10 @@ final class LoftUITests: XCTestCase {
         app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
         app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
-        // The Owner row sits below the fold on the detail screen.
+        // An open spec: its Delivery card sits above "Where", so the Owner row is below the fold.
         let owner = text(containing: "octo-dev", app)
-        for _ in 0..<4 where !owner.waitForExistence(timeout: 1) { app.swipeUp() }
-        XCTAssertTrue(owner.appears(timeout: 5), "its owner")
+        for _ in 0..<4 where !owner.appears(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(owner.exists, "its owner")
         XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
         // #146: the Lead answers, from a script.
         app.tabBars.buttons["Chat"].tap()
@@ -830,48 +830,43 @@ final class LoftUITests: XCTestCase {
         row.tap()
     }
 
-    /// #149: a spec's detail shows its Delivery and tickets with verdicts; a ticket opens its issue, with back to the spec.
+    /// #149: an open spec on GitHub shows the Delivery card, then its tickets with verdicts; a ticket opens its issue,
+    /// with back to the spec.
     func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
         let app = launch(["-fixture-specs"])
         openSpec("Implement settings functionality", app)
-        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
-        XCTAssertEqual(any("deliveryState", app).label, "Running")
-        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who has which ticket")
-        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
-        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        // The card has the state and Start delivery (the fixture has no per-issue Delivery); the spec panel adds its tickets.
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the Delivery card")
+        XCTAssertFalse(any("specPRLink", app).exists, "no second Delivery panel")
         for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
         XCTAssertTrue(any("ticketRow-Docs", app).label.contains("in review"))
         XCTAssertTrue(any("ticketRow-Docs", app).label.contains("security waiting"))
         XCTAssertTrue(any("ticketRow-QA", app).label.contains("done"))
         XCTAssertTrue(any("ticketRow-QA", app).label.contains("security passed"))
-        XCTAssertFalse(any("startDelivery", app).exists, "it has a Delivery")
-        XCTAssertFalse(any("mergeDelivery", app).exists, "it isn't ready")
+        XCTAssertFalse(any("startDelivery", app).exists, "one Start delivery: the card's")
+        XCTAssertFalse(any("mergeDelivery", app).exists, "it merges on GitHub")
 
         any("ticketRow-Backend endpoints", app).tap()
         XCTAssertTrue(app.navigationBars["Issue"].appears(timeout: 5))
         XCTAssertTrue(text(containing: "Implement backend endpoints", app).appears(timeout: 5), "the ticket's own issue")
-        XCTAssertFalse(any("deliveryState", app).exists, "a ticket's page has no Delivery")
+        XCTAssertFalse(any("ticketRow-QA", app).exists, "a ticket's page lists no tickets")
         back(app)
-        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5), "back to the spec")
+        XCTAssertTrue(any("ticketRow-QA", app).appears(timeout: 5), "back to the spec")
     }
 
-    /// #149: Start delivery shows for a spec without a Delivery, pending and then its result; Merge only for a plan kept in Loft that's ready.
+    /// #149: an open spec on GitHub starts from the Delivery card and never merges here; Merge only for a plan kept
+    /// in Loft that's ready.
     func testStartDeliveryAndMergeAppearOnlyWhenTheyApply() {
         let app = launch(["-fixture-specs"])
         openSpec("Offline mode", app)
-        XCTAssertFalse(any("deliveryState", app).exists, "no Delivery panel without a Delivery")
-        let start = any("startDelivery", app)
-        XCTAssertTrue(start.appears(timeout: 5))
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
+        XCTAssertFalse(any("startDelivery", app).exists, "not a second one")
         XCTAssertFalse(any("mergeDelivery", app).exists)
-        start.tap()
-        XCTAssertTrue(text(containing: "Starting delivery…", app).appears(timeout: 3), "pending")
-        XCTAssertTrue(any("deliveryState", app).appears(timeout: 8), "then its Delivery")
-        XCTAssertFalse(any("startDelivery", app).exists, "started")
         back(app)
 
-        // Ready on GitHub: it merges there, so neither button.
+        // Ready on GitHub: it merges there.
         any("specRow-Widget gallery", app).tap()
-        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5))
         XCTAssertFalse(any("startDelivery", app).exists)
         XCTAssertFalse(any("mergeDelivery", app).exists)
         back(app)
@@ -952,6 +947,30 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["needsYouProject-api"].exists)
         loft.tap()
         XCTAssertEqual(loft.value as? String, "Collapsed")
+    }
+
+    /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.
+    func testReplyingToAnIssueWithNobodyOnItAsksForAnAgent() {
+        let app = launch()
+        app.buttons["needsYouSeeAll"].firstMatch.tap()
+        let row = any("needsYou-task_failed", app)
+        let reply = row.buttons["Reply on the issue"]
+        XCTAssertTrue(any("needsYou-permission", app).appears(timeout: 5))
+        for _ in 0..<6 where !reply.isHittable { app.swipeUp() }
+        reply.tap()
+        let agent = any("needsYouAnswerAgent", app)
+        XCTAssertTrue(agent.appears(timeout: 5))
+        XCTAssertTrue(text(containing: "kept as a note only", app).exists)
+        agent.tap()
+        app.buttons["QA Agent"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "takes the issue", app).appears(timeout: 5))
+        app.textFields["needsYouAnswerField"].tap()
+        app.typeText("Install Xcode 27 first")
+        app.buttons["needsYouAnswerSend"].tap()
+        let notice = any("needsYouNotice", app)
+        XCTAssertTrue(notice.appears(timeout: 5))
+        XCTAssertEqual(notice.label, "Sent to QA Agent")
+        XCTAssertFalse(any("needsYou-task_failed", app).exists, "the item clears")
     }
 
     func testAnAttachedTaskGoesWithTheMessageAndShowsAsAChip() {

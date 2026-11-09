@@ -40,7 +40,7 @@ final class LoftStore {
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
     /// Every spec's Delivery, for the Specs view; loaded when it opens and after each issue change.
-    private(set) var deliveries: [DeliverySummary] = []
+    private(set) var deliverySummaries: [DeliverySummary] = []
     private var deliveriesRefresh: Task<Void, Never>?
     /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
     var deliveryWatchers = 0
@@ -52,6 +52,14 @@ final class LoftStore {
     /// A short note for the Needs you list ("Already done").
     var needsYouNotice: String?
     private(set) var pullRequests: [PullRequest] = []
+    /// The Delivery of each issue whose page loaded its card, by Loft issue id (absent: none, or not loaded).
+    /// A `delivery` event reloads the ones it's about, so an open card stays live.
+    private(set) var deliveries: [String: IssueDelivery] = [:]
+    /// Issues whose Delivery card is on screen, with how many: only these reload on reconnects and `delivery` events.
+    private var deliveryCards: [String: Int] = [:]
+    /// Bumped by each Delivery load and action reply per issue: a load applies its answer only if nothing newer
+    /// started or landed meanwhile, so a late, older answer can't put a Resumed card back to Stalled.
+    private var deliveryGen: [String: Int] = [:]
     /// Plan views by parent task id, for the chat's plan cards. Kept here rather than in the card: the chat's lazy
     /// list drops a card's state when it scrolls out of view, and a card that comes back short and loads again moves
     /// the bottom-anchored list, which scrolls it out again, round and round.
@@ -127,11 +135,11 @@ final class LoftStore {
     /// `text` is the user's words for answer and retry.
     /// Returns false when it had already been handled (404/409: answered elsewhere, or the item is gone): not an error.
     @discardableResult
-    func perform(_ action: NeedsYouAction, text: String? = nil) async throws -> Bool {
+    func perform(_ action: NeedsYouAction, text: String? = nil, agentId: String? = nil) async throws -> Bool {
         let api = try requireWrite()
         guard let method = action.method, let path = action.path else { return true }
         do {
-            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString))
+            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString, agentId: agentId))
         } catch APIError.server(let status, _) where status == 404 || status == 409 {
             await refreshNeedsYou()
             return false
@@ -346,6 +354,8 @@ final class LoftStore {
         if let o = orchestratorId { await refreshGrill(o) }
         if info.supports(.grill) { await loadGrillPhrases() }
         if info.supports(.needsYou) { await refreshNeedsYou() }
+        // A reconnect may have missed `delivery` events: open cards catch up.
+        for id in deliveryCards.keys { try? await loadDelivery(id) }
         scheduleSave()
     }
 
@@ -413,7 +423,7 @@ final class LoftStore {
         deliveriesRefresh = Task { [weak self] in
             if soon { try? await Task.sleep(for: .seconds(1.5)) }
             guard let self, let api = self.api, !Task.isCancelled else { return }
-            if let fresh = try? await api.deliverySummaries() { self.deliveries = fresh }
+            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = fresh }
         }
     }
 
@@ -510,6 +520,11 @@ final class LoftStore {
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
         case .needsYou(_, let ids):
             if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+        case .delivery(let repo, let spec):
+            for id in deliveryCards.keys {
+                guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
+                Task { try? await loadDelivery(id) }
+            }
         case .other:
             break
         }
@@ -910,6 +925,48 @@ final class LoftStore {
         return nil
     }
 
+    /// Load issue `taskId`'s Delivery for its card.
+    func loadDelivery(_ taskId: String) async throws {
+        guard let api else { throw APIError.notConfigured }
+        let gen = bumpDeliveryGen(taskId)
+        let d = try await api.issueDelivery(taskId: taskId)
+        if deliveryGen[taskId] == gen { deliveries[taskId] = d }
+    }
+
+    private func bumpDeliveryGen(_ taskId: String) -> Int {
+        let gen = deliveryGen[taskId, default: 0] + 1
+        deliveryGen[taskId] = gen
+        return gen
+    }
+
+    /// Issue `taskId`'s Delivery card came on screen: it stays live from `delivery` events and reconnects until
+    /// `hideDeliveryCard`.
+    func showDeliveryCard(_ taskId: String) {
+        deliveryCards[taskId, default: 0] += 1
+    }
+
+    /// Issue `taskId`'s Delivery card left the screen: once no other copy shows it, it stops reloading.
+    func hideDeliveryCard(_ taskId: String) {
+        guard let n = deliveryCards[taskId] else { return }
+        deliveryCards[taskId] = n > 1 ? n - 1 : nil
+    }
+
+    /// Start delivery, Pause or Resume on issue `taskId`'s Delivery card. Returns what the server says it did.
+    @discardableResult
+    func deliveryAction(_ taskId: String, _ action: IssueDeliveryAction) async throws -> String? {
+        do {
+            let r = try await requireTasks().issueDeliveryAction(taskId: taskId, action)
+            // Newer than any load already on its way.
+            _ = bumpDeliveryGen(taskId)
+            deliveries[taskId] = r.delivery
+            return r.message
+        } catch {
+            // Refused (it started elsewhere, or isn't stalled any more): show where it stands now.
+            try? await loadDelivery(taskId)
+            throw error
+        }
+    }
+
     @discardableResult
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
         let t = try await requireTasks().createTask(fields)
@@ -989,7 +1046,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; deliveries = []; permissions = []; activity = []; pullRequests = []
+        agents = []; tasks = []; deliverySummaries = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

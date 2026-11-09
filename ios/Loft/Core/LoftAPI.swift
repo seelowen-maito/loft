@@ -21,6 +21,11 @@ protocol LoftAPI: Sendable {
     /// on the team's Dev once and returns the card with `delivery.started` (`duplicate` when it had started).
     /// `initGit`: the user said yes to setting up git in a project folder that has none (`needsGit` came back).
     func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse
+    /// A standalone ticket's or a spec's Delivery, for its issue page; nil when it has none.
+    func issueDelivery(taskId: String) async throws -> IssueDelivery?
+    /// The issue page's Delivery card buttons: Start delivery (once), Pause on a running one, Resume on a stalled
+    /// or paused one or one waiting for the user. Each answers with the Delivery as the card shows it now.
+    func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply
     func taskPlan(id: String) async throws -> TaskPlan
     func needsYou() async throws -> NeedsYouList
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws
@@ -221,6 +226,12 @@ struct LiveLoftAPI: LoftAPI {
         try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/start-delivery\(initGit ? "?init_git=true" : "")"))
     }
 
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? { try await get("/issues/\(taskId)/delivery") }
+
+    func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply {
+        try decode(IssueDeliveryReply.self, try await send("POST", "/issues/\(taskId)/\(action.rawValue)-delivery"))
+    }
+
     /// The grill endpoints answer with the session either bare or wrapped as `{ "session": … }`
     /// (`{ "session": null }` when there is none).
     static func decodeGrillSession(_ data: Data) throws -> GrillSession? {
@@ -376,6 +387,8 @@ extension LoftAPI {
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
     func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse { throw APIError.unsupported("Delivery") }
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? { nil }
+    func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply { throw APIError.unsupported("Delivery") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
     func startIssueDelivery(id: String) async throws { throw APIError.unsupported("Delivery") }
     func mergeDelivery(repo: String, spec: Int) async throws -> String { throw APIError.unsupported("Delivery") }

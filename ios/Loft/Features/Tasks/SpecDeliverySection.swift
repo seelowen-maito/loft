@@ -2,16 +2,18 @@ import SwiftUI
 
 /// The top of a spec's detail: its Delivery (state, who has which ticket, progress, spec PR), its tickets with their
 /// verdicts, and Start delivery or Merge where the web shows them. A spec without a Delivery gets no panel, only Start delivery.
+/// Under the Delivery card (an open spec on GitHub) only the tickets show: the card has its state and Start delivery.
 struct SpecDeliverySection: View {
     @Environment(LoftStore.self) private var store
     let spec: HBTask
+    var underCard = false
     @State private var busy: Busy?
     @State private var error: String?
     @State private var merged: String?
 
     private enum Busy { case start, merge }
 
-    private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliveries) }
+    private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
 
     var body: some View {
         let d = delivery
@@ -19,7 +21,7 @@ struct SpecDeliverySection: View {
         let tickets = SpecViews.tickets(of: spec, d, tasks: store.tasks)
         let started = d.map { $0.state != "planned" } ?? false
         Group {
-            if let d {
+            if let d, !underCard {
                 Section {
                     HStack {
                         Text(Self.stateLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
@@ -49,9 +51,9 @@ struct SpecDeliverySection: View {
                     }
                 } header: { Text("Delivery") }
             }
-            if SpecViews.canStartDelivery(spec, d) || SpecViews.canMerge(spec, d) || merged != nil || error != nil {
+            if (!underCard && SpecViews.canStartDelivery(spec, d)) || SpecViews.canMerge(spec, d) || merged != nil || error != nil {
                 Section {
-                    if SpecViews.canStartDelivery(spec, d) {
+                    if !underCard && SpecViews.canStartDelivery(spec, d) {
                         Button { start() } label: {
                             if busy == .start { HStack { ProgressView(); Text("Starting delivery…") } } else { Label("Start delivery", systemImage: "play.fill") }
                         }

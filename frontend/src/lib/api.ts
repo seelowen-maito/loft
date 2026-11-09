@@ -72,8 +72,6 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
 
-export const roleLabel = (role: string) => ROLES.find((r) => r.value === role)?.label ?? role;
-
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
 export type Message = {
@@ -104,7 +102,18 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
 export type IssueDelivery = {
+  /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
+  /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
+  stall_reason?: string | null;
+  /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
+  state_line?: { tone: string; text: string } | null;
+  /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
+  can_pause?: boolean;
+  /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
+  can_resume?: boolean;
+  /** A ticket, or the final review, waits for the user after too many changes rounds. */
+  needs_human?: boolean;
   started: boolean;
   agent_id: string | null;
   agent_name: string | null;
@@ -257,10 +266,14 @@ export const portalHome = (s: Pick<PushStatus, "relay_url" | "signin">): string 
 /** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
 export type PushStatus = {
   path: "own_key" | "relay" | "none";
-  /** Whether a relay key is stored. */
+  /** Whether a relay key is stored and the relay hasn't refused it. */
   relay_key: boolean;
+  /** The relay answered 401 to the stored key: pushes through it stopped until the user signs in again or pastes a new key. */
+  relay_refused: boolean;
   /** Sign in was pressed and the code isn't allowed on the portal yet. */
   signing_in: boolean;
+  /** While Sign in waits: the confirmation code the user types on the portal's Allow page (null from a relay that gives none). */
+  signin_code: string | null;
   /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */
   relay_url: string | null;
   /** The address saved in Settings ("" when none: the environment's, if any, is used). */
@@ -444,6 +457,15 @@ export type Settings = {
   auto_publish_all: boolean;
   /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
+  /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
+  backup_dir: string;
+};
+
+/** The backups folder, its newest backup and the last attempt's error (a good backup clears it). */
+export type BackupStatus = {
+  dir: string;
+  last: { at: string; bytes: number; path: string } | null;
+  error: { message: string; at: string } | null;
 };
 
 export type ApprovalMode = "ask" | "own" | "all";
@@ -520,7 +542,8 @@ export function grillError(e: unknown) {
   return m;
 }
 
-export type Simulator = { udid: string; name: string; runtime: string };
+/** A booted simulator; `agent` is the agent whose device it is, null for one the user booted. */
+export type Simulator = { udid: string; name: string; runtime: string; agent: { id: string; name: string } | null };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =
   | { action: "tap"; x: number; y: number }
@@ -530,7 +553,7 @@ export type SimulatorInput =
   | { action: "button"; name: "home" | "lock" };
 
 export const api = {
-  simulators: () => req<{ interactive: boolean; devices: Simulator[] }>("GET", "/simulator"),
+  simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   simulatorInput: (udid: string, input: SimulatorInput) => req<{ ok: boolean }>("POST", "/simulator/input", { udid, ...input }),
   info: () => req<Info>("GET", "/info"),
   update: () => req<UpdateStatus>("GET", "/update"),
@@ -540,8 +563,10 @@ export const api = {
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
-  saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
+  saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  backups: () => req<BackupStatus>("GET", "/backups"),
+  backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
@@ -592,15 +617,16 @@ export const api = {
   configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string }) =>
     req<PushStatus>("PUT", "/push", b),
   /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
-  pushSignIn: () => req<{ url: string }>("POST", "/push/signin"),
+  pushSignIn: () => req<{ url: string; confirm: string | null }>("POST", "/push/signin"),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
-   * `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
+   * `reopen`: run a finished task again with it (a failed one always runs again); `agent_id`: on a task with nobody on it,
+   * hand it to this agent. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean; agent_id?: string }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
@@ -621,6 +647,10 @@ export const api = {
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
+  /** Resume on a stalled or paused Delivery: Loft checks what was done meanwhile, then wakes only the agent its step waits on. */
+  resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
+  /** Pause on a running Delivery: Loft stops the run working on it and sends no more wakes until Resume. */
+  pauseIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/pause-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

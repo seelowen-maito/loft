@@ -4,7 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, ListTodo, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
-import { parseFilters, withFilters, type IssueFilters } from "../lib/issueFilters";
+import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
@@ -16,7 +16,7 @@ import { compareOpen, isSpec, specProgress } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, ViewToggle, boardSpecs } from "./SpecBoard";
 import { parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
-import { groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
+import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** The list's sections, in order; done and cancelled tasks are folded away. */
 const GROUPS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -121,20 +121,28 @@ export default function TasksPage() {
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
   const projects = useMemo(() => [...new Set((tasks ?? []).map((t) => t.project).filter(Boolean))].sort(), [tasks]);
   const teams = useMemo(() => [...new Set(agents.map(teamOf).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [agents]);
-  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`.
+  // Coming from an agent (the Issues tab passes `from`): its group, in place of `from`, once.
   const from = params.get("from");
   useEffect(() => {
-    const a = from && agentById.get(from);
-    if (from && agents.length) setParams((cur) => withFilters(cur, { group: a ? teamOf(a) : "" }), { replace: true });
+    if (!from || !agents.length) return;
+    const groupOf = (id: string) => {
+      const a = agentById.get(id);
+      return a ? teamOf(a) : "";
+    };
+    setParams((cur) => resolveFrom(cur, groupOf) ?? cur, { replace: true });
   }, [from, agents.length, agentById, setParams]);
   // A group, agent or project the URL names that doesn't exist (any more) is ignored, once the lists are in.
   const group = agents.length && !teams.includes(filters.group) ? "" : filters.group;
   const groupProjectList = useMemo(() => groupProjects(group, agents, projects), [group, agents, projects]);
-  const agentId = agents.length && !agentById.has(filters.agent) ? "" : filters.agent;
+  const groupAgentList = useMemo(() => groupAgents(group, agents), [group, agents]);
+  // An agent outside the picked group is ignored, like an unknown one.
+  const agentId = agents.length ? agentInGroup(filters.agent, group, agents) : filters.agent;
   const project = tasks && !groupProjectList.includes(filters.project) ? "" : filters.project;
-  const filtered = useMemo(() => {
-    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!agentId || t.agent_id === agentId) && (!mine || createdByMe(t, mirror?.login)));
-  }, [tasks, filters.q, group, agents, project, agentId, mine, source, mirror?.login]);
+  // Every filter but the agent: the board matches an agent on its own (a spec's, or its Delivery's, see boardSpecs).
+  const anyAgent = useMemo(() => {
+    return filterIssues(tasks ?? [], filters.q, source).filter((t) => (!group || inGroup(t, group, agents)) && (!project || t.project === project) && (!mine || createdByMe(t, mirror?.login)));
+  }, [tasks, filters.q, group, agents, project, mine, source, mirror?.login]);
+  const filtered = useMemo(() => anyAgent.filter((t) => !agentId || t.agent_id === agentId), [anyAgent, agentId]);
 
   const groups = useMemo(
     () =>
@@ -165,7 +173,7 @@ export default function TasksPage() {
     <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
   ) : null;
   const unread = groups[0].tasks.length;
-  const specs = useMemo(() => filtered.filter(isSpec), [filtered]);
+  const specs = useMemo(() => anyAgent.filter(isSpec), [anyAgent]);
   const kept = useMemo(() => (board ? boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId) : []), [board, specs, deliveries, tasks, params, agentId]);
   const count = board ? (kept.length === specs.length ? `${specs.length} specs` : `${kept.length} of ${specs.length} specs`) : filtered.length === (tasks ?? []).length ? `${filtered.length} issues` : `${filtered.length} of ${(tasks ?? []).length} issues`;
 
@@ -202,7 +210,7 @@ export default function TasksPage() {
             </button>
           ))}
         </div>
-        <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "" })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
+        <select value={group} onChange={(e) => setFilter({ group: e.target.value, project: "", agent: agentInGroup(agentId, e.target.value, agents) })} className="chip bg-ink-850 text-[12px]" aria-label="Group">
           <option value="">All groups</option>
           {teams.map((g) => <option key={g} value={g}>{g}</option>)}
         </select>
@@ -212,7 +220,7 @@ export default function TasksPage() {
         </select>
         <select value={agentId} onChange={(e) => setFilter({ agent: e.target.value })} className="chip bg-ink-850 text-[12px]" aria-label="Agent">
           <option value="">All agents</option>
-          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          {groupAgentList.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <button className={cx("chip text-[12px]", mine && "border-accent/40 text-accent")} onClick={() => setFilter({ mine: !mine })} aria-pressed={mine}>
           Created by me

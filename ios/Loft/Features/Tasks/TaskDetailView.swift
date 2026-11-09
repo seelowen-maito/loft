@@ -65,7 +65,8 @@ struct TaskDetailView: View {
                 }
             }
 
-            if SpecViews.isSpec(t) { SpecDeliverySection(spec: t) }
+            if t.hasDeliveryCard { DeliveryCardSection(task: t) }
+            if SpecViews.isSpec(t) { SpecDeliverySection(spec: t, underCard: t.hasDeliveryCard) }
 
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {

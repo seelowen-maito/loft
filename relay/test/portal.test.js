@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { createServer as createH2 } from "node:http2";
-import { home, start, callback, createAccountKey, revokeAccountKey, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { home, start, callback, createAccountKey, revokeAccountKey, signOut, confirmDelete, startDelete, deleteAccount } from "../lib/portal.js";
+import { approve } from "../lib/pairing.js";
 import { kv as makeKv } from "../lib/kv.js";
-import { push } from "../lib/relay.js";
+import { push, BIND } from "../lib/relay.js";
 
 const SERVICES_ID = "com.example.loft.web";
 const BUNDLE = "com.example.loft";
@@ -23,7 +24,9 @@ const expiries = new Map();
 let failing = null; // a command the store answers with an error
 const members = (key) => sets.get(key) ?? new Set();
 const run = ([cmd, key, ...args]) => {
-  if (cmd === "SET" && args[1] === "EX") expiries.set(key, args[2]);
+  if (cmd === "EVAL") return bind(key, args);
+  if (cmd === "SET" && args.indexOf("EX") > 0) expiries.set(key, args[args.indexOf("EX") + 1]);
+  if (cmd === "EXPIRE") expiries.set(key, args[0]);
   if (cmd === "SET") return args[1] === "NX" && store.has(key) ? null : (store.set(key, args[0]), "OK");
   if (cmd === "GET") return store.get(key) ?? null;
   if (cmd === "DEL") return [key, ...args].filter((k) => store.delete(k) || sets.delete(k)).length;
@@ -34,6 +37,17 @@ const run = ([cmd, key, ...args]) => {
   if (cmd === "SISMEMBER") return members(key).has(args[0]) ? 1 : 0;
   if (cmd === "EXISTS") return store.has(key) ? 1 : 0;
   if (cmd === "INCR") return (store.set(key, String(Number(store.get(key) ?? 0) + 1)), Number(store.get(key)));
+  return 1;
+};
+/** The relay's one script (BIND), as Redis runs it. */
+const bind = (script, [n, ...rest]) => {
+  assert.equal(script, BIND);
+  const [[owner, seconds, device], [holds, list]] = [rest.slice(n), rest.slice(0, n)];
+  const holder = run(["GET", holds]);
+  if (holder === null) run(["SET", holds, owner, "EX", seconds]);
+  else if (holder === owner) run(["EXPIRE", holds, seconds]);
+  else return 0;
+  if (list) (run(["SADD", list, device]), run(["EXPIRE", list, seconds]));
   return 1;
 };
 const kvServer = createServer((req, res) => {
@@ -246,14 +260,52 @@ const pushWith = (key) =>
   push(new Request("http://relay/api/push", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: JSON.stringify({ device_token: DEVICE, environment: "production", bundle_id: BUNDLE, payload: { aps: { alert: "hi" } } }) }), env, Date.UTC(2026, 10, 6, 12));
 const idsOn = (html) => [...html.matchAll(/name="id" value="([0-9a-f]{64})"/g)].map((m) => m[1]);
 
+test("a device belongs to the account that first pushed to it: its other keys can push, another account's get 403", async () => {
+  const session = await signInAs();
+  const mac = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const laptop = await keyFrom(await createAccountKey(post("/keys", { name: "MacBook" }, session), env));
+  const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, await signInAs("999.other")), env));
+  assert.equal((await pushWith(mac)).status, 200);
+  assert.equal((await pushWith(laptop)).status, 200, "a second Loft on the same account shares the phone");
+  const refused = await pushWith(theirs);
+  assert.equal(refused.status, 403);
+  assert.match((await refused.json()).error, /belongs to another account/);
+  assert.equal(pushed.length, 2, "the refused push wasn't forwarded");
+  const device = sha256(DEVICE);
+  assert.equal(store.get(`device-owner:${device}`), "account:001234.abcdef");
+  assert.equal(expiries.get(`device-owner:${device}`), 30 * 86400);
+  assert.deepEqual([...sets.get("account-devices:001234.abcdef")], [device]);
+  const everything = [...store.keys(), ...store.values(), ...sets.keys(), ...[...sets.values()].flatMap((m) => [...m])];
+  assert.ok(!everything.some((v) => v.includes(DEVICE)), "only the token's hash is stored");
+});
+
+test("deleting an account frees its devices, but not one that went to another account after expiring", async () => {
+  const session = await signInAs();
+  const mine = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
+  const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, await signInAs("999.other")), env));
+  const later = await keyFrom(await createAccountKey(post("/keys", { name: "Later" }, await signInAs("777.later")), env));
+  assert.equal((await pushWith(mine)).status, 200);
+  assert.equal((await pushWith(theirs)).status, 403);
+  assert.equal((await deleteAs(session)).status, 200);
+  assert.ok(![...store.keys(), ...sets.keys()].some((k) => k.startsWith("device-owner:") || k.includes("001234.abcdef")), "its binding and its list are gone");
+  assert.equal((await pushWith(theirs)).status, 200, "the phone is free for the next account");
+
+  // 999.other's binding expires and 777.later takes the phone: deleting 999.other leaves 777.later's binding alone.
+  store.delete(`device-owner:${sha256(DEVICE)}`);
+  assert.equal((await pushWith(later)).status, 200);
+  await deleteAccount(makeKv(env), "999.other");
+  assert.equal(store.get(`device-owner:${sha256(DEVICE)}`), "account:777.later");
+  assert.equal((await pushWith(theirs)).status, 401);
+});
+
 test("the key list shows each key's name, created and last-used dates, never the key", async () => {
   const session = await signInAs();
   const mini = await keyFrom(await createAccountKey(post("/keys", { name: "Mac <mini>" }, session), env, Date.UTC(2026, 10, 3)));
   const book = await keyFrom(await createAccountKey(post("/keys", { name: "MacBook" }, session), env, Date.UTC(2026, 10, 4)));
   assert.equal((await pushWith(mini)).status, 200);
   const html = await (await home(get("/", session), env)).text();
-  assert.match(html, /<td>Mac &lt;mini&gt;<\/td><td>Nov 3, 2026<\/td><td>Nov 6, 2026<\/td>/);
-  assert.match(html, /<td>MacBook<\/td><td>Nov 4, 2026<\/td><td>never<\/td>/);
+  assert.match(html, /Mac &lt;mini&gt;<\/td><td class="mono">Nov 3, 2026<\/td><td class="mono">Nov 6, 2026<\/td>/);
+  assert.match(html, /MacBook<\/td><td class="mono">Nov 4, 2026<\/td><td class="mono">never<\/td>/);
   assert.match(html, /2 of 5 keys/);
   assert.ok(!html.includes(mini) && !html.includes(book), "no key on the page");
   // Another account sees none of them.
@@ -358,7 +410,7 @@ test("a key's last-used date expires, so a push racing a revoke can't keep one f
   // A key without one that's over a year old may have been used before then.
   const old = await signInAs("999.old");
   await createAccountKey(post("/keys", { name: "Old" }, old), env, Date.UTC(2025, 0, 1));
-  assert.match(await (await home(get("/", old), env)).text(), /<td>Old<\/td><td>Jan 1, 2025<\/td><td>not in the last year<\/td>/);
+  assert.match(await (await home(get("/", old), env)).text(), /Old<\/td><td class="mono">Jan 1, 2025<\/td><td class="mono">not in the last year<\/td>/);
 });
 
 test("a store error is an error, not an empty answer", async () => {
@@ -386,7 +438,7 @@ test("Delete my account deletes the keys and the account and revokes Apple's tok
   const other = await signInAs("999.other");
   const theirs = await keyFrom(await createAccountKey(post("/keys", { name: "Theirs" }, other), env));
   assert.match(await (await home(get("/", session), env)).text(), /href="\/account\/delete"/);
-  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all 3 keys, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
+  assert.match(await (await confirmDelete(get("/account/delete", session), env)).text(), /deletes your account and all <b>3 keys<\/b>, so those Lofts stop pushing, and ends[\s\S]*sign in once more/);
 
   const res = await deleteAs(session);
   assert.equal(res.status, 200);
@@ -522,13 +574,15 @@ const forged = (req, headers) => {
 };
 const FORGERIES = [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "https://evil.example.com" }, {}];
 
-test("a form posted from another site is refused with 403 and changes nothing", async () => {
+test("a form posted from another site is refused with 403 and changes nothing; the portal's own passes", async () => {
   const session = await signInAs();
   const key = await keyFrom(await createAccountKey(post("/keys", { name: "Mac" }, session), env));
   const before = JSON.stringify([...store]);
   const id = sha256(key);
+  // Sign out last: it ends the session the others use.
+  const forms = [[approve, "/connect", { code: "x", name: "Evil" }], [createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}], [signOut, "/signout", {}]];
   for (const headers of FORGERIES) {
-    for (const [handler, path, form] of [[createAccountKey, "/keys", { name: "Evil" }], [revokeAccountKey, "/keys/revoke", { id }], [startDelete, "/account/delete", {}]]) {
+    for (const [handler, path, form] of forms) {
       const res = await handler(forged(post(path, form, session), headers), env);
       assert.equal(res.status, 403, `${path} ${JSON.stringify(headers)}`);
       assert.match(await res.text(), /didn't come from this portal/);
@@ -538,7 +592,11 @@ test("a form posted from another site is refused with 403 and changes nothing", 
   assert.equal(JSON.stringify([...store]), before, "nothing was written, not even a rate-limit count");
   assert.equal((await pushWith(key)).status, 200, "the key still works");
   // The portal's own origin passes, with or without Sec-Fetch-Site.
-  assert.equal((await createAccountKey(forged(post("/keys", { name: "Own" }, session), { origin: "https://portal.example.com" }), env)).status, 200);
+  for (const [handler, path, form] of forms) {
+    for (const headers of [{ "sec-fetch-site": "same-origin" }, { origin: "https://portal.example.com" }]) {
+      assert.notEqual((await handler(forged(post(path, form, session), headers), env)).status, 403, `${path} ${JSON.stringify(headers)}`);
+    }
+  }
 });
 
 test("the session, state and delete cookies are __Host- cookies: Secure, HttpOnly, SameSite=Lax, Path=/, no Domain", async () => {
@@ -588,4 +646,41 @@ test("every portal page carries the CSP (no scripts), Referrer-Policy and nosnif
     assert.equal(res.headers.get("x-content-type-options"), "nosniff");
     assert.equal(res.headers.get("cache-control"), "no-store");
   }
+});
+
+test("every signed-in page has the header with Signed in with Apple and a Sign out form; the signed-out page doesn't", async () => {
+  const session = await signInAs();
+  for (const res of [await home(get("/", session), env), await confirmDelete(get("/account/delete", session), env), await createAccountKey(post("/keys", { name: "Mac" }, session), env)]) {
+    const html = await res.text();
+    assert.match(html, /Loft push portal/);
+    assert.match(html, /Signed in with Apple[\s\S]*<form method="post" action="\/signout"><button>Sign out<\/button>/);
+  }
+  assert.doesNotMatch(await (await home(get("/"), env)).text(), /Sign out/);
+});
+
+test("Sign out clears the session cookie, shows the sign-in page, and the old cookie no longer works", async () => {
+  const session = await signInAs();
+  const res = await signOut(post("/signout", {}, session), env);
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get("location"), "/");
+  assert.match(res.headers.getSetCookie().join(), /^__Host-session=; Max-Age=0; /);
+  assert.match(await (await home(get("/"), env)).text(), /Sign in with Apple/);
+  // Someone who kept a copy of the cookie is signed out too.
+  assert.doesNotMatch(await (await home(get("/", session), env)).text(), /Sign out/);
+  assert.equal((await createAccountKey(post("/keys", { name: "Late" }, session), env)).status, 303);
+});
+
+test("Sign out with a forged or expired cookie writes nothing to the store, and a real one lasts only as long as the session", async () => {
+  const session = await signInAs();
+  const before = JSON.stringify([...store]);
+  for (const bad of ["__Host-session=garbage", `${session.replace(/.$/, "x")}`, "__Host-session=a.9999999999.b"]) {
+    const res = await signOut(post("/signout", {}, bad), env);
+    assert.equal(res.status, 303);
+    assert.match(res.headers.getSetCookie().join(), /^__Host-session=; Max-Age=0/);
+  }
+  assert.equal(JSON.stringify([...store]), before);
+  const now = Date.now() + 3 * 86400 * 1000;
+  await signOut(post("/signout", {}, session), env, now);
+  const [ttl] = [...expiries].filter(([k]) => k.startsWith("session-ended:")).map(([, v]) => Number(v));
+  assert.ok(ttl > 3.9 * 86400 && ttl <= 4 * 86400, `ttl ${ttl}`);
 });

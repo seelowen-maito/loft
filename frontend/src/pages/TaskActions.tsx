@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
-import { ArrowUp, Check, CloudUpload, Link2, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
@@ -9,6 +9,9 @@ import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/menti
 import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
+import { deliveryButtons, deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
+import { useServerEvents, type ServerEvent } from "../lib/events";
+import { latestOnly } from "../lib/latest";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -144,33 +147,119 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
   );
 }
 
+/** The issue's Delivery, loaded once and again whenever the server says it changed (here, on another device,
+ *  or from Loft moving it on), so the card stays live. Only the newest load or action answer is shown, and
+ *  nothing after unmount: one Resume saves the Delivery several times, and an older answer mustn't land last.
+ *  A burst of events makes one reload, 150 ms after the last. */
+function useIssueDelivery(t: Task) {
+  const [d, setD] = useState<IssueDelivery | null>(null);
+  const [latest] = useState(() => latestOnly<IssueDelivery | null>(setD));
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const reload = useCallback(() => latest.load(api.issueDelivery(t.id)), [t.id, latest]);
+  useEffect(() => {
+    latest.start();
+    reload();
+    return () => {
+      clearTimeout(timer.current);
+      latest.stop();
+    };
+  }, [latest, reload]);
+  const repo = t.github?.repo.toLowerCase();
+  const number = t.github?.number;
+  useServerEvents(
+    useCallback(
+      (e: ServerEvent) => {
+        if (e.type !== "delivery" || e.repo.toLowerCase() !== repo || e.spec !== number) return;
+        clearTimeout(timer.current);
+        timer.current = setTimeout(reload, 150);
+      },
+      [repo, number, reload],
+    ),
+  );
+  return [d, latest.set, reload] as const;
+}
+
+const TONE: Record<DeliveryTone, string> = {
+  running: "text-accent",
+  stalled: "text-bad",
+  paused: "text-fg-3",
+  needs_you: "text-warn",
+  final: "text-accent",
+  done: "text-good",
+};
+
+/** Where a started Delivery stands: running, stalled (and why), paused, needs you, final review or done. */
+function DeliveryState({ d }: { d: IssueDelivery | null }) {
+  const line = deliveryStateLine(d);
+  if (!line) return null;
+  return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
+}
+
+/** Pause and Resume on a Delivery's card. Pause stops the run working on a running Delivery and sends no more
+ *  wakes. Resume, on a stalled or paused Delivery or one whose ticket or final review waits for the user after too
+ *  many changes rounds, checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
+ *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
+function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
+  const [busy, setBusy] = useState<"pause" | "resume" | null>(null);
+  const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
+  const run = async (what: "pause" | "resume") => {
+    setBusy(what);
+    setSaid(null);
+    try {
+      const r = await (what === "pause" ? api.pauseIssueDelivery(t.id) : api.resumeIssueDelivery(t.id));
+      setD(r);
+      setSaid({ ok: true, text: r.message });
+    } catch (e) {
+      setSaid({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  };
+  return { pause: () => run("pause"), resume: () => run("resume"), busy, said };
+}
+
+function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<typeof useDeliveryActions> }) {
+  const show = deliveryButtons(d);
+  return (
+    <>
+      {show.pause && (
+        <button className={cx("btn-ghost", a.busy === "pause" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "pause"} onClick={a.pause}>
+          {a.busy === "pause" ? <Loader2 className="size-3.5 animate-spin" /> : <Pause className="size-3.5" />} {a.busy === "pause" ? "Pausing…" : "Pause"}
+        </button>
+      )}
+      {show.resume && (
+        <button className={cx("btn-primary", a.busy === "resume" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "resume"} onClick={a.resume}>
+          {a.busy === "resume" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {a.busy === "resume" ? "Resuming…" : "Resume"}
+        </button>
+      )}
+    </>
+  );
+}
+
+function Said({ said }: { said: { ok: boolean; text: string } | null }) {
+  if (!said) return null;
+  return <div className={cx("mt-2 text-[12px]", said.ok ? "text-fg-3" : "text-bad")}>{said.text}</div>;
+}
+
 /** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [started, setStarted] = useState<{ agent_id: string; agent_name: string; pr: number | null } | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
-  useEffect(() => {
-    let live = true;
-    api.issueDelivery(t.id)
-      .then((d) => live && d?.started && d.agent_id && setStarted({ agent_id: d.agent_id, agent_name: d.agent_name ?? "", pr: d.pr }))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [t.id]);
+  const [d, setD] = useIssueDelivery(t);
+  const r = useDeliveryActions(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
-      const d = await api.startIssueDelivery(t.id);
-      setStarted({ agent_id: d.agent_id ?? "", agent_name: d.agent_name ?? "", pr: d.pr });
+      setD(await api.startIssueDelivery(t.id));
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+  const started = d?.started && d.agent_id ? d : null;
   const n = t.github?.number;
   return (
     <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
@@ -180,13 +269,19 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           <div className="mt-0.5 text-[12.5px] text-fg-3">
             {started
               ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
-              : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
+              : d?.started
+                ? `Started${d.pr ? ` on PR #${d.pr}` : ""}; the agent building it is gone. #${n} closes when the PR merges.`
+                : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
           </div>
+          <DeliveryState d={d} />
         </div>
-        {!started && (
+        {!d?.started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
+        {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
+        <DeliveryButtons d={d} a={r} />
       </div>
+      <Said said={r.said} />
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </section>
   );
@@ -197,17 +292,9 @@ export function DeliveryCard({ task: t }: { task: Task }) {
 export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [d, setD] = useState<IssueDelivery | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
-  useEffect(() => {
-    let live = true;
-    api.issueDelivery(t.id)
-      .then((d) => live && setD(d))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [t.id]);
+  const [d, setD, reload] = useIssueDelivery(t);
+  const r = useDeliveryActions(t, setD);
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -215,7 +302,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
       setD(await api.startIssueDelivery(t.id));
     } catch (e) {
       setError((e as Error).message);
-      api.issueDelivery(t.id).then(setD).catch(() => {});
+      reload();
     } finally {
       setBusy(false);
     }
@@ -240,11 +327,14 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
               `Loft builds the open sub-issues of #${t.github?.number} one at a time on its spec branch and draft spec PR, starting with the first unblocked one on the team's Dev.`
             )}
           </div>
+          <DeliveryState d={started} />
         </div>
         {!started && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
+        <DeliveryButtons d={started} a={r} />
       </div>
+      <Said said={r.said} />
       {skipped.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-[12px] text-fg-3">
           {skipped.map((x) => (
@@ -495,8 +585,11 @@ export function ClosedOnGithubCard({ task: t }: { task: Task }) {
 }
 
 /** The comment box under a task's thread. */
-export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Agent; agents: Agent[] }) {
+export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent?: Agent; agents: Agent[] }) {
   const [text, setText] = useState("");
+  // Nobody on the issue: pick who gets it, as a hand-off does, or keep it as a note.
+  const [picked, setPicked] = useState("");
+  const agent = onIt ?? agents.find((a) => a.id === picked);
   const box = useRef<HTMLTextAreaElement>(null);
   useAutoGrow(box, text, 2);
   const [send, setSend] = useState(true);
@@ -506,6 +599,8 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const finished = FINISHED.includes(t.status);
+  // A failed issue always runs again with what you send; done or cancelled ones only when you ask.
+  const rerun = t.status === "failed" || (finished && reopen);
   // "@" in the box (comment or note) offers agents to mention; Escape closes it until the text changes.
   const [menuIndex, setMenuIndex] = useState(0);
   const [closedAt, setClosedAt] = useState<string | null>(null);
@@ -523,6 +618,7 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
   useEffect(() => {
     setText("");
     setReopen(false);
+    setPicked("");
     setError(null);
   }, [t.id]);
   useEffect(() => {
@@ -539,9 +635,10 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
     try {
       const sending = !!agent && send;
       const posting = !!t.github && github;
-      const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && finished && reopen });
+      const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && rerun, agent_id: onIt ? undefined : agent?.id });
       setText("");
       setReopen(false);
+      setPicked("");
       setNote(
         r.task ? `Reopened; ${agent!.name} is on it${r.queued ? " after its current run" : ""}.`
         : r.delivered_to ? `Sent to ${agent!.name}${r.queued ? "; it reads it after its current run" : ""}.`
@@ -555,7 +652,7 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
     }
   };
 
-  const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : finished && reopen ? "Reopen and send" : `Send to ${agent.name}`;
+  const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : rerun ? "Reopen and send" : `Send to ${agent.name}`;
   return (
     <div className="space-y-2">
       {flat.length > 0 && <MentionMenu groups={groups} index={Math.min(menuIndex, flat.length - 1)} marks={marks} onHover={setMenuIndex} onPick={pick} />}
@@ -592,13 +689,19 @@ export function CommentBox({ task: t, agent, agents }: { task: Task; agent?: Age
           className="w-full resize-none bg-transparent py-1 text-[13.5px] outline-none placeholder:text-fg-3"
         />
         <div className="flex flex-wrap items-center gap-3">
-          {agent && (
+          {!onIt && (
+            <select value={picked} onChange={(e) => setPicked(e.target.value)} className="chip bg-ink-850 text-[11px]" aria-label="Agent to send it to">
+              <option value="">Nobody: keep it as a note</option>
+              {agents.map((a) => <option key={a.id} value={a.id}>Send to {a.name}</option>)}
+            </select>
+          )}
+          {onIt && (
             <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2">
               <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} className="accent-[var(--color-accent)]" />
-              Send to {agent.name}
+              Send to {onIt.name}
             </label>
           )}
-          {agent && send && finished && (
+          {agent && send && finished && t.status !== "failed" && (
             <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2" title="Run it again with this comment as the instruction">
               <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} className="accent-[var(--color-accent)]" />
               Reopen and run again

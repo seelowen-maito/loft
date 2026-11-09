@@ -63,3 +63,13 @@ export function groupProjects(group: string, agents: GroupAgent[], known: string
   const mine = new Set(agents.filter((a) => teamOf(a) === group).flatMap(projectsOf));
   return known.filter((p) => mine.has(p));
 }
+
+/** The agents of a group (by their group label), or every agent without a group. */
+export function groupAgents<A extends GroupAgent>(group: string, agents: A[]): A[] {
+  return group ? agents.filter((a) => teamOf(a) === group) : agents;
+}
+
+/** The agent filter after switching to `group`: kept when the agent is in it, otherwise "" (all agents). */
+export function agentInGroup(agentId: string, group: string, agents: GroupAgent[]): string {
+  return agentId && groupAgents(group, agents).some((a) => a.id === agentId) ? agentId : "";
+}

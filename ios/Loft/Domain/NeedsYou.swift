@@ -65,11 +65,16 @@ struct NeedsYouAction: Codable, Hashable {
     /// An HTTP action (anything but `open`).
     var isRequest: Bool { method != nil && path != nil }
 
-    /// The body to send: `text` filled in for answers and retries, plus a client id for messages and comments.
-    func body(text: String?, clientId: String) -> JSONValue? {
+    /// Answers an issue: the server delivers it to the issue's agent, or to `agentId` when nobody is on it.
+    var isIssueReply: Bool { kind == "answer" && path?.hasSuffix("/comments") == true }
+
+    /// The body to send: `text` filled in for answers and retries, plus a client id for messages and comments, and on
+    /// an issue with nobody on it, the agent picked to take it.
+    func body(text: String?, clientId: String, agentId: String? = nil) -> JSONValue? {
         guard case .object(var o)? = body else { return body }
         if let text, o["text"] != nil { o["text"] = .string(text) }
         if let p = path, p.contains("/messages") || p.contains("/comments") { o["client_id"] = .string(clientId) }
+        if let agentId, isIssueReply { o["agent_id"] = .string(agentId) }
         return .object(o)
     }
 }

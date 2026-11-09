@@ -42,7 +42,25 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
     func deliverySummaries() async throws -> [DeliverySummary] { [] }
-    func tasks() async throws -> [HBTask] { try check(); return [] }
+    var taskList: [HBTask] = []
+    func tasks() async throws -> [HBTask] { try check(); return taskList }
+    /// Each issue's Delivery, and how many times the app fetched one.
+    var deliveryOf: [String: IssueDelivery] = [:]
+    var deliveryLoads = 0
+    /// How long each next load takes to answer, in order: it answers with the Delivery as it was when it started.
+    var deliveryDelays: [Duration] = []
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? {
+        deliveryLoads += 1
+        let d = deliveryOf[taskId]
+        if !deliveryDelays.isEmpty { try await Task.sleep(for: deliveryDelays.removeFirst()) }
+        return d
+    }
+    /// What a Delivery action answers.
+    var deliveryReply: IssueDeliveryReply?
+    func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply {
+        guard let r = deliveryReply else { throw APIError.unsupported("Delivery") }
+        return r
+    }
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
         HBTask(id: fields["id"]?.stringValue ?? "x", title: fields["title"]?.stringValue ?? "", description: "", kind: "todo", status: "inbox",
                priority: "normal", project: "", agentId: nil, parentId: nil, dependsOn: [], dueAt: nil, createdBy: "user", note: "",
