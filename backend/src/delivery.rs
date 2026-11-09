@@ -408,16 +408,44 @@ fn stall_why(reason: &str) -> &'static str {
     }
 }
 
+/// The name of the agent building ticket `t`, else its id when the agent is gone.
+fn builder_name(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
+    let id = builder_id(d, t);
+    state.db.get_agent(id).ok().flatten().map_or_else(|| id.to_string(), |a| a.name)
+}
+
+/// The Devs who built the spec's tickets, each once, in ticket order.
+pub(crate) fn builders(state: &AppState, d: &Delivery) -> Vec<String> {
+    let mut names: Vec<String> = vec![];
+    for t in d.tickets.iter().filter(|t| t.skipped.is_empty() && t.state != "open" && !builder_id(d, t).is_empty()) {
+        let n = builder_name(state, d, t);
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+}
+
+/// "A", "A and B", "A, B and C".
+fn list_of(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [a] => a.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Why a Delivery stalled and what waits, for Needs you: names and titles only.
-pub(crate) fn stalled_reason(d: &Delivery) -> String {
+pub(crate) fn stalled_reason(state: &AppState, d: &Delivery) -> String {
     let why = stall_why(&d.stall_reason);
     let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
-    let what = match (d.resume_to.as_str(), d.current.and_then(|n| d.ticket(n))) {
-        ("final_review", _) => "the final Code Review".to_string(),
-        ("final_fixes", _) => "the fixes from the final Code Review".to_string(),
-        (_, Some(t)) if t.state == "review" => format!("the review of {}", tag(d, t)),
-        (_, Some(t)) => format!("building {}", tag(d, t)),
-        _ => "its next step".to_string(),
+    // Every ticket in flight, with the agent on it.
+    let in_flight: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "closing")).collect();
+    let what = match d.resume_to.as_str() {
+        "final_review" => "the final Code Review".to_string(),
+        "final_fixes" => "the fixes from the final Code Review".to_string(),
+        _ if in_flight.is_empty() => "its next step".to_string(),
+        _ => list_of(&in_flight.iter().map(|t| if t.state == "started" { format!("building {} on {}", tag(d, t), builder_name(state, d, t)) } else { format!("the review of {}", tag(d, t)) }).collect::<Vec<_>>()),
     };
     format!("{why}. Stopped at: {what}.")
 }
@@ -1840,7 +1868,8 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
             v["spec"] = json!(d.spec);
             v["spec_id"] = json!(d.spec_id);
             v["local"] = json!(d.local);
-            v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "verdicts": t.verdicts })).collect::<Vec<_>>());
+            let tickets = v["tickets"].take();
+            v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "verdicts": t.verdicts })).collect::<Vec<_>>());
             v
         })
         .collect();
@@ -2379,6 +2408,32 @@ mod tests {
         for done in ["ready", "settled", "merged"] {
             assert_eq!(line(done, "", vec![]).await, says("done", "Done: every review passed."), "{done}");
         }
+    }
+
+    /// With two tickets in flight, a stalled Delivery's reason names both and their agents, the Merge item
+    /// names the Devs who built the spec, and the summary carries every started ticket's agent.
+    #[tokio::test]
+    async fn parallel_tickets_name_every_ticket_and_dev() {
+        let st = crate::planning::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Backend Dev");
+        let b = crate::tasks::tests::agent(&st, "Dev 2");
+        let mut d: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "stalled", "stall_reason": "restart", "created_at": "" })).unwrap();
+        let (mut t1, mut t2, t3) = (ticket(1, "", "started"), ticket(2, "", "started"), ticket(3, "", "open"));
+        (t1.agent, t2.agent) = (a.id.clone(), b.id.clone());
+        d.tickets = vec![t1, t2, t3];
+        assert_eq!(stalled_reason(&st, &d), "Its run was lost when Loft restarted. Stopped at: building #1 on Backend Dev and building #2 on Dev 2.");
+        assert_eq!(builders(&st, &d), vec!["Backend Dev", "Dev 2"]);
+        d.tickets.truncate(1);
+        d.tickets[0].state = "closed".into();
+        assert_eq!(stalled_reason(&st, &d), "Its run was lost when Loft restarted. Stopped at: its next step.");
+        d.tickets[0].state = "started".into();
+        d.tickets.push(ticket(2, "", "started"));
+        d.tickets[1].agent = b.id.clone();
+        d.state = "running".into();
+        st.db.save_delivery(&d).unwrap();
+        let v = summary_route(State(st)).await.unwrap().0;
+        let agents: Vec<&str> = v[0]["tickets"].as_array().unwrap().iter().map(|t| t["agent_name"].as_str().unwrap()).collect();
+        assert_eq!(agents, vec!["Backend Dev", "Dev 2"]);
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
