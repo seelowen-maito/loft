@@ -39,6 +39,11 @@ final class LoftStore {
 
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
+    /// Every spec's Delivery, for the Specs view; loaded when it opens and after each issue change.
+    private(set) var deliverySummaries: [DeliverySummary] = []
+    private var deliveriesRefresh: Task<Void, Never>?
+    /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
+    var deliveryWatchers = 0
     private(set) var permissions: [PermissionRequest] = []
     private(set) var activity: [ActivityItem] = []
     private(set) var activityHasMore = true
@@ -411,6 +416,25 @@ final class LoftStore {
         }
     }
 
+    /// Loads the Deliveries now; `soon` waits a moment so a burst of issue changes reads once.
+    func loadDeliveries(soon: Bool = false) {
+        guard supportsTasks else { return }
+        deliveriesRefresh?.cancel()
+        deliveriesRefresh = Task { [weak self] in
+            if soon { try? await Task.sleep(for: .seconds(1.5)) }
+            guard let self, let api = self.api, !Task.isCancelled else { return }
+            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = fresh }
+        }
+    }
+
+    /// Merge a plan kept in Loft; returns the server's message.
+    func mergeDelivery(_ d: DeliverySummary) async throws -> String {
+        let message = try await requireTasks().mergeDelivery(repo: d.repo, spec: d.spec)
+        try? await refresh()
+        loadDeliveries()
+        return message
+    }
+
     private func refreshActivitySoon() {
         guard supportsActivity else { return }
         activityRefresh?.cancel()
@@ -480,6 +504,7 @@ final class LoftStore {
                 }
             }
             refreshActivitySoon()
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .taskDeleted(let id):
             tasks.removeAll { $0.id == id }
         case .system(let r):
@@ -1014,7 +1039,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
+        agents = []; tasks = []; deliverySummaries = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

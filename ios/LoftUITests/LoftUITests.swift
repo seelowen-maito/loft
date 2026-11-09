@@ -97,7 +97,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(allow.disappears(timeout: 5))
 
         let activity = any("activityCard", app)
-        for _ in 0..<4 where !activity.exists { app.swipeUp(velocity: .fast) }
+        for _ in 0..<4 where !activity.waitForExistence(timeout: 1) { app.swipeUp(velocity: .fast) }
         XCTAssertTrue(activity.appears(timeout: 5))
 
         // Tasks.
@@ -773,6 +773,122 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(text(containing: "3 of 4 endpoints", app).appears(timeout: 5), "a scripted answer, shown at once")
         app.buttons["exitDemo"].tap()
         XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
+    }
+
+    /// #148: the Issues tab switches to Specs (kept across launches), in sections by stage, with the shared filters.
+    func testSpecsListSectionsAndFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        for (stage, title) in [("planned", "Offline mode"), ("delivery", "Implement settings functionality"), ("ready", "Widget gallery"), ("shipped", "Dark theme")] {
+            XCTAssertTrue(any("specSection-\(stage)", app).appears(timeout: 5), stage)
+            XCTAssertTrue(any("specRow-\(title)", app).exists, title)
+        }
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who is on which ticket")
+        XCTAssertTrue(text(containing: "octo/loft#50", app).exists, "its repo")
+        XCTAssertTrue(text(containing: "Loft · garden", app).exists, "a plan kept in Loft")
+        XCTAssertFalse(any("specRow-Old idea", app).exists, "dropped is hidden")
+        XCTAssertFalse(app.buttons["taskRow-Renew the domain"].exists, "only specs")
+
+        app.buttons["Filter issues"].tap()
+        app.buttons["Show dropped"].tap()
+        for _ in 0..<3 where !any("specRow-Old idea", app).exists { app.swipeUp() }
+        XCTAssertTrue(any("specRow-Old idea", app).appears(timeout: 3))
+
+        // The group and project filters are the List's, and apply here.
+        app.buttons["Filter issues"].tap()
+        app.buttons["Loft"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Garden notes", app).exists, "no agent of the group works in garden")
+        app.buttons["Filter issues"].tap()
+        app.buttons["Any group"].tap()
+        app.buttons["Filter issues"].tap()
+        app.buttons["garden"].tap()
+        XCTAssertTrue(any("specRow-Garden notes", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Offline mode", app).exists)
+
+        // Kept across launches.
+        app.terminate()
+        app.launchArguments += ["-keep-issues-view"]
+        app.launch()
+        app.tabBars.buttons["Issues"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+    }
+
+    private func openSpec(_ title: String, _ app: XCUIApplication) {
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        let row = any("specRow-\(title)", app)
+        for _ in 0..<3 where !row.exists { app.swipeUp() }
+        XCTAssertTrue(row.appears(timeout: 5), title)
+        row.tap()
+    }
+
+    /// #149: an open spec on GitHub shows the Delivery card, then its progress, Spec PR and tickets with verdicts; a
+    /// ticket opens its issue, with back to the spec.
+    func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Implement settings functionality", app)
+        // The card has the state and Pause; the spec panel adds the rest.
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5), "the Delivery card")
+        XCTAssertEqual(any("deliveryState", app).label, "Running.")
+        XCTAssertTrue(any("delivery-pause", app).exists)
+        XCTAssertFalse(any("delivery-start", app).exists, "it started")
+        XCTAssertTrue(text(containing: "#43 Backend endpoints is with Backend Agent", app).exists, "the card says who has which ticket")
+        XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        // The tickets sit below the card and the progress.
+        for _ in 0..<3 where !any("ticketRow-QA", app).exists { app.swipeUp() }
+        for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("in review"))
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("security waiting"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("done"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("security passed"))
+        XCTAssertFalse(any("mergeDelivery", app).exists, "it merges on GitHub")
+
+        any("ticketRow-Backend endpoints", app).tap()
+        XCTAssertTrue(app.navigationBars["Issue"].appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Implement backend endpoints", app).appears(timeout: 5), "the ticket's own issue")
+        XCTAssertFalse(any("ticketRow-QA", app).exists, "a ticket's page lists no tickets")
+        back(app)
+        XCTAssertTrue(any("ticketRow-QA", app).appears(timeout: 5), "back to the spec")
+    }
+
+    /// #149: an open spec on GitHub starts from the Delivery card and never merges here; Merge only for a plan kept
+    /// in Loft that's ready.
+    func testStartDeliveryAndMergeAppearOnlyWhenTheyApply() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Offline mode", app)
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
+        XCTAssertFalse(any("deliveryProgress", app).exists, "no Delivery yet, so no progress")
+        XCTAssertFalse(any("deliveryState", app).exists, "nor a state")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        back(app)
+
+        // Ready on GitHub: it merges there, and the spec panel still shows its progress and Spec PR.
+        any("specRow-Widget gallery", app).tap()
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertEqual(any("deliveryState", app).label, "Done: every review passed.", "the card's state")
+        XCTAssertFalse(any("delivery-start", app).exists)
+        XCTAssertEqual(any("deliveryProgress", app).label, "3 of 3 tickets done")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        back(app)
+
+        for _ in 0..<3 where !any("specRow-Garden notes", app).exists { app.swipeUp() }
+        any("specRow-Garden notes", app).tap()
+        let merge = any("mergeDelivery", app)
+        XCTAssertTrue(merge.appears(timeout: 5))
+        XCTAssertTrue(any("deliveryState", app).exists, "no card on a plan kept in Loft: the panel has the state")
+        merge.tap()
+        XCTAssertTrue(text(containing: "Merging…", app).appears(timeout: 3), "pending")
+        XCTAssertTrue(any("deliveryResult", app).appears(timeout: 8), "then the result")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
     }
 
     /// #149: a relaunch starts outside the demo with none of its changes, and the full-screen Talk view has the

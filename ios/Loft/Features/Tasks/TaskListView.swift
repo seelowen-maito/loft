@@ -7,14 +7,43 @@ struct TaskListView: View {
     @State private var search = ""
     @State private var priority: TaskPriority?
     @State private var project: String?
+    @State private var group: String?
     @State private var agentId: String?
+    @State private var showDropped = false
+    /// List or Specs, kept on the device.
+    @AppStorage("issuesView") private var mode = IssuesMode.list
+
+    enum IssuesMode: String { case list, specs }
+
+    /// The group and project filters, shared by both views.
+    private func inScope(_ t: HBTask) -> Bool {
+        (group == nil || SpecViews.inGroup(t, group!, agents: store.agents)) && (project == nil || t.project == project)
+    }
+
+    private var groups: [String] { Array(Set(store.agents.map(\.team).filter { !$0.isEmpty })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } }
+
+    /// The projects to pick from: the group's agents' when a group is picked.
+    private var projectChoices: [String] {
+        guard let group else { return store.projects }
+        return Array(Set(store.agents.filter { $0.team == group }.flatMap(\.allProjects))).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private var modePicker: some View {
+        Picker("View", selection: $mode) {
+            Text("List").tag(IssuesMode.list)
+            Text("Specs").tag(IssuesMode.specs)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("issuesViewSwitch")
+        .listRowBackground(Color.clear)
+    }
 
     private var filtered: [HBTask] {
         store.tasks.filter { t in
             filter.matches(t.state)
                 && (search.isEmpty || t.title.localizedCaseInsensitiveContains(search))
                 && (priority == nil || t.priorityLevel == priority)
-                && (project == nil || t.project == project)
+                && inScope(t)
                 && (agentId == nil || t.agentId == agentId)
         }
         .sorted(by: Self.order)
@@ -36,9 +65,9 @@ struct TaskListView: View {
     }
 
     /// Top-level tasks with their subtasks nested, unless a filter makes nesting misleading.
-    private var showsTree: Bool { filter == .all && search.isEmpty && priority == nil && project == nil && agentId == nil }
+    private var showsTree: Bool { filter == .all && search.isEmpty && priority == nil && project == nil && group == nil && agentId == nil }
 
-    private var hasFilters: Bool { priority != nil || project != nil || agentId != nil }
+    private var hasFilters: Bool { priority != nil || project != nil || group != nil || agentId != nil }
 
     var body: some View {
         Group {
@@ -46,7 +75,14 @@ struct TaskListView: View {
                 EmptyState(symbol: "checklist", title: "Issues need a newer Loft",
                            message: "This server doesn't have the issues API yet. Pull the latest Loft on your Mac and restart it.")
             } else {
-                list
+                if mode == .specs {
+                    SpecsView(specs: store.tasks.filter { SpecViews.isSpec($0) && inScope($0) }, showDropped: showDropped) {
+                        modePicker
+                    }
+                    .toolbar { ToolbarItem(placement: .topBarLeading) { filterMenu } }
+                } else {
+                    list
+                }
             }
         }
         .navigationTitle("Issues")
@@ -56,6 +92,7 @@ struct TaskListView: View {
     private var list: some View {
         List {
             StaleBanner().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+            modePicker
             Section {
                 filterBar.listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)).listRowBackground(Color.clear)
             }
@@ -121,20 +158,33 @@ struct TaskListView: View {
 
     private var filterMenu: some View {
         Menu {
-            Picker("Priority", selection: $priority) {
-                Text("Any priority").tag(TaskPriority?.none)
-                ForEach(TaskPriority.allCases) { Text($0.label).tag(TaskPriority?.some($0)) }
+            if mode == .list {
+                Picker("Priority", selection: $priority) {
+                    Text("Any priority").tag(TaskPriority?.none)
+                    ForEach(TaskPriority.allCases) { Text($0.label).tag(TaskPriority?.some($0)) }
+                }
+            }
+            if !groups.isEmpty {
+                Picker("Group", selection: $group) {
+                    Text("Any group").tag(String?.none)
+                    ForEach(groups, id: \.self) { Text($0).tag(String?.some($0)) }
+                }
             }
             Picker("Project", selection: $project) {
                 Text("Any project").tag(String?.none)
-                ForEach(store.projects, id: \.self) { Text($0).tag(String?.some($0)) }
+                ForEach(projectChoices, id: \.self) { Text($0).tag(String?.some($0)) }
             }
-            Picker("Agent", selection: $agentId) {
-                Text("Anyone").tag(String?.none)
-                ForEach(store.agents) { Text($0.name).tag(String?.some($0.id)) }
+            if mode == .list {
+                Picker("Agent", selection: $agentId) {
+                    Text("Anyone").tag(String?.none)
+                    ForEach(store.agents) { Text($0.name).tag(String?.some($0.id)) }
+                }
+            }
+            if mode == .specs {
+                Toggle("Show dropped", isOn: $showDropped)
             }
             if hasFilters {
-                Button("Clear filters", role: .destructive) { priority = nil; project = nil; agentId = nil }
+                Button("Clear filters", role: .destructive) { priority = nil; project = nil; group = nil; agentId = nil }
             }
         } label: {
             Image(systemName: hasFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")

@@ -51,6 +51,10 @@ protocol LoftAPI: Sendable {
     func permissions() async throws -> [PermissionRequest]
     func decidePermission(id: String, decision: String) async throws
     func pullRequests() async throws -> [PullRequest]
+    /// Every spec's Delivery in one read (the web board's source).
+    func deliverySummaries() async throws -> [DeliverySummary]
+    /// Merge for a plan kept in Loft (`POST /deliveries/merge`); the server's message says what merged.
+    func mergeDelivery(repo: String, spec: Int) async throws -> String
     func tasks() async throws -> [HBTask]
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask
     func updateTask(id: String, _ fields: [String: JSONValue]) async throws -> HBTask
@@ -256,6 +260,11 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func pullRequests() async throws -> [PullRequest] { try await get("/pull-requests") }
+    func deliverySummaries() async throws -> [DeliverySummary] { try await get("/deliveries/summary") }
+    func mergeDelivery(repo: String, spec: Int) async throws -> String {
+        struct Merged: Decodable { var message: String }
+        return try decode(Merged.self, try await send("POST", "/deliveries/merge", body: ["repo": .string(repo), "spec": .number(Double(spec))], timeout: 120)).message
+    }
     func tasks() async throws -> [HBTask] { try await get("/tasks") }
 
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
@@ -376,6 +385,7 @@ extension LoftAPI {
     func issueDelivery(taskId: String) async throws -> IssueDelivery? { nil }
     func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply { throw APIError.unsupported("Delivery") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
+    func mergeDelivery(repo: String, spec: Int) async throws -> String { throw APIError.unsupported("Delivery") }
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent { throw APIError.unsupported("Agent settings") }
     func taskComments(id: String) async throws -> [TaskComment] { [] }
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }

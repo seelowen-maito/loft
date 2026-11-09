@@ -41,6 +41,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
+    func deliverySummaries() async throws -> [DeliverySummary] { [] }
     var taskList: [HBTask] = []
     func tasks() async throws -> [HBTask] { try check(); return taskList }
     /// Each issue's Delivery, and how many times the app fetched one.
