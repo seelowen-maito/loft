@@ -4289,7 +4289,7 @@ pub(crate) mod tests {
         let items = stalled_items(&st);
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!((&items[0]["title"], &items[0]["urgency"]), (&json!("Delivery stalled: Rounds"), &json!(2)));
-        assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building #41.");
+        assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building #41 on Builder.");
         assert_eq!(items[0]["actions"][1]["target"], json!({ "screen": "task", "task_id": spec.id }));
         let all = crate::needs_you::collect(&st).unwrap();
         let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
@@ -4502,7 +4502,7 @@ pub(crate) mod tests {
         let items = stalled_items(&st);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["title"], "Delivery stalled: Offline mode");
-        assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building \"Store\".");
+        assert_eq!(items[0]["reason"], "The run Loft woke for its step ended without its call. Stopped at: building \"Store\" on dev agent.");
         assert_eq!(items[0]["actions"][1]["target"], json!({ "screen": "task", "task_id": spec.id }));
     }
 
