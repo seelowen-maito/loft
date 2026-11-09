@@ -12,6 +12,8 @@ struct DeliverySummary: Codable, Hashable {
     var pr: Int? = nil
     var current: Current?
     var tickets: [Ticket]
+    /// Ready tickets nobody has yet, while the Lead hands them out.
+    var waitingForLead: [Int]? = nil
 
     struct Current: Codable, Hashable { var number: Int; var title: String }
     struct Ticket: Codable, Hashable {
@@ -20,6 +22,8 @@ struct DeliverySummary: Codable, Hashable {
         var state: String
         /// The ticket's own Loft issue, for a plan kept in Loft.
         var id: String? = nil
+        /// The agent on it while it's started, in review, closing or needs you; nil otherwise.
+        var agentName: String? = nil
         /// Review role (qa, security…) to `pass` or still waiting.
         var verdicts: [String: String]? = nil
     }
@@ -67,10 +71,15 @@ enum SpecViews {
         }
     }
 
-    /// Who is on which ticket: "Backend Agent on #43 Backend endpoints".
-    static func onIt(_ d: DeliverySummary) -> String? {
-        let parts = [d.agentName, d.current.map { "#\($0.number) \($0.title)" }].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " on ")
+    /// Who is on which ticket, one line per running ticket: "Backend Agent on #43 Backend endpoints".
+    static func onIt(_ d: DeliverySummary) -> [String] {
+        d.tickets.compactMap { t in t.agentName.map { "\($0) on #\(t.number) \(t.title)" } }
+    }
+
+    /// "Waiting for the Lead to assign #44, #47", or nil when no ready ticket waits.
+    static func waitingLine(_ numbers: [Int]?) -> String? {
+        guard let numbers, !numbers.isEmpty else { return nil }
+        return "Waiting for the Lead to assign " + numbers.map { "#\($0)" }.joined(separator: ", ")
     }
 
     /// Merged, or closed as completed, is Shipped; closed as not planned is Dropped; no Delivery or not started is Planned;
@@ -114,7 +123,7 @@ enum SpecViews {
                 let own = t.id.flatMap { id in tasks.first { $0.id == id } }
                     ?? tasks.first { x in spec.github.map { x.github?.repo == $0.repo && x.github?.number == t.number } ?? false }
                 return TicketLine(id: "\(t.number)", number: own?.github?.number ?? t.number, title: t.title, state: t.state,
-                                  taskId: own?.id, verdicts: t.verdicts ?? [:], current: d.current?.number == t.number)
+                                  taskId: own?.id, verdicts: t.verdicts ?? [:], current: t.agentName != nil)
             }
         }
         return tasks.filter { $0.parentId == spec.id && $0.state != .cancelled }.map { x in

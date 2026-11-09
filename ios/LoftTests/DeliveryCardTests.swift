@@ -23,6 +23,19 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertTrue(!d.showsPause && d.showsResume)
     }
 
+    /// #181: two tickets running at once, each with its Dev, and a ready ticket nobody has yet.
+    func testASpecCardListsEveryRunningTicketAndWhatWaitsForTheLead() throws {
+        let d = try delivery(#"""
+        {"state":"running","started":true,"agent_id":null,"agent_name":null,"pr":334,"spec":true,"current":null,"waiting_for_lead":[343],
+         "tickets":[{"number":340,"title":"Card","state":"started","skipped":"","agent_id":"a","agent_name":"Dev 1"},
+                    {"number":342,"title":"Specs","state":"review","skipped":"","agent_id":"b","agent_name":"Dev 2"},
+                    {"number":343,"title":"Docs","state":"open","skipped":"","agent_id":null,"agent_name":null}]}
+        """#)
+        XCTAssertEqual(d.runningLines, ["#340 Card is with Dev 1", "#342 Specs is with Dev 2"])
+        XCTAssertEqual(d.progressLine(issue: 333), "On spec PR #334. 0 of 3 tickets done.")
+        XCTAssertEqual(SpecViews.waitingLine(d.waitingForLead), "Waiting for the Lead to assign #343")
+    }
+
     func testEachStateReadsLikeTheWebCard() throws {
         func line(_ state: String, _ extra: String = "") throws -> String? {
             try delivery(#"{"state":"\#(state)","started":\#(state != "planned"),"agent_id":null,"agent_name":null,"pr":null\#(extra)}"#).line?.text
