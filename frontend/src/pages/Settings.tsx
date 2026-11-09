@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
-import { cx } from "../lib/format";
+import { cx, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -120,6 +120,62 @@ function GithubUsage() {
   );
 }
 
+/** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
+function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
+  const [s, setS] = useState<BackupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    api.backups().then((v) => {
+      setS(v);
+      // Needs you links here when backups fail.
+      if (window.location.hash === "#backups") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
+    }).catch((e) => setErr((e as Error).message));
+  }, []);
+  const now = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setS(await api.backUpNow());
+    } catch (e) {
+      setErr((e as Error).message);
+      // The failure is recorded: show the last good backup next to it.
+      api.backups().then(setS).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+  const last = s?.last;
+  return (
+    <div ref={card} id="backups">
+      <Section title="Backups">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="min-w-0 flex-1 text-[13px] text-fg">
+            {!s ? " " : last ? (
+              <span title={last.path}>
+                Last backup {timeAgo(last.at)} · {new Date(last.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · {(last.bytes / 1e6).toFixed(1)} MB
+              </span>
+            ) : "No backup yet."}
+          </p>
+          <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
+            {busy ? "Backing up…" : "Back up now"}
+          </button>
+        </div>
+        {(s?.error || err) && (
+          <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">
+            {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
+          </p>
+        )}
+        <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
+          <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
+        </Field>
+        {folderErr && <p className="text-[12.5px] text-bad">{folderErr}</p>}
+      </Section>
+    </div>
+  );
+}
+
 /** The All-time spend: every run Loft has counted, which the home line no longer shows. */
 function Spend() {
   const [all, setAll] = useState<AgentsSummary["all_time"] | null>(null);
@@ -220,6 +276,7 @@ export default function SettingsPage() {
   const [token, setToken] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
 
@@ -249,10 +306,20 @@ export default function SettingsPage() {
   const save = async () => {
     setSaving(true);
     setErr(null);
+    setFolderErr(null);
     try {
-      const v = await api.saveSettings({ ...draft, github_token: token });
+      // The backups folder goes on its own, after the rest: a folder the server refuses fails only that field.
+      let v = await api.saveSettings({ ...draft, github_token: token, backup_dir: undefined });
+      if (draft.backup_dir !== v.settings.backup_dir) {
+        try {
+          // No github_token: the view's is blank, and blank would clear it.
+          v = await api.saveSettings({ ...v.settings, github_token: undefined, backup_dir: draft.backup_dir });
+        } catch (e) {
+          setFolderErr((e as Error).message);
+        }
+      }
       setView(v);
-      setDraft(v.settings);
+      setDraft({ ...v.settings, backup_dir: draft.backup_dir });
       setToken(undefined);
       window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
     } catch (e) {
@@ -342,6 +409,8 @@ export default function SettingsPage() {
             </div>
           </Field>
         </Section>
+
+        <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
 
         <GithubUsage />
         <Spend />

@@ -111,7 +111,9 @@ struct AgentDetailView: View {
             if let fresh = agent.freshContext, agent.freshContextApplies != false {
                 Section {
                     Picker("Fresh context", selection: Binding(get: { fresh }, set: { v in act { try await store.setFreshContext(agent.id, v) } })) {
-                        Text("Above 80k").tag("above_80k")
+                        ForEach([80, 100, 120, 150, 180, 200], id: \.self) { n in
+                            Text("Above \(n)k").tag("above_\(n)k")
+                        }
                         Text("Always").tag("always")
                         Text("Off").tag("off")
                     }

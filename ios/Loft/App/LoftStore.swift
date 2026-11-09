@@ -39,6 +39,12 @@ final class LoftStore {
 
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
+    /// Every spec's Delivery, for the Specs view, by spec (`SpecViews.index`); loaded when it opens and after each
+    /// issue, pull request, needs-you or Delivery change.
+    private(set) var deliverySummaries: [String: DeliverySummary] = [:]
+    private var deliveriesRefresh: Task<Void, Never>?
+    /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
+    var deliveryWatchers = 0
     private(set) var permissions: [PermissionRequest] = []
     private(set) var activity: [ActivityItem] = []
     private(set) var activityHasMore = true
@@ -411,6 +417,25 @@ final class LoftStore {
         }
     }
 
+    /// Loads the Deliveries now; `soon` waits a moment so a burst of issue changes reads once.
+    func loadDeliveries(soon: Bool = false) {
+        guard supportsTasks else { return }
+        deliveriesRefresh?.cancel()
+        deliveriesRefresh = Task { [weak self] in
+            if soon { try? await Task.sleep(for: .seconds(1.5)) }
+            guard let self, let api = self.api, !Task.isCancelled else { return }
+            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = SpecViews.index(fresh) }
+        }
+    }
+
+    /// Merge a plan kept in Loft; returns the server's message.
+    func mergeDelivery(_ d: DeliverySummary) async throws -> String {
+        let message = try await requireTasks().mergeDelivery(repo: d.repo, spec: d.spec)
+        try? await refresh()
+        loadDeliveries()
+        return message
+    }
+
     private func refreshActivitySoon() {
         guard supportsActivity else { return }
         activityRefresh?.cancel()
@@ -465,6 +490,8 @@ final class LoftStore {
             }
         case .pullRequest(let pr):
             upsert(&pullRequests, pr)
+            // A review verdict comes as a pull request change, needs you as a needs-you one.
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .task(let t):
             let before = task(t.id)
             upsert(&tasks, t)
@@ -480,6 +507,7 @@ final class LoftStore {
                 }
             }
             refreshActivitySoon()
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .taskDeleted(let id):
             tasks.removeAll { $0.id == id }
         case .system(let r):
@@ -488,11 +516,13 @@ final class LoftStore {
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
         case .needsYou(_, let ids):
             if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .delivery(let repo, let spec):
             for id in deliveryCards.keys {
                 guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
                 Task { try? await loadDelivery(id) }
             }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .other:
             break
         }
@@ -851,7 +881,7 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always".
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always".
     func setFreshContext(_ agentId: String, _ value: String) async throws {
         upsert(&agents, try await requireWrite().updateAgent(id: agentId, ["fresh_context": .string(value)]))
     }
@@ -1014,7 +1044,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
+        agents = []; tasks = []; deliverySummaries = [:]; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

@@ -147,6 +147,9 @@ pub struct DeliveryTicket {
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
+    /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
+    #[serde(default)]
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,8 +200,8 @@ pub struct Agent {
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
-    /// Fresh context for each Delivery ticket: "off", "above_80k" (cleared before a new ticket when its
-    /// context is at the context warning or above) or "always". A Lead follows it only as the agent
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" (cleared before a new
+    /// ticket when its context is at N thousand tokens or above) or "always". A Lead follows it only as the agent
     /// building the tickets.
     #[serde(default = "default_fresh_context")]
     pub fresh_context: String,
@@ -1251,6 +1254,11 @@ impl Db {
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
     }
 
+    /// The database file, for backups (backup.rs), which read it through a connection of their own.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
+    }
+
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.
     #[cfg(test)]
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1433,6 +1441,7 @@ impl Db {
                     verdicts: Default::default(),
                     id: String::new(),
                     skipped: String::new(),
+                    agent: String::new(),
                 })
                 .collect();
             let d = Delivery {
