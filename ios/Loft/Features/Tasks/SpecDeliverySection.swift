@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The top of a spec's detail: its Delivery (state, who has which ticket, progress, spec PR), its tickets with their
 /// verdicts, and Merge for a plan kept in Loft. A spec without a Delivery gets no panel.
-/// Under the Delivery card (an open spec on GitHub) the card has the state and Start delivery, so this adds the rest.
+/// Under the Delivery card (an open spec on GitHub) the card has the state, who has which ticket and Start delivery, so
+/// this adds only the Spec PR, progress and tickets.
 struct SpecDeliverySection: View {
     @Environment(LoftStore.self) private var store
     let spec: HBTask
@@ -35,10 +36,12 @@ struct SpecDeliverySection: View {
                                 .accessibilityIdentifier("specPRLink")
                         }
                     }
-                    if started {
-                        if let who = Self.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
-                    } else if !underCard {
-                        Text("Not started: no ticket has been handed to an agent yet.").font(.subheadline).foregroundStyle(.secondary)
+                    if !underCard {
+                        if started {
+                            if let who = Self.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
+                        } else {
+                            Text("Not started: no ticket has been handed to an agent yet.").font(.subheadline).foregroundStyle(.secondary)
+                        }
                     }
                     if let p = SpecViews.progress(of: spec, d, tasks: store.tasks) {
                         HStack(spacing: 8) {

@@ -811,12 +811,10 @@ final class LoftUITests: XCTestCase {
 
         // Kept across launches.
         app.terminate()
+        app.launchArguments += ["-keep-issues-view"]
         app.launch()
         app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
-        // Back to the List, which the other tests expect on a fresh install.
-        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
-        XCTAssertTrue(app.buttons["taskFilter-all"].appears(timeout: 3))
     }
 
     private func openSpec(_ title: String, _ app: XCUIApplication) {
@@ -840,7 +838,8 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(any("deliveryState", app).label, "Running.")
         XCTAssertTrue(any("delivery-pause", app).exists)
         XCTAssertFalse(any("delivery-start", app).exists, "it started")
-        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who has which ticket")
+        XCTAssertTrue(text(containing: "#43 Backend endpoints is with Backend Agent", app).exists, "the card says who has which ticket")
+        XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
         XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
         // The tickets sit below the card and the progress.
@@ -890,9 +889,6 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(text(containing: "Merging…", app).appears(timeout: 3), "pending")
         XCTAssertTrue(any("deliveryResult", app).appears(timeout: 8), "then the result")
         XCTAssertFalse(any("mergeDelivery", app).exists)
-        // Back to the List, which the other tests expect on a fresh install.
-        back(app)
-        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
     }
 
     /// #149: a relaunch starts outside the demo with none of its changes, and the full-screen Talk view has the
