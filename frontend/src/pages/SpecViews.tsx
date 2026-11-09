@@ -38,7 +38,7 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
 
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
   const running = d?.tickets.filter((t) => t.agent_id) ?? [];
-  if (!d || (!running.length && !d.waiting_for_lead?.length)) return null;
+  if (!d || (!running.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
   return (
     <div className="space-y-0.5 text-[11.5px] text-fg-2">
       {running.map((t) => {
@@ -50,6 +50,7 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
           </div>
         );
       })}
+      {!!d.waiting_on_you?.length && <div className="text-warn">Waiting on you: {d.waiting_on_you.map((n) => `#${n}`).join(", ")}</div>}
       {!!d.waiting_for_lead?.length && <div className="text-warn">Waiting for the Lead: {d.waiting_for_lead.map((n) => `#${n}`).join(", ")}</div>}
     </div>
   );

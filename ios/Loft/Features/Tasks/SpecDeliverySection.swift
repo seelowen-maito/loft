@@ -39,6 +39,9 @@ struct SpecDeliverySection: View {
                     if !underCard {
                         if started {
                             ForEach(SpecViews.onIt(d), id: \.self) { Text($0).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
+                            if let line = SpecViews.waitingOnYouLine(d.waitingOnYou) {
+                                Text(line).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaitingOnYou")
+                            }
                             if let waiting = SpecViews.waitingLine(d.waitingForLead) {
                                 Text(waiting).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaiting")
                             }

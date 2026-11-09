@@ -172,6 +172,13 @@ fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
     }
 }
 
+/// Why a spec branch waits for Merge: "Built by A, B." only when the Delivery has builders.
+pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String {
+    let built = crate::delivery::builders(state, d);
+    let by = if built.is_empty() { String::new() } else { format!(" Built by {}.", built.join(", ")) };
+    format!("Its reviews passed: merge `{}` into `{}`.{by}", d.branch, d.base)
+}
+
 fn dismiss(id: &str) -> Value {
     action("dismiss", "Dismiss", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
 }
@@ -571,7 +578,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             agent: name(&d.dev),
             task_id: spec_task.map(|t| t.id.clone()),
             title: text(&format!("Merge \"{}\"", d.title), MAX_TITLE),
-            reason: text(&format!("Its reviews passed: merge `{}` into `{}`. Built by {}.", d.branch, d.base, crate::delivery::builders(state, &d).join(", ")).replace(" Built by .", ""), MAX_REASON),
+            reason: text(&merge_reason(state, &d), MAX_REASON),
             text: String::new(),
             created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
             links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),

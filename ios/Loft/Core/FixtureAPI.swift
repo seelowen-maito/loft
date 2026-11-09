@@ -161,8 +161,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                 current: .init(number: 43, title: "Backend endpoints"),
                                 // Two tickets running at once, each on its own Dev, and one ready ticket waiting for the Lead.
                                 tickets: [ticket(43, "Backend endpoints", "started", agent: "Backend Agent"), ticket(44, "iOS screen", "open"),
-                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])],
-                                waitingForLead: [44]),
+                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"]),
+                                          ticket(47, "Release notes", "needs_human")],
+                                waitingForLead: [44], waitingOnYou: [47]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
                                 tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
@@ -733,7 +734,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
                                  agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
                                  tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
-                                 waitingForLead: d.waitingForLead)
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
         }
     }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {
