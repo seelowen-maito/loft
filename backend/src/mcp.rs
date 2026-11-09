@@ -494,12 +494,10 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(t) => t,
                 Err(e) => return tool_error(e),
             };
-            let busy = agents::is_running(state, &to.id);
-            agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref());
-            text(if busy {
-                format!("Delivered. {} is busy and will read it when its current run ends.", to.name)
-            } else {
-                format!("Delivered. {} is reading it now.", to.name)
+            // The dashboard reads the message id off a queued result to show when it's delivered.
+            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
+                Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
+                None => format!("Delivered. {} is reading it now.", to.name),
             })
         }
         "approval_prompt" => {
@@ -755,6 +753,37 @@ mod tests {
         assert!(p.contains("[Message from agent Lead") && p.contains("Review PR #12") && p.contains(&hint(&from)), "{p}");
         let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().find(|m| m.role == "user").unwrap();
         assert_eq!((m.content.as_str(), m.meta.get("fyi")), ("Review PR #12", None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_to_a_busy_agent_shows_as_queued_until_its_next_run_takes_it() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        // What GET /api/agents/{id} says is waiting.
+        let queued = |st: &AppState| {
+            let (st, id) = (st.clone(), to.id.clone());
+            async move { crate::api::get_agent(axum::extract::State(st), axum::extract::Path(id)).await.ok().unwrap().0["queued_messages"].clone() }
+        };
+        // Idle: delivered at once, never queued.
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
+        assert!(said(&r).0.starts_with("Delivered."), "{r}");
+        assert_eq!(queued(&st).await, json!([]));
+        until("the run", 10, || !is_running(&st, &to.id)).await;
+
+        enqueue(&st, &to.id, Some("busy".into()), "user");
+        until("the run to start", 10, || is_running(&st, &to.id)).await;
+        let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #13", "kind": "needs_action" })).await;
+        let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().rfind(|m| m.content == "Review PR #13").unwrap();
+        assert_eq!(said(&r).0, format!("Queued: Worker is busy and will read it when its current run ends (message {}).", m.id));
+        assert_eq!(queued(&st).await, json!([m.id]));
+        // An FYI never queues.
+        message(&st, &from, json!({ "agent": to.id, "text": "Build is green", "kind": "fyi" })).await;
+        assert_eq!(queued(&st).await, json!([m.id]));
+
+        // The busy run ends: the next run takes the message.
+        crate::agents::stop(&st, &to.id);
+        until("the next run to take it", 10, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
+        assert_eq!(queued(&st).await, json!([]));
     }
 
     #[tokio::test(flavor = "multi_thread")]

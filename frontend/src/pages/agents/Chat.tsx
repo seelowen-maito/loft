@@ -31,6 +31,7 @@ import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
+import { QUEUED_MARK, sendState } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { HoverTip } from "../../components/HoverTip";
 
@@ -812,6 +813,11 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
           <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          {agent.queued_messages?.includes(m.id) && (
+            <div className="mt-1 flex items-center gap-1 font-mono text-[10.5px] text-warn">
+              <Hourglass className="size-3" /> {QUEUED_MARK}
+            </div>
+          )}
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
@@ -874,6 +880,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
 
 function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Message; agent: Agent; agents: Agent[] }) {
   const to = findAgent(agents, use.meta?.input?.agent);
+  const state = sendState(result?.content, agents);
   return (
     <div className="flex gap-3 pt-1">
       <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={26} className="mt-5" />
@@ -882,6 +889,11 @@ function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Me
           {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.role === "lead"} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
         <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
+        {state && (
+          <div className={cx("mt-1 flex items-center gap-1 font-mono text-[10.5px]", state === "Delivered" ? "text-fg-3" : "text-warn")}>
+            {state !== "Delivered" && <Hourglass className="size-3" />} {state}
+          </div>
+        )}
       </div>
     </div>
   );

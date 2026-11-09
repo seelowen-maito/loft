@@ -106,6 +106,8 @@ pub struct Runtime {
     pub running: HashMap<String, Arc<Notify>>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
+    /// agent id -> the agent messages (their ids in its chat) waiting in `queued` for the current run to end
+    pub queued_messages: HashMap<String, Vec<i64>>,
     /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
     /// for an Unread reply
     pub queued_for_user: std::collections::HashSet<String>,
