@@ -854,6 +854,31 @@ final class LoftUITests: XCTestCase {
         app.buttons["Clear filters"].tap()
     }
 
+    /// #194: a filter that hides every spec says so and offers Clear filters; with no specs at all, "No specs" stays.
+    func testSpecsFilterThatHidesEverySpecOffersClearFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+        app.buttons["Filter issues"].tap()
+        app.buttons["website"].tap()
+        XCTAssertTrue(app.staticTexts["No matching specs"].appears(timeout: 3))
+        XCTAssertFalse(app.staticTexts["No specs"].exists)
+        app.buttons["Clear filters"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 3))
+
+        app.terminate()
+        let empty = launch(["-fixture-empty"])
+        empty.tabBars.buttons["Issues"].tap()
+        let emptySpecs = empty.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(emptySpecs.appears(timeout: 5))
+        emptySpecs.tap()
+        XCTAssertTrue(empty.staticTexts["No specs"].appears(timeout: 3))
+        XCTAssertFalse(empty.buttons["Clear filters"].exists)
+    }
+
     private func openSpec(_ title: String, _ app: XCUIApplication) {
         app.tabBars.buttons["Issues"].tap()
         let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
