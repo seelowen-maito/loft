@@ -62,8 +62,7 @@ final class SpecViewsTests: XCTestCase {
 
     func testTicketsComeFromTheDeliveryWithTheirOwnIssueAndVerdicts() {
         var d = delivery("running")
-        d.current = .init(number: 2, title: "b")
-        d.tickets = [.init(number: 1, title: "a", state: "closed", verdicts: ["qa": "pass"]), .init(number: 2, title: "b", state: "started")]
+        d.tickets = [.init(number: 1, title: "a", state: "closed", verdicts: ["qa": "pass"]), .init(number: 2, title: "b", state: "started", agentName: "Dev")]
         var own = spec(id: "own"); own.github = .init(repo: "o/r", number: 2, url: "", state: "open")
         let lines = SpecViews.tickets(of: spec(), d, tasks: [own])
         XCTAssertEqual(lines.map(\.number), [1, 2])
@@ -95,10 +94,22 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(SpecViews.deliveryLabel("needs_human"), "Needs you")
         XCTAssertEqual(SpecViews.deliveryLabel("some_new_state"), "Some New State")
         var d = delivery("running")
-        XCTAssertNil(SpecViews.onIt(d))
-        d.agentName = "Backend Agent"
-        XCTAssertEqual(SpecViews.onIt(d), "Backend Agent")
-        d.current = .init(number: 43, title: "Backend endpoints")
-        XCTAssertEqual(SpecViews.onIt(d), "Backend Agent on #43 Backend endpoints")
+        XCTAssertEqual(SpecViews.onIt(d), [])
+        d.tickets = [.init(number: 43, title: "Backend endpoints", state: "started", agentName: "Backend Agent"),
+                     .init(number: 44, title: "iOS screen", state: "open"),
+                     .init(number: 45, title: "Docs", state: "review", agentName: "Docs Agent")]
+        XCTAssertEqual(SpecViews.onIt(d), ["Backend Agent on #43 Backend endpoints", "Docs Agent on #45 Docs"], "every running ticket")
+        XCTAssertNil(SpecViews.waitingLine(nil))
+        XCTAssertNil(SpecViews.waitingLine([]))
+        XCTAssertEqual(SpecViews.waitingLine([44, 47]), "Waiting for the Lead to assign #44, #47")
+    }
+
+    /// #181: the summary names every started ticket's agent and the ready tickets waiting for the Lead.
+    func testDecodesEachTicketsAgentAndTheTicketsWaitingForTheLead() throws {
+        let json = ###"[{"state":"running","agent_id":null,"agent_name":null,"current":null,"repo":"o/r","spec":9,"spec_id":"x","local":false,"waiting_for_lead":[3],"tickets":[{"number":1,"id":null,"title":"A","state":"started","skipped":"","agent_id":"a","agent_name":"Dev 1","verdicts":{}},{"number":2,"id":null,"title":"B","state":"review","skipped":"","agent_id":"b","agent_name":"Dev 2","verdicts":{}},{"number":3,"id":null,"title":"C","state":"open","skipped":"","agent_id":null,"agent_name":null,"verdicts":{}}]}]"###
+        let d = try JSONCoding.decoder.decode([DeliverySummary].self, from: Data(json.utf8))[0]
+        XCTAssertEqual(d.tickets.map(\.agentName), ["Dev 1", "Dev 2", nil])
+        XCTAssertEqual(d.waitingForLead, [3])
+        XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.current), [true, true, false], "every running ticket is current")
     }
 }

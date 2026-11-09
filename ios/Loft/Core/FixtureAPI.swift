@@ -153,11 +153,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 spec("s6", "Garden notes", "ready", nil, project: "garden", minutes: 250),
             ]
             for i in taskList.indices where taskList[i].id == "s2" || taskList[i].id == "s3" { taskList[i].github?.state = "open" }
-            func ticket(_ n: Int, _ title: String, _ state: String, _ verdicts: [String: String]? = nil) -> DeliverySummary.Ticket { .init(number: n, title: title, state: state, verdicts: verdicts) }
+            func ticket(_ n: Int, _ title: String, _ state: String, _ verdicts: [String: String]? = nil, agent: String? = nil) -> DeliverySummary.Ticket {
+                .init(number: n, title: title, state: state, agentName: agent, verdicts: verdicts)
+            }
             deliveryList = [
                 DeliverySummary(state: "running", agentName: "Backend Agent", repo: "octo/loft", spec: 42, specId: nil, local: false, pr: 47,
                                 current: .init(number: 43, title: "Backend endpoints"),
-                                tickets: [ticket(43, "Backend endpoints", "started"), ticket(44, "iOS screen", "open"), ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"]), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])]),
+                                // Two tickets running at once, each on its own Dev, and one ready ticket waiting for the Lead.
+                                tickets: [ticket(43, "Backend endpoints", "started", agent: "Backend Agent"), ticket(44, "iOS screen", "open"),
+                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])],
+                                waitingForLead: [44]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
                                 tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
@@ -727,7 +732,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
             return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
                                  agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
-                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "") })
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
+                                 waitingForLead: d.waitingForLead)
         }
     }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {

@@ -790,13 +790,17 @@ final class LoftUITests: XCTestCase {
         let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
         XCTAssertTrue(specs.appears(timeout: 5))
         specs.tap()
+        XCTAssertTrue(any("specSection-planned", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who is on which ticket")
+        XCTAssertTrue(text(containing: "Docs Agent on #45 Docs", app).exists, "#181: every running ticket")
+        XCTAssertTrue(text(containing: "Waiting for the Lead to assign #44", app).exists, "#181: and what waits for the Lead")
+        XCTAssertTrue(text(containing: "octo/loft#50", app).exists, "its repo")
+        XCTAssertTrue(text(containing: "Loft · garden", app).exists, "a plan kept in Loft")
         for (stage, title) in [("planned", "Offline mode"), ("delivery", "Implement settings functionality"), ("ready", "Widget gallery"), ("shipped", "Dark theme")] {
+            for _ in 0..<3 where !any("specRow-\(title)", app).exists { app.swipeUp() }
             XCTAssertTrue(any("specSection-\(stage)", app).appears(timeout: 5), stage)
             XCTAssertTrue(any("specRow-\(title)", app).exists, title)
         }
-        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who is on which ticket")
-        XCTAssertTrue(text(containing: "octo/loft#50", app).exists, "its repo")
-        XCTAssertTrue(text(containing: "Loft · garden", app).exists, "a plan kept in Loft")
         XCTAssertFalse(any("specRow-Old idea", app).exists, "dropped is hidden")
         XCTAssertFalse(app.buttons["taskRow-Renew the domain"].exists, "only specs")
 
@@ -872,6 +876,8 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("delivery-pause", app).exists)
         XCTAssertFalse(any("delivery-start", app).exists, "it started")
         XCTAssertTrue(text(containing: "#43 Backend endpoints is with Backend Agent", app).exists, "the card says who has which ticket")
+        XCTAssertTrue(text(containing: "#45 Docs is with Docs Agent", app).exists, "#181: every running ticket")
+        XCTAssertEqual(any("deliveryWaiting", app).label, "Waiting for the Lead to assign #44")
         XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
         XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")

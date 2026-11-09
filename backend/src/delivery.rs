@@ -614,6 +614,10 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Err("That ticket number is on more than one of your projects' Deliveries: name the ticket by its Loft issue id.".into());
     }
     let found = found.pop().ok_or("That isn't a ticket of a Delivery on your team: only tickets started with Start delivery go through assign_ticket.")?;
+    if found.project.trim().is_empty() {
+        // From before Deliveries had projects: it'd match any Lead whose main project is empty too.
+        return Err("That ticket's Delivery has no project (it started before Deliveries had one), so Loft can't tell whose team it is: restart it with Start delivery.".into());
+    }
     let _held = state.publish_locks.of(&found.repo).lock_owned().await;
     let d = state.db.get_delivery(&found.repo, found.spec).map_err(|e| e.to_string())?.ok_or("The Delivery record is gone.")?;
     refuse_paused(&d)?;

@@ -38,7 +38,10 @@ struct SpecDeliverySection: View {
                     }
                     if !underCard {
                         if started {
-                            if let who = SpecViews.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
+                            ForEach(SpecViews.onIt(d), id: \.self) { Text($0).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
+                            if let waiting = SpecViews.waitingLine(d.waitingForLead) {
+                                Text(waiting).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaiting")
+                            }
                         } else {
                             Text("Not started: no ticket has been handed to an agent yet.").font(.subheadline).foregroundStyle(.secondary)
                         }

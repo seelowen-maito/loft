@@ -53,9 +53,10 @@ struct SpecRow: View {
 
     private var badge: String? { delivery.map { SpecViews.deliveryLabel($0.state) } }
 
-    private var onIt: String? {
-        guard stage == .delivery, let d = delivery else { return nil }
-        return SpecViews.onIt(d)
+    /// Each running ticket with its agent, then the tickets waiting for the Lead.
+    private var onIt: [String] {
+        guard stage == .delivery, let d = delivery else { return [] }
+        return SpecViews.onIt(d) + [SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
     var body: some View {
@@ -79,8 +80,8 @@ struct SpecRow: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(p.done) of \(p.total) tickets done")
             }
-            if let onIt {
-                Text(onIt).font(.caption).foregroundStyle(.secondary).readableLineLimit(2)
+            ForEach(onIt, id: \.self) { line in
+                Text(line).font(.caption).foregroundStyle(.secondary).readableLineLimit(2)
             }
         }
         .padding(.vertical, 2)
