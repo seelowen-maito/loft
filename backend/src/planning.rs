@@ -2797,12 +2797,33 @@ pub(crate) mod tests {
         let second = busy(&st, "Second", "dl-lead-resume", "dev");
         press(&st, &a, &m).await.unwrap();
         tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
         crate::delivery::stall_lost_runs(&st);
         assert_eq!(delivery(&st, slug).state, "stalled");
-        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        let line = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(line, "Resumed spec #40. First is building #41 again. Second is building #42 again.");
         assert_eq!(delivery(&st, slug).state, "running");
-        assert!(woken(&st, &first).last().is_some_and(|p| p.contains("build ticket #41") && p.contains("resume")), "{:?}", woken(&st, &first));
-        assert!(woken(&st, &second).is_empty());
+        // Both tickets in flight: each Dev is woken again on its own ticket.
+        let (w1, w2) = (woken(&st, &first), woken(&st, &second));
+        assert!(w1.len() == 2 && w1[1].contains("build ticket #41") && w1[1].contains("This is a resume"), "{w1:?}");
+        assert!(w2.len() == 2 && w2[1].contains("build ticket #42") && w2[1].contains("This is a resume"), "{w2:?}");
+    }
+
+    #[tokio::test]
+    async fn assign_ticket_refuses_a_delivery_with_no_project() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-no-project";
+        let (a, m) = planned(&st, &fake, "dl-no-project", vec![ticket("Store", &[])]).await;
+        let mut lead = busy(&st, "Lofty", "dl-no-project", "lead");
+        busy(&st, "First", "dl-no-project", "dev");
+        press(&st, &a, &m).await.unwrap();
+        // A Delivery migrated from before Deliveries had projects, and a Lead with no main project.
+        crate::delivery::update(&st, slug, 40, |d| d.project = String::new());
+        lead.project = String::new();
+        st.db.save_agent(&lead).unwrap();
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap_err();
+        assert!(err.contains("has no project"), "{err}");
+        assert_eq!(delivery(&st, slug).current, None);
     }
 
     #[tokio::test]
