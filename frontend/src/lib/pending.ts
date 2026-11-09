@@ -14,3 +14,9 @@ export function pendingItems(perms: PermissionRequest[], agents: Pick<Agent, "id
       return { id: p.id, agent, tool: p.tool_name, href: `/agents/${p.agent_id}#perm-${p.id}`, title: `${agent} wants to use ${p.tool_name}` };
     });
 }
+
+/** The permission card a `#perm-<id>` link points at, inside the chat's transcript only (the Inspector shows a copy of it). */
+export function permCard(transcript: ParentNode | null, hash: string): Element | null {
+  if (!transcript || !hash.startsWith("#perm-")) return null;
+  return transcript.querySelector(`[id="${hash.slice(1).replace(/["\\]/g, "\\$&")}"]`);
+}

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pendingItems } from "../src/lib/pending.ts";
+import { JSDOM } from "jsdom";
+import { pendingItems, permCard } from "../src/lib/pending.ts";
 import type { PermissionRequest } from "../src/lib/api.ts";
 
 const req = (id: string, agent_id: string, tool_name: string, created_at: string, status: PermissionRequest["status"] = "pending") =>
@@ -27,4 +28,13 @@ test("an agent that isn't loaded yet still gets a link", () => {
   const [i] = pendingItems([req("r", "gone", "Bash", "2026-11-09T10:00:00Z")], agents);
   assert.equal(i.title, "An agent wants to use Bash");
   assert.equal(i.href, "/agents/gone#perm-r");
+});
+
+test("the link finds the card in the transcript, not the Inspector's copy", () => {
+  const { document } = new JSDOM(`<div id="transcript"></div><aside><div id="perm-r1">inspector</div></aside>`).window;
+  const transcript = document.getElementById("transcript");
+  assert.equal(permCard(transcript, "#perm-r1"), null);
+  transcript!.innerHTML = `<div id="perm-r1">transcript</div>`;
+  assert.equal(permCard(transcript, "#perm-r1")?.textContent, "transcript");
+  assert.equal(permCard(transcript, "#other"), null);
 });

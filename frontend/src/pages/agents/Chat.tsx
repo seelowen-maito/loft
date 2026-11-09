@@ -2,6 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useLocation } from "react-router";
+import { permCard } from "../../lib/pending";
 import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
@@ -209,7 +210,7 @@ export function Chat({
   const shownFor = useRef("");
   useLayoutEffect(() => {
     if (!location.hash.startsWith("#perm-") || shownFor.current === location.key) return;
-    const card = document.getElementById(location.hash.slice(1));
+    const card = permCard(scroller.current, location.hash);
     if (!card) return;
     shownFor.current = location.key;
     stick.current = false;

@@ -48,7 +48,8 @@ function PendingBadge() {
   const box = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const refresh = useCallback(() => {
-    Promise.all([api.permissions(), api.agents()]).then(([p, a]) => setItems(pendingItems(p, a))).catch(() => {});
+    // Without the agents the requests still show, unnamed.
+    Promise.all([api.permissions(), api.agents().catch(() => [])]).then(([p, a]) => setItems(pendingItems(p, a))).catch(() => {});
   }, []);
   useEffect(refresh, [refresh]);
   useServerEvents(
