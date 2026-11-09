@@ -35,7 +35,7 @@ final class SpecViewsTests: XCTestCase {
     }
 
     func testADeliveryBelongsToItsSpecByRepoAndNumberOrByIssueWhenKeptInLoft() {
-        let all = [delivery("running", spec: 8), delivery("ready", spec: 7), delivery("running", spec: 1, local: true, specId: "loft-1")]
+        let all = SpecViews.index([delivery("running", spec: 8), delivery("ready", spec: 7), delivery("running", spec: 1, local: true, specId: "loft-1")])
         XCTAssertEqual(SpecViews.delivery(of: spec(), in: all)?.state, "ready")
         var local = spec(id: "loft-1"); local.github = nil
         XCTAssertEqual(SpecViews.delivery(of: local, in: all)?.state, "running")
@@ -86,5 +86,19 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertFalse(SpecViews.canMerge(spec(), delivery("running", local: true)))
         XCTAssertFalse(SpecViews.canMerge(spec(), delivery("ready")), "a spec on GitHub merges there")
         XCTAssertFalse(SpecViews.canMerge(spec("done"), delivery("ready", local: true)))
+    }
+
+    /// #171: a spec's row and its detail say the same thing about its Delivery.
+    func testDeliveryLabelAndWhoIsOnIt() {
+        XCTAssertEqual(SpecViews.deliveryLabel("ready"), "Ready to merge")
+        XCTAssertEqual(SpecViews.deliveryLabel("settled"), "Ready to merge")
+        XCTAssertEqual(SpecViews.deliveryLabel("needs_human"), "Needs you")
+        XCTAssertEqual(SpecViews.deliveryLabel("some_new_state"), "Some New State")
+        var d = delivery("running")
+        XCTAssertNil(SpecViews.onIt(d))
+        d.agentName = "Backend Agent"
+        XCTAssertEqual(SpecViews.onIt(d), "Backend Agent")
+        d.current = .init(number: 43, title: "Backend endpoints")
+        XCTAssertEqual(SpecViews.onIt(d), "Backend Agent on #43 Backend endpoints")
     }
 }

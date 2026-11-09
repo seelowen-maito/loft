@@ -817,6 +817,31 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
     }
 
+    /// #172: a Priority picked in the List doesn't count as a filter in Specs, which has no Priority filter.
+    func testSpecsDoesNotCountTheListOnlyFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        // The view is kept across launches, and a spec's detail test leaves it on Specs.
+        let list = app.segmentedControls["issuesViewSwitch"].buttons["List"]
+        XCTAssertTrue(list.appears(timeout: 5))
+        list.tap()
+        XCTAssertTrue(app.buttons["taskFilter-all"].appears(timeout: 3))
+        app.buttons["Filter issues"].tap()
+        app.buttons["Urgent"].tap()
+        app.segmentedControls["issuesViewSwitch"].buttons["Specs"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+        app.buttons["Filter issues"].tap()
+        XCTAssertTrue(app.buttons["Show dropped"].appears(timeout: 3))
+        XCTAssertFalse(app.buttons["Clear filters"].exists, "no filter of the Specs view is set")
+        app.buttons["Show dropped"].tap()
+
+        // The List still has it, and the List is what the other tests expect on a fresh install.
+        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
+        app.buttons["Filter issues"].tap()
+        XCTAssertTrue(app.buttons["Clear filters"].appears(timeout: 3))
+        app.buttons["Clear filters"].tap()
+    }
+
     private func openSpec(_ title: String, _ app: XCUIApplication) {
         app.tabBars.buttons["Issues"].tap()
         let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]

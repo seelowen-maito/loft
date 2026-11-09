@@ -51,24 +51,11 @@ struct SpecRow: View {
     private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
     private var stage: SpecStage { SpecViews.stage(of: spec, delivery) }
 
-    private var badge: String? {
-        guard let d = delivery else { return nil }
-        switch d.state {
-        case "planned": return "Not started"
-        case "running": return "Running"
-        case "needs_human": return "Needs you"
-        case "ready", "settled": return "Ready"
-        case "merged": return "Merged"
-        default: return d.state.replacingOccurrences(of: "_", with: " ").capitalized
-        }
-    }
+    private var badge: String? { delivery.map { SpecViews.deliveryLabel($0.state) } }
 
     private var onIt: String? {
         guard stage == .delivery, let d = delivery else { return nil }
-        let who = d.agentName
-        let what = d.current.map { "#\($0.number) \($0.title)" }
-        let parts = [who, what].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " on ")
+        return SpecViews.onIt(d)
     }
 
     var body: some View {
