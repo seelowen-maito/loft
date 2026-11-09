@@ -99,10 +99,15 @@ export const roleHint = (team: string) =>
     : "What it does in its group's team. Only an agent with a group can be Lead: set one first.";
 
 export const FRESH_CONTEXT_HINT =
-  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
+  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k (the smart zone) or a higher threshold only once its context reaches it. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
 
 export const FRESH_CONTEXT = [
   { value: "above_80k", label: "Above 80k (default)" },
+  { value: "above_100k", label: "Above 100k" },
+  { value: "above_120k", label: "Above 120k" },
+  { value: "above_150k", label: "Above 150k" },
+  { value: "above_180k", label: "Above 180k" },
+  { value: "above_200k", label: "Above 200k" },
   { value: "always", label: "Always" },
   { value: "off", label: "Off" },
 ];

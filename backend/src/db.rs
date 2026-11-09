@@ -200,8 +200,8 @@ pub struct Agent {
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
-    /// Fresh context for each Delivery ticket: "off", "above_80k" (cleared before a new ticket when its
-    /// context is at the context warning or above) or "always". A Lead follows it only as the agent
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" (cleared before a new
+    /// ticket when its context is at N thousand tokens or above) or "always". A Lead follows it only as the agent
     /// building the tickets.
     #[serde(default = "default_fresh_context")]
     pub fresh_context: String,

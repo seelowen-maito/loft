@@ -276,7 +276,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
     }
     if let Some(v) = str_field("fresh_context") {
         if !crate::agents::FRESH_CONTEXT.contains(&v.as_str()) {
-            return Err(bad("fresh_context must be one of off, above_80k or always"));
+            return Err(bad(format!("fresh_context must be one of {}", crate::agents::FRESH_CONTEXT.join(", "))));
         }
         a.fresh_context = v;
     }
