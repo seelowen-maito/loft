@@ -39,8 +39,9 @@ final class LoftStore {
 
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
-    /// Every spec's Delivery, for the Specs view; loaded when it opens and after each issue change.
-    private(set) var deliverySummaries: [DeliverySummary] = []
+    /// Every spec's Delivery, for the Specs view, by spec (`SpecViews.index`); loaded when it opens and after each
+    /// issue, pull request, needs-you or Delivery change.
+    private(set) var deliverySummaries: [String: DeliverySummary] = [:]
     private var deliveriesRefresh: Task<Void, Never>?
     /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
     var deliveryWatchers = 0
@@ -423,7 +424,7 @@ final class LoftStore {
         deliveriesRefresh = Task { [weak self] in
             if soon { try? await Task.sleep(for: .seconds(1.5)) }
             guard let self, let api = self.api, !Task.isCancelled else { return }
-            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = fresh }
+            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = SpecViews.index(fresh) }
         }
     }
 
@@ -489,6 +490,8 @@ final class LoftStore {
             }
         case .pullRequest(let pr):
             upsert(&pullRequests, pr)
+            // A review verdict comes as a pull request change, needs you as a needs-you one.
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .task(let t):
             let before = task(t.id)
             upsert(&tasks, t)
@@ -513,11 +516,13 @@ final class LoftStore {
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
         case .needsYou(_, let ids):
             if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .delivery(let repo, let spec):
             for id in deliveryCards.keys {
                 guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
                 Task { try? await loadDelivery(id) }
             }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .other:
             break
         }
@@ -1039,7 +1044,7 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; deliverySummaries = []; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
+        agents = []; tasks = []; deliverySummaries = [:]; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
     }

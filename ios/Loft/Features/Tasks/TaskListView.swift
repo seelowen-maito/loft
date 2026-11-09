@@ -67,7 +67,8 @@ struct TaskListView: View {
     /// Top-level tasks with their subtasks nested, unless a filter makes nesting misleading.
     private var showsTree: Bool { filter == .all && search.isEmpty && priority == nil && project == nil && group == nil && agentId == nil }
 
-    private var hasFilters: Bool { priority != nil || project != nil || group != nil || agentId != nil }
+    /// The filters that apply in this view: Specs has no Priority or Agent filter.
+    private var hasFilters: Bool { project != nil || group != nil || (mode == .list && (priority != nil || agentId != nil)) }
 
     var body: some View {
         Group {

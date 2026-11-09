@@ -24,7 +24,7 @@ struct SpecDeliverySection: View {
                 Section {
                     HStack {
                         if !underCard {
-                            Text(Self.stateLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
+                            Text(SpecViews.deliveryLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
                                 .accessibilityIdentifier("deliveryState")
                         }
                         Spacer()
@@ -38,7 +38,7 @@ struct SpecDeliverySection: View {
                     }
                     if !underCard {
                         if started {
-                            if let who = Self.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
+                            if let who = SpecViews.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
                         } else {
                             Text("Not started: no ticket has been handed to an agent yet.").font(.subheadline).foregroundStyle(.secondary)
                         }
@@ -89,23 +89,6 @@ struct SpecDeliverySection: View {
             do { merged = try await store.mergeDelivery(d) } catch { self.error = APIError.from(error).localizedDescription }
             merging = false
         }
-    }
-
-    static func stateLabel(_ state: String) -> String {
-        switch state {
-        case "planned": "Not started"
-        case "running": "Running"
-        case "needs_human": "Needs you"
-        case "ready", "settled": "Ready to merge"
-        case "merged": "Merged"
-        default: state.replacingOccurrences(of: "_", with: " ").capitalized
-        }
-    }
-
-    /// "Backend Agent on #43 Backend endpoints".
-    static func onIt(_ d: DeliverySummary) -> String? {
-        let parts = [d.agentName, d.current.map { "#\($0.number) \($0.title)" }].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " on ")
     }
 }
 

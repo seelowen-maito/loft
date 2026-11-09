@@ -44,11 +44,33 @@ enum SpecStage: String, CaseIterable, Identifiable {
 enum SpecViews {
     static func isSpec(_ t: HBTask) -> Bool { (t.labels ?? []).contains { $0.lowercased() == "spec" } }
 
-    /// The Delivery of a spec's issue: a GitHub spec by repo and number, a plan kept in Loft by its issue.
-    static func delivery(of spec: HBTask, in all: [DeliverySummary]) -> DeliverySummary? {
-        all.first { d in
-            d.local ? d.specId == spec.id : spec.github.map { d.repo == $0.repo && d.spec == $0.number } ?? false
+    /// Deliveries by the spec they belong to: a plan kept in Loft by its issue, a GitHub spec by repo and number.
+    static func index(_ all: [DeliverySummary]) -> [String: DeliverySummary] {
+        Dictionary(all.compactMap { d in (d.local ? d.specId.map { "id:\($0)" } : "\(d.repo)#\(d.spec)").map { ($0, d) } },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The Delivery of a spec's issue, from `index(_:)`.
+    static func delivery(of spec: HBTask, in index: [String: DeliverySummary]) -> DeliverySummary? {
+        index["id:\(spec.id)"] ?? spec.github.flatMap { index["\($0.repo)#\($0.number)"] }
+    }
+
+    /// A Delivery's state in a few words, the same in a spec's row and its detail.
+    static func deliveryLabel(_ state: String) -> String {
+        switch state {
+        case "planned": "Not started"
+        case "running": "Running"
+        case "needs_human": "Needs you"
+        case "ready", "settled": "Ready to merge"
+        case "merged": "Merged"
+        default: state.replacingOccurrences(of: "_", with: " ").capitalized
         }
+    }
+
+    /// Who is on which ticket: "Backend Agent on #43 Backend endpoints".
+    static func onIt(_ d: DeliverySummary) -> String? {
+        let parts = [d.agentName, d.current.map { "#\($0.number) \($0.title)" }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " on ")
     }
 
     /// Merged, or closed as completed, is Shipped; closed as not planned is Dropped; no Delivery or not started is Planned;
