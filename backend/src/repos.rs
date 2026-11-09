@@ -435,7 +435,7 @@ async fn fill(dir: &Path, s: &mut RepoSummary) -> Result<()> {
             }
         }
         let mut v: Vec<(String, i64)> = langs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
         v.truncate(6);
         s.languages = v;
     }
@@ -481,13 +481,11 @@ fn discover(root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 pub async fn list(state: &AppState, force: bool) -> Vec<RepoSummary> {
-    if !force {
-        if let Some((at, v)) = &*state.repos.git.lock().unwrap() {
-            if at.elapsed() < GIT_TTL {
+    if !force
+        && let Some((at, v)) = &*state.repos.git.lock().unwrap()
+            && at.elapsed() < GIT_TTL {
                 return v.clone();
             }
-        }
-    }
     let dirs = discover(&state.settings.boot().projects_dir);
     let handles: Vec<_> = dirs.into_iter().map(|(n, d)| tokio::spawn(summarize(n, d))).collect();
     let mut out = vec![];

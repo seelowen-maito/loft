@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn normalizes_accents_punctuation_and_apostrophes() {
         assert_eq!(normalize("  Não, É  ÓTIMO!! don't "), "nao e otimo dont");
-        assert!(within_one_edit("pause", "pasue") == false && within_one_edit("pause", "paus") && within_one_edit("skip", "skipp"));
+        assert!(!within_one_edit("pause", "pasue") && within_one_edit("pause", "paus") && within_one_edit("skip", "skipp"));
     }
 
     #[test]

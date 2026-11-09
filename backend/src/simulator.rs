@@ -174,14 +174,13 @@ pub async fn agent_device(state: &AppState, agent: &Agent) -> Result<(String, St
     if all.is_null() {
         return Err("Couldn't run `xcrun simctl`. Is Xcode installed, and selected with `xcode-select`?".into());
     }
-    if let Some(udid) = state.db.agent_device(&agent.id).map_err(|e| e.to_string())? {
-        if let Some((_, d)) = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid.as_str()) {
+    if let Some(udid) = state.db.agent_device(&agent.id).map_err(|e| e.to_string())?
+        && let Some((_, d)) = devices(&all).into_iter().find(|(_, d)| d["udid"] == udid.as_str()) {
             if d["name"] != name.as_str() {
                 let _ = run_simctl(state, ["rename", &udid, &name]).await;
             }
             return Ok((udid, name));
         }
-    }
     let Some((kind, runtime)) = new_device_kind(state, &all).await else {
         return Err("No iOS Simulator runtime is installed. Add one in Xcode (Settings > Components).".into());
     };
