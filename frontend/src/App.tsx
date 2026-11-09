@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
 import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
+import { pendingItems, type PendingItem } from "./lib/pending";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
@@ -40,10 +41,14 @@ function Logo() {
   );
 }
 
+/** Pending permission requests: opens the oldest one's card in its agent's chat; with several, also lists them all. */
 function PendingBadge() {
-  const [count, setCount] = useState(0);
+  const [items, setItems] = useState<PendingItem[]>([]);
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
   const refresh = useCallback(() => {
-    api.permissions().then((p) => setCount(p.filter((r) => r.status === "pending").length)).catch(() => {});
+    Promise.all([api.permissions(), api.agents()]).then(([p, a]) => setItems(pendingItems(p, a))).catch(() => {});
   }, []);
   useEffect(refresh, [refresh]);
   useServerEvents(
@@ -51,12 +56,51 @@ function PendingBadge() {
       if (e.type === "permission") refresh();
     }, [refresh]),
   );
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const count = items.length;
   if (!count) return null;
-  return (
-    <NavLink to="/agents" className="flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn">
+  const pill = "flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn";
+  const label = (
+    <>
       <ShieldAlert className="size-3.5" />
       {count}<span className="max-md:hidden"> permission{count > 1 ? "s" : ""} pending</span>
-    </NavLink>
+    </>
+  );
+  if (count === 1) {
+    return <Link to={items[0].href} className={pill} title={items[0].title}>{label}</Link>;
+  }
+  return (
+    <div ref={box} className="relative">
+      <button
+        type="button"
+        className={pill}
+        title={`Oldest: ${items[0].title}`}
+        aria-expanded={open}
+        onClick={() => {
+          if (!open) navigate(items[0].href);
+          setOpen(!open);
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-full z-50 mt-2 flex w-72 flex-col rounded-lg border border-line-strong bg-ink-800/95 p-1 shadow-xl backdrop-blur">
+          {items.map((i) => (
+            <Link key={i.id} to={i.href} role="menuitem" title={i.title} onClick={() => setOpen(false)} className="flex items-baseline gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] hover:bg-white/5">
+              <span className="shrink-0 text-fg">{i.agent}</span>
+              <code className="min-w-0 truncate font-mono text-[11.5px] text-accent">{i.tool}</code>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

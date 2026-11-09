@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useLocation } from "react-router";
 import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
@@ -203,8 +204,21 @@ export function Chat({
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [items.length, agent.status_text, agent.running, prs.length]);
 
+  // `#perm-<id>` (the top bar's pending badge): that permission card in view, once per visit of the link.
+  const location = useLocation();
+  const shownFor = useRef("");
+  useLayoutEffect(() => {
+    if (!location.hash.startsWith("#perm-") || shownFor.current === location.key) return;
+    const card = document.getElementById(location.hash.slice(1));
+    if (!card) return;
+    shownFor.current = location.key;
+    stick.current = false;
+    card.scrollIntoView({ block: "center" });
+  }, [location, items.length, perms]);
+
   useEffect(() => {
-    stick.current = true;
+    // Not when the permission card a link points at is already in view (it can be, from cached messages).
+    if (shownFor.current !== location.key) stick.current = true;
     setShowEarlier(false);
     drop.reset();
     setCmdError(null);
