@@ -2698,7 +2698,7 @@ esac
         let (st, a) = fake_claude_state();
         let save = |spec: i64| {
             let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "o/r", "spec": spec, "state": "running", "current": spec + 1, "dev": a.id, "created_at": "" })).unwrap();
-            d.tickets.push(crate::db::DeliveryTicket { number: spec + 1, title: "T".into(), blocked_by: vec![], state: "started".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new() });
+            d.tickets.push(crate::db::DeliveryTicket { number: spec + 1, title: "T".into(), blocked_by: vec![], state: "started".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new() });
             st.db.save_delivery(&d).unwrap();
         };
         let wake = |spec: i64, prompt: &str| {
