@@ -165,7 +165,7 @@ impl Step {
     fn waiting(&self, d: &Delivery) -> bool {
         match self {
             // Tickets in flight keep the Delivery going, and their close wakes the Lead again.
-            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && d.tickets.iter().all(|t| !matches!(t.state.as_str(), "started" | "review" | "closing" | "needs_human")),
+            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_in_flight(d),
             Step::Build { ticket, round } => d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round),
             Step::Review { ticket, role, round } => d.ticket(*ticket).is_some_and(|t| t.state == "review" && t.rounds == *round && t.verdicts.get(role).is_some_and(|v| v == "pending")),
             // A pass whose ready call failed waits on Loft's retry, not on the Code reviewer.
@@ -239,7 +239,8 @@ pub fn stall_lost_runs(state: &AppState) {
     for s in ["running", "final_review", "final_fixes"] {
         for d in state.db.deliveries_in_state(s).unwrap_or_default() {
             let lost = match s {
-                "running" => d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")),
+                // Or the Lead's wake: it has tickets to hand out, and nothing is in flight to wake it later.
+                "running" => d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review")) || waits_on_lead(state, &d),
                 // A final review that passed only waits on Loft's ready retry, which survives the restart.
                 "final_review" => !d.ready_retry,
                 _ => true,
@@ -292,6 +293,16 @@ pub fn ticket_closed(state: &AppState, repo: &str, number: i64) -> Option<Delive
 pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     let closed = |n: &i64| d.tickets.iter().any(|t| t.number == *n && t.state == "closed");
     d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
+}
+
+/// No ticket is being built, reviewed or waiting for the user: nothing will wake the Lead by closing.
+fn none_in_flight(d: &Delivery) -> bool {
+    d.tickets.iter().all(|t| !matches!(t.state.as_str(), "started" | "review" | "closing" | "needs_human"))
+}
+
+/// A running Delivery of a team with a Lead that has tickets to hand out and nothing in flight: it waits on the Lead.
+fn waits_on_lead(state: &AppState, d: &Delivery) -> bool {
+    d.state == "running" && none_in_flight(d) && !ready_tickets(d).is_empty() && lead_of(state, d).is_some()
 }
 
 /// The tickets ready to hand out: open, with every blocker closed, and nobody on them.
@@ -652,7 +663,7 @@ async fn start_next(state: &AppState, repo: &str, spec: i64) -> String {
         if ready.is_empty() {
             return format!("\nThe {} has no ticket ready to hand out.", subject(&d));
         }
-        wake_lead(state, &d, &lead, &format!("A ticket closed. Ready to hand out now: {}.", ready.join(", ")));
+        wake_lead(state, &d, &lead, &format!("Ready to hand out now: {}.", ready.join(", ")));
         return format!("\nReady: {}. {} hands them out.", ready.join(", "), lead.name);
     }
     let Some(t) = next_ticket(&d).cloned() else {

@@ -2793,6 +2793,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_lead_run_that_ends_without_assigning_stalls_the_delivery_and_resume_wakes_it_again() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-lead-lost";
+        let (a, m) = planned(&st, &fake, "dl-lead-lost", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-lead-lost", "lead");
+        busy(&st, "First", "dl-lead-lost", "dev");
+        press(&st, &a, &m).await.unwrap();
+
+        // The Lead's run ends without assign_ticket.
+        run_starts(&st, &lead);
+        crate::delivery::run_ended(&st, &lead.id, false).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str()), ("stalled", "running", "no_call"));
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "running");
+        let w = woken(&st, &lead);
+        assert!(w.last().is_some_and(|p| p.contains("Ready to hand out now: #41, #42")), "{w:?}");
+
+        // A run that did assign doesn't stall it.
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        crate::delivery::run_ended(&st, &lead.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_restart_stalls_a_lead_delivery_waiting_for_its_hand_out_and_resume_wakes_the_lead() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-lead-restart";
+        let (a, m) = planned(&st, &fake, "dl-lead-restart", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-lead-restart", "lead");
+        busy(&st, "First", "dl-lead-restart", "dev");
+        press(&st, &a, &m).await.unwrap();
+        // Nothing is in flight: the Lead's wake was lost with the restart.
+        crate::delivery::stall_lost_runs(&st);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str()), ("stalled", "running", "restart"));
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "running");
+        let w = woken(&st, &lead);
+        assert!(w.last().is_some_and(|p| p.contains("Ready to hand out now: #41, #42")), "{w:?}");
+    }
+
+    #[tokio::test]
     async fn a_lead_on_a_team_with_no_dev_leaves_start_delivery_as_before() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-nodev", vec![ticket("Store", &[])]).await;
