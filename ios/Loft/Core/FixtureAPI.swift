@@ -719,6 +719,17 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
     func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }
+    /// A GitHub spec's Delivery card, from its Delivery in the list; nil for a spec without one.
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? {
+        try check()
+        return locked {
+            guard let g = taskList.first(where: { $0.id == taskId })?.github,
+                  let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
+            return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
+                                 agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "") })
+        }
+    }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {
         try check()
         try await Task.sleep(for: .milliseconds(800))

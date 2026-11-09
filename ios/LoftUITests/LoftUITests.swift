@@ -97,7 +97,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(allow.disappears(timeout: 5))
 
         let activity = any("activityCard", app)
-        for _ in 0..<4 where !activity.exists { app.swipeUp(velocity: .fast) }
+        for _ in 0..<4 where !activity.waitForExistence(timeout: 1) { app.swipeUp(velocity: .fast) }
         XCTAssertTrue(activity.appears(timeout: 5))
 
         // Tasks.
@@ -835,9 +835,11 @@ final class LoftUITests: XCTestCase {
     func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
         let app = launch(["-fixture-specs"])
         openSpec("Implement settings functionality", app)
-        // The card has the state and Start delivery (the fixture has no per-issue Delivery); the spec panel adds the rest.
-        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the Delivery card")
-        XCTAssertFalse(any("deliveryState", app).exists, "the state is the card's")
+        // The card has the state and Pause; the spec panel adds the rest.
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5), "the Delivery card")
+        XCTAssertEqual(any("deliveryState", app).label, "Running.")
+        XCTAssertTrue(any("delivery-pause", app).exists)
+        XCTAssertFalse(any("delivery-start", app).exists, "it started")
         XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who has which ticket")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
         XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
@@ -865,15 +867,17 @@ final class LoftUITests: XCTestCase {
         openSpec("Offline mode", app)
         XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
         XCTAssertFalse(any("deliveryProgress", app).exists, "no Delivery yet, so no progress")
+        XCTAssertFalse(any("deliveryState", app).exists, "nor a state")
         XCTAssertFalse(any("mergeDelivery", app).exists)
         back(app)
 
         // Ready on GitHub: it merges there, and the spec panel still shows its progress and Spec PR.
         any("specRow-Widget gallery", app).tap()
-        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5))
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertEqual(any("deliveryState", app).label, "Done: every review passed.", "the card's state")
+        XCTAssertFalse(any("delivery-start", app).exists)
         XCTAssertEqual(any("deliveryProgress", app).label, "3 of 3 tickets done")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
-        XCTAssertFalse(any("deliveryState", app).exists, "the state is the card's")
         XCTAssertFalse(any("mergeDelivery", app).exists)
         back(app)
 
