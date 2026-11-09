@@ -830,20 +830,24 @@ final class LoftUITests: XCTestCase {
         row.tap()
     }
 
-    /// #149: an open spec on GitHub shows the Delivery card, then its tickets with verdicts; a ticket opens its issue,
-    /// with back to the spec.
+    /// #149: an open spec on GitHub shows the Delivery card, then its progress, Spec PR and tickets with verdicts; a
+    /// ticket opens its issue, with back to the spec.
     func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
         let app = launch(["-fixture-specs"])
         openSpec("Implement settings functionality", app)
-        // The card has the state and Start delivery (the fixture has no per-issue Delivery); the spec panel adds its tickets.
+        // The card has the state and Start delivery (the fixture has no per-issue Delivery); the spec panel adds the rest.
         XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the Delivery card")
-        XCTAssertFalse(any("specPRLink", app).exists, "no second Delivery panel")
+        XCTAssertFalse(any("deliveryState", app).exists, "the state is the card's")
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who has which ticket")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        // The tickets sit below the card and the progress.
+        for _ in 0..<3 where !any("ticketRow-QA", app).exists { app.swipeUp() }
         for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
         XCTAssertTrue(any("ticketRow-Docs", app).label.contains("in review"))
         XCTAssertTrue(any("ticketRow-Docs", app).label.contains("security waiting"))
         XCTAssertTrue(any("ticketRow-QA", app).label.contains("done"))
         XCTAssertTrue(any("ticketRow-QA", app).label.contains("security passed"))
-        XCTAssertFalse(any("startDelivery", app).exists, "one Start delivery: the card's")
         XCTAssertFalse(any("mergeDelivery", app).exists, "it merges on GitHub")
 
         any("ticketRow-Backend endpoints", app).tap()
@@ -860,14 +864,16 @@ final class LoftUITests: XCTestCase {
         let app = launch(["-fixture-specs"])
         openSpec("Offline mode", app)
         XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
-        XCTAssertFalse(any("startDelivery", app).exists, "not a second one")
+        XCTAssertFalse(any("deliveryProgress", app).exists, "no Delivery yet, so no progress")
         XCTAssertFalse(any("mergeDelivery", app).exists)
         back(app)
 
-        // Ready on GitHub: it merges there.
+        // Ready on GitHub: it merges there, and the spec panel still shows its progress and Spec PR.
         any("specRow-Widget gallery", app).tap()
         XCTAssertTrue(any("delivery-start", app).appears(timeout: 5))
-        XCTAssertFalse(any("startDelivery", app).exists)
+        XCTAssertEqual(any("deliveryProgress", app).label, "3 of 3 tickets done")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertFalse(any("deliveryState", app).exists, "the state is the card's")
         XCTAssertFalse(any("mergeDelivery", app).exists)
         back(app)
 
@@ -875,7 +881,7 @@ final class LoftUITests: XCTestCase {
         any("specRow-Garden notes", app).tap()
         let merge = any("mergeDelivery", app)
         XCTAssertTrue(merge.appears(timeout: 5))
-        XCTAssertFalse(any("startDelivery", app).exists)
+        XCTAssertTrue(any("deliveryState", app).exists, "no card on a plan kept in Loft: the panel has the state")
         merge.tap()
         XCTAssertTrue(text(containing: "Merging…", app).appears(timeout: 3), "pending")
         XCTAssertTrue(any("deliveryResult", app).appears(timeout: 8), "then the result")

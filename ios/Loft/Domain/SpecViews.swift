@@ -114,11 +114,6 @@ enum SpecViews {
         }
     }
 
-    /// Start delivery: an open spec on GitHub whose Delivery hasn't started (the web's `isDeliverableSpec`).
-    static func canStartDelivery(_ spec: HBTask, _ d: DeliverySummary?) -> Bool {
-        isSpec(spec) && !spec.state.isClosed && spec.github?.state == "open" && (d == nil || d?.state == "planned")
-    }
-
     /// Merge: a plan kept in Loft whose reviews passed; a spec on GitHub merges there.
     static func canMerge(_ spec: HBTask, _ d: DeliverySummary?) -> Bool {
         d?.local == true && d?.state == "ready" && !spec.state.isClosed

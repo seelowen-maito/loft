@@ -1,17 +1,15 @@
 import SwiftUI
 
 /// The top of a spec's detail: its Delivery (state, who has which ticket, progress, spec PR), its tickets with their
-/// verdicts, and Start delivery or Merge where the web shows them. A spec without a Delivery gets no panel, only Start delivery.
-/// Under the Delivery card (an open spec on GitHub) only the tickets show: the card has its state and Start delivery.
+/// verdicts, and Merge for a plan kept in Loft. A spec without a Delivery gets no panel.
+/// Under the Delivery card (an open spec on GitHub) the card has the state and Start delivery, so this adds the rest.
 struct SpecDeliverySection: View {
     @Environment(LoftStore.self) private var store
     let spec: HBTask
     var underCard = false
-    @State private var busy: Busy?
+    @State private var merging = false
     @State private var error: String?
     @State private var merged: String?
-
-    private enum Busy { case start, merge }
 
     private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
 
@@ -21,11 +19,13 @@ struct SpecDeliverySection: View {
         let tickets = SpecViews.tickets(of: spec, d, tasks: store.tasks)
         let started = d.map { $0.state != "planned" } ?? false
         Group {
-            if let d, !underCard {
+            if let d {
                 Section {
                     HStack {
-                        Text(Self.stateLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
-                            .accessibilityIdentifier("deliveryState")
+                        if !underCard {
+                            Text(Self.stateLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
+                                .accessibilityIdentifier("deliveryState")
+                        }
                         Spacer()
                         if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
                             Link(destination: url) {
@@ -37,7 +37,7 @@ struct SpecDeliverySection: View {
                     }
                     if started {
                         if let who = Self.onIt(d) { Text(who).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("deliveryOnIt") }
-                    } else {
+                    } else if !underCard {
                         Text("Not started: no ticket has been handed to an agent yet.").font(.subheadline).foregroundStyle(.secondary)
                     }
                     if let p = SpecViews.progress(of: spec, d, tasks: store.tasks) {
@@ -49,22 +49,15 @@ struct SpecDeliverySection: View {
                         .accessibilityLabel("\(p.done) of \(p.total) tickets done")
                         .accessibilityIdentifier("deliveryProgress")
                     }
-                } header: { Text("Delivery") }
+                } header: { Text(underCard ? "Progress" : "Delivery") }
             }
-            if (!underCard && SpecViews.canStartDelivery(spec, d)) || SpecViews.canMerge(spec, d) || merged != nil || error != nil {
+            if SpecViews.canMerge(spec, d) || merged != nil || error != nil {
                 Section {
-                    if !underCard && SpecViews.canStartDelivery(spec, d) {
-                        Button { start() } label: {
-                            if busy == .start { HStack { ProgressView(); Text("Starting delivery…") } } else { Label("Start delivery", systemImage: "play.fill") }
-                        }
-                        .disabled(busy != nil || !store.canWrite)
-                        .accessibilityIdentifier("startDelivery")
-                    }
                     if let d, SpecViews.canMerge(spec, d) {
                         Button { merge(d) } label: {
-                            if busy == .merge { HStack { ProgressView(); Text("Merging…") } } else { Label("Merge", systemImage: "arrow.triangle.merge") }
+                            if merging { HStack { ProgressView(); Text("Merging…") } } else { Label("Merge", systemImage: "arrow.triangle.merge") }
                         }
-                        .disabled(busy != nil || !store.canWrite)
+                        .disabled(merging || !store.canWrite)
                         .accessibilityIdentifier("mergeDelivery")
                     }
                     if let merged { Label(merged, systemImage: "checkmark.circle").font(.footnote).foregroundStyle(Theme.working).accessibilityIdentifier("deliveryResult") }
@@ -87,19 +80,11 @@ struct SpecDeliverySection: View {
         .onDisappear { store.deliveryWatchers -= 1 }
     }
 
-    private func start() {
-        busy = .start; error = nil
-        Task {
-            do { try await store.startDelivery(spec: spec.id) } catch { self.error = APIError.from(error).localizedDescription }
-            busy = nil
-        }
-    }
-
     private func merge(_ d: DeliverySummary) {
-        busy = .merge; error = nil
+        merging = true; error = nil
         Task {
             do { merged = try await store.mergeDelivery(d) } catch { self.error = APIError.from(error).localizedDescription }
-            busy = nil
+            merging = false
         }
     }
 

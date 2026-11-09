@@ -81,21 +81,6 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(lines[0].state, "closed")
     }
 
-    func testStartDeliveryOnlyForAnOpenSpecWithoutAStartedDelivery() {
-        var s = spec(); s.labels = ["spec"]
-        XCTAssertTrue(SpecViews.canStartDelivery(s, nil))
-        XCTAssertTrue(SpecViews.canStartDelivery(s, delivery("planned")))
-        XCTAssertFalse(SpecViews.canStartDelivery(s, delivery("running")))
-        s.github?.state = "closed"
-        XCTAssertFalse(SpecViews.canStartDelivery(s, nil))
-        s.github?.state = "open"; s.status = "done"
-        XCTAssertFalse(SpecViews.canStartDelivery(s, nil), "closed in Loft")
-        var plain = spec(); plain.labels = []
-        XCTAssertFalse(SpecViews.canStartDelivery(plain, nil), "not a spec")
-        var local = spec(); local.labels = ["spec"]; local.github = nil
-        XCTAssertFalse(SpecViews.canStartDelivery(local, nil), "a plan kept in Loft has no GitHub issue to start from")
-    }
-
     func testMergeOnlyForAReadyPlanKeptInLoft() {
         XCTAssertTrue(SpecViews.canMerge(spec(), delivery("ready", local: true)))
         XCTAssertFalse(SpecViews.canMerge(spec(), delivery("running", local: true)))

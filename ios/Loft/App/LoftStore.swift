@@ -427,13 +427,6 @@ final class LoftStore {
         }
     }
 
-    /// Start delivery on a spec's issue; the Deliveries reload to show it.
-    func startDelivery(spec id: String) async throws {
-        try await requireTasks().startIssueDelivery(id: id)
-        try? await refresh()
-        loadDeliveries()
-    }
-
     /// Merge a plan kept in Loft; returns the server's message.
     func mergeDelivery(_ d: DeliverySummary) async throws -> String {
         let message = try await requireTasks().mergeDelivery(repo: d.repo, spec: d.spec)

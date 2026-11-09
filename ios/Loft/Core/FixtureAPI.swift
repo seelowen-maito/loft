@@ -160,7 +160,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                 tickets: [ticket(43, "Backend endpoints", "started"), ticket(44, "iOS screen", "open"), ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"]), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
                                 tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
-                DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, current: nil,
+                DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
                                 tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
             ]
         }
@@ -719,15 +719,6 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
     func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }
-    func startIssueDelivery(id: String) async throws {
-        try check()
-        try await Task.sleep(for: .milliseconds(800)) // long enough to see the pending state
-        try locked {
-            guard let t = taskList.first(where: { $0.id == id }), let g = t.github else { throw APIError.server(status: 404, message: "not found") }
-            deliveryList.append(DeliverySummary(state: "running", agentName: "Backend Agent", repo: g.repo, spec: g.number, specId: nil, local: false, pr: 70,
-                                                current: .init(number: 71, title: "First ticket"), tickets: [.init(number: 71, title: "First ticket", state: "started")]))
-        }
-    }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {
         try check()
         try await Task.sleep(for: .milliseconds(800))
