@@ -70,6 +70,14 @@ final class LoftUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while !picker.label.contains("Always"), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertTrue(picker.label.contains("Always"), picker.label)
+        // A higher threshold than the default 80k.
+        picker.tap()
+        let above150 = app.buttons["Above 150k"].firstMatch
+        XCTAssertTrue(above150.appears(timeout: 5))
+        above150.tap()
+        let deadline150 = Date().addingTimeInterval(5)
+        while !picker.label.contains("Above 150k"), Date() < deadline150 { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(picker.label.contains("Above 150k"), picker.label)
     }
 
     // MARK: - Default fixture

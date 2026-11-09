@@ -881,7 +881,7 @@ final class LoftStore {
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always".
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always".
     func setFreshContext(_ agentId: String, _ value: String) async throws {
         upsert(&agents, try await requireWrite().updateAgent(id: agentId, ["fresh_context": .string(value)]))
     }

@@ -34,7 +34,7 @@ struct Agent: Codable, Identifiable, Hashable {
     var waitingSince: Date? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     var sessionId: String? = nil
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always" (nil from older servers).
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always" (nil from older servers).
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil

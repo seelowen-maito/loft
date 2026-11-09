@@ -583,10 +583,15 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
 }
 
 /// The Fresh context choices, the default first.
-pub const FRESH_CONTEXT: &[&str] = &["above_80k", "off", "always"];
+pub const FRESH_CONTEXT: &[&str] = &["above_80k", "above_100k", "above_120k", "above_150k", "above_180k", "above_200k", "off", "always"];
 
-/// The context size the clients warn at (out of the smart zone): "above_80k" clears from here.
+/// The context size the clients warn at (out of the smart zone).
 pub const CONTEXT_WARN_AT: u64 = 80_000;
+
+/// The context size an "above_Nk" setting clears from: N thousand tokens (80k for anything unknown).
+fn fresh_threshold(setting: &str) -> u64 {
+    setting.strip_prefix("above_").and_then(|n| n.strip_suffix('k')).and_then(|n| n.parse::<u64>().ok()).map_or(CONTEXT_WARN_AT, |n| n * 1000)
+}
 
 /// What belongs to one Claude session: dropped together whenever the next run starts a fresh one.
 fn reset_session_fields(a: &mut Agent) {
@@ -674,14 +679,14 @@ pub(crate) fn fresh_boundary(state: &AppState, agent_id: &str) {
 }
 
 /// At a ticket boundary: clear the agent's context if its setting says so. Off never, Always whenever it
-/// has a session, and Above 80k (the default) when its context is at the warning or above.
+/// has a session, and Above Nk (Above 80k is the default) when its context is at N thousand tokens or above.
 fn fresh_if_due(state: &AppState, agent_id: &str) {
     let Ok(Some(a)) = state.db.get_agent(agent_id) else { return };
     let due = a.session_id.is_some()
         && match a.fresh_context.as_str() {
             "off" => false,
             "always" => true,
-            _ => a.context_tokens.is_some_and(|n| n >= CONTEXT_WARN_AT),
+            setting => a.context_tokens.is_some_and(|n| n >= fresh_threshold(setting)),
         };
     if due {
         clear_context(state, agent_id, "Context cleared for a new ticket. Long-term memory carries over.", json!({ "fresh_context": a.fresh_context }));
@@ -3157,6 +3162,22 @@ esac
         set(&st, &a.id, |a| (a.fresh_context, a.context_tokens) = ("off".into(), Some(500_000)));
         on_ticket(&st, &a.id, "o/r#2/5", true).await;
         assert_eq!(count(&st, &a.id, "clear"), 2, "off");
+
+        // Above 150k: 120k stays, 150k clears.
+        set(&st, &a.id, |a| (a.fresh_context, a.context_tokens) = ("above_150k".into(), Some(120_000)));
+        on_ticket(&st, &a.id, "o/r#2/6", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 2, "below 150k");
+        set(&st, &a.id, |a| a.context_tokens = Some(150_000));
+        on_ticket(&st, &a.id, "o/r#2/7", true).await;
+        assert_eq!(count(&st, &a.id, "clear"), 3, "a new ticket at 150k");
+    }
+
+    #[test]
+    fn fresh_threshold_reads_the_setting() {
+        assert_eq!(fresh_threshold("above_80k"), 80_000);
+        assert_eq!(fresh_threshold("above_200k"), 200_000);
+        assert_eq!(fresh_threshold("above_xk"), CONTEXT_WARN_AT);
+        assert!(FRESH_CONTEXT.iter().filter(|f| f.starts_with("above_")).all(|f| fresh_threshold(f) >= CONTEXT_WARN_AT));
     }
 
     #[tokio::test(flavor = "multi_thread")]
