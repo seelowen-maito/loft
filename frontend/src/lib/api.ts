@@ -60,6 +60,8 @@ export type Agent = {
   subagents?: RunningSubagent[];
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
+  /** Agent messages in its chat (their ids) waiting for its current run to end. */
+  queued_messages?: number[];
 };
 
 /** The roles an agent can have, as stored in `Agent.role`, with what each does. */
