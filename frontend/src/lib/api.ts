@@ -120,7 +120,9 @@ export type IssueDelivery = {
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
+  waiting_for_lead?: number[];
 };
 
 export type Task = {

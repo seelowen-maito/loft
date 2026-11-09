@@ -147,6 +147,9 @@ pub struct DeliveryTicket {
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
+    /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
+    #[serde(default)]
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1438,6 +1441,7 @@ impl Db {
                     verdicts: Default::default(),
                     id: String::new(),
                     skipped: String::new(),
+                    agent: String::new(),
                 })
                 .collect();
             let d = Delivery {
