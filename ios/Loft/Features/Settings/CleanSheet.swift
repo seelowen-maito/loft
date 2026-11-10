@@ -177,6 +177,7 @@ struct CleanSheet: View {
             }
         }
         .padding(.leading, CGFloat(depth) * 16)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("cleanItem-\(i.rel)")
     }
 
@@ -189,10 +190,19 @@ struct CleanSheet: View {
             Text(c.text).font(.caption)
                 .foregroundStyle(c.state == "safe" ? Color.green : c.state == "unsafe" ? Theme.attentionInk : Color.secondary)
                 .accessibilityIdentifier("check-\(i.rel)")
-            Button("Check again") { check(i) }.font(.caption).buttonStyle(.borderless)
+            checkButton("Check again", i)
         case .none:
-            Button("Check") { check(i) }.font(.caption).buttonStyle(.borderless).accessibilityIdentifier("checkButton-\(i.rel)")
+            checkButton("Check", i)
         }
+    }
+
+    /// A 44 pt tall tap target, whatever the caption's size.
+    private func checkButton(_ title: String, _ i: CleanItem) -> some View {
+        Button { check(i) } label: {
+            Text(title).font(.caption).frame(minWidth: 44, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("checkButton-\(i.rel)")
     }
 
     private func check(_ i: CleanItem) {
