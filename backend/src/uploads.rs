@@ -463,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn a_video_over_30_seconds_gets_30_frames_spread_evenly() {
         let Some(ffmpeg) = find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
-        let dir = std::env::temp_dir().join(format!("loft-frames-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("frames");
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("long.mp4");
         let made = std::process::Command::new(ffmpeg)

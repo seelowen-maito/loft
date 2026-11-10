@@ -859,7 +859,7 @@ mod tests {
     use std::fs;
 
     fn temp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("loft-sweep-{}", uuid::Uuid::new_v4()));
+        let d = crate::testdir::for_this_test("sweep");
         fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
     }

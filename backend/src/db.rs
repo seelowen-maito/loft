@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn stored_running_totals_become_per_run_costs_once() {
-        let path = std::env::temp_dir().join(format!("loft-costs-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("costs").join("costs.db");
         {
             let db = Db::open(&path).unwrap();
             let mut a = agent("a");
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn fyis_kept_in_agent_data_move_to_their_table_in_order() {
-        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("fyis").join("fyis.db");
         {
             let db = Db::open(&path).unwrap();
             db.save_agent(&agent("a")).unwrap();
@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn agent_with_role_finds_the_first_in_list_order_within_the_trimmed_project() {
-        let path = std::env::temp_dir().join(format!("loft-roles-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("roles").join("roles.db");
         let db = Db::open(&path).unwrap();
         let with = |id: &str, project: &str, role: &str| {
             let mut a = agent(id);
@@ -2041,7 +2041,7 @@ mod tests {
 
     #[test]
     fn agents_saved_before_groups_get_their_project_as_group_and_only_project_once() {
-        let path = std::env::temp_dir().join(format!("loft-groups-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("groups").join("groups.db");
         {
             let db = Db::open(&path).unwrap();
             for (id, project) in [("a", "api"), ("b", " api "), ("c", "")] {
@@ -2065,7 +2065,7 @@ mod tests {
 
     #[test]
     fn restored_fyis_go_back_ahead_of_newer_ones_and_leave_with_their_agent() {
-        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("fyis").join("fyis.db");
         let db = Db::open(&path).unwrap();
         db.save_agent(&agent("a")).unwrap();
         db.add_pending_fyi("a", "first").unwrap();
@@ -2085,7 +2085,7 @@ mod tests {
 
     #[test]
     fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
-        let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("grills").join("grills.db");
         let session = |id: &str, agent: &str, status: &str, at: &str| {
             serde_json::json!({ "id": id, "agent_id": agent, "topic": id, "status": status, "created_at": at, "updated_at": at })
         };
@@ -2131,7 +2131,7 @@ mod tests {
 
     #[test]
     fn older_memories_get_their_first_line_as_title_and_keep_their_text() {
-        let path = std::env::temp_dir().join(format!("loft-memories-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("memories").join("memories.db");
         let long = "Deploys go through staging first and only then to production, after the smoke tests pass on it\nmore";
         {
             let c = Connection::open(&path).unwrap();
@@ -2197,7 +2197,7 @@ mod tests {
 
     #[test]
     fn all_time_spend_starts_from_history_once_and_never_goes_down() {
-        let path = std::env::temp_dir().join(format!("loft-all-time-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("all-time").join("all-time.db");
         let end = |db: &Db, agent: &str, cost: Option<f64>| {
             let meta = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c, "session_cost_usd": c }));
             db.add_message(agent, None, "system", "run_end", "", meta).unwrap();
@@ -2240,7 +2240,7 @@ mod tests {
     #[test]
     fn the_run_ledger_starts_from_the_run_ends_there_are_once() {
         use chrono::Duration;
-        let path = std::env::temp_dir().join(format!("loft-ledger-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("ledger").join("ledger.db");
         let now = Utc::now();
         let ago = |d: i64| (now - Duration::days(d)).to_rfc3339();
         // What the period figures read before the ledger, straight from the run ends.

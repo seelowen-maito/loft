@@ -470,7 +470,7 @@ pub(crate) mod tests {
         let calls = || log.lock().unwrap().pushes.iter().filter(|(auth, _)| auth.contains(REVOKED)).count();
 
         // Its own key folder, so the shared relay key stays good for the other tests.
-        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(std::env::temp_dir().join(format!("loft-apns-refused-{}", uuid::Uuid::new_v4()))));
+        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(crate::testdir::for_this_test("apns-refused")));
         store_relay_key(RELAY_KEY).unwrap();
         // A network error, a 429 or a 5xx never marks the key refused.
         let _ = via_relay(&st, "http://127.0.0.1:9", &d, &p).await;
@@ -512,7 +512,7 @@ pub(crate) mod tests {
     fn a_late_401_for_an_old_key_does_not_refuse_the_new_one() {
         THIS_TEST_DIR.with(|d| {
             *d.borrow_mut() =
-                Some(std::env::temp_dir().join(format!("loft-apns-race-{}", uuid::Uuid::new_v4())))
+                Some(crate::testdir::for_this_test("apns-race"))
         });
         let old = "lrk_revoked-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaa";
         store_relay_key(old).unwrap();
@@ -726,7 +726,7 @@ pub(crate) mod tests {
                 });
             });
             let (url, relay) = rx.recv().unwrap();
-            let dir = std::env::temp_dir().join(format!("loft-apns-test-{}", uuid::Uuid::new_v4()));
+            let dir = crate::testdir::for_this_process("apns-test");
             // Set once, before any test reads them.
             unsafe {
                 std::env::set_var("LOFT_APNS_URL", &url);

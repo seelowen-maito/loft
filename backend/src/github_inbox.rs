@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn finds_workspace_checkouts() {
-        let root = std::env::temp_dir().join(format!("loft-ws-{}", uuid::Uuid::new_v4()));
+        let root = crate::testdir::for_this_test("ws");
         for (dir, url) in [("a/shop", "git@github.com:acme/shop.git"), ("b/deep/api", "https://github.com/acme/api"), ("c/node_modules/x", "https://github.com/x/y")] {
             std::fs::create_dir_all(root.join(dir).join(".git")).unwrap();
             std::fs::write(root.join(dir).join(".git/config"), format!("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {url}\n")).unwrap();

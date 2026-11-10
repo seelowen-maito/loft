@@ -2270,7 +2270,7 @@ esac
 
     #[test]
     fn the_old_agent_files_folder_is_deleted() {
-        let dir = std::env::temp_dir().join(format!("loft-old-files-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("old-files");
         std::fs::create_dir_all(dir.join(OLD_AGENT_FILES)).unwrap();
         std::fs::write(dir.join(OLD_AGENT_FILES).join("a.mcp.json"), "{\"token\":\"x\"}").unwrap();
         std::fs::create_dir_all(dir.join(AGENT_FILES)).unwrap();
