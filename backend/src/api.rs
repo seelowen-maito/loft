@@ -448,7 +448,7 @@ pub async fn reorder_agents(State(state): State<AppState>, Json(o): Json<Order>)
 pub async fn workspace_size(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let dir = workspace(&state, &id);
-    let bytes = tokio::task::spawn_blocking(move || agents::dir_size(&dir)).await.unwrap_or(0);
+    let bytes = tokio::task::spawn_blocking(move || crate::sweep::size(&dir)).await.unwrap_or(0);
     Ok(Json(json!({ "bytes": bytes })))
 }
 
@@ -1125,7 +1125,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let outside = std::env::temp_dir().join(format!("loft-outside-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("big"), vec![0u8; 5000]).unwrap();
+        std::fs::write(outside.join("big"), vec![0u8; 1_000_000]).unwrap();
         let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
         for id in [&a.id, &b.id] {
             let ws = super::workspace(&st, id);
@@ -1135,7 +1135,8 @@ pub(crate) mod tests {
             std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
         }
         let size = super::workspace_size(State(st.clone()), Path(a.id.clone())).await.ok().unwrap().0;
-        assert_eq!(size["bytes"], 1005, "symlinks aren't followed");
+        let bytes = size["bytes"].as_u64().unwrap();
+        assert!((1005..1_000_000).contains(&bytes), "symlinks aren't followed: {bytes}");
 
         let del = |id: String, purge: &str| {
             let uri: axum::http::Uri = format!("/?purge_files={purge}").parse().unwrap();
@@ -1145,7 +1146,7 @@ pub(crate) mod tests {
         assert!(!super::workspace(&st, &a.id).exists());
         let _ = del(b.id.clone(), "false").await.ok().unwrap();
         assert!(super::workspace(&st, &b.id).join("clone/target/lib.rlib").exists());
-        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 5000, "a symlink's target is never touched");
+        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 1_000_000, "a symlink's target is never touched");
     }
 
     #[tokio::test]

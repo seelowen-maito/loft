@@ -6,10 +6,11 @@
 //! files kept. It skips running agents and agents with a live process (a dev server), never follows a symlink,
 //! and never removes anything outside the agents' folder (`agent-local-storage/`), so Loft's own checkout stays.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local};
 use serde::Serialize;
@@ -22,6 +23,8 @@ const IDLE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const DEPTH: usize = 3;
 /// How often the day's sweep runs.
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a measured size is reused: Settings and the delete dialog reload often, and a walk is slow.
+const SIZE_FOR: Duration = Duration::from_secs(60);
 
 /// What a sweep removed and how much it freed.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -55,7 +58,7 @@ pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) 
     let storage = state.cfg.storage_dir.clone();
     let dirs: Vec<(String, String, PathBuf)> = agents.iter().map(|a| (a.id.clone(), a.name.clone(), crate::agents::workspace(&state, &a.id))).collect();
     let (rows, free) = tokio::task::spawn_blocking(move || {
-        let rows: Vec<_> = dirs.into_iter().map(|(id, name, d)| serde_json::json!({ "id": id, "name": name, "bytes": crate::agents::dir_size(&d) })).collect();
+        let rows: Vec<_> = dirs.into_iter().map(|(id, name, d)| serde_json::json!({ "id": id, "name": name, "bytes": size(&d) })).collect();
         (rows, free_bytes(&storage))
     })
     .await
@@ -73,21 +76,26 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>) 
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Sweeps every workspace but those of running agents and agents with a live process, or just `only`'s.
-/// Records and returns what it removed.
+/// Returns what it removed, and records it as the last sweep when it swept every workspace.
 pub async fn run(state: &AppState, only: Option<&str>) -> Report {
     let _one = RUNNING.lock().await;
-    let storage = state.cfg.storage_dir.clone();
-    let running: HashSet<String> = state.rt.lock().unwrap().running.keys().cloned().collect();
+    let (st, all) = (state.clone(), only.is_none());
     let only = only.map(str::to_string);
     let r = tokio::task::spawn_blocking(move || {
-        let mut skip = running;
-        skip.extend(crate::processes::with_live_processes(&storage));
-        sweep(&storage, only.as_deref(), &skip, SystemTime::now())
+        let storage = &st.cfg.storage_dir;
+        let live = crate::processes::with_live_processes(storage);
+        // Asked again for each clone, so a run that starts mid-sweep keeps its build output.
+        let busy = |id: &str| live.contains(id) || st.rt.lock().unwrap().running.contains_key(id);
+        sweep(storage, only.as_deref(), &busy, SystemTime::now())
     })
     .await
     .unwrap_or_default();
     tracing::info!("sweep freed {} bytes in {} folders: {:?}", r.freed_bytes, r.removed.len(), r.removed);
-    state.rt.lock().unwrap().sweep = r.clone();
+    *SIZES.lock().unwrap() = None;
+    // One deleted agent's sweep isn't what Settings shows as the last one.
+    if all {
+        state.rt.lock().unwrap().sweep = r.clone();
+    }
     r
 }
 
@@ -100,23 +108,23 @@ pub async fn scheduler(state: AppState) {
     }
 }
 
-/// Sweeps the workspaces in `storage` (or only `only`'s), skipping the agent ids in `skip`, as of `now`.
-pub fn sweep(storage: &Path, only: Option<&str>, skip: &HashSet<String>, now: SystemTime) -> Report {
+/// Sweeps the workspaces in `storage` (or only `only`'s) as of `now`, skipping the agents `busy` names.
+pub fn sweep(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime) -> Report {
     let mut r = Report { at: Some(Local::now()), ..Default::default() };
     let Ok(root) = storage.canonicalize() else { return r };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
         // `.agent-files` and the like are Loft's; a symlinked workspace leads outside.
         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-        if id.starts_with('.') || !is_dir || skip.contains(&id) || only.is_some_and(|o| o != id) {
+        if id.starts_with('.') || !is_dir || only.is_some_and(|o| o != id) || busy(&id) {
             continue;
         }
-        workspace(&root, &e.path(), now, &mut r);
+        workspace(&root, &e.path(), now, &|| busy(&id), &mut r);
     }
     r
 }
 
-fn workspace(root: &Path, ws: &Path, now: SystemTime, r: &mut Report) {
+fn workspace(root: &Path, ws: &Path, now: SystemTime, busy: &dyn Fn() -> bool, r: &mut Report) {
     let mut clones = vec![];
     find_clones(ws, DEPTH, &mut clones);
     let mut all_idle = true;
@@ -124,7 +132,7 @@ fn workspace(root: &Path, ws: &Path, now: SystemTime, r: &mut Report) {
         let mut builds = vec![];
         let mut newest = git_time(&clone);
         walk(&clone, &mut builds, &mut newest);
-        if now.duration_since(newest).unwrap_or_default() < IDLE {
+        if now.duration_since(newest).unwrap_or_default() < IDLE || busy() {
             all_idle = false;
             continue;
         }
@@ -133,7 +141,7 @@ fn workspace(root: &Path, ws: &Path, now: SystemTime, r: &mut Report) {
         }
     }
     // Compiled dependencies all the workspace's clones share: kept while any of them is in use.
-    if all_idle {
+    if all_idle && !busy() {
         remove(root, &ws.join(".cargo-build"), r);
     }
 }
@@ -221,6 +229,22 @@ fn remove(root: &Path, path: &Path, r: &mut Report) {
     }
 }
 
+/// Measured sizes, by path: when and how big.
+static SIZES: Mutex<Option<HashMap<PathBuf, (Instant, u64)>>> = Mutex::new(None);
+
+/// Disk space `path` takes, as `du` measures it (the same measure as a sweep's freed bytes), measured at most
+/// once a minute; 0 when it doesn't exist. Blocking.
+pub fn size(path: &Path) -> u64 {
+    if let Some(&(at, n)) = SIZES.lock().unwrap().get_or_insert_default().get(path)
+        && at.elapsed() < SIZE_FOR
+    {
+        return n;
+    }
+    let n = du(path);
+    SIZES.lock().unwrap().get_or_insert_default().insert(path.to_path_buf(), (Instant::now(), n));
+    n
+}
+
 /// Disk space `path` takes, symlinks not followed.
 fn du(path: &Path) -> u64 {
     let Ok(meta) = path.symlink_metadata() else { return 0 };
@@ -272,7 +296,7 @@ mod tests {
         fs::write(ws.join("big.bin"), vec![0u8; 5000]).unwrap();
         let axum::Json(v) = sizes(axum::extract::State(st.clone())).await.unwrap();
         let row = v["agents"].as_array().unwrap().iter().find(|r| r["id"] == a.id.as_str()).unwrap();
-        assert_eq!(row["bytes"], 5000);
+        assert!(row["bytes"].as_u64().unwrap() >= 5000, "{row}");
         assert!(v["free_bytes"].as_u64().unwrap() > 0);
         // A clone built just now isn't idle: nothing freed, and the report is what Settings shows after.
         clone(&ws.join("loft"));
@@ -308,7 +332,7 @@ mod tests {
         file(&ws.join("loft/docs/target/keep.md"));
         file(&ws.join("scratch/node_modules/keep.js"));
 
-        let r = sweep(&storage, None, &HashSet::new(), later());
+        let r = sweep(&storage, None, &|_| false, later());
 
         for gone in ["loft/target", "loft/frontend/node_modules", "loft/ios/build", "loft/ios/DerivedData", "loft/Pkg/.build", ".cargo-build"] {
             assert!(!ws.join(gone).exists(), "{gone} stays");
@@ -342,7 +366,7 @@ mod tests {
         age(&storage.join("idle/old"));
         clone(&storage.join("idle/fresh"));
 
-        let r = sweep(&storage, None, &HashSet::from(["running".to_string()]), SystemTime::now());
+        let r = sweep(&storage, None, &|id| id == "running", SystemTime::now());
 
         assert!(!storage.join("idle/old/target").exists(), "an idle clone keeps its build output");
         assert!(storage.join("idle/fresh/target").exists(), "a fresh clone lost its build output");
@@ -351,11 +375,78 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_starts_mid_sweep_keeps_its_build_output() {
+        let storage = temp();
+        clone(&storage.join("a/loft"));
+        clone(&storage.join("a/homebase"));
+        // Idle when the sweep reaches the workspace, running by the time it reaches a clone.
+        let asked = std::cell::Cell::new(0);
+        let busy = |_: &str| {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+        let r = sweep(&storage, None, &busy, later());
+        assert!(r.removed.is_empty(), "{:?}", r.removed);
+        assert!(storage.join("a/loft/target").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_with_a_live_process_is_skipped() {
+        use std::os::unix::process::CommandExt;
+        let st = crate::tasks::tests::state();
+        let (server, idle) = (crate::tasks::tests::agent(&st, "Server"), crate::tasks::tests::agent(&st, "Idle"));
+        for a in [&server, &idle] {
+            let ws = crate::agents::workspace(&st, &a.id);
+            clone(&ws.join("loft"));
+            age(&ws);
+        }
+        // A detached dev server: a process in a session of its own, recorded as the agent's.
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("60");
+        unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+        let mut dev = cmd.spawn().unwrap();
+        crate::processes::record(&st.cfg.storage_dir, &server.id, dev.id()).unwrap();
+
+        run(&st, None).await;
+        let _ = dev.kill();
+        let _ = dev.wait();
+
+        assert!(crate::agents::workspace(&st, &server.id).join("loft/target").exists(), "a dev server's agent lost its build output");
+        assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_agent_s_sweep_leaves_the_last_sweep_report_alone() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Gone");
+        let ws = crate::agents::workspace(&st, &a.id);
+        clone(&ws.join("loft"));
+        age(&ws);
+        let one = run(&st, Some(&a.id)).await;
+        assert!(!one.removed.is_empty());
+        assert!(st.rt.lock().unwrap().sweep.at.is_none(), "the last sweep is one agent's");
+        run(&st, None).await;
+        assert!(st.rt.lock().unwrap().sweep.at.is_some());
+    }
+
+    #[test]
+    fn sizes_are_disk_blocks_like_the_freed_bytes() {
+        let storage = temp();
+        clone(&storage.join("a/loft"));
+        let target = storage.join("a/loft/target");
+        let before = size(&target);
+        let mut r = Report::default();
+        remove(&storage, &target, &mut r);
+        assert_eq!(r.freed_bytes, before);
+        assert!(before >= 4096, "a 1-byte file takes a block: {before}");
+    }
+
+    #[test]
     fn one_workspace_alone_is_swept_when_named() {
         let storage = temp();
         clone(&storage.join("a/loft"));
         clone(&storage.join("b/loft"));
-        sweep(&storage, Some("a"), &HashSet::new(), later());
+        sweep(&storage, Some("a"), &|_| false, later());
         assert!(!storage.join("a/loft/target").exists());
         assert!(storage.join("b/loft/target").exists());
     }
@@ -379,7 +470,7 @@ mod tests {
         // A whole workspace that is a symlink to Loft's checkout.
         std::os::unix::fs::symlink(&loft, storage.join("b")).unwrap();
 
-        let r = sweep(&storage, None, &HashSet::new(), later());
+        let r = sweep(&storage, None, &|_| false, later());
 
         assert!(!ws.join("app/target").exists(), "the real target/ is removed");
         assert!(ws.join("app/web/node_modules").symlink_metadata().is_ok(), "a symlinked node_modules is left alone");
