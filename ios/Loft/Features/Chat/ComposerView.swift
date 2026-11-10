@@ -744,10 +744,8 @@ struct TagPicker: View {
     }
 
     var body: some View {
-        if rows.isEmpty {
-            Text("Nothing to tag by that name").font(.footnote).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
+        // No match shows nothing, like the web menu: "#fff" in a message is often just text.
+        if !rows.isEmpty {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(rows) { r in
