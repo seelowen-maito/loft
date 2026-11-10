@@ -117,6 +117,11 @@ impl Store {
         self.current.read().unwrap().clone()
     }
 
+    /// Loft's data folder, which holds `settings.json` and the database.
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new("."))
+    }
+
     /// Values in effect for restart-only fields.
     pub fn boot(&self) -> &Settings {
         &self.boot
