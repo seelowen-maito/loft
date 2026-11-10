@@ -22,6 +22,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Past this many branches, or this much output from one git call, Check answers "unknown".
 const MAX_BRANCHES: usize = 200;
 const MAX_OUTPUT: u64 = 4 << 20;
+/// Git writes these files small; a bigger one isn't read whole, and the check answers "unknown".
+const MAX_FILE: u64 = 1 << 20;
 
 #[derive(Deserialize)]
 pub struct CheckBody {
@@ -70,11 +72,13 @@ pub async fn run(storage: &Path, agent: &str, rel: &str, projects: &[String]) ->
         Ok(d) => d,
         Err(why) => return unknown(why),
     };
-    let Some(branches) = branches(&dirs.common) else { return unknown("too many branches") };
+    let Ok(packed) = read_small(&dirs.common.join("packed-refs")) else { return unknown("can't read its refs") };
+    let packed = packed.unwrap_or_default();
+    let Some(branches) = branches(&dirs.common, &packed) else { return unknown("too many branches") };
     let Some(status) = git(&repo, &dirs, &["status", "--porcelain", "--ignore-submodules=all"]).await else { return unknown("git failed") };
     let mut refs: Vec<(String, String)> = branches.into_iter().map(|b| (format!("refs/heads/{b}"), b)).collect();
     // A detached HEAD's commits are on no branch.
-    let head = std::fs::read_to_string(dirs.dir.join("HEAD")).unwrap_or_default();
+    let Ok(Some(head)) = read_small(&dirs.dir.join("HEAD")) else { return unknown("can't read its HEAD") };
     if !head.starts_with("ref:") {
         refs.push(("HEAD".into(), "detached HEAD".into()));
     }
@@ -87,10 +91,10 @@ pub async fn run(storage: &Path, agent: &str, rel: &str, projects: &[String]) ->
             Err(_) => return unknown("git failed"),
         }
     }
-    if dirs.configs.iter().any(|(f, before)| read_config(f).ok().as_ref() != Some(before)) {
+    if dirs.configs.iter().any(|(f, before)| read_small(f).ok().as_ref() != Some(before)) {
         return unknown("its git config changed during the check");
     }
-    if has_stash(&dirs.common) {
+    if has_stash(&dirs.common, &packed) {
         lines.push("Stashed changes".into());
     }
     let changed = status.lines().filter(|l| !l.is_empty()).count();
@@ -143,10 +147,10 @@ fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
         (dot_git.clone(), dot_git)
     } else if m.is_file() {
         // A worktree: `.git` names its folder in the base clone, which names the base's own.
-        let text = std::fs::read_to_string(&dot_git).map_err(|_| "not a git repo")?;
+        let text = read_small(&dot_git).ok().flatten().ok_or("not a git repo")?;
         let dir = text.trim().strip_prefix("gitdir:").ok_or("not a git repo")?.trim();
         let dir = repo.join(dir);
-        let common = std::fs::read_to_string(dir.join("commondir")).map(|c| dir.join(c.trim())).map_err(|_| "not a git repo")?;
+        let common = read_small(&dir.join("commondir")).ok().flatten().map(|c| dir.join(c.trim())).ok_or("not a git repo")?;
         (dir, common)
     } else {
         return Err("not a git repo");
@@ -166,7 +170,7 @@ fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
     }
     let mut configs = vec![];
     for f in [common.join("config"), dir.join("config.worktree"), common.join("config.worktree")] {
-        let text = read_config(&f).map_err(|_| "can't read its git config")?;
+        let text = read_small(&f).map_err(|_| "can't read its git config")?;
         if text.as_deref().is_some_and(|t| !keys(t).is_some_and(|ks| ks.iter().all(|k| plain_key(k)))) {
             return Err("unusual git config");
         }
@@ -175,23 +179,30 @@ fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
     Ok(GitDirs { dir, common, configs })
 }
 
-/// A config file's text; None when it isn't there.
-fn read_config(f: &Path) -> std::io::Result<Option<String>> {
-    match std::fs::read_to_string(f) {
-        Ok(t) => Ok(Some(t)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+/// A git file's text; None when it isn't there, an error past [`MAX_FILE`].
+fn read_small(f: &Path) -> std::io::Result<Option<String>> {
+    use std::io::Read;
+    let file = match std::fs::File::open(f) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut text = String::new();
+    file.take(MAX_FILE + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_FILE {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "too big"));
     }
+    Ok(Some(text))
 }
 
 /// Whether the repo has a stash, loose or packed.
-fn has_stash(common: &Path) -> bool {
-    common.join("refs/stash").symlink_metadata().is_ok() || std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default().lines().any(|l| l.ends_with(" refs/stash"))
+fn has_stash(common: &Path, packed: &str) -> bool {
+    common.join("refs/stash").symlink_metadata().is_ok() || packed.lines().any(|l| l.ends_with(" refs/stash"))
 }
 
 /// The branches the repo's refs files name (loose under `refs/heads/`, and `packed-refs`), sorted; symlinks and
 /// names git wouldn't write are left out. None past [`MAX_BRANCHES`].
-fn branches(common: &Path) -> Option<Vec<String>> {
+fn branches(common: &Path, packed: &str) -> Option<Vec<String>> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let (Ok(t), Some(name)) = (e.file_type(), e.file_name().to_str().map(str::to_string)) else { continue };
@@ -205,7 +216,6 @@ fn branches(common: &Path) -> Option<Vec<String>> {
     }
     let mut out = vec![];
     walk(&common.join("refs/heads"), "", &mut out);
-    let packed = std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default();
     out.extend(packed.lines().filter_map(|l| l.split_once(' ')?.1.strip_prefix("refs/heads/").map(str::to_string)));
     out.retain(|b| !b.is_empty() && b.len() <= 255 && !b.starts_with('-') && !b.contains(|c: char| c.is_control() || c.is_whitespace()) && !b.split('/').any(|p| p.is_empty() || p == "." || p == ".."));
     out.sort();
@@ -457,6 +467,17 @@ mod tests {
             fs::write(loft.join(format!(".git/refs/heads/b{i}")), fs::read_to_string(loft.join(".git/refs/heads/main")).unwrap()).unwrap();
         }
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("too many branches"));
+    }
+
+    #[tokio::test]
+    async fn a_huge_refs_or_head_file_is_unknown_without_reading_it_all() {
+        let (storage, loft) = setup();
+        let packed = fs::File::create(loft.join(".git/packed-refs")).unwrap();
+        packed.set_len(MAX_FILE + 1).unwrap();
+        assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
+        fs::remove_file(loft.join(".git/packed-refs")).unwrap();
+        fs::OpenOptions::new().append(true).open(loft.join(".git/HEAD")).unwrap().set_len(MAX_FILE + 1).unwrap();
+        assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its HEAD"));
     }
 
     #[tokio::test]
