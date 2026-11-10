@@ -102,6 +102,9 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertNil(SpecViews.waitingLine(nil))
         XCTAssertNil(SpecViews.waitingLine([]))
         XCTAssertEqual(SpecViews.waitingLine([44, 47]), "Waiting for the Lead to assign #44, #47")
+        XCTAssertNil(SpecViews.waitingOnYouLine([]))
+        XCTAssertEqual(SpecViews.waitingOnYouLine([47]), "Waiting on you: #47")
+        XCTAssertEqual(SpecViews.ticketLabel("needs_human"), "Waiting on you")
     }
 
     /// #181: the summary names every started ticket's agent and the ready tickets waiting for the Lead.

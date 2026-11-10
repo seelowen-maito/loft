@@ -43,6 +43,7 @@ struct IssueDelivery: Codable, Hashable {
     var tickets: [Ticket]? = nil
     /// Ready tickets nobody has yet, while the Lead hands them out.
     var waitingForLead: [Int]? = nil
+    var waitingOnYou: [Int]? = nil
 
     /// How a card's state line reads: the colour it takes.
     enum Tone: String { case running, stalled, paused, needsYou = "needs_you", final, done }

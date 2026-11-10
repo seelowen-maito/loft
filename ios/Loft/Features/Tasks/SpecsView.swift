@@ -56,7 +56,7 @@ struct SpecRow: View {
     /// Each running ticket with its agent, then the tickets waiting for the Lead.
     private var onIt: [String] {
         guard stage == .delivery, let d = delivery else { return [] }
-        return SpecViews.onIt(d) + [SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
+        return SpecViews.onIt(d) + [SpecViews.waitingOnYouLine(d.waitingOnYou), SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
     var body: some View {

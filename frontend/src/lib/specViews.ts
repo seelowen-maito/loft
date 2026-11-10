@@ -44,7 +44,7 @@ export function ticketLabel(state: string): { text: string; tone: "good" | "acce
     case "started": return { text: "building", tone: "accent" };
     case "review": return { text: "in review", tone: "accent" };
     case "closing": return { text: "closing", tone: "accent" };
-    case "needs_human": return { text: "needs you", tone: "warn" };
+    case "needs_human": return { text: "Waiting on you", tone: "warn" };
     case "elsewhere": return { text: "elsewhere", tone: "muted" };
     default: return { text: "open", tone: "muted" };
   }
