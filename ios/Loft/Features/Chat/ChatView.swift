@@ -42,8 +42,8 @@ struct ChatView: View {
     @State private var routeSuggestion: RouteSuggestion?
     /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
-    /// A video picked in the composer, uploading or up, until it goes with a message.
-    @State private var video: VideoDraft?
+    /// Photos and a video picked in the composer, uploading or up, until they go with a message.
+    @State private var attachments: [AttachmentDraft] = []
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
     @State private var resuming = false
@@ -245,13 +245,14 @@ struct ChatView: View {
                              onVoiceSent: continueByVoice,
                              onVoiceStop: stopByVoice,
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
-                             videoAgentId: currentQuestion == nil ? agentId : nil, video: $video) { text, byVoice in
-                    if let file = video?.uploaded {
-                        // A message with a video is always plain chat.
+                             videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
+                    if !attachments.isEmpty {
+                        // A message with photos or a video is always plain chat.
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let files = attachments.compactMap(\.uploaded)
                         attached = nil
-                        video = nil
-                        Task { await store.send(text, to: agentId, meta: meta, images: [file]) }
+                        attachments = []
+                        Task { await store.send(text, to: agentId, meta: meta, images: files) }
                     // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
                     // on another one) and the voice moves on; typed text is always chat, as on the web.
                     } else if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
@@ -778,6 +779,16 @@ private struct MessageBubble: View {
                 Text(message.content).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
         default:
+            let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
+            if !photos.isEmpty {
+                // Two a row, an odd one on the message's side.
+                VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
+                    ForEach(Array(stride(from: 0, to: photos.count, by: 2)), id: \.self) { i in
+                        HStack(spacing: 6) { ForEach(photos[i..<min(i + 2, photos.count)], id: \.self) { ChatPhoto(url: $0) } }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            }
             ForEach(message.videos, id: \.self) { f in
                 if let url = store.uploadURL(agentId: message.agentId, file: f) {
                     ChatVideo(url: url).frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
@@ -823,7 +834,7 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("tagChips")
                     }
-                    if message.videos.isEmpty || !message.displayContent.isEmpty {
+                    if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
                         CollapsibleText(text: message.displayContent)
                             .font(.body)
                             .padding(.horizontal, 12)
@@ -1055,7 +1066,13 @@ private struct PendingBubble: View {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 4) {
                 if let files = message.images, !files.isEmpty {
-                    Label("Video", systemImage: "video.fill").font(.caption).foregroundStyle(.secondary)
+                    let photos = files.filter { !VideoAttachment.isVideo($0) }.count
+                    if photos < files.count {
+                        Label("Video", systemImage: "video.fill").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if photos > 0 {
+                        Label(photos == 1 ? "Photo" : "\(photos) photos", systemImage: "photo").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if !message.text.isEmpty {
                     Text(message.text)
