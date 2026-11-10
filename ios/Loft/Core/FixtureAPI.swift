@@ -161,8 +161,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                 current: .init(number: 43, title: "Backend endpoints"),
                                 // Two tickets running at once, each on its own Dev, and one ready ticket waiting for the Lead.
                                 tickets: [ticket(43, "Backend endpoints", "started", agent: "Backend Agent"), ticket(44, "iOS screen", "open"),
-                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"])],
-                                waitingForLead: [44]),
+                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"]),
+                                          ticket(47, "Release notes", "needs_human")],
+                                waitingForLead: [44], waitingOnYou: [47]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
                                 tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
@@ -406,7 +407,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -433,11 +434,38 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse {
+        try await sendMessage(agentId: agentId, text: text, clientId: clientId, meta: meta, images: [])
+    }
+
+    /// Uploads, by name, kept where they were read from so a sent video plays.
+    private var uploads: [String: URL] = [:]
+
+    /// Goes up in quarters a fifth of a second apart, so the progress shows.
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try check()
+        if mode == .failSends { throw APIError.timeout }
+        for p in [0.25, 0.5, 0.75, 1] {
+            try await Task.sleep(for: .milliseconds(200))
+            progress(p)
+        }
+        let name = UUID().uuidString.lowercased() + "." + (file.pathExtension.isEmpty ? "mov" : file.pathExtension.lowercased())
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-" + name)
+        try FileManager.default.copyItem(at: file, to: kept)
+        locked { uploads[name] = kept }
+        return name
+    }
+
+    func uploadURL(agentId: String, file: String) -> URL {
+        locked { uploads[file] } ?? baseURL.appendingPathComponent("api/agents/\(agentId)/uploads/\(file)")
+    }
+
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         try check()
         if mode == .failSends { throw APIError.timeout }
         return try locked {
             nextId += 1
             var tags: [String: JSONValue] = ["client_id": .string(clientId)]
+            if !images.isEmpty { tags["images"] = .array(images.map(JSONValue.string)) }
             if let g = meta?["grill"] { tags["grill"] = g }
             // An attached task, as the backend stores it (#116): `task_id`, and first in `task_refs`.
             if let t = meta?["task_id"]?.stringValue {
@@ -577,6 +605,18 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     func stopRun(agentId: String) async throws { try check() }
+    func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
+    func workspaceSizes() async throws -> WorkspaceSizes {
+        try check()
+        let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
+        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000), .init(id: "a3", name: "Loft Lead", bytes: 410_000_000)],
+                              freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
+    }
+    func cleanWorkspaces() async throws -> SweepReport { try check(); return SweepReport(freedBytes: 21_700_000_000) }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws {
+        try check()
+        locked { agentList.removeAll { $0.id == id } }
+    }
     /// The plan view the backend builds, from the fixture's tasks.
     func taskPlan(id: String) async throws -> TaskPlan {
         try check()
@@ -620,6 +660,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            make("pr:c", "acme/api", "api#1765: Scope menu discounts to the restaurant", urgency: 2),
                            make("pr:d", "Octo/loft", "loft#111: Make it a brief", urgency: 0)]
         }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
+        }
         list.items.removeAll { done.contains($0.id) }
         list.count = list.items.count
         list.urgent = list.items.filter { $0.urgency >= 2 }.count
@@ -629,6 +675,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Any action resolves its item, as the real server's next list would show.
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws {
         try check()
+        if path == "/api/backups" { _ = try await backUpNow(); return }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }
@@ -733,7 +780,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
                                  agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
                                  tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
-                                 waitingForLead: d.waitingForLead)
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
         }
     }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {
@@ -794,11 +841,47 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
     private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
-                                       "auto_update": true, "messaging_rules": true]
+                                       "auto_update": true, "messaging_rules": true,
+                                       "backup_dir": .string(ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? "/Volumes/Backup/Loft backups" : "")]
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []
 
     func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+
+    /// The Mac's backups: one this morning; with `-fixture-backup-failed`, none since two days ago and the error.
+    private var backupStatus = BackupStatus(
+        dir: "", last: .init(at: Date(timeIntervalSinceNow: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? -55 * 3600 : -5 * 3600), bytes: 152_400_000, path: ""),
+        error: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed")
+            ? .init(message: "can't create /Volumes/Backup/Loft backups: No such file or directory", at: Date(timeIntervalSinceNow: -20 * 60)) : nil,
+        icloud: "/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Loft backups")
+
+    private func backupDir() -> String {
+        let d = settings["backup_dir"]?.stringValue ?? ""
+        return d.isEmpty ? "/Users/you/Library/Application Support/Loft/backups" : d
+    }
+
+    func backups() async throws -> BackupStatus {
+        try check()
+        return locked {
+            var s = backupStatus
+            s.dir = backupDir()
+            return s
+        }
+    }
+
+    /// Always works, into whichever folder Settings names now, and clears the Needs you item.
+    func backUpNow() async throws -> BackupStatus {
+        try check()
+        return locked {
+            let dir = backupDir()
+            backupStatus.last = .init(at: Date(), bytes: 152_600_000, path: dir + "/" + Date().formatted(.iso8601.year().month().day()))
+            backupStatus.error = nil
+            needsYouDone.insert("backup:2026-11-07T03:00:00+00:00")
+            var s = backupStatus
+            s.dir = dir
+            return s
+        }
+    }
 
     func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
         try check()

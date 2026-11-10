@@ -10,6 +10,12 @@ protocol LoftAPI: Sendable {
     func sendMessage(agentId: String, text: String, clientId: String) async throws -> SendMessageResponse
     /// `meta` carries only what the server accepts from clients (today `grill`).
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse
+    /// A message with uploads (`images`: names from `upload`).
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse
+    /// `POST /agents/{id}/uploads` with the file's bytes; returns the server's name for it. `progress` gets 0...1 as it goes up.
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String
+    /// Where an upload is served (it answers Range requests, so a video plays from it).
+    func uploadURL(agentId: String, file: String) -> URL
     /// The agent's open interview, or nil when there is none (404).
     func grillSession(agentId: String) async throws -> GrillSession?
     func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession?
@@ -38,6 +44,10 @@ protocol LoftAPI: Sendable {
     /// `PATCH /api/agents/{id}` with some of its editable fields (today `fresh_context`).
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent
     func stopRun(agentId: String) async throws
+    /// Bytes in the agent's workspace: what deleting it with the agent frees.
+    func workspaceSize(agentId: String) async throws -> Int64
+    /// Deletes the agent; with `purgeFiles` its workspace folder too.
+    func deleteAgent(id: String, purgeFiles: Bool) async throws
     /// Stops the run and keeps the queue; queued messages run next (`run_watchdog`).
     func restartRun(agentId: String) async throws
     /// Clear context: a fresh Claude session, memory kept.
@@ -71,6 +81,12 @@ protocol LoftAPI: Sendable {
     /// The server's settings object (`GET /api/settings`'s `settings`), and replacing it.
     func serverSettings() async throws -> JSONValue
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue
+    /// The Mac's backups (`backups`), and Back up now, which answers once it's done or fails with the error.
+    func backups() async throws -> BackupStatus
+    func backUpNow() async throws -> BackupStatus
+    /// Settings › Disk: every workspace's size and the free space, and Clean now (the sweep of idle build output).
+    func workspaceSizes() async throws -> WorkspaceSizes
+    func cleanWorkspaces() async throws -> SweepReport
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -146,6 +162,10 @@ struct LiveLoftAPI: LoftAPI {
             Log.net.error("\(method, privacy: .public) \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             throw APIError.from(error)
         }
+        return try checked(data, resp, method, path, started)
+    }
+
+    private func checked(_ data: Data, _ resp: URLResponse, _ method: String, _ path: String, _ started: Date) throws -> Data {
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         Log.net.debug("\(method, privacy: .public) \(path, privacy: .public) → \(status) in \(Int(Date().timeIntervalSince(started) * 1000))ms")
         guard (200..<300).contains(status) else {
@@ -194,10 +214,37 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse {
+        try await sendMessage(agentId: agentId, text: text, clientId: clientId, meta: meta, images: [])
+    }
+
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         var body: [String: JSONValue] = ["text": .string(text), "client_id": .string(clientId)]
         if let meta { body["meta"] = meta }
+        if !images.isEmpty { body["images"] = .array(images.map(JSONValue.string)) }
         return try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages", body: .object(body)))
     }
+
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        let path = "/agents/\(agentId)/uploads"
+        var req = URLRequest(url: url(path))
+        req.httpMethod = "POST"
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        // Up to 200 MB over the tailnet: give the server time to answer once it has it all.
+        req.timeoutInterval = 120
+        let started = Date()
+        let (data, resp): (Data, URLResponse)
+        do {
+            (data, resp) = try await session.upload(for: req, fromFile: file, delegate: UploadProgress(progress))
+        } catch {
+            Log.net.error("POST \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            throw APIError.from(error)
+        }
+        let r = try decode([String: String].self, try checked(data, resp, "POST", path, started))
+        guard let name = r["file"] else { throw APIError.server(status: 200, message: "The upload has no name") }
+        return name
+    }
+
+    func uploadURL(agentId: String, file: String) -> URL { url("/agents/\(agentId)/uploads/\(file)") }
 
     func grillSession(agentId: String) async throws -> GrillSession? {
         do {
@@ -246,6 +293,13 @@ struct LiveLoftAPI: LoftAPI {
         try decode(Agent.self, try await send("PATCH", "/agents/\(id)", body: .object(fields)))
     }
     func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
+    func workspaceSize(agentId: String) async throws -> Int64 {
+        struct Size: Decodable { let bytes: Int64 }
+        return try await (get("/agents/\(agentId)/workspace-size") as Size).bytes
+    }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws {
+        _ = try await send("DELETE", "/agents/\(id)", query: [URLQueryItem(name: "purge_files", value: String(purgeFiles))])
+    }
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
     func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
     func compact(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/compact", body: .object(["instructions": .string("")])) }
@@ -306,6 +360,15 @@ struct LiveLoftAPI: LoftAPI {
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue {
         let v = try decode(JSONValue.self, try await send("PUT", "/settings", body: settings))
         return v["settings"] ?? .null
+    }
+
+    func backups() async throws -> BackupStatus { try await get("/backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await get("/workspaces") }
+    func cleanWorkspaces() async throws -> SweepReport { try decode(SweepReport.self, try await send("POST", "/workspaces/clean", body: [:], timeout: 120)) }
+
+    func backUpNow() async throws -> BackupStatus {
+        // A backup of a big database takes a while; the server answers once it's done.
+        try decode(BackupStatus.self, try await send("POST", "/backups", body: [:], timeout: 120))
     }
 
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
@@ -370,8 +433,28 @@ struct LiveLoftAPI: LoftAPI {
     }
 }
 
+/// Reports how much of an upload's body has gone out.
+private final class UploadProgress: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let report: @Sendable (Double) -> Void
+    init(_ report: @escaping @Sendable (Double) -> Void) { self.report = report }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
+                    totalBytesExpectedToSend: Int64) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        report(Double(totalBytesSent) / Double(totalBytesExpectedToSend))
+    }
+}
+
 /// Defaults for stand-ins written before grill mode (test mocks): no meta, no sessions.
 extension LoftAPI {
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
+        guard images.isEmpty else { throw APIError.unsupported("Videos") }
+        return try await sendMessage(agentId: agentId, text: text, clientId: clientId, meta: meta)
+    }
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String { throw APIError.unsupported("Videos") }
+    func uploadURL(agentId: String, file: String) -> URL {
+        baseURL.appendingPathComponent("api/agents/\(agentId)/uploads/\(file)")
+    }
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse {
         try await sendMessage(agentId: agentId, text: text, clientId: clientId)
     }
@@ -387,10 +470,16 @@ extension LoftAPI {
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
     func mergeDelivery(repo: String, spec: Int) async throws -> String { throw APIError.unsupported("Delivery") }
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent { throw APIError.unsupported("Agent settings") }
+    func workspaceSize(agentId: String) async throws -> Int64 { throw APIError.unsupported("Workspace size") }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws { throw APIError.unsupported("Deleting agents") }
     func taskComments(id: String) async throws -> [TaskComment] { [] }
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }
     func serverSettings() async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue { throw APIError.unsupported("Server settings") }
+    func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
+    func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
+    func cleanWorkspaces() async throws -> SweepReport { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }

@@ -32,6 +32,7 @@ test("the stage follows the Delivery and the issue", () => {
 test("ticket states read in words", () => {
   assert.deepEqual(ticketLabel("closed"), { text: "done", tone: "good" });
   assert.equal(ticketLabel("needs_human").tone, "warn");
+  assert.equal(ticketLabel("needs_human").text, "Waiting on you");
   assert.equal(ticketLabel("whatever").text, "open");
 });
 

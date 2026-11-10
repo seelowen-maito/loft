@@ -84,6 +84,12 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
     owners
 }
 
+/// The agents with a process still alive, like a detached dev server.
+pub fn with_live_processes(storage: &Path) -> HashSet<String> {
+    let owners = owners(storage);
+    table().iter().filter_map(|p| owners.get(&session_of(p.pid)?).cloned()).collect()
+}
+
 /// The process session of `pid`, if it is alive.
 fn session_of(pid: i32) -> Option<i32> {
     let sid = unsafe { libc::getsid(pid) };
@@ -595,14 +601,13 @@ fn plan_killall(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>)
     let mut pids = vec![];
     for line in shown.stdout.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
-        if let ["kill", sig, pid] = words[..] {
-            if let (Some(s), Ok(p)) = (signal_of(sig.trim_start_matches('-')), pid.parse::<i32>()) {
+        if let ["kill", sig, pid] = words[..]
+            && let (Some(s), Ok(p)) = (signal_of(sig.trim_start_matches('-')), pid.parse::<i32>()) {
                 signal = s;
                 if !caller_side.contains(&p) {
                     pids.push(p);
                 }
             }
-        }
     }
     Plan::Signal { signal, pids, out: Output::default() }
 }
@@ -1038,7 +1043,7 @@ mod tests {
         let server = || std::fs::read_to_string(ws.join("server.pid")).unwrap().trim().parse::<i32>().unwrap();
 
         // `pkill -F` reads the pidfile from the command's folder, the workspace, not Loft's.
-        for stop in [format!("pkill -f {name}"), "pkill -F server.pid".into(), "kill $(cat server.pid)".into(), format!("echo $(cat server.pid) | xargs kill")] {
+        for stop in [format!("pkill -f {name}"), "pkill -F server.pid".into(), "kill $(cat server.pid)".into(), "echo $(cat server.pid) | xargs kill".to_string()] {
             let out = bash(&st, &a.id, &start).await;
             assert!(out.contains("exit 0"), "{out}");
             let pid = server();

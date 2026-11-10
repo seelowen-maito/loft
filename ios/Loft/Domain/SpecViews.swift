@@ -14,6 +14,7 @@ struct DeliverySummary: Codable, Hashable {
     var tickets: [Ticket]
     /// Ready tickets nobody has yet, while the Lead hands them out.
     var waitingForLead: [Int]? = nil
+    var waitingOnYou: [Int]? = nil
 
     struct Current: Codable, Hashable { var number: Int; var title: String }
     struct Ticket: Codable, Hashable {
@@ -82,6 +83,12 @@ enum SpecViews {
         return "Waiting for the Lead to assign " + numbers.map { "#\($0)" }.joined(separator: ", ")
     }
 
+    /// "Waiting on you: #44", or nil when no ticket waits for the user.
+    static func waitingOnYouLine(_ numbers: [Int]?) -> String? {
+        guard let numbers, !numbers.isEmpty else { return nil }
+        return "Waiting on you: " + numbers.map { "#\($0)" }.joined(separator: ", ")
+    }
+
     /// Merged, or closed as completed, is Shipped; closed as not planned is Dropped; no Delivery or not started is Planned;
     /// ready or settled is Ready to merge; the rest is In Delivery.
     static func stage(of spec: HBTask, _ d: DeliverySummary?) -> SpecStage {
@@ -139,7 +146,7 @@ enum SpecViews {
         case "started": "building"
         case "review": "in review"
         case "closing": "closing"
-        case "needs_human": "needs you"
+        case "needs_human": "Waiting on you"
         case "elsewhere": "elsewhere"
         default: "open"
         }

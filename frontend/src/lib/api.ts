@@ -125,6 +125,8 @@ export type IssueDelivery = {
   tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
+  /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
+  waiting_on_you?: number[];
 };
 
 export type Task = {
@@ -470,7 +472,18 @@ export type BackupStatus = {
   dir: string;
   last: { at: string; bytes: number; path: string } | null;
   error: { message: string; at: string } | null;
+  /** iCloud Drive → Loft backups, the one-click choice; null when iCloud Drive is off on the Mac. */
+  icloud: string | null;
 };
+
+/** Every agent's workspace size, the disk's free space and what the last sweep freed. */
+export type WorkspaceSizes = {
+  agents: { id: string; name: string; bytes: number }[];
+  free_bytes: number | null;
+  low_disk_bytes: number;
+  last_sweep: SweepReport;
+};
+export type SweepReport = { at: string | null; removed: string[]; freed_bytes: number };
 
 export type ApprovalMode = "ask" | "own" | "all";
 
@@ -570,6 +583,8 @@ export const api = {
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   backups: () => req<BackupStatus>("GET", "/backups"),
+  workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
+  cleanWorkspaces: () => req<SweepReport>("POST", "/workspaces/clean"),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
@@ -583,6 +598,8 @@ export const api = {
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
+  /** What deleting the agent with its workspace would free. */
+  workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */

@@ -62,6 +62,8 @@ struct PendingMessage: Codable, Identifiable, Hashable {
     var failure: String?
     /// Sent with the message (a grill answer's tag); nil for plain messages.
     var meta: JSONValue?
+    /// Uploads sent with it (a video), by the server's names.
+    var images: [String]? = nil
 
     var isFailed: Bool { failure != nil }
 }

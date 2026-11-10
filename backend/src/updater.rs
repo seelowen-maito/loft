@@ -169,6 +169,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                         while running_agents(&state) > 0 {
                             tokio::time::sleep(IDLE_POLL).await;
                         }
+                        crate::sweep::run(&state, None).await;
                         restart();
                     }
                     Err(e) => {

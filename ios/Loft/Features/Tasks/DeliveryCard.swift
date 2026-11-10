@@ -19,6 +19,9 @@ struct DeliveryCardSection: View {
                 ForEach(d?.runningLines ?? [], id: \.self) { line in
                     Text(line).font(.subheadline).accessibilityIdentifier("deliveryRunning")
                 }
+                if let line = SpecViews.waitingOnYouLine(d?.waitingOnYou) {
+                    Text(line).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaitingOnYou")
+                }
                 if let waiting = SpecViews.waitingLine(d?.waitingForLead) {
                     Text(waiting).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaiting")
                 }

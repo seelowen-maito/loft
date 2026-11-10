@@ -39,6 +39,19 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
     state.cfg.storage_dir.join(agent_id)
 }
 
+/// Bytes of the files under `dir`, without following symlinks; 0 when it doesn't exist. Blocking.
+pub fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Where `@path` in this agent's chat starts: its project's folder when the project names one inside the
 /// projects folder (`work/notes`), else its workspace (no project, or a project that's just a tag).
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
@@ -293,17 +306,17 @@ impl Drop for Unanswered<'_> {
             return;
         }
         self.state.rt.lock().unwrap().waiters.remove(&self.id);
-        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id) {
-            if r.status == "pending" {
+        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
+            && r.status == "pending" {
                 r.status = "expired".into();
                 let _ = self.state.db.save_permission(&r);
                 self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
             }
-        }
     }
 }
 
 /// `ask_permission`, waiting at most `timeout` for the user.
+#[allow(clippy::too_many_arguments)]
 pub async fn ask_permission_for(
     state: &AppState,
     agent_id: &str,
@@ -478,6 +491,9 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 # Workspace
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
+- Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review, and never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
+- Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
+- When your PR is merged: `git fetch --prune origin`, `git switch --detach origin/<base>`, then `git branch -d <branch>` (never `-D`: git refuses if it isn't merged, and then you leave it and say so). If you used a worktree for it, `git worktree remove <path>` without `--force`.
 {team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
 - Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
@@ -719,13 +735,13 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
 }
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
+#[allow(clippy::too_many_arguments)]
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
     if quiet && kind != "error" {
-        if kind == "run_end" {
-            if let Err(e) = state.db.add_unsaved_run_end(&meta) {
+        if kind == "run_end"
+            && let Err(e) = state.db.add_unsaved_run_end(&meta) {
                 tracing::error!("all-time spend: {e}");
             }
-        }
         return None;
     }
     add_msg(state, agent_id, rid, role, kind, content, meta)
@@ -1122,6 +1138,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
+        // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
+        .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1155,11 +1173,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     if let Some(n @ 1..) = a.max_subagents {
         cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
     }
-    if resume {
-        if let Some(sid) = &a.session_id {
+    if resume
+        && let Some(sid) = &a.session_id {
             cmd.args(["--resume", sid]);
         }
-    }
     Ok(cmd)
 }
 
@@ -1215,6 +1232,7 @@ enum RunOutcome {
     StaleSession,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
     agent_id: &str,
@@ -1257,7 +1275,7 @@ async fn run_process(
     }
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
-    let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
+    let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
     let mut cmd = build_command(state, &agent, resume)?;
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
@@ -1266,11 +1284,10 @@ async fn run_process(
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
     // Its session id is its PID.
-    if let Some(pid) = child.id() {
-        if let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
+    if let Some(pid) = child.id()
+        && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
-    }
     {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
@@ -1533,8 +1550,8 @@ async fn run_process(
                         if ended {
                             emit_run(state, agent_id);
                         }
-                        if let Some((name, input)) = tool_calls.get(&use_id) {
-                            if ok && crate::prs::creates_pr(name, input) {
+                        if let Some((name, input)) = tool_calls.get(&use_id)
+                            && ok && crate::prs::creates_pr(name, input) {
                                 for (slug, n) in crate::github::extract_pr_links(&full) {
                                     let (state, agent_id, use_id) = (state.clone(), agent_id.to_string(), use_id.clone());
                                     tokio::spawn(async move {
@@ -1542,7 +1559,6 @@ async fn run_process(
                                     });
                                 }
                             }
-                        }
                         let text = truncate(&full, 6000);
                         let hide = quiet || tool_calls.get(&use_id).is_some_and(|(n, _)| n.starts_with("mcp__loft__grill_"));
                         run_msg(hide, state, agent_id, rid, "tool", "tool_result", &text, json!({
@@ -1751,6 +1767,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn prompt_keeps_the_clone_rule_and_asks_to_reuse_one_clone_per_project() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("Never edit them in place. To work on one, clone it into your workspace (`git clone "));
+        assert!(p.contains("or clone from its remote) and work on the clone."));
+        for key in ["reuse it for every ticket", "pull/<N>/head", "--detach", "Never clone a project again"] {
+            assert!(p.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn prompt_asks_to_fetch_and_branch_from_the_remote_base() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        for key in ["`git fetch origin`", "`git switch -c <branch> origin/<base>`", "`origin/HEAD`", "`git pull --ff-only`"] {
+            assert!(p.contains(key), "{key}");
+        }
+        // After the merge: prune, then a safe delete only.
+        for key in ["`git fetch --prune origin`", "`git branch -d <branch>`", "`git worktree remove <path>` without `--force`"] {
+            assert!(p.contains(key), "{key}");
+        }
+        assert!(!p.contains("git branch -D") && !p.contains("git worktree remove --force"));
+    }
+
+    #[test]
     fn the_kill_timeout_the_prompt_names_is_the_one_claude_allows() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
@@ -1915,6 +1956,7 @@ while [ $# -gt 0 ]; do
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
+printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
@@ -2127,6 +2169,18 @@ esac
         assert_eq!(ports_seen(&st, &c.id), ["20000 20000-20009"]);
         run(&st, &b.id, "again", 2).await;
         assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_agent_builds_cargo_dependencies_in_its_own_workspace() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        run(&st, &a.id, "hello", 1).await;
+        run(&st, &b.id, "hello", 1).await;
+        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("cargo-build.log")).unwrap().trim().to_string();
+        assert_eq!(seen(&a.id), workspace(&st, &a.id).join(".cargo-build").to_string_lossy());
+        assert_eq!(seen(&b.id), workspace(&st, &b.id).join(".cargo-build").to_string_lossy());
+        assert_ne!(seen(&a.id), seen(&b.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]

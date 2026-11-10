@@ -5,6 +5,8 @@ struct SpecsView<Header: View>: View {
     @Environment(LoftStore.self) private var store
     let specs: [HBTask]
     let showDropped: Bool
+    /// Clears the filters that hide specs; nil when none is set.
+    var clearFilters: (() -> Void)?
     @ViewBuilder let header: Header
 
     private func rows(_ stage: SpecStage) -> [HBTask] {
@@ -34,6 +36,9 @@ struct SpecsView<Header: View>: View {
         .overlay {
             if !store.hasLoaded {
                 NotLoadedView()
+            } else if stages.allSatisfy({ rows($0).isEmpty }), let clearFilters {
+                EmptyState(symbol: "line.3.horizontal.decrease", title: "No matching specs", message: "No specs match the filters.",
+                           actionTitle: "Clear filters", action: clearFilters)
             } else if stages.allSatisfy({ rows($0).isEmpty }) {
                 EmptyState(symbol: "doc.text", title: "No specs", message: "Specs you plan show up here, by stage.")
             }
@@ -56,7 +61,7 @@ struct SpecRow: View {
     /// Each running ticket with its agent, then the tickets waiting for the Lead.
     private var onIt: [String] {
         guard stage == .delivery, let d = delivery else { return [] }
-        return SpecViews.onIt(d) + [SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
+        return SpecViews.onIt(d) + [SpecViews.waitingOnYouLine(d.waitingOnYou), SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
     var body: some View {

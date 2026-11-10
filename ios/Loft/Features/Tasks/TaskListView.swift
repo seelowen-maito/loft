@@ -70,6 +70,8 @@ struct TaskListView: View {
     /// The filters that apply in this view: Specs has no Priority or Agent filter.
     private var hasFilters: Bool { project != nil || group != nil || (mode == .list && (priority != nil || agentId != nil)) }
 
+    private func clearFilters() { priority = nil; project = nil; group = nil; agentId = nil }
+
     var body: some View {
         Group {
             if store.info != nil && !store.supportsTasks {
@@ -77,7 +79,8 @@ struct TaskListView: View {
                            message: "This server doesn't have the issues API yet. Pull the latest Loft on your Mac and restart it.")
             } else {
                 if mode == .specs {
-                    SpecsView(specs: store.tasks.filter { SpecViews.isSpec($0) && inScope($0) }, showDropped: showDropped) {
+                    SpecsView(specs: store.tasks.filter { SpecViews.isSpec($0) && inScope($0) }, showDropped: showDropped,
+                              clearFilters: hasFilters ? clearFilters : nil) {
                         modePicker
                     }
                     .toolbar { ToolbarItem(placement: .topBarLeading) { filterMenu } }
@@ -185,7 +188,7 @@ struct TaskListView: View {
                 Toggle("Show dropped", isOn: $showDropped)
             }
             if hasFilters {
-                Button("Clear filters", role: .destructive) { priority = nil; project = nil; group = nil; agentId = nil }
+                Button("Clear filters", role: .destructive, action: clearFilters)
             }
         } label: {
             Image(systemName: hasFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")

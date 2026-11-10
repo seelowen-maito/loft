@@ -142,6 +142,8 @@ pub struct Runtime {
     pub tcc: crate::mac_access::Requests,
     /// The backups folder, its newest backup and the last attempt's error (backup.rs)
     pub backup: crate::backup::Status,
+    /// What the last sweep of agents' build output removed (sweep.rs)
+    pub sweep: crate::sweep::Report,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
 }
