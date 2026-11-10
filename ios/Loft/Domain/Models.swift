@@ -103,6 +103,14 @@ struct ChatMessage: Codable, Identifiable, Hashable {
         return a.compactMap { $0["name"]?.stringValue }
     }
     var mentionsOnly: Bool { meta?["mentions_only"] == .bool(true) }
+    /// The specs, issues and pull requests your message tagged with `#` that Loft knows (`meta.tags`).
+    var tags: [MessageTag] {
+        guard case .array(let a)? = meta?["tags"] else { return [] }
+        return a.compactMap { t in
+            guard let tag = t["tag"]?.stringValue, let kind = t["kind"]?.stringValue, let title = t["title"]?.stringValue else { return nil }
+            return MessageTag(tag: tag, kind: kind, title: title, url: t["url"]?.stringValue, taskId: t["task_id"]?.stringValue)
+        }
+    }
     var clientId: String? { meta?["client_id"]?.stringValue }
     var taskId: String? { meta?["task_id"]?.stringValue }
     var toolName: String? { meta?["name"]?.stringValue }
@@ -175,6 +183,17 @@ struct PermissionRequest: Codable, Identifiable, Hashable {
         if let perm = input?["permission"]?.stringValue { return "Grant \(perm)" }
         return toolName
     }
+}
+
+/// A `#` tag on a chat message, as the backend resolved it: it opens the Loft issue, else the GitHub page.
+struct MessageTag: Hashable, Identifiable {
+    let tag: String
+    /// spec | issue | pr
+    let kind: String
+    let title: String
+    let url: String?
+    let taskId: String?
+    var id: String { tag }
 }
 
 struct HBTask: Codable, Identifiable, Hashable {
@@ -301,6 +320,8 @@ enum ServerFeature: String {
     case push
     case backups
     case workspaces
+    /// Clean previews what it removes and logs it.
+    case cleanPreview = "clean_preview"
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

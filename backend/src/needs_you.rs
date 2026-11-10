@@ -725,7 +725,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
     {
         let id = "disk_low".to_string();
         let gb = free as f64 / 1e9;
-        let mut actions = vec![action("retry", "Clean now", "POST", "/api/workspaces/clean".into(), json!({}))];
+        // Nothing is removed blind: Settings previews what a clean removes.
+        let mut actions = vec![];
         if let Some(h) = crate::tailnet::host() {
             actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#workspaces", state.cfg.port) } }));
         }
@@ -737,7 +738,7 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
             task_id: None,
             title: text("Disk almost full", MAX_TITLE),
             reason: text(&format!("{gb:.1} GB are free where agents' workspaces live."), MAX_REASON),
-            text: text("Clean now removes build output from idle workspaces. Settings shows each workspace's size; deleting an agent deletes its workspace by default.", MAX_TEXT),
+            text: text("Settings → Disk shows each workspace's size and cleans build output after a preview. Deleting an agent deletes its workspace by default.", MAX_TEXT),
             created_at: Utc::now().to_rfc3339(),
             links: vec![],
             actions,

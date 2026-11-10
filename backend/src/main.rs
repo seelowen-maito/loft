@@ -36,6 +36,7 @@ mod state;
 mod sweep;
 mod system;
 mod tailnet;
+mod tags;
 mod tasks;
 mod updater;
 mod uploads;
@@ -46,7 +47,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
@@ -157,6 +157,8 @@ async fn serve() -> anyhow::Result<()> {
         .route("/agents/{id}/workspace-size", get(api::workspace_size))
         .route("/workspaces", get(sweep::sizes))
         .route("/workspaces/clean", post(sweep::clean))
+        .route("/workspaces/clean/preview", get(sweep::preview))
+        .route("/workspaces/log", get(sweep::log))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/messages/{mid}/start-delivery", post(delivery::start_from_card))
@@ -164,7 +166,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/deliveries/resume", post(delivery::resume_route))
-        .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_VIDEO_BYTES + 1)))
+        .route("/agents/{id}/uploads", post(uploads::upload))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))

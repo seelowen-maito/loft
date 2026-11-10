@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_preview"],
     }))
 }
 
@@ -102,21 +102,17 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Replace the settings. `github_token`: absent or null keeps the saved one, "" clears it.
-pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Value>) -> ApiResult<Value> {
-    let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
-    // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
-    let keep_push = body.get("push").is_none();
-    let keep_backup_dir = body.get("backup_dir").is_none();
-    let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
-    if keep_push {
-        s.push = state.settings.get().push;
-    } else {
-        // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
-        s.push.relay_url = state.settings.get().push.relay_url;
+pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult<Value> {
+    let Value::Object(mut body) = body else { return Err(bad("settings must be an object")) };
+    let token = body.remove("github_token");
+    // Keys a client leaves out keep their saved value, so a client can send only what it changed.
+    let mut merged = serde_json::to_value(state.settings.get()).map_err(|e| bad(e.to_string()))?;
+    if let Some(o) = merged.as_object_mut() {
+        o.extend(body);
     }
-    if keep_backup_dir {
-        s.backup_dir = state.settings.get().backup_dir;
-    }
+    let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
+    // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
+    s.push.relay_url = state.settings.get().push.relay_url;
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
@@ -452,7 +448,7 @@ pub async fn reorder_agents(State(state): State<AppState>, Json(o): Json<Order>)
 pub async fn workspace_size(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let dir = workspace(&state, &id);
-    let bytes = tokio::task::spawn_blocking(move || agents::dir_size(&dir)).await.unwrap_or(0);
+    let bytes = tokio::task::spawn_blocking(move || crate::sweep::size(&dir)).await.unwrap_or(0);
     Ok(Json(json!({ "bytes": bytes })))
 }
 
@@ -478,7 +474,7 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     } else {
         // Its files stay: its clones' build output goes once they're idle.
         let (state, id) = (state.clone(), id.clone());
-        tokio::spawn(async move { crate::sweep::run(&state, Some(&id)).await });
+        tokio::spawn(async move { crate::sweep::run(&state, None, Some(&id), crate::sweep::IDLE, None).await });
     }
     state.emit(Event::AgentDeleted { agent_id: id });
     Ok(Json(json!({ "ok": true })))
@@ -549,6 +545,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     }
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
+    }
+    let tags = crate::tags::resolve(&state, &agent, &text);
+    if !tags.is_empty() {
+        meta["tags"] = json!(tags);
     }
     // Any agent, its own group's first: where two share a name, the "Dev" of this group wins.
     let mut all = state.db.list_agents()?;
@@ -1129,7 +1129,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let outside = std::env::temp_dir().join(format!("loft-outside-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("big"), vec![0u8; 5000]).unwrap();
+        std::fs::write(outside.join("big"), vec![0u8; 1_000_000]).unwrap();
         let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
         for id in [&a.id, &b.id] {
             let ws = super::workspace(&st, id);
@@ -1139,7 +1139,8 @@ pub(crate) mod tests {
             std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
         }
         let size = super::workspace_size(State(st.clone()), Path(a.id.clone())).await.ok().unwrap().0;
-        assert_eq!(size["bytes"], 1005, "symlinks aren't followed");
+        let bytes = size["bytes"].as_u64().unwrap();
+        assert!((1005..1_000_000).contains(&bytes), "symlinks aren't followed: {bytes}");
 
         let del = |id: String, purge: &str| {
             let uri: axum::http::Uri = format!("/?purge_files={purge}").parse().unwrap();
@@ -1149,7 +1150,7 @@ pub(crate) mod tests {
         assert!(!super::workspace(&st, &a.id).exists());
         let _ = del(b.id.clone(), "false").await.ok().unwrap();
         assert!(super::workspace(&st, &b.id).join("clone/target/lib.rlib").exists());
-        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 5000, "a symlink's target is never touched");
+        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 1_000_000, "a symlink's target is never touched");
     }
 
     #[tokio::test]

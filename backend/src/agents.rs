@@ -39,19 +39,6 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
     state.cfg.storage_dir.join(agent_id)
 }
 
-/// Bytes of the files under `dir`, without following symlinks; 0 when it doesn't exist. Blocking.
-pub fn dir_size(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
-    entries
-        .flatten()
-        .map(|e| match e.file_type() {
-            Ok(t) if t.is_dir() => dir_size(&e.path()),
-            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
-            _ => 0,
-        })
-        .sum()
-}
-
 /// Where `@path` in this agent's chat starts: its project's folder when the project names one inside the
 /// projects folder (`work/notes`), else its workspace (no project, or a project that's just a tag).
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
@@ -589,7 +576,11 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-        if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) }
+        let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
+        match crate::tags::block(&meta["tags"]) {
+            b if b.is_empty() => p,
+            b => format!("{p}\n\n{b}"),
+        }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
@@ -1077,7 +1068,13 @@ pub fn remove_agent_files(state: &AppState, agent_id: &str) {
 fn loft_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     if cfg!(test) {
-        return Ok(exe.parent().and_then(Path::parent).map(|d| d.join("loft")).unwrap_or(exe));
+        let next_to_tests = exe.parent().and_then(Path::parent).map(|d| d.join("loft"));
+        if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
+            return Ok(bin);
+        }
+        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+        return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }

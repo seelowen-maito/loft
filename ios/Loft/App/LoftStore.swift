@@ -1024,17 +1024,15 @@ final class LoftStore {
 
     func backUpNow() async throws -> BackupStatus { try await requireWrite().backUpNow() }
     func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
-    func cleanWorkspaces() async throws -> SweepReport { try await requireWrite().cleanWorkspaces() }
+    func cleanPreview(agentId: String?) async throws -> CleanPlan { try await requireWrite().cleanPreview(agentId: agentId) }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog { try await requireWrite().clean(agentId: agentId, paths: paths) }
+    func cleanLog() async throws -> CleanLog { try await requireWrite().cleanLog() }
 
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.
     func saveBackupDir(_ dir: String) async throws {
-        let api = try requireWrite()
-        guard case .object(var o) = try await api.serverSettings() else { return }
-        o["backup_dir"] = .string(dir)
-        // Absent keeps the saved token; the empty one the server sends would clear it.
-        o["github_token"] = nil
-        _ = try await api.putServerSettings(.object(o))
+        // Only the folder: the server keeps every key left out, so a change made on the web meanwhile stays.
+        _ = try await requireWrite().putServerSettings(.object(["backup_dir": .string(dir)]))
     }
 
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {

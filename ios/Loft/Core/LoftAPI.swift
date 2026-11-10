@@ -84,9 +84,14 @@ protocol LoftAPI: Sendable {
     /// The Mac's backups (`backups`), and Back up now, which answers once it's done or fails with the error.
     func backups() async throws -> BackupStatus
     func backUpNow() async throws -> BackupStatus
-    /// Settings › Disk: every workspace's size and the free space, and Clean now (the sweep of idle build output).
+    /// Settings › Disk: every workspace's size and the free space, and Clean: removes the build output of one
+    /// agent (`agentId`) or of every idle agent (nil), whatever its age.
     func workspaceSizes() async throws -> WorkspaceSizes
-    func cleanWorkspaces() async throws -> SweepReport
+    /// What Clean (one agent) or Clean all with nil would remove; `clean` removes the folders kept ticked.
+    func cleanPreview(agentId: String?) async throws -> CleanPlan
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog
+    /// The running or last clean's log, the daily sweep's included.
+    func cleanLog() async throws -> CleanLog
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -364,7 +369,14 @@ struct LiveLoftAPI: LoftAPI {
 
     func backups() async throws -> BackupStatus { try await get("/backups") }
     func workspaceSizes() async throws -> WorkspaceSizes { try await get("/workspaces") }
-    func cleanWorkspaces() async throws -> SweepReport { try decode(SweepReport.self, try await send("POST", "/workspaces/clean", body: [:], timeout: 120)) }
+    func cleanPreview(agentId: String?) async throws -> CleanPlan {
+        try await get("/workspaces/clean/preview", query: agentId.map { [URLQueryItem(name: "agent", value: $0)] } ?? [])
+    }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
+        let body: JSONValue = .object(["agent": agentId.map { .string($0) } ?? .null, "paths": .array(paths.map { .string($0) })])
+        return try decode(CleanLog.self, try await send("POST", "/workspaces/clean", body: body, timeout: 600))
+    }
+    func cleanLog() async throws -> CleanLog { try await get("/workspaces/log") }
 
     func backUpNow() async throws -> BackupStatus {
         // A backup of a big database takes a while; the server answers once it's done.
@@ -479,7 +491,9 @@ extension LoftAPI {
     func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
-    func cleanWorkspaces() async throws -> SweepReport { throw APIError.unsupported("Disk usage") }
+    func cleanPreview(agentId: String?) async throws -> CleanPlan { throw APIError.unsupported("Disk usage") }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
+    func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
