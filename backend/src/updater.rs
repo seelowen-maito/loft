@@ -117,6 +117,15 @@ async fn wait_for_idle(state: &AppState) -> bool {
     }
 }
 
+/// Once the update is built: waits for agents started by hand during the build (the new build is on disk, so
+/// Loft restarts into it even if auto-update was turned off meanwhile), then sweeps.
+async fn before_restart(state: &AppState) {
+    while running_agents(state) > 0 {
+        tokio::time::sleep(IDLE_POLL).await;
+    }
+    crate::sweep::run(state, None).await;
+}
+
 fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
@@ -164,11 +173,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 tracing::info!("updating {} -> {}", short(&head), short(&up));
                 match install(&root).await {
                     Ok(()) => {
-                        // Agents may have been started by hand during the build. The new build is
-                        // on disk, so restart into it even if auto-update was turned off meanwhile.
-                        while running_agents(&state) > 0 {
-                            tokio::time::sleep(IDLE_POLL).await;
-                        }
+                        before_restart(&state).await;
                         restart();
                     }
                     Err(e) => {
@@ -194,4 +199,28 @@ pub fn restart() -> ! {
         tracing::error!("restart: exec failed: {err}");
     }
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_sweeps_before_restarting() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ws = crate::agents::workspace(&st, &a.id);
+        std::fs::create_dir_all(ws.join("loft/.git")).unwrap();
+        std::fs::write(ws.join("loft/Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(ws.join("loft/target/debug")).unwrap();
+        std::fs::write(ws.join("loft/target/debug/app"), "x").unwrap();
+        // Untouched for 4 days.
+        let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
+        for p in ["loft/Cargo.toml", "loft/target", "loft/.git", "loft"] {
+            std::fs::File::open(ws.join(p)).unwrap().set_modified(then).unwrap();
+        }
+        super::before_restart(&st).await;
+        assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");
+        assert!(st.rt.lock().unwrap().sweep.at.is_some());
+    }
 }

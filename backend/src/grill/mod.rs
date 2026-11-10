@@ -1529,7 +1529,7 @@ pub(crate) mod tests {
         for f in [&shot, &logo, &mock] {
             assert!(wake.contains(&format!("[loft-image:{f}]")), "{wake}");
         }
-        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).unwrap().contains("\"type\":\"image\""));
+        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).await.unwrap().contains("\"type\":\"image\""));
         // The chat's copy of the answers says how many images each had.
         let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == json!("answers")).unwrap();
         assert!(posted.content.contains("1. Like this one [1 image]\n2. [1 image]\n3. Let's discuss: [1 image]"), "{}", posted.content);

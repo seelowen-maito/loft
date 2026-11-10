@@ -59,6 +59,16 @@ struct SettingsView: View {
     /// Settings › GitHub issues, from the server; nil until loaded, or on a server without them.
     @State private var issueSettings: IssueSettings?
     @State private var issueSettingsError: APIError?
+    /// Settings › Backups, from the server: the status and the saved `backup_dir`; nil until loaded.
+    @State private var backup: BackupStatus?
+    @State private var backupDir = ""
+    @State private var backingUp = false
+    @State private var confirmICloud = false
+    @State private var backupError: APIError?
+    /// Settings › Disk: workspace sizes and free space; nil until loaded. `freed` is what Clean now just removed.
+    @State private var disk: WorkspaceSizes?
+    @State private var cleaning = false
+    @State private var freed: Int64?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
@@ -286,6 +296,14 @@ struct SettingsView: View {
                 .disabled(!store.canWrite)
             }
 
+            if let backup {
+                backupsSection(backup)
+            }
+
+            if let disk {
+                diskSection(disk)
+            }
+
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     Text("Dark").tag("dark")
@@ -317,6 +335,14 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task { issueSettings = try? await store.issueSettings() }
         .errorAlert($issueSettingsError)
+        .task { await loadBackups() }
+        .task { await loadDisk() }
+        .errorAlert($backupError)
+        .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
+            Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
+        } message: {
+            Text(Self.iCloudWarning)
+        }
         .task { notificationStatus = await store.notifier.authorizationStatus() }
         .task {
             while !Task.isCancelled {
@@ -332,6 +358,136 @@ struct SettingsView: View {
         } message: {
             Text("The saved address and cached data on this iPhone are removed. Nothing changes on the Mac.")
         }
+    }
+
+    static let iCloudWarning = "Backups in iCloud Drive leave your Mac: all your chats and your GitHub token are then stored by Apple."
+
+    private func loadBackups() async {
+        guard store.info?.supports(.backups) == true, let b = try? await store.backups() else { return }
+        backup = b.status
+        backupDir = b.backupDir
+    }
+
+    private func loadDisk() async {
+        guard store.info?.supports(.workspaces) == true else { return }
+        disk = try? await store.workspaceSizes()
+    }
+
+    private func cleanNow() {
+        Task {
+            cleaning = true
+            defer { cleaning = false }
+            do {
+                freed = try await store.cleanWorkspaces().freedBytes
+                await loadDisk()
+            } catch { backupError = APIError.from(error) }
+        }
+    }
+
+    private func diskSection(_ d: WorkspaceSizes) -> some View {
+        Section {
+            LabeledContent("Free") {
+                Text(d.freeBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "Unknown")
+                    .foregroundStyle(d.isLow ? Theme.failure : .primary)
+            }
+            .accessibilityIdentifier("diskFree")
+            ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
+                LabeledContent(r.name, value: r.bytes.formatted(.byteCount(style: .file)))
+            }
+            Button {
+                cleanNow()
+            } label: {
+                if cleaning {
+                    HStack(spacing: 8) { ProgressView(); Text("Cleaning…") }
+                } else {
+                    Text("Clean now")
+                }
+            }
+            .disabled(cleaning)
+            .accessibilityIdentifier("cleanNow")
+            if let freed {
+                Text("Freed \(freed.formatted(.byteCount(style: .file)))").font(.footnote).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("diskFreed")
+            }
+        } header: {
+            Text("Disk")
+        } footer: {
+            Text("Clean now removes build output from workspaces untouched for 3 days. Your Mac does it daily too.")
+        }
+    }
+
+    private func saveBackupDir(_ dir: String) {
+        Task {
+            do { try await store.saveBackupDir(dir) } catch { backupError = APIError.from(error) }
+            await loadBackups()
+        }
+    }
+
+    private func backUpNow() {
+        Task {
+            backingUp = true
+            defer { backingUp = false }
+            do { backup = try await store.backUpNow() } catch {
+                backupError = APIError.from(error)
+                // The failure is recorded: show it next to the last good backup.
+                await loadBackups()
+            }
+        }
+    }
+
+    /// The last backup and any error, Back up now, and where backups go: this Mac or iCloud Drive in one tap.
+    private func backupsSection(_ b: BackupStatus) -> some View {
+        let folder = b.folder(backupDir)
+        return Section {
+            LabeledContent("Last backup") {
+                if let last = b.last {
+                    Text("\(last.at.formatted(.relative(presentation: .named))) · \(last.bytes.formatted(.byteCount(style: .file)))")
+                } else {
+                    Text("None yet")
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("backupLast")
+            if let e = b.error {
+                Label("Failed \(e.at.formatted(.relative(presentation: .named))): \(e.message)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.failure)
+                    .accessibilityIdentifier("backupError")
+            }
+            Picker("Back up to", selection: Binding(get: { folder }, set: { new in
+                switch new {
+                case .local: saveBackupDir("")
+                case .icloud: confirmICloud = true
+                case .other: break
+                }
+            })) {
+                Text("This Mac").tag(BackupStatus.Folder.local)
+                if b.icloud != nil { Text("iCloud Drive").tag(BackupStatus.Folder.icloud) }
+                if case .other(let d) = folder { Text((d as NSString).lastPathComponent).tag(folder) }
+            }
+            .accessibilityIdentifier("backupFolderPicker")
+            LabeledContent("Folder") {
+                Text(b.dir).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+            }
+            Button {
+                backUpNow()
+            } label: {
+                if backingUp {
+                    HStack(spacing: 8) { ProgressView(); Text("Backing up…") }
+                } else {
+                    Text("Back up now")
+                }
+            }
+            .disabled(backingUp)
+            .accessibilityIdentifier("backUpNow")
+        } header: {
+            Text("Backups")
+        } footer: {
+            Text(folder == .icloud
+                 ? Self.iCloudWarning
+                 : "Your Mac backs up Loft's database and settings once a day, and keeps 7 daily and 4 weekly backups. iCloud Drive keeps them off the Mac too.")
+        }
+        .disabled(!store.canWrite)
     }
 
     /// The device language as a name ("English (United States)"), without region overrides like "@rg=iszzzz"

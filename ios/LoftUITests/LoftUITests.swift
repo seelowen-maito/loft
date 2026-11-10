@@ -221,6 +221,33 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(owner.exists, "the chip opens the spec's detail")
     }
 
+    /// Spec #203: a video chosen in the composer uploads with progress, then goes with the message and plays inline
+    /// with its length. Photos is another process, so `-fixture-video` stands in for picking it there.
+    func testSendingAVideo() throws {
+        let video = try XCTUnwrap(Bundle(for: Self.self).path(forResource: "sample-video", ofType: "mp4"))
+        let app = launch(["-fixture-video", video])
+        openQAChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["chooseVideo"].tap()
+        XCTAssertTrue(any("videoChip", app).appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Video · 0:06"].appears(timeout: 5), "its length")
+        XCTAssertTrue(app.progressIndicators["Uploading"].appears(timeout: 3), "the upload's progress")
+        XCTAssertFalse(app.buttons["sendButton"].isEnabled, "the message waits for the upload")
+        XCTAssertTrue(app.staticTexts["Ready to send"].appears(timeout: 5))
+
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("What happens here?")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(any("videoChip", app).disappears(timeout: 5), "it went with the message")
+        XCTAssertTrue(any("chatVideo", app).appears(timeout: 5), "an inline player")
+        XCTAssertTrue(any("chatVideo", app).label.contains("0:06"), any("chatVideo", app).label)
+        XCTAssertTrue(app.staticTexts["What happens here?"].exists)
+        XCTAssertFalse(app.buttons["retrySend"].exists)
+    }
+
     /// The agent screen shows the agent's group and its projects, main first.
     func testAgentDetailsShowGroupAndProjects() {
         let app = launch()
@@ -929,7 +956,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(any("deliveryWaiting", app).label, "Waiting for the Lead to assign #44")
         XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
-        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 5 tickets done")
         // The tickets sit below the card and the progress.
         for _ in 0..<3 where !any("ticketRow-QA", app).exists { app.swipeUp() }
         for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
@@ -1041,6 +1068,41 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["needsYouProject-api"].exists)
         loft.tap()
         XCTAssertEqual(loft.value as? String, "Collapsed")
+    }
+
+    /// #176: Settings › Backups shows the last backup and its error, Back up now clears it, and iCloud Drive is one
+    /// tap after the privacy warning. A failing backup's Needs you item has Back up now too.
+    func testBackupsInSettingsAndNeedsYou() {
+        let app = launch(["-fixture-backup-failed"])
+        app.buttons["Settings"].firstMatch.tap()
+        let now = app.buttons["backUpNow"]
+        for _ in 0..<10 where !now.isHittable { app.swipeUp() }
+        XCTAssertTrue(now.isHittable)
+        XCTAssertTrue(any("backupLast", app).label.contains("2 days ago"), any("backupLast", app).label)
+        XCTAssertTrue(any("backupError", app).label.contains("can't create /Volumes/Backup/Loft backups"))
+        now.tap()
+        XCTAssertTrue(any("backupError", app).disappears(timeout: 5), "a good backup clears the error")
+        XCTAssertFalse(any("backupLast", app).label.contains("2 days ago"))
+
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "stored by Apple", app).appears(timeout: 3), "the warning comes first")
+        app.buttons["Use iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "com~apple~CloudDocs/Loft backups", app).appears(timeout: 5))
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["This Mac"].tap()
+        XCTAssertTrue(text(containing: "Application Support/Loft/backups", app).appears(timeout: 5))
+
+        app.terminate()
+        let again = launch(["-fixture-backup-failed"])
+        again.buttons["needsYouSeeAll"].firstMatch.tap()
+        let item = any("needsYou-backup_failed", again)
+        XCTAssertTrue(any("needsYou-permission", again).appears(timeout: 5))
+        for _ in 0..<6 where !item.exists { again.swipeUp() }
+        XCTAssertTrue(item.exists)
+        XCTAssertTrue(item.staticTexts["Loft's backups are failing"].exists)
+        item.buttons["Back up now"].tap()
+        XCTAssertTrue(item.disappears(timeout: 5), "the item clears")
     }
 
     /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.

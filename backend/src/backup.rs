@@ -20,6 +20,8 @@ use crate::state::AppState;
 
 /// Under the home folder, when Settings names no other.
 const DEFAULT_DIR: &str = "Library/Application Support/Loft/backups";
+/// iCloud Drive's own folder under the home folder, there only once iCloud Drive is on.
+const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
 /// A backup's folder name: when it was made, in local time.
 const NAME: &str = "%Y-%m-%d_%H%M%S";
 const KEEP_DAILY: usize = 7;
@@ -38,6 +40,8 @@ pub struct Status {
     pub dir: PathBuf,
     pub last: Option<Last>,
     pub error: Option<Failure>,
+    /// iCloud Drive → Loft backups, Settings' one-click choice; none when iCloud Drive is off on this Mac.
+    pub icloud: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -60,6 +64,18 @@ pub fn dir(s: &crate::settings::Settings) -> PathBuf {
         "" => dirs::home_dir().unwrap_or_default().join(DEFAULT_DIR),
         d => PathBuf::from(d),
     }
+}
+
+/// The iCloud Drive choice for this Mac's user.
+fn icloud() -> Option<PathBuf> {
+    dirs::home_dir().and_then(|h| icloud_in(&h))
+}
+
+/// iCloud Drive's "Loft backups" folder under `home`, when iCloud Drive is on there. The folder itself is made
+/// by the first backup; iCloud Drive's is never made, or backups would sit in a folder that doesn't sync.
+fn icloud_in(home: &Path) -> Option<PathBuf> {
+    let drive = home.join(ICLOUD_DRIVE);
+    drive.is_dir().then(|| drive.join("Loft backups"))
 }
 
 /// Backs up `db` (and `settings`, when there is one) into a new folder under `root` named for `at`, and
@@ -259,7 +275,7 @@ pub async fn scheduler(state: AppState) {
         if state.rt.lock().unwrap().backup.dir != root {
             let r = root.clone();
             let last = tokio::task::spawn_blocking(move || newest(&r)).await.unwrap_or(None);
-            state.rt.lock().unwrap().backup = Status { dir: root, last, error: None };
+            state.rt.lock().unwrap().backup = Status { dir: root, last, ..Default::default() };
         }
         let go = {
             let rt = state.rt.lock().unwrap();
@@ -276,13 +292,15 @@ pub async fn get(State(state): State<AppState>) -> Json<Status> {
     let mut s = state.rt.lock().unwrap().backup.clone();
     // Before the first tick, or right after Settings moved the folder.
     s.dir = dir(&state.settings.get());
+    s.icloud = icloud();
     Json(s)
 }
 
 /// `POST /api/backups`: Back up now. Answers once it's done: the status, or a 500 with the error (which
 /// `GET` then shows too).
 pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
-    let s = run(&state).await;
+    let mut s = run(&state).await;
+    s.icloud = icloud();
     match s.error {
         Some(e) => Err(crate::api::ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.message)),
         None => Ok(Json(s)),
@@ -481,6 +499,7 @@ mod tests {
                 dir: "/Volumes/Gone/backups".into(),
                 last: last_hours_ago.map(|h| Last { at: now - chrono::Duration::hours(h), bytes: 1, path: PathBuf::new() }),
                 error: failed.then(|| Failure { message: "can't create /Volumes/Gone/backups".into(), at: Local::now() }),
+                icloud: None,
             };
         };
         set(Some(47), true);
@@ -497,6 +516,36 @@ mod tests {
         assert_eq!(items(&st)[0]["id"], id, "the same item while retries keep failing");
         set(None, true);
         assert_eq!(items(&st).len(), 1, "never a good one");
+    }
+
+    #[tokio::test]
+    async fn icloud_drive_is_offered_only_when_it_is_on_and_takes_the_next_backup() {
+        let home = temp();
+        assert_eq!(icloud_in(&home), None, "iCloud Drive off: no choice, and nothing made");
+        std::fs::create_dir_all(home.join(ICLOUD_DRIVE)).unwrap();
+        let icloud = icloud_in(&home).expect("iCloud Drive on");
+        assert_eq!(icloud, home.join("Library/Mobile Documents/com~apple~CloudDocs/Loft backups"));
+        assert!(!icloud.exists(), "the first backup makes it");
+
+        // Chosen in Settings, like any folder, then the next backup lands there in the same layout.
+        let st = crate::tasks::tests::state();
+        let put = |dir: &Path| crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "backup_dir": dir })));
+        assert!(put(&icloud).await.is_ok());
+        let s = now(State(st.clone())).await.expect("a good backup").0;
+        let last = s.last.expect("a backup");
+        assert_eq!(last.path.parent(), Some(icloud.as_path()));
+        assert!(NaiveDateTime::parse_from_str(&last.path.file_name().unwrap().to_string_lossy(), NAME).is_ok(), "a dated folder");
+        assert!(last.path.join("loft.db").is_file() && last.path.join("settings.json").is_file());
+        assert_eq!((mode(&icloud), mode(&last.path)), (0o700, 0o700));
+
+        // The same checks as any folder: iCloud Drive linked into Loft's folder, or in a repo, is refused.
+        let into_loft = temp().join("home");
+        std::fs::create_dir_all(st.cfg.storage_dir.join("agent-1")).unwrap();
+        std::fs::create_dir_all(into_loft.join("Library/Mobile Documents")).unwrap();
+        std::os::unix::fs::symlink(st.cfg.storage_dir.join("agent-1"), into_loft.join(ICLOUD_DRIVE)).unwrap();
+        assert!(put(&icloud_in(&into_loft).unwrap()).await.is_err(), "through a symlink into Loft");
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert!(put(&home.join(ICLOUD_DRIVE).join("Other backups")).await.is_err_and(|e| e.1.contains("git repository")));
     }
 
     #[tokio::test]
@@ -527,5 +576,13 @@ mod tests {
         // A client that doesn't know the field keeps it.
         let _ = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir }))).await.unwrap();
         assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
+        // The iPhone sends only the folder: everything else stays as saved, even when changed on the web since.
+        let mut web = st.settings.get();
+        web.ssh_host = "mac.example".into();
+        st.settings.save(web).unwrap();
+        let before = st.settings.get();
+        assert!(put("/Volumes/Other".into()).await.is_ok());
+        let _ = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "backup_dir": "/Volumes/Disk/Loft backups" }))).await.unwrap();
+        assert_eq!(st.settings.get(), before, "only the folder changed, and back");
     }
 }

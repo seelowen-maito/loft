@@ -32,6 +32,7 @@ mod setup;
 mod signing;
 mod simulator;
 mod state;
+mod sweep;
 mod system;
 mod tailnet;
 mod tags;
@@ -45,7 +46,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
@@ -134,6 +134,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
+    tokio::spawn(sweep::scheduler(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))
@@ -152,6 +153,9 @@ async fn serve() -> anyhow::Result<()> {
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
+        .route("/agents/{id}/workspace-size", get(api::workspace_size))
+        .route("/workspaces", get(sweep::sizes))
+        .route("/workspaces/clean", post(sweep::clean))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/messages/{mid}/start-delivery", post(delivery::start_from_card))
@@ -159,7 +163,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/deliveries/resume", post(delivery::resume_route))
-        .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1)))
+        .route("/agents/{id}/uploads", post(uploads::upload))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
@@ -218,6 +222,7 @@ async fn serve() -> anyhow::Result<()> {
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.
         .fallback_service(ServeDir::new(&dist).fallback(ServeFile::new(dist.join("index.html"))))
+        .layer(compression())
         .with_state(state.clone());
 
     let addr = format!("127.0.0.1:{}", state.cfg.port);
@@ -228,4 +233,79 @@ async fn serve() -> anyhow::Result<()> {
     println!("  github:   {}", if github::token(&state).is_some() { "token found" } else { "no token (public repos only, 60 req/h)" });
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Gzip or brotli, as the client asks, for text bodies of 1 KB and up: JSON, JS, CSS, HTML and SVG. Images,
+/// video and event streams go as they are, so live updates aren't held back to fill a compressed block.
+fn compression() -> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate> {
+    use tower_http::compression::{CompressionLayer, CompressionLevel, Predicate, predicate::SizeAbove};
+    let text = |_: axum::http::StatusCode, _: axum::http::Version, h: &axum::http::HeaderMap, _: &axum::http::Extensions| {
+        let ty = h.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let ty = ty.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        matches!(ty.as_str(), "application/json" | "text/javascript" | "application/javascript" | "text/css" | "text/html" | "image/svg+xml")
+    };
+    // Brotli's default (its best) takes seconds on a large list; 4 compresses about as well as gzip's best, fast.
+    CompressionLayer::new().quality(CompressionLevel::Precise(4)).compress_when(SizeAbove::new(1024).and(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn text_is_compressed_when_asked_and_images_video_small_bodies_and_events_are_not() {
+        let st = tasks::tests::state();
+        for i in 0..40 {
+            tasks::create(&st, &json!({ "title": format!("Issue number {i}"), "body": "Some words that repeat. ".repeat(20) }), "user").unwrap();
+        }
+        let dist = std::env::temp_dir().join(format!("loft-dist-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dist).unwrap();
+        for f in ["app.js", "app.css", "pic.png", "clip.mp4"] {
+            std::fs::write(dist.join(f), "x".repeat(4096)).unwrap();
+        }
+        let app = Router::new()
+            .nest("/api/issues", tasks::routes())
+            .route("/api/info", get(api::info))
+            .route("/api/events", get(api::events))
+            .fallback_service(ServeDir::new(&dist))
+            .layer(compression())
+            .with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // Built without reqwest's decompression: bodies arrive as sent.
+        let http = reqwest::Client::new();
+        let get = |path: &str, accept: &str| {
+            let req = http.get(format!("{base}{path}"));
+            if accept.is_empty() { req } else { req.header("accept-encoding", accept) }
+        };
+        let encoding = |r: &reqwest::Response| r.headers().get("content-encoding").map(|v| v.to_str().unwrap().to_string());
+
+        let plain = get("/api/issues", "").send().await.unwrap();
+        assert_eq!(encoding(&plain), None);
+        let plain = plain.bytes().await.unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&plain).unwrap().as_array().unwrap().len() == 40);
+        for enc in ["gzip", "br"] {
+            let r = get("/api/issues", enc).send().await.unwrap();
+            assert_eq!(encoding(&r).as_deref(), Some(enc));
+            let n = r.bytes().await.unwrap().len();
+            assert!(n * 4 < plain.len(), "{enc}: {n} of {} bytes", plain.len());
+        }
+        for path in ["/app.js", "/app.css"] {
+            assert_eq!(encoding(&get(path, "gzip, br").send().await.unwrap()).as_deref(), Some("br"), "{path}");
+        }
+        for path in ["/pic.png", "/clip.mp4", "/api/info"] {
+            let r = get(path, "gzip, br").send().await.unwrap();
+            assert!(r.status().is_success(), "{path}: {}", r.status());
+            assert_eq!(encoding(&r), None, "{path}");
+        }
+        assert!(get("/api/info", "").send().await.unwrap().content_length().unwrap() < 1024, "/api/info isn't small any more");
+
+        // The event stream's first message arrives right away, uncompressed.
+        let mut r = get("/api/events", "gzip, br").send().await.unwrap();
+        assert_eq!(encoding(&r), None);
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), r.chunk()).await.expect("the stream is held back").unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("connected"), "{first:?}");
+    }
 }

@@ -24,6 +24,14 @@ export function fmtNum(n: number): string {
   return String(n);
 }
 
+/** Disk size in decimal units, like Finder: 980 KB, 4.2 MB, 12 GB. */
+export function fmtBytes(n: number): string {
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return i === 0 ? `${n} bytes` : `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 export function fmtInterval(min: number): string {
   if (!min) return "manual";
   if (min % 1440 === 0) return `every ${min / 1440}d`;

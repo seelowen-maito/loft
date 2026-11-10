@@ -84,6 +84,12 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
     owners
 }
 
+/// The agents with a process still alive, like a detached dev server.
+pub fn with_live_processes(storage: &Path) -> HashSet<String> {
+    let owners = owners(storage);
+    table().iter().filter_map(|p| owners.get(&session_of(p.pid)?).cloned()).collect()
+}
+
 /// The process session of `pid`, if it is alive.
 fn session_of(pid: i32) -> Option<i32> {
     let sid = unsafe { libc::getsid(pid) };

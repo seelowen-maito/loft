@@ -1,13 +1,13 @@
 import { useState, type Dispatch, type DragEvent, type SetStateAction } from "react";
 import { api } from "./api";
 import type { Attachment } from "./useDraft";
+import { attachable } from "./video";
 
 /** The API's limits: 3.75 MB raw (5 MB base64), and it scales anything bigger than 1568 px down anyway. */
 const MAX_IMAGE_BYTES = 3_750_000;
 const MAX_IMAGE_EDGE = 1568;
 export const MAX_IMAGES = 10;
 const SENDABLE = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
 /** The image as-is when the API takes it, else redrawn to fit: PNG keeps screenshots sharp, JPEG if that's still too big. */
 async function prepareImage(f: File): Promise<Blob> {
   const bmp = await createImageBitmap(f).catch(() => {
@@ -27,25 +27,26 @@ async function prepareImage(f: File): Promise<Blob> {
   throw new Error("Image is too large");
 }
 
-/** Starts uploading the images among `all` for `agent`, each shown at once as an attachment, up to MAX_IMAGES with those `have` already.
- * Returns what to tell the user about the files left out, or null. */
-export function attachImages(agent: string, all: File[], have: number, setAttachments: Dispatch<SetStateAction<Attachment[]>>, per = "message"): string | null {
-  const images = all.filter((f) => f.type.startsWith("image/"));
-  const files = images.slice(0, MAX_IMAGES - have);
+/** Starts uploading the images (and with `videos`, the videos) among `all` for `agent`, each shown at once as an attachment,
+ * up to MAX_IMAGES with those `have` already. Returns what to tell the user about the files left out, or null. */
+export function attachImages(agent: string, all: File[], have: number, setAttachments: Dispatch<SetStateAction<Attachment[]>>, per = "message", videos = false): string | null {
+  const { ok, why } = attachable(all, videos);
+  const files = ok.slice(0, MAX_IMAGES - have);
   for (const f of files) {
     const key = crypto.randomUUID();
-    setAttachments((a) => [...a, { key, preview: URL.createObjectURL(f) }]);
+    const video = f.type.startsWith("video/");
+    setAttachments((a) => [...a, { key, preview: URL.createObjectURL(f), video }]);
     const update = (u: Partial<Attachment>) => setAttachments((a) => a.map((x) => (x.key === key ? { ...x, ...u } : x)));
-    prepareImage(f)
+    (video ? Promise.resolve<Blob>(f) : prepareImage(f))
       .then((blob) => api.upload(agent, blob))
       .then((r) => update({ file: r.file }), (e) => update({ error: (e as Error).message }));
   }
-  return files.length < images.length ? `Up to ${MAX_IMAGES} images per ${per}.`
-    : images.length < all.length ? "Only images can be attached." : null;
+  return files.length < ok.length ? `Up to ${MAX_IMAGES} attachments per ${per}.` : why;
 }
 
 /** The images on a paste, taken instead of the text: copying an image from a page also puts its address on the clipboard. */
 export function pastedImages(e: { clipboardData: DataTransfer; preventDefault: () => void }): File[] {
+  // Videos are attached by the button or drag and drop; a paste only takes images.
   const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
   if (files.length > 0) e.preventDefault();
   return files;

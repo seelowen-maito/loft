@@ -7,7 +7,9 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
   (after 36 hours it stops waiting for a quiet moment). Settings → Backups → **Back up now** makes one at once.
 - **How:** SQLite's `VACUUM INTO`, a consistent copy while Loft writes, then `PRAGMA integrity_check` on the copy.
 - **Where:** `~/Library/Application Support/Loft/backups`, or the folder set in Settings → Backups (a full
-  path outside the Loft folder and outside any git repository, symlinks resolved, such as an external disk or an iCloud Drive folder). Each backup is a folder
+  path outside the Loft folder and outside any git repository, symlinks resolved, such as an external disk or an iCloud Drive folder). Settings offers
+  **iCloud Drive** in one click, on the web and the iPhone: `~/Library/Mobile Documents/com~apple~CloudDocs/Loft backups`,
+  when iCloud Drive is on (`GET /api/backups`'s `icloud`). Each backup is a folder
   named for when it was made, `2026-11-08_031500/`, holding `loft.db` and `settings.json`. Back up now twice in the same second returns the one just made.
 - **Privacy:** owner-only: folders `0700`, files `0600`. `settings.json` holds your GitHub token if you saved one.
   An iCloud Drive (or Dropbox, Google Drive…) folder sends every backup off this Mac: all your chats and
