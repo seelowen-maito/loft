@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, Loader2, RotateCw } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type LeftProcess, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
@@ -194,6 +194,9 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
 function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours: (v: number) => void }) {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
   const [devices, setDevices] = useState<AgentDevice[] | null>(null);
+  // What idle agents left running, by agent id, and the agent whose Stop them is working.
+  const [left, setLeft] = useState<Record<string, LeftProcess[]>>({});
+  const [stopping, setStopping] = useState<string | null>(null);
   // The open list: whose (an agent's id, or "all"), its items, and the paths ticked.
   const [preview, setPreview] = useState<Picker | null>(null);
   // The log on screen: live while cleaning, then the summary.
@@ -204,7 +207,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
   const [remeasuring, setRemeasuring] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
   const card = useRef<HTMLDivElement>(null);
-  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices))]);
+  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices)), api.leftRunning().then(setLeft)]);
   useEffect(() => {
     load().then(() => {
       // Needs you links here when the disk is almost full.
@@ -222,6 +225,18 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
       setErr((e as Error).message);
     } finally {
       setLoading(null);
+    }
+  };
+  const stopThem = async (id: string) => {
+    setStopping(id);
+    setErr(null);
+    try {
+      await api.stopLeftRunning(id);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setStopping(null);
     }
   };
   const confirm = async () => {
@@ -283,8 +298,32 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
                   {r.busy ? "Working" : "Clean"}
                 </button>
               </li>
-            ))}
+              ))}
           </ul>
+        )}
+        {rows.some((r) => left[r.id]?.length && !r.busy) && (
+          <div className="space-y-2 text-[12.5px]">
+            {rows.filter((r) => left[r.id]?.length && !r.busy).map((r) => (
+              <div key={r.id} className="space-y-1 rounded-xl border border-line px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="min-w-0 flex-1 text-fg-2">
+                    {r.name}: {left[r.id].length} process{left[r.id].length === 1 ? "" : "es"} still running
+                  </span>
+                  <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={stopping !== null || busy} onClick={() => stopThem(r.id)}>
+                    {stopping === r.id ? "Stopping…" : "Stop them"}
+                  </button>
+                </div>
+                <ul className="space-y-0.5 text-fg-3">
+                  {left[r.id].map((p) => (
+                    <li key={p.pid} className="flex gap-3">
+                      <span className="min-w-0 flex-1 truncate font-mono" title={p.command}>{p.command}</span>
+                      <span className="shrink-0 tabular-nums">{timeAgo(Date.now() / 1000 - p.age_secs).replace(" ago", "")}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
         )}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">

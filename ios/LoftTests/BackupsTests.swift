@@ -77,11 +77,20 @@ final class BackupsTests: XCTestCase {
         XCTAssertNil(log.title, "an older Mac's log has no title")
     }
 
+    /// Settings › Disk lists what an idle agent left running, and counts it; an agent is busy only in a run.
+    func testDecodesWhatIdleAgentsLeftRunning() throws {
+        let sizes = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(#"{"agents":[{"id":"a","name":"Dev","bytes":5,"busy":false,"processes":2}],"free_bytes":9,"low_disk_bytes":20}"#.utf8))
+        XCTAssertEqual(sizes.agents.first?.processes, 2)
+        let left = try JSONCoding.decoder.decode([String: [LeftProcess]].self, from: Data(#"{"a-1":[{"pid":41,"command":"node vite","age_secs":21600},{"pid":42,"command":"tail -f x","age_secs":90}]}"#.utf8))
+        XCTAssertEqual(left["a-1"]?.map(\.pid), [41, 42])
+        XCTAssertEqual(left["a-1"]?.map(\.ageText), ["6 h", "1 min"])
+    }
+
     /// Settings › Disk lists agents' Simulator devices; the clean log says which device was deleted or shut down.
     func testDecodesAgentDevicesAndTheirLogLines() throws {
         let json = #"{"devices":[{"udid":"U1","name":"Loft Dev (Loft)","state":"Booted","bytes":2878722048,"agent":{"id":"a","name":"Loft Dev"}},{"udid":"U2","name":"Loft Lead (Loft)","state":"Shutdown","bytes":5,"agent":{"id":"b","name":"Loft Lead"}}]}"#
         let d = try JSONCoding.decoder.decode(AgentDevices.self, from: Data(json.utf8)).devices
-        XCTAssertEqual(d.map(\.agent.name), ["Loft Dev", "Loft Lead"])
+        XCTAssertEqual(d.map(\.title), ["Loft Dev", "Loft Lead"])
         XCTAssertEqual(d.map(\.stateText), ["Booted", "Shut down"])
         XCTAssertEqual(d.first?.bytes, 2_878_722_048)
 
