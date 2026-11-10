@@ -1285,10 +1285,12 @@ impl Db {
         self.0.lock().unwrap().query_row("SELECT COUNT(*) FROM paired_clients", [], |r| r.get(0)).unwrap_or(0)
     }
 
-    /// Whether a client with this token hash is paired; counts as its use.
+    /// Whether a client with this token hash is paired; counts as its use, written at most once a minute.
     pub fn use_paired_client(&self, hash: &str) -> bool {
-        let now = now();
-        self.0.lock().unwrap().execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now, hash]).is_ok_and(|n| n > 0)
+        let c = self.0.lock().unwrap();
+        let Ok(last) = c.query_row("SELECT last_used_at FROM paired_clients WHERE hash = ?1", params![hash], |r| r.get::<_, Option<String>>(0)) else { return false };
+        let fresh = last.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).is_some_and(|t| Utc::now().signed_duration_since(t) < chrono::Duration::seconds(60));
+        fresh || c.execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now(), hash]).is_ok()
     }
 
     /// Every paired client as (token hash, name, paired, last used), most recently used first.

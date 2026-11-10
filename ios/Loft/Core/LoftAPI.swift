@@ -87,8 +87,10 @@ protocol LoftAPI: Sendable {
     /// Settings › Disk: every workspace's size and the free space, and Clean: removes the build output of one
     /// agent (`agentId`) or of every idle agent (nil), whatever its age.
     func workspaceSizes() async throws -> WorkspaceSizes
-    /// What Clean (one agent) or Clean all with nil would remove; `clean` removes the folders kept ticked.
-    func cleanPreview(agentId: String?) async throws -> CleanPlan
+    /// What Clean (one agent) or Clean all with nil lists; `clean` removes the paths ticked.
+    func cleanPreview(agentId: String?) async throws -> [CleanItem]
+    /// The folders in `rel` inside one of the agent's main clones.
+    func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem]
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog
     /// The running or last clean's log, the daily sweep's included.
     func cleanLog() async throws -> CleanLog
@@ -383,8 +385,13 @@ struct LiveLoftAPI: LoftAPI {
 
     func backups() async throws -> BackupStatus { try await get("/backups") }
     func workspaceSizes() async throws -> WorkspaceSizes { try await get("/workspaces") }
-    func cleanPreview(agentId: String?) async throws -> CleanPlan {
-        try await get("/workspaces/clean/preview", query: agentId.map { [URLQueryItem(name: "agent", value: $0)] } ?? [])
+    func cleanPreview(agentId: String?) async throws -> [CleanItem] {
+        let l: CleanListing = try await get("/workspaces/clean/preview", query: agentId.map { [URLQueryItem(name: "agent", value: $0)] } ?? [])
+        return l.items
+    }
+    func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] {
+        let l: CleanListing = try await get("/workspaces/clean/folders", query: [URLQueryItem(name: "agent", value: agentId), URLQueryItem(name: "rel", value: rel)])
+        return l.items
     }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let body: JSONValue = .object(["agent": agentId.map { .string($0) } ?? .null, "paths": .array(paths.map { .string($0) })])
@@ -522,7 +529,8 @@ extension LoftAPI {
     func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
-    func cleanPreview(agentId: String?) async throws -> CleanPlan { throw APIError.unsupported("Disk usage") }
+    func cleanPreview(agentId: String?) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
+    func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
