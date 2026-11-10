@@ -416,7 +416,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -685,6 +685,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                                  lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
                                                                command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
                                                  skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
+    }
+    func agentDevices() async throws -> [AgentDevice] {
+        try check()
+        return [
+            AgentDevice(udid: "24B1D07C-CFC2-4DCE-8367-F4B9D9347656", name: "Loft Dev (Loft)", state: "Booted", bytes: 2_878_722_048, agent: .init(id: "a1", name: "Loft Dev")),
+            AgentDevice(udid: "B478038F-179F-4CD2-9B0D-CD3FD7405EC8", name: "Loft Lead (Loft)", state: "Shutdown", bytes: 2_474_229_760, agent: .init(id: "a3", name: "Loft Lead")),
+        ]
     }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {
         try check()

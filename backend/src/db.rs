@@ -663,7 +663,7 @@ CREATE TABLE IF NOT EXISTS paired_clients (
     created_at TEXT NOT NULL,
     last_used_at TEXT NOT NULL
 );
--- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
+-- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it, and its row goes once the device has.
 CREATE TABLE IF NOT EXISTS agent_devices (
     agent_id TEXT PRIMARY KEY,
     udid TEXT NOT NULL
@@ -1027,7 +1027,7 @@ impl Db {
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [id])?;
-        c.execute("DELETE FROM agent_devices WHERE agent_id = ?1", [id])?;
+        // Its device's row stays until the device is gone, so Loft knows it for an orphan (simulator::tidy).
         Ok(())
     }
 
@@ -1043,7 +1043,14 @@ impl Db {
         Ok(())
     }
 
-    /// Every agent device, as (UDID, agent id).
+    /// Forgets a deleted device.
+    pub fn forget_agent_device(&self, udid: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM agent_devices WHERE udid = ?1", [udid])?;
+        Ok(())
+    }
+
+    /// Every agent device, deleted agents' included until their device is gone, as (UDID, agent id).
     pub fn agent_devices(&self) -> Result<Vec<(String, String)>> {
         let c = self.0.lock().unwrap();
         let mut st = c.prepare("SELECT udid, agent_id FROM agent_devices")?;

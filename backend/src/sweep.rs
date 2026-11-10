@@ -114,6 +114,9 @@ pub struct Line {
     pub error: Option<String>,
     #[serde(default)]
     pub command: String,
+    /// What was done when it isn't a removal, like "Shut down" for a Simulator device; empty for a removal.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub done: String,
 }
 
 /// A run's log: each removal as it happens, what was skipped, and the totals.
@@ -273,7 +276,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
                     let bytes = size(&path);
                     let command = rm_command(&path);
                     let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&path).err() };
-                    log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command });
+                    log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command, done: String::new() });
                 }
             }
             show(&st, &log);
@@ -352,6 +355,18 @@ pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str
     tracing::info!("sweep freed {} bytes in {} folders, {} failed", log.freed_bytes, log.removed, log.failed);
     *SIZES.lock().unwrap() = None;
     log
+}
+
+/// Saves `lines` as a run of its own (`what`, like "Simulator cleanup"), the log Settings shows, after any sweep or
+/// clean in progress.
+pub async fn record(state: &AppState, what: &'static str, lines: Vec<Line>) {
+    let _one = RUNNING.lock().await;
+    let mut log = Log { at: Some(Local::now()), what: what.into(), title: what.into(), ..Default::default() };
+    for l in lines {
+        log.push(l);
+    }
+    show(state, &log);
+    save(&state.cfg.storage_dir, &log);
 }
 
 /// The day's sweep, the first right after Loft starts.
@@ -644,7 +659,7 @@ fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &
     for f in folders {
         let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
         let bytes = if error.is_none() { f.bytes } else { 0 };
-        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command });
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done: String::new() });
     }
 }
 

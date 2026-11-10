@@ -5,7 +5,7 @@
 //! agent asks for it, and deletes with the agent, so two agents never install over each other.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -217,10 +217,115 @@ pub async fn delete_agent_device(state: &AppState, agent_id: &str) {
     // A booted device can't be deleted.
     let _ = run_simctl(state, ["shutdown", &udid]).await;
     match run_simctl(state, ["delete", &udid]).await {
-        Ok(o) if o.status.success() => {}
+        Ok(o) if o.status.success() => {
+            let _ = state.db.forget_agent_device(&udid);
+        }
+        // Its row stays: the tidy tries again.
         Ok(o) => tracing::warn!("couldn't delete Simulator device {udid}: {}", String::from_utf8_lossy(&o.stderr).trim()),
         Err(e) => tracing::warn!("couldn't delete Simulator device {udid}: {e}"),
     }
+}
+
+/// How often orphaned and idle agents' devices are looked for.
+const TIDY_EVERY: Duration = Duration::from_secs(10 * 60);
+
+/// What a device is to Loft, by its name and UDID: `None` when it isn't an agent's (the user's own, like "iPhone 17"),
+/// else the agent it belongs to, or `Some(None)` for an orphan: the device Loft made for an agent since deleted, or
+/// one named for a live agent under the old scheme, "<agent name> <8 hex digits>" (like "Loft Dev 93543007"). A
+/// "<name> (Loft)" device this Loft didn't make is left alone: another Loft on this Mac (a demo) may own it.
+fn owner<'a>(name: &str, udid: &str, agents: &'a [Agent], kept: &HashMap<String, String>) -> Option<Option<&'a Agent>> {
+    if let Some(id) = kept.get(udid) {
+        return Some(agents.iter().find(|a| a.id == *id));
+    }
+    let old = name.rsplit_once(' ').is_some_and(|(who, hex)| hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) && agents.iter().any(|a| a.name == who));
+    old.then_some(None)
+}
+
+/// Deletes orphaned agent devices and shuts down the booted devices of idle agents (see [`crate::agents::idle`]),
+/// leaving every other device alone. Returns a line per deletion or shutdown, for the clean log.
+pub async fn tidy(state: &AppState) -> Vec<crate::sweep::Line> {
+    let Ok(all) = simctl_json(state, &["list", "devices"]).await else { return vec![] };
+    let agents = state.db.list_agents().unwrap_or_default();
+    let kept: HashMap<String, String> = state.db.agent_devices().unwrap_or_default().into_iter().collect();
+    let mut lines = vec![];
+    for (_, d) in devices(&all) {
+        let (Some(udid), Some(name)) = (d["udid"].as_str(), d["name"].as_str()) else { continue };
+        if !valid_udid(udid) {
+            continue;
+        }
+        let booted = d["state"] == "Booted";
+        let delete = match owner(name, udid, &agents, &kept) {
+            None => continue,
+            Some(None) => true,
+            // Asked again right here, so a run that just started keeps its device.
+            Some(Some(a)) if booted && crate::agents::idle(state, a, std::time::SystemTime::now()) => false,
+            Some(Some(_)) => continue,
+        };
+        // A booted device can't be deleted.
+        let steps: Vec<&str> = [booted.then_some("shutdown"), delete.then_some("delete")].into_iter().flatten().collect();
+        let mut error = None;
+        for step in &steps {
+            if let Err(e) = simctl_ok(state, [step, udid]).await {
+                error = Some(e);
+                break;
+            }
+        }
+        let command = steps.iter().map(|a| format!("xcrun simctl {a} {udid}")).collect::<Vec<_>>().join(" && ");
+        let bytes = if delete && error.is_none() { device_bytes(d) } else { 0 };
+        if delete && error.is_none() {
+            let _ = state.db.forget_agent_device(udid);
+        }
+        let done = if delete { "Deleted" } else { "Shut down" };
+        // An old-scheme device goes under the agent it is named for.
+        let named = name.rsplit_once(' ').and_then(|(who, _)| agents.iter().find(|a| a.name == who)).map(|a| a.id.clone());
+        let agent = kept.get(udid).cloned().or(named).unwrap_or_default();
+        let path = d["dataPath"].as_str().and_then(|p| Path::new(p).parent()).map_or_else(|| udid.into(), Path::to_path_buf);
+        lines.push(crate::sweep::Line { agent, path, rel: name.to_string(), bytes, error, command, done: done.into() });
+    }
+    lines
+}
+
+/// Runs a `simctl` subcommand, its error output as the error.
+async fn simctl_ok<const N: usize>(state: &AppState, args: [&str; N]) -> Result<(), String> {
+    match run_simctl(state, args).await? {
+        o if o.status.success() => Ok(()),
+        o => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+    }
+}
+
+/// The disk space a device takes, as simctl reports it.
+fn device_bytes(d: &Value) -> u64 {
+    d["dataPathSize"].as_u64().unwrap_or(0) + d["logPathSize"].as_u64().unwrap_or(0)
+}
+
+/// Tidies agents' devices every few minutes, the first right after Loft starts; each run that did something is
+/// the clean log's.
+pub async fn tidier(state: AppState) {
+    let mut tick = tokio::time::interval(TIDY_EVERY);
+    loop {
+        tick.tick().await;
+        let lines = tidy(&state).await;
+        if !lines.is_empty() {
+            crate::sweep::record(&state, "Simulator cleanup", lines).await;
+        }
+    }
+}
+
+/// `GET /api/simulator/devices`: agents' devices for Settings → Disk, biggest first:
+/// `{ devices: [{ udid, name, state, bytes, agent: { id, name } }] }`, none with no Xcode.
+pub async fn agent_devices(State(state): State<AppState>) -> Json<Value> {
+    let all = simctl_json(&state, &["list", "devices"]).await.unwrap_or_default();
+    let agents = state.db.list_agents().unwrap_or_default();
+    let kept: HashMap<String, String> = state.db.agent_devices().unwrap_or_default().into_iter().collect();
+    let mut list: Vec<Value> = devices(&all)
+        .into_iter()
+        .filter_map(|(_, d)| {
+            let a = owner(d["name"].as_str()?, d["udid"].as_str()?, &agents, &kept)??;
+            Some(json!({ "udid": d["udid"], "name": d["name"], "state": d["state"], "bytes": device_bytes(d), "agent": { "id": a.id, "name": a.name } }))
+        })
+        .collect();
+    list.sort_by_key(|d| std::cmp::Reverse(d["bytes"].as_u64()));
+    Json(json!({ "devices": list }))
 }
 
 #[derive(Deserialize)]
@@ -409,7 +514,7 @@ case "$1" in
       [ -f "$f" ] || continue
       state=$(sed -n 1p "$f"); name=$(sed -n 2p "$f")
       [ "$3" = booted ] && [ "$state" != Booted ] && continue
-      printf '%s{"udid":"%s","name":"%s","state":"%s","isAvailable":true,"deviceTypeIdentifier":"%s"}' "$sep" "$(basename "$f")" "$name" "$state" "$(sed -n 3p "$f")"
+      printf '%s{"udid":"%s","name":"%s","state":"%s","isAvailable":true,"deviceTypeIdentifier":"%s","dataPath":"/sim/%s/data","dataPathSize":%s}' "$sep" "$(basename "$f")" "$name" "$state" "$(sed -n 3p "$f")" "$(basename "$f")" "$(sed -n 4p "$f" | grep . || echo 0)"
       sep=,
     done
     echo ']}}';;
@@ -417,9 +522,9 @@ case "$1" in
   boot|shutdown|rename|delete)
     f="$dir/$2"; [ -f "$f" ] || { echo "Invalid device: $2" >&2; exit 1; }
     case "$1" in
-      boot) printf 'Booted\n%s\n%s\n' "$(sed -n 2p "$f")" "$(sed -n 3p "$f")" > "$f.new";;
-      shutdown) printf 'Shutdown\n%s\n%s\n' "$(sed -n 2p "$f")" "$(sed -n 3p "$f")" > "$f.new";;
-      rename) printf '%s\n%s\n%s\n' "$(sed -n 1p "$f")" "$3" "$(sed -n 3p "$f")" > "$f.new";;
+      boot) { echo Booted; sed -n 2,4p "$f"; } > "$f.new";;
+      shutdown) { echo Shutdown; sed -n 2,4p "$f"; } > "$f.new";;
+      rename) { sed -n 1p "$f"; echo "$3"; sed -n 3,4p "$f"; } > "$f.new";;
       delete) [ "$(sed -n 1p "$f")" = Booted ] && { echo "Unable to delete a booted device" >&2; exit 1; }; rm "$f"; exit 0;;
     esac
     mv "$f.new" "$f";;
@@ -514,6 +619,122 @@ esac
     async fn listed(st: &AppState) -> Value {
         let body = axum::body::to_bytes(booted(State(st.clone())).await.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    /// A device in the fake as if made outside Loft: its UDID.
+    fn device(st: &AppState, name: &str, state: &str, bytes: u64) -> String {
+        let udid = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let dir = mkdir(st.cfg.xcrun.parent().unwrap().join("sim"));
+        std::fs::write(dir.join(&udid), format!("{state}\n{name}\ncom.apple.CoreSimulator.SimDeviceType.iPhone-17\n{bytes}\n")).unwrap();
+        udid
+    }
+
+    fn state_of(st: &AppState, udid: &str) -> Option<String> {
+        fake_devices(st).into_iter().find(|d| d.0 == udid).map(|d| d.1)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn orphaned_agent_devices_are_deleted_and_no_other_device_is_touched() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let a = crate::tasks::tests::agent(&st, "Loft Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        let kept = device(&st, "Loft Dev (Loft)", "Booted", 3_000_000_000);
+        st.db.set_agent_device(&a.id, &kept).unwrap();
+        let old = device(&st, "Loft Dev 93543007", "Booted", 2_000_000_000);
+        let deleted = crate::tasks::tests::agent(&st, "Deleted Agent");
+        let gone = device(&st, "Deleted Agent (Loft)", "Shutdown", 1_000_000_000);
+        st.db.set_agent_device(&deleted.id, &gone).unwrap();
+        st.db.delete_agent(&deleted.id).unwrap();
+        let users = [
+            // Another Loft's on this Mac (a demo's): not this one's to delete.
+            device(&st, "Loft Dev (Loft)", "Shutdown", 5),
+            device(&st, "iPhone 17", "Booted", 7),
+            device(&st, "QA clone", "Shutdown", 7),
+            device(&st, "Someone 93543007", "Shutdown", 7),
+            device(&st, "Loft Dev 9354300", "Shutdown", 7),
+            device(&st, "Loft Dev 9354300z", "Shutdown", 7),
+        ];
+
+        let lines = tidy(&st).await;
+        let mut done: Vec<(&str, &str, &str, u64)> = lines.iter().map(|l| (l.rel.as_str(), l.done.as_str(), l.command.as_str(), l.bytes)).collect();
+        done.sort();
+        let cmd_old = format!("xcrun simctl shutdown {old} && xcrun simctl delete {old}");
+        let cmd_gone = format!("xcrun simctl delete {gone}");
+        assert_eq!(done, [
+            ("Deleted Agent (Loft)", "Deleted", cmd_gone.as_str(), 1_000_000_000),
+            ("Loft Dev 93543007", "Deleted", cmd_old.as_str(), 2_000_000_000),
+        ]);
+        assert!(lines.iter().all(|l| l.error.is_none() && l.path.ends_with(l.command.rsplit(' ').next().unwrap())), "{lines:?}");
+        let left: Vec<String> = fake_devices(&st).into_iter().map(|d| d.0).collect();
+        for u in users.iter().chain([&kept]) {
+            assert!(left.contains(u), "{u} stays");
+        }
+        assert_eq!(left.len(), users.len() + 1);
+        assert_eq!(state_of(&st, &kept).as_deref(), Some("Booted"), "a running agent's device stays up");
+        assert_eq!(state_of(&st, &users[1]).as_deref(), Some("Booted"), "the user's own device stays up");
+        assert_eq!(lines.iter().find(|l| l.rel == "Loft Dev 93543007").unwrap().agent, a.id, "under the agent it was named for");
+        assert!(tidy(&st).await.is_empty(), "nothing left to do");
+        assert_eq!(st.db.agent_devices().unwrap(), [(kept, a.id)], "a deleted device is forgotten");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_agent_s_device_is_shut_down_after_the_timeout_never_during_a_run() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let udid = device(&st, "Builder (Loft)", "Booted", 9);
+        st.db.set_agent_device(&a.id, &udid).unwrap();
+        let ago = |h: i64| Some((Utc::now() - chrono::Duration::hours(h)).to_rfc3339());
+        use chrono::Utc;
+
+        // Started 3 hours ago: under the 4-hour default.
+        st.db.update_agent(&a.id, |x| x.last_run_at = ago(3)).unwrap();
+        assert!(tidy(&st).await.is_empty());
+        // Started 5 hours ago, but still running.
+        st.db.update_agent(&a.id, |x| x.last_run_at = ago(5)).unwrap();
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        assert!(tidy(&st).await.is_empty(), "never during a run");
+        // That run ended a minute ago.
+        st.rt.lock().unwrap().running.remove(&a.id);
+        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(60));
+        assert!(tidy(&st).await.is_empty(), "the timeout counts from the run's end");
+        assert_eq!(state_of(&st, &udid).as_deref(), Some("Booted"));
+        // The timeout is a setting.
+        let mut s = st.settings.get();
+        s.idle_timeout_hours = 1;
+        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(2 * 3600));
+        st.settings.save(s).unwrap();
+        let lines = tidy(&st).await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!((lines[0].agent.as_str(), lines[0].done.as_str(), lines[0].bytes), (a.id.as_str(), "Shut down", 0));
+        assert_eq!(lines[0].command, format!("xcrun simctl shutdown {udid}"));
+        assert_eq!(state_of(&st, &udid).as_deref(), Some("Shutdown"), "shut down, not deleted");
+        assert!(tidy(&st).await.is_empty(), "a shut-down device is left alone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_lists_agents_devices_with_their_size_and_state_and_the_tidy_is_logged() {
+        let mut st = crate::tasks::tests::state();
+        fake_xcrun(&mut st);
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let b = crate::tasks::tests::agent(&st, "Tester");
+        let small = device(&st, "Builder (Loft)", "Booted", 100);
+        let big = device(&st, "Tester (Loft)", "Shutdown", 200);
+        st.db.set_agent_device(&a.id, &small).unwrap();
+        st.db.set_agent_device(&b.id, &big).unwrap();
+        device(&st, "iPhone 17", "Booted", 300);
+        let Json(v) = agent_devices(State(st.clone())).await;
+        assert_eq!(v, json!({ "devices": [
+            { "udid": big, "name": "Tester (Loft)", "state": "Shutdown", "bytes": 200, "agent": { "id": b.id, "name": "Tester" } },
+            { "udid": small, "name": "Builder (Loft)", "state": "Booted", "bytes": 100, "agent": { "id": a.id, "name": "Builder" } },
+        ] }));
+
+        // Both never ran: Builder's booted device is shut down, and the log says so.
+        let lines = tidy(&st).await;
+        crate::sweep::record(&st, "Simulator cleanup", lines).await;
+        let axum::Json(log) = crate::sweep::log(State(st.clone())).await;
+        assert_eq!((log.what.as_str(), log.lines.len(), log.lines[0].done.as_str(), log.lines[0].rel.as_str()), ("Simulator cleanup", 1, "Shut down", "Builder (Loft)"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

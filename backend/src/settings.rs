@@ -38,6 +38,8 @@ pub struct Settings {
     pub push: Push,
     /// Where the daily backups go (see backup.rs). Empty: `~/Library/Application Support/Loft/backups`.
     pub backup_dir: String,
+    /// Hours with no run after which an agent counts as idle: Loft then shuts its Simulator device down.
+    pub idle_timeout_hours: u32,
 }
 
 impl Settings {
@@ -87,6 +89,7 @@ impl Default for Settings {
             comment_approval_default: "ask".into(),
             push: Push::default(),
             backup_dir: String::new(),
+            idle_timeout_hours: 4,
         }
     }
 }
@@ -132,6 +135,9 @@ impl Store {
         let backups = Path::new(s.backup_dir.trim());
         if !s.backup_dir.trim().is_empty() && (!backups.is_absolute() || backups.components().any(|c| c == std::path::Component::ParentDir)) {
             bail!("Backups folder must be a full path, like /Volumes/Disk/Loft backups");
+        }
+        if s.idle_timeout_hours == 0 {
+            bail!("Idle timeout must be at least 1 hour");
         }
         let tmp = self.path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
@@ -226,6 +232,15 @@ mod tests {
         first.projects_dir = dir.join("projects");
         s.save(first).unwrap();
         assert_eq!((mode(&fresh), mode(&fresh.join("settings.json"))), (0o700, 0o600));
+    }
+
+    #[test]
+    fn the_idle_timeout_defaults_to_4_hours_and_is_at_least_1() {
+        let s = store(r#"{ "projects_dir": "PROJECTS" }"#);
+        assert_eq!(s.get().idle_timeout_hours, 4, "settings saved before it");
+        let mut zero = s.get();
+        zero.idle_timeout_hours = 0;
+        assert!(s.save(zero).is_err());
     }
 
     #[test]

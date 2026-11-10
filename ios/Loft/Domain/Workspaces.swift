@@ -74,9 +74,17 @@ struct CleanLog: Codable, Hashable {
         var bytes: Int64
         var error: String?
         var command: String
+        /// What was done when it isn't a removal, like "Shut down" a Simulator device (`rel` is its name); nil for a removal.
+        var done: String?
         var id: String { path }
         /// Past tense like the log's header: "Removed /path (2.2 GB)" or "failed /path: why".
-        var text: String { error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))" }
+        var text: String {
+            if let done, !done.isEmpty {
+                let what = "\(done) Simulator device \(rel)"
+                return error.map { "failed: \(what): \($0)" } ?? (bytes > 0 ? "\(what) (\(bytesText(bytes)))" : what)
+            }
+            return error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))"
+        }
     }
 
     var at: Date?
@@ -90,6 +98,27 @@ struct CleanLog: Codable, Hashable {
     var freedBytes: Int64
     var removed: Int
     var failed: Int
+}
+
+/// `GET /api/simulator/devices`: an agent's Simulator device, its size on disk and whether it is booted.
+struct AgentDevice: Codable, Hashable, Identifiable {
+    struct Owner: Codable, Hashable {
+        var id: String
+        var name: String
+    }
+
+    var udid: String
+    var name: String
+    /// "Booted" or "Shutdown", as simctl says.
+    var state: String
+    var bytes: Int64
+    var agent: Owner
+    var id: String { udid }
+    var stateText: String { state == "Booted" ? "Booted" : "Shut down" }
+}
+
+struct AgentDevices: Codable, Hashable {
+    var devices: [AgentDevice]
 }
 
 /// A size as Settings › Disk says it: "0 bytes", never "Zero KB".

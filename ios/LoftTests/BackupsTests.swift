@@ -59,6 +59,24 @@ final class BackupsTests: XCTestCase {
         XCTAssertNil(log.title, "an older Mac's log has no title")
     }
 
+    /// Settings › Disk lists agents' Simulator devices; the clean log says which device was deleted or shut down.
+    func testDecodesAgentDevicesAndTheirLogLines() throws {
+        let json = #"{"devices":[{"udid":"U1","name":"Loft Dev (Loft)","state":"Booted","bytes":2878722048,"agent":{"id":"a","name":"Loft Dev"}},{"udid":"U2","name":"Loft Lead (Loft)","state":"Shutdown","bytes":5,"agent":{"id":"b","name":"Loft Lead"}}]}"#
+        let d = try JSONCoding.decoder.decode(AgentDevices.self, from: Data(json.utf8)).devices
+        XCTAssertEqual(d.map(\.agent.name), ["Loft Dev", "Loft Lead"])
+        XCTAssertEqual(d.map(\.stateText), ["Booted", "Shut down"])
+        XCTAssertEqual(d.first?.bytes, 2_878_722_048)
+
+        let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
+        {"at":"2026-11-10T13:21:00+00:00","what":"Simulator cleanup","title":"Simulator cleanup","running":false,
+         "lines":[{"agent":"","path":"/sim/U3","rel":"Loft Dev 93543007","bytes":700,"error":null,"command":"xcrun simctl delete U3","done":"Deleted"},
+                  {"agent":"a","path":"/sim/U1","rel":"Loft Dev (Loft)","bytes":0,"error":null,"command":"xcrun simctl shutdown U1","done":"Shut down"},
+                  {"agent":"","path":"/sim/U4","rel":"Gone (Loft)","bytes":0,"error":"busy","command":"xcrun simctl delete U4","done":"Deleted"}],
+         "skipped":[],"freed_bytes":700,"removed":2,"failed":1}
+        """#.utf8))
+        XCTAssertEqual(log.lines.map(\.text), ["Deleted Simulator device Loft Dev 93543007 (\(bytesText(700)))", "Shut down Simulator device Loft Dev (Loft)", "failed: Deleted Simulator device Gone (Loft): busy"])
+    }
+
     /// Sizes read "0 bytes", never "Zero KB".
     func testSizesReadZeroBytes() {
         XCTAssertEqual(bytesText(0), "0 bytes")
