@@ -7,6 +7,7 @@ mod db;
 mod delivery;
 mod file_search;
 mod devices;
+mod git_check;
 mod github;
 mod github_inbox;
 mod greenfield;
@@ -97,6 +98,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/workspaces/clean", post(sweep::clean))
         .route("/workspaces/clean/preview", get(sweep::preview))
         .route("/workspaces/clean/folders", get(sweep::folders))
+        .route("/workspaces/clean/check", post(git_check::check))
         .route("/workspaces/log", get(sweep::log))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
