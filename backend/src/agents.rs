@@ -480,6 +480,8 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review, and never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
+- Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
+- If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
 - When your PR is merged: `git fetch --prune origin`, `git switch --detach origin/<base>`, then `git branch -d <branch>` (never `-D`: git refuses if it isn't merged, and then you leave it and say so). If you used a worktree for it, `git worktree remove <path>` without `--force`.
 {team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
@@ -1779,6 +1781,10 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         for key in ["`git fetch origin`", "`git switch -c <branch> origin/<base>`", "`origin/HEAD`", "`git pull --ff-only`"] {
+            assert!(p.contains(key), "{key}");
+        }
+        // Before handing work in: merge the base (never rebase), and fetch from GitHub, not a local checkout.
+        for key in ["`git merge origin/<base>`", "merge, not rebase", "re-run the tests", "`git remote set-url origin <the project's GitHub URL>`"] {
             assert!(p.contains(key), "{key}");
         }
         // After the merge: prune, then a safe delete only.

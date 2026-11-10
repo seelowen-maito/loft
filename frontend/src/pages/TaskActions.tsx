@@ -191,8 +191,12 @@ const TONE: Record<DeliveryTone, string> = {
 /** Where a started Delivery stands: running, stalled (and why), paused, needs you, final review or done. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
   const line = deliveryStateLine(d);
-  if (!line) return null;
-  return <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>;
+  return (
+    <>
+      {line && <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>}
+      {d?.behind && <div className="mt-1 text-[12.5px] text-warn" data-delivery-behind>{d.behind.count} behind {d.behind.base}: the Dev merges it in before submitting.</div>}
+    </>
+  );
 }
 
 /** Pause and Resume on a Delivery's card. Pause stops the run working on a running Delivery and sends no more

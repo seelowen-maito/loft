@@ -394,6 +394,8 @@ pub struct PullRequest {
     /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
     pub kind: String,
     pub kind_sha: String,
+    /// Commits on the base branch the head doesn't have, from GitHub's compare; 0 when up to date or unknown.
+    pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
 }

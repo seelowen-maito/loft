@@ -858,6 +858,43 @@ fn refuse_paused(d: &Delivery) -> Result<(), String> {
     Err(format!("The Delivery of {} is paused: the user paused it, so Loft took nothing in. Stop here: when they resume it, Loft wakes the agent its step waits on with what's already done.", subject(d)))
 }
 
+/// The PR Loft tracks for the Delivery, if it has one on GitHub.
+fn tracked_pr(state: &AppState, d: &Delivery) -> Option<crate::db::PullRequest> {
+    let n = d.pr.filter(|_| !d.local)?;
+    state.db.list_pull_requests(None).ok()?.into_iter().find(|p| p.slug == d.repo && p.number == n)
+}
+
+/// Refuses a submission whose branch is behind the base of its PR, by GitHub's compare (Loft runs no git in
+/// agents' clones), and keeps the count on the PR for its card and the Delivery's. When Loft can't tell (no
+/// PR, or GitHub didn't answer) it lets the submission through.
+async fn refuse_behind(state: &AppState, d: &Delivery) -> Result<(), String> {
+    let Some(mut pr) = tracked_pr(state, d).filter(|p| !p.base_ref.is_empty() && !d.branch.is_empty()) else { return Ok(()) };
+    let v = match crate::github::get(state, &format!("/repos/{}/compare/{}...{}", d.repo, pr.base_ref, d.branch)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("delivery {}#{}: couldn't compare `{}` with `{}`: {e}", d.repo, d.spec, d.branch, pr.base_ref);
+            return Ok(());
+        }
+    };
+    let behind = v["behind_by"].as_i64().unwrap_or(0);
+    if behind != pr.behind_by {
+        pr.behind_by = behind;
+        if state.db.save_pull_request(&pr).is_ok() {
+            crate::prs::emit(state, &pr);
+            changed(state, d);
+        }
+    }
+    if behind == 0 {
+        return Ok(());
+    }
+    let base = &pr.base_ref;
+    Err(format!(
+        "`{}` is {behind} commit{} behind origin/{base}, so Loft took nothing in: `git fetch origin`, `git merge origin/{base}` into it (merge, not rebase), resolve any conflicts, re-run the tests, push, then submit again.",
+        d.branch,
+        if behind == 1 { "" } else { "s" },
+    ))
+}
+
 /// The tickets being built or in review on `slug`, for a refusal.
 fn in_progress(state: &AppState, slug: &str) -> String {
     let ds = state.db.deliveries(slug, true).unwrap_or_default();
@@ -889,6 +926,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let who = state.db.get_agent(builder_id(&d, t)).ok().flatten().map_or("another agent".to_string(), |a| a.name);
         return Err(format!("{name} is with {who}: only the agent building it submits it."));
     }
+    refuse_behind(state, &d).await?;
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
     let d = unstalled(state, d);
     let d = update(state, &slug, d.spec, |d| {
@@ -1839,6 +1877,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
         "agent_name": dev.as_ref().map(|a| a.name.clone()),
         "pr": d.pr,
+        "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
         v["spec"] = json!(true);
@@ -2009,6 +2048,9 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     }
     if d.dev != me.id {
         return Some(Err(format!("{n}'s fixes are with another agent: only the agent fixing it submits them.")));
+    }
+    if let Err(e) = refuse_behind(state, &d).await {
+        return Some(Err(e));
     }
     let Some(cr) = with_role(state, &d, "code_reviewer") else {
         return Some(Err("The team has no Code reviewer any more: ask the user to look at the spec PR.".into()));

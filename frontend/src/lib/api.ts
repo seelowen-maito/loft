@@ -127,6 +127,8 @@ export type IssueDelivery = {
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
   waiting_on_you?: number[];
+  /** Its open PR's branch is behind its base by `count` commits; null when it isn't. An older server doesn't send it. */
+  behind?: { count: number; base: string } | null;
 };
 
 export type Task = {
@@ -403,6 +405,8 @@ export type PullRequest = {
   created_at: string;
   /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
   labels?: string[];
+  /** Commits on the base the branch doesn't have; 0 when up to date. An older server doesn't send it. */
+  behind_by?: number;
 };
 
 export type AgentSummary = {
