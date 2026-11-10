@@ -775,6 +775,36 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     func cancelPairing(secret: String) async throws {}
 
+    /// Paired devices on fixture data: this iPhone plus two others.
+    private var clients = [
+        PairedClient(id: "c1", name: "iPhone", pairedAt: Date(timeIntervalSinceNow: -6 * 86_400), lastUsedAt: Date(), this: true),
+        PairedClient(id: "c2", name: "Chrome on Mac", pairedAt: Date(timeIntervalSinceNow: -7 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -1_500), this: false),
+        PairedClient(id: "c3", name: "Safari on iOS", pairedAt: Date(timeIntervalSinceNow: -13 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -9 * 86_400), this: false),
+    ]
+
+    func pairedClients() async throws -> [PairedClient] {
+        try check()
+        guard locked({ paired }) else {
+            Pairing.reportUnpaired()
+            throw APIError.server(status: 401, message: "pair this client with Loft first")
+        }
+        return locked { clients }
+    }
+
+    /// Forgetting this iPhone unpairs it: the next request is refused, like Loft does.
+    func forgetClient(id: String) async throws {
+        try check()
+        locked {
+            if clients.contains(where: { $0.id == id && $0.this }) { paired = false }
+            clients.removeAll { $0.id == id }
+        }
+    }
+
+    func unpairAll() async throws {
+        try check()
+        locked { clients.removeAll { !$0.this } }
+    }
+
     func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
         try check()
         return locked {

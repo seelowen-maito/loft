@@ -40,6 +40,15 @@ struct PairingStart: Decodable, Equatable {
     var expiresIn: Int?
 }
 
+/// A browser or iPhone paired with Loft (`GET /api/paired-clients`); `this` is the one asking.
+struct PairedClient: Decodable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var pairedAt: Date
+    var lastUsedAt: Date
+    var this: Bool
+}
+
 /// `POST /api/pair/poll`: `pending`, `denied`, `gone` (expired, cancelled or already collected), or `allowed`
 /// with the token, once.
 struct PairingPoll: Decodable, Equatable {

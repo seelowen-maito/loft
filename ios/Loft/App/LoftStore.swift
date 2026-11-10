@@ -1008,6 +1008,10 @@ final class LoftStore {
         IssueSettings(try await requireWrite().serverSettings())
     }
 
+    func pairedClients() async throws -> [PairedClient] { try await requireWrite().pairedClients() }
+    func forgetClient(id: String) async throws { try await requireWrite().forgetClient(id: id) }
+    func unpairAll() async throws { try await requireWrite().unpairAll() }
+
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     func saveIssueSettings(_ s: IssueSettings) async throws {
         let api = try requireWrite()

@@ -84,6 +84,10 @@ protocol LoftAPI: Sendable {
     func startPairing(name: String) async throws -> PairingStart
     func pollPairing(secret: String) async throws -> PairingPoll
     func cancelPairing(secret: String) async throws
+    /// Paired devices (#170): the list, Forget this device, and Unpair all (every client but this one).
+    func pairedClients() async throws -> [PairedClient]
+    func forgetClient(id: String) async throws
+    func unpairAll() async throws
 }
 
 struct LiveLoftAPI: LoftAPI {
@@ -345,6 +349,12 @@ struct LiveLoftAPI: LoftAPI {
 
     func cancelPairing(secret: String) async throws { _ = try await send("POST", "/pair/cancel", body: ["secret": .string(secret)]) }
 
+    func pairedClients() async throws -> [PairedClient] { try decode([PairedClient].self, try await send("GET", "/paired-clients")) }
+
+    func forgetClient(id: String) async throws { _ = try await send("DELETE", "/paired-clients/\(id)") }
+
+    func unpairAll() async throws { _ = try await send("POST", "/paired-clients/unpair-all", body: [:]) }
+
     func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         var req = URLRequest(url: url("/events"))
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -416,4 +426,7 @@ extension LoftAPI {
     func startPairing(name: String) async throws -> PairingStart { throw APIError.unsupported("Pairing") }
     func pollPairing(secret: String) async throws -> PairingPoll { throw APIError.unsupported("Pairing") }
     func cancelPairing(secret: String) async throws {}
+    func pairedClients() async throws -> [PairedClient] { throw APIError.unsupported("Pairing") }
+    func forgetClient(id: String) async throws { throw APIError.unsupported("Pairing") }
+    func unpairAll() async throws { throw APIError.unsupported("Pairing") }
 }

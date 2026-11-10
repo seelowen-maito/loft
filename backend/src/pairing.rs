@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -159,7 +159,7 @@ fn needs_token(method: &Method, path: &str) -> bool {
         return false;
     }
     match *method {
-        Method::GET | Method::HEAD | Method::OPTIONS => matches!(path, "/devices" | "/push" | "/settings"),
+        Method::GET | Method::HEAD | Method::OPTIONS => matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients"),
         _ => true,
     }
 }
@@ -242,6 +242,35 @@ fn answer(state: &AppState, code: &str, allow: bool) -> Result<Json<Value>, ApiE
         return Err(bad("the code has 4 digits"));
     }
     if state.pairing.decide(code, allow) { Ok(Json(json!({ "ok": true }))) } else { Err(not_found()) }
+}
+
+/// A paired client's id in the list: the start of its token's hash, so the hash itself never leaves.
+fn client_id(hash: &str) -> &str {
+    &hash[..16]
+}
+
+/// `GET /api/paired-clients`: every paired client, with `this` on the one asking.
+pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let me = token_of(&headers).map(|t| hash(&t)).unwrap_or_default();
+    let clients: Vec<Value> = state
+        .db
+        .paired_clients()?
+        .into_iter()
+        .map(|(h, name, paired_at, last_used_at)| json!({ "id": client_id(&h), "name": name, "paired_at": paired_at, "last_used_at": last_used_at, "this": h == me }))
+        .collect();
+    Ok(Json(json!(clients)))
+}
+
+/// `DELETE /api/paired-clients/{id}`: Forget this device. That client is refused from its next request on.
+pub async fn forget(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    if state.db.forget_paired_client(&id)? { Ok(Json(json!({ "ok": true }))) } else { Err(not_found()) }
+}
+
+/// `POST /api/paired-clients/unpair-all`: unpairs every client but the one asking.
+pub async fn unpair_all(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    // The middleware let this through, so the request carries a paired token.
+    let me = token_of(&headers).map(|t| hash(&t)).ok_or_else(not_found)?;
+    Ok(Json(json!({ "unpaired": state.db.unpair_all_but(&me)? })))
 }
 
 /// The first client is never trusted automatically: a native dialog at the Mac, or the code typed into the
@@ -357,6 +386,9 @@ mod tests {
         ("POST", "/agents/abc/memories"),
         ("POST", "/pair/approve"),
         ("POST", "/pair/deny"),
+        ("GET", "/paired-clients"),
+        ("DELETE", "/paired-clients/abc"),
+        ("POST", "/paired-clients/unpair-all"),
     ];
 
     #[tokio::test]
@@ -513,6 +545,59 @@ mod tests {
         assert_eq!(req("GET", &format!("{base}/api/devices"), Some(&token), Value::Null).await.0, 200);
         let after: String = st.db.conn().query_row("SELECT last_used_at FROM paired_clients", [], |r| r.get(0)).unwrap();
         assert!(after.as_str() > "2000-01-01T00:00:00Z" && !before.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_list_shows_each_client_and_marks_the_one_asking_without_its_hash() {
+        let (base, st) = serve().await;
+        let phone = pair(&base, &st, "iPhone").await;
+        pair(&base, &st, "Safari on Mac").await;
+        let (code, v) = req("GET", &format!("{base}/api/paired-clients"), Some(&phone), Value::Null).await;
+        assert_eq!(code, 200);
+        let list = v.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        let me = list.iter().find(|c| c["this"] == true).unwrap();
+        assert_eq!(me["name"], "iPhone");
+        assert!(me["paired_at"].is_string() && me["last_used_at"].is_string());
+        assert_eq!(list.iter().filter(|c| c["this"] == true).count(), 1);
+        assert_eq!(me["id"].as_str().unwrap().len(), 16, "the start of the hash, not all of it");
+        assert!(!v.to_string().contains(&hash(&phone)));
+    }
+
+    #[tokio::test]
+    async fn forget_this_device_ends_that_clients_access_on_its_next_request() {
+        let (base, st) = serve().await;
+        let phone = pair(&base, &st, "iPhone").await;
+        let mac = pair(&base, &st, "Safari on Mac").await;
+        let (_, v) = req("GET", &format!("{base}/api/paired-clients"), Some(&mac), Value::Null).await;
+        let id = v.as_array().unwrap().iter().find(|c| c["name"] == "iPhone").unwrap()["id"].as_str().unwrap().to_string();
+        assert_eq!(req("DELETE", &format!("{base}/api/paired-clients/{id}"), None, Value::Null).await.0, 401, "only a paired client unpairs");
+        assert_eq!(req("DELETE", &format!("{base}/api/paired-clients/{id}"), Some(&mac), Value::Null).await.0, 200);
+        assert_eq!(req("GET", &format!("{base}/api/devices"), Some(&phone), Value::Null).await.0, 401);
+        assert_eq!(req("GET", &format!("{base}/api/devices"), Some(&mac), Value::Null).await.0, 200);
+        assert_eq!(req("DELETE", &format!("{base}/api/paired-clients/{id}"), Some(&mac), Value::Null).await.0, 404);
+        // A client can forget itself: its very next request is refused.
+        let (_, v) = req("GET", &format!("{base}/api/paired-clients"), Some(&mac), Value::Null).await;
+        let own = v[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(req("DELETE", &format!("{base}/api/paired-clients/{own}"), Some(&mac), Value::Null).await.0, 200);
+        assert_eq!(req("GET", &format!("{base}/api/paired-clients"), Some(&mac), Value::Null).await.0, 401);
+    }
+
+    #[tokio::test]
+    async fn unpair_all_ends_every_other_clients_access_and_keeps_this_one() {
+        let (base, st) = serve().await;
+        let a = pair(&base, &st, "a").await;
+        let b = pair(&base, &st, "b").await;
+        let me = pair(&base, &st, "me").await;
+        let (code, v) = req("POST", &format!("{base}/api/paired-clients/unpair-all"), Some(&me), json!({})).await;
+        assert_eq!((code, v["unpaired"].as_i64()), (200, Some(2)));
+        for t in [&a, &b] {
+            assert_eq!(req("GET", &format!("{base}/api/settings"), Some(t), Value::Null).await.0, 401);
+        }
+        let (code, v) = req("GET", &format!("{base}/api/paired-clients"), Some(&me), Value::Null).await;
+        assert_eq!(code, 200);
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["this"], true);
     }
 
     #[tokio::test]

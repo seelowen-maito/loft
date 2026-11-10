@@ -118,7 +118,9 @@ struct SettingsView: View {
                          : store.isPaired ? "Paired" : "Not paired")
                 }
                 .accessibilityIdentifier("pairingStatus")
-                if !store.isPaired {
+                if store.isPaired {
+                    NavigationLink("Paired devices") { PairedDevicesView() }.accessibilityIdentifier("pairedDevices")
+                } else {
                     Button("Pair this iPhone") { store.showsPairing = true }.accessibilityIdentifier("pairThisIPhone")
                 }
                 Button("Reconnect") { store.reconnect() }

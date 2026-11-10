@@ -19,6 +19,7 @@ Protects against an agent, or a prompt injected into one, that uses the API the 
 ## User-only endpoints (all writes, plus the named reads)
 Push and relay: `PUT /push`, `POST /push/signin`, `POST/PATCH/DELETE /devices…`, `POST /devices/{token}/test`, `GET /push`, `GET /devices`.
 Approvals: `POST /permissions/{id}`, `POST /issues/{id}/comments/{cid}/approve|keep` (and the `/tasks` alias), `POST /pull-requests/{id}/merge`, `POST /deliveries/merge`.
+Pairing: `GET /paired-clients` (the list, with `this` on the caller), `DELETE /paired-clients/{id}` (Forget this device), `POST /paired-clients/unpair-all` (every client but the caller), `POST /pair/approve|deny`.
 Widening access: `PUT /settings` (GitHub token, `claude_bin`, comment approval mode), `POST/PATCH/DELETE /agents…` (instructions, tools, delete), `POST /restart`, `POST /system/mac-access`, `POST /simulator/input`, `POST /agents/{id}/open-editor`.
 Everything else that writes (messages, issues, runs, memories…) is covered by the default-deny rule without being listed.
 

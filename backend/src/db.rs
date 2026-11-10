@@ -1258,7 +1258,6 @@ impl Db {
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
     }
 
-    /// The database file, for backups (backup.rs), which read it through a connection of their own.
     pub fn add_paired_client(&self, hash: &str, name: &str) -> Result<()> {
         let now = now();
         self.0.lock().unwrap().execute("INSERT INTO paired_clients (hash, name, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)", params![hash, name, now])?;
@@ -1275,6 +1274,25 @@ impl Db {
         self.0.lock().unwrap().execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now, hash]).is_ok_and(|n| n > 0)
     }
 
+    /// Every paired client as (token hash, name, paired, last used), most recently used first.
+    pub fn paired_clients(&self) -> Result<Vec<(String, String, String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT hash, name, created_at, last_used_at FROM paired_clients ORDER BY last_used_at DESC")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Unpairs the client whose token hash starts with this id. False when none does.
+    pub fn forget_paired_client(&self, id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE substr(hash, 1, 16) = ?1", params![id])? > 0)
+    }
+
+    /// Unpairs every client but the one with this token hash; how many went.
+    pub fn unpair_all_but(&self, hash: &str) -> Result<usize> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE hash != ?1", params![hash])?)
+    }
+
+    /// The database file, for backups (backup.rs), which read it through a connection of their own.
     pub fn path(&self) -> Option<std::path::PathBuf> {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
     }

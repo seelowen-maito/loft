@@ -247,6 +247,9 @@ export type EndCard = {
 
 export type DeliveryStarted = { ticket: number; title?: string; agent_id: string; agent_name: string; at: string };
 
+/** A browser or iPhone paired with Loft (`/api/paired-clients`); `this` is the one asking. */
+export type PairedClient = { id: string; name: string; paired_at: string; last_used_at: string; this: boolean };
+
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
   token: string;
@@ -625,6 +628,11 @@ export const api = {
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
+  pairedClients: () => req<PairedClient[]>("GET", "/paired-clients"),
+  /** Forget this device: that client is refused from its next request on. */
+  forgetClient: (id: string) => req<{ ok: boolean }>("DELETE", `/paired-clients/${id}`),
+  /** Unpairs every client but this one. */
+  unpairAll: () => req<{ unpaired: number }>("POST", "/paired-clients/unpair-all", {}),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;

@@ -759,6 +759,30 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(app.buttons["pairThisIPhone"].exists)
     }
 
+    /// #170: Settings lists the paired devices and marks this one; Forget this device and Unpair all remove the
+    /// others, and forgetting this iPhone brings back the pairing screen.
+    func testPairedDevicesForgetAndUnpairAll() {
+        let app = launch(["-fixture-unpaired", "-fixture-pairing"])
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10))
+        XCTAssertTrue(any("pairingCode", app).disappears(timeout: 10))
+        app.buttons["settingsButton"].tap()
+        let link = app.buttons["pairedDevices"]
+        XCTAssertTrue(link.appears(timeout: 5))
+        link.tap()
+        XCTAssertTrue(any("pairedClient-c1", app).appears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).label.contains("This device"))
+        XCTAssertTrue(any("pairedClient-c2", app).exists && any("pairedClient-c3", app).exists)
+        app.buttons["forget-c3"].tap()
+        XCTAssertTrue(any("pairedClient-c3", app).disappears(timeout: 5))
+        app.buttons["unpairAll"].tap()
+        app.sheets.buttons["Unpair all"].firstMatch.tap()
+        XCTAssertTrue(any("pairedClient-c2", app).disappears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).exists, "this iPhone stays paired")
+        XCTAssertFalse(app.buttons["unpairAll"].isEnabled)
+        app.buttons["forget-c1"].tap()
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10), "forgot itself: the pairing screen is back")
+    }
+
     /// Spec #164: the demo never pairs, and says so.
     func testTheDemoRefusesToPair() {
         let app = XCUIApplication()

@@ -4,6 +4,7 @@ import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type Git
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
+import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { cx, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
@@ -457,6 +458,8 @@ export default function SettingsPage() {
         <Section title="Keyboard shortcuts">
           <ShortcutSettings />
         </Section>
+
+        <PairedClients />
 
         <PushSettings />
 
