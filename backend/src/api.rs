@@ -328,11 +328,10 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
-    if a.role == "lead" {
-        if a.team().is_empty() {
+    if a.role == "lead"
+        && a.team().is_empty() {
             return Err(bad("Only an agent with a group can be Lead: a Lead leads the agents that share its group."));
         }
-    }
     Ok(())
 }
 
@@ -504,11 +503,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     }
     crate::uploads::validate(&state, &id, &m.images)?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
-    if let Some(c) = &client_id {
-        if let Some(prev) = state.db.find_client_message(&id, c)? {
+    if let Some(c) = &client_id
+        && let Some(prev) = state.db.find_client_message(&id, c)? {
             return Ok(Json(json!({ "ok": true, "queued": false, "duplicate": true, "message": prev })));
         }
-    }
     let queued = is_running(&state, &id);
     let mut meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
     // Images go in before routing: a grill answer keeps them too.

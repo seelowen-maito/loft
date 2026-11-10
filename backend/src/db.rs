@@ -653,8 +653,7 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
             "SELECT id, data FROM agents WHERE id IN (SELECT agent_id FROM messages WHERE kind = 'run_end'
                AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL)",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (agent_id, data) in agents {
         let current = serde_json::from_str::<Value>(&data).ok().and_then(|d| d["session_id"].as_str().map(String::from));
@@ -663,10 +662,9 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
             let mut st = tx.prepare(
                 "SELECT id, kind, meta FROM messages WHERE agent_id = ?1 AND kind IN ('run_start', 'run_end', 'clear', 'resume') ORDER BY id",
             )?;
-            let rows = st
+            st
                 .query_map([&agent_id], |r| Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null))))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         // The session the runs belong to (None while unnamed), its last total, and each named session's last total.
         let mut sid: Option<String> = None;
@@ -786,8 +784,7 @@ impl Db {
             conn.execute("ALTER TABLE memories ADD COLUMN title TEXT NOT NULL DEFAULT ''", [])?;
             let old: Vec<(i64, String)> = {
                 let mut st = conn.prepare("SELECT id, content FROM memories")?;
-                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for (id, content) in old {
                 conn.execute("UPDATE memories SET title = ?1 WHERE id = ?2", params![title_from(&content), id])?;
@@ -1038,8 +1035,7 @@ impl Db {
         tx.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [agent_id])?;
         let taken: std::collections::HashSet<i64> = {
             let mut st = tx.prepare("SELECT slot FROM port_ranges")?;
-            let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            rows
+            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
         let Some(slot) = (0..slots).find(|s| !taken.contains(s) && usable(*s)) else { return Ok(None) };
         tx.execute("INSERT INTO port_ranges (slot, agent_id) VALUES (?1, ?2)", params![slot, agent_id])?;

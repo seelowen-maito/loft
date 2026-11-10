@@ -293,17 +293,17 @@ impl Drop for Unanswered<'_> {
             return;
         }
         self.state.rt.lock().unwrap().waiters.remove(&self.id);
-        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id) {
-            if r.status == "pending" {
+        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
+            && r.status == "pending" {
                 r.status = "expired".into();
                 let _ = self.state.db.save_permission(&r);
                 self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
             }
-        }
     }
 }
 
 /// `ask_permission`, waiting at most `timeout` for the user.
+#[allow(clippy::too_many_arguments)]
 pub async fn ask_permission_for(
     state: &AppState,
     agent_id: &str,
@@ -719,13 +719,13 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
 }
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
+#[allow(clippy::too_many_arguments)]
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
     if quiet && kind != "error" {
-        if kind == "run_end" {
-            if let Err(e) = state.db.add_unsaved_run_end(&meta) {
+        if kind == "run_end"
+            && let Err(e) = state.db.add_unsaved_run_end(&meta) {
                 tracing::error!("all-time spend: {e}");
             }
-        }
         return None;
     }
     add_msg(state, agent_id, rid, role, kind, content, meta)
@@ -1155,11 +1155,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     if let Some(n @ 1..) = a.max_subagents {
         cmd.env("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", n.to_string());
     }
-    if resume {
-        if let Some(sid) = &a.session_id {
+    if resume
+        && let Some(sid) = &a.session_id {
             cmd.args(["--resume", sid]);
         }
-    }
     Ok(cmd)
 }
 
@@ -1215,6 +1214,7 @@ enum RunOutcome {
     StaleSession,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
     agent_id: &str,
@@ -1266,11 +1266,10 @@ async fn run_process(
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
     // Its session id is its PID.
-    if let Some(pid) = child.id() {
-        if let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
+    if let Some(pid) = child.id()
+        && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
-    }
     {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
@@ -1533,8 +1532,8 @@ async fn run_process(
                         if ended {
                             emit_run(state, agent_id);
                         }
-                        if let Some((name, input)) = tool_calls.get(&use_id) {
-                            if ok && crate::prs::creates_pr(name, input) {
+                        if let Some((name, input)) = tool_calls.get(&use_id)
+                            && ok && crate::prs::creates_pr(name, input) {
                                 for (slug, n) in crate::github::extract_pr_links(&full) {
                                     let (state, agent_id, use_id) = (state.clone(), agent_id.to_string(), use_id.clone());
                                     tokio::spawn(async move {
@@ -1542,7 +1541,6 @@ async fn run_process(
                                     });
                                 }
                             }
-                        }
                         let text = truncate(&full, 6000);
                         let hide = quiet || tool_calls.get(&use_id).is_some_and(|(n, _)| n.starts_with("mcp__loft__grill_"));
                         run_msg(hide, state, agent_id, rid, "tool", "tool_result", &text, json!({
