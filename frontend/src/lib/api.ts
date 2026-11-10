@@ -492,17 +492,31 @@ export type WorkspaceSizes = {
 };
 /** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
 export type CleanSkip = { agent: string; rel: string; reason: string };
-/** What Clean (one agent) or Clean all would remove: build folders by agent, and what it skips. `path` is absolute;
- * `command` is the equivalent `rm -rf`, to read or copy (Loft removes by path); `note` says why it goes whatever its age. */
-export type CleanPlan = {
-  folders: { agent: string; path: string; rel: string; bytes: number; changed: string; command: string; note?: string }[];
-  skipped: CleanSkip[];
-  total_bytes: number;
+/** One thing Clean lists: a workspace's top-level item, or a folder inside a main clone. `path` is absolute; `command`
+ * is the equivalent `rm -rf`, to read or copy (Loft removes by path); `changed` is its newest file's change. `label`
+ * says why it starts unticked, `blocked` why it can't be ticked, and `opens` that it lists its own folders. */
+export type CleanItem = {
+  agent: string;
+  path: string;
+  rel: string;
+  name: string;
+  kind: "clone" | "worktree" | "folder" | "file" | "symlink";
+  bytes: number;
+  changed: string;
+  command: string;
+  label: string;
+  note: string;
+  warning: string;
+  ticked: boolean;
+  blocked: string;
+  opens: boolean;
 };
 /** A clean's log, live while `running`: each removal (or its error), what was skipped, and the totals. */
 export type CleanLog = {
   at: string | null;
   what: string;
+  /** "Cleaning Loft Tester…" while running, then "Cleaned Loft Tester"; empty in an older log. */
+  title?: string;
   running: boolean;
   lines: { agent: string; path: string; rel: string; bytes: number; error: string | null; command: string }[];
   skipped: CleanSkip[];
@@ -614,8 +628,10 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   backups: () => req<BackupStatus>("GET", "/backups"),
   workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
-  /** What Clean on one agent, or Clean all, would remove. */
-  cleanPreview: (agent?: string) => req<CleanPlan>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
+  /** What Clean on one agent, or Clean all, lists: each workspace's top-level items. */
+  cleanPreview: (agent?: string) => req<{ items: CleanItem[] }>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
+  /** The folders in `rel` inside one of the agent's main clones. */
+  cleanFolders: (agent: string, rel: string) => req<{ items: CleanItem[] }>("GET", `/workspaces/clean/folders?agent=${encodeURIComponent(agent)}&rel=${encodeURIComponent(rel)}`),
   /** Removes the previewed folders the user kept ticked. */
   clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
   /** The running or last clean's log, the daily sweep's included. */

@@ -395,16 +395,16 @@ struct SettingsView: View {
         guard store.info?.supports(.workspaces) == true else { return }
         defer { measuringDisk = false }
         disk = try? await store.workspaceSizes()
-        if store.info?.supports(.cleanPreview) == true { lastClean = try? await store.cleanLog() }
+        if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
     }
 
-    /// A Mac whose Clean previews what it removes; an older one's Clean would remove blind, so it gets none.
-    private var canClean: Bool { store.info?.supports(.cleanPreview) == true }
+    /// A Mac whose Clean lists the workspace to tick what goes; an older one's Clean works another way, so it gets none.
+    private var canClean: Bool { store.info?.supports(.cleanPicker) == true }
 
     private func diskSection(_ d: WorkspaceSizes) -> some View {
         Section {
             LabeledContent("Free") {
-                Text(d.freeBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "Unknown")
+                Text(d.freeBytes.map(bytesText) ?? "Unknown")
                     .foregroundStyle(d.isLow ? Theme.failure : .primary)
             }
             .accessibilityIdentifier("diskFree")
@@ -414,7 +414,7 @@ struct SettingsView: View {
                         if remeasuring.contains(r.id) {
                             ProgressView().accessibilityLabel("Measuring")
                         } else {
-                            Text(r.bytes.formatted(.byteCount(style: .file)))
+                            Text(bytesText(r.bytes))
                         }
                         if canClean, let busy = r.busy {
                             Button(busy ? "Working" : "Clean") { cleanSheet = .preview(agentId: r.id) }
@@ -439,8 +439,8 @@ struct SettingsView: View {
                     LabeledContent {
                         Text("View log")
                     } label: {
-                        Text("Last: \(last.what) \(at.formatted(.relative(presentation: .named)))")
-                        Text("Freed \(last.freedBytes.formatted(.byteCount(style: .file))) from \(last.removed) folder\(last.removed == 1 ? "" : "s")\(last.failed > 0 ? " · \(last.failed) failed" : "")")
+                        Text("\(last.title ?? last.what) \(at.formatted(.relative(presentation: .named)))")
+                        Text("Freed \(bytesText(last.freedBytes)) from \(last.removed) item\(last.removed == 1 ? "" : "s")\(last.failed > 0 ? " · \(last.failed) failed" : "")")
                     }
                 }
                 .accessibilityIdentifier("lastClean")
@@ -448,7 +448,7 @@ struct SettingsView: View {
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean shows the build output it would remove first; its next build starts from scratch. Source, notes and git stay. Your Mac also cleans workspaces untouched for 3 days, daily.")
+            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily.")
         }
     }
 

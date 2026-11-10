@@ -95,6 +95,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/workspaces", get(sweep::sizes))
         .route("/workspaces/clean", post(sweep::clean))
         .route("/workspaces/clean/preview", get(sweep::preview))
+        .route("/workspaces/clean/folders", get(sweep::folders))
         .route("/workspaces/log", get(sweep::log))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))

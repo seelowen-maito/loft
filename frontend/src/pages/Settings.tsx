@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanPlan, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { ChevronRight, Loader2, RotateCw } from "lucide-react";
+import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
@@ -188,12 +188,12 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   );
 }
 
-/** Disk: each agent's workspace size and the free space. Clean (one agent) and Clean all first preview the build
- * folders they'd remove, then log each removal; the last clean's log, the daily sweep's included, stays here. */
+/** Disk: each agent's workspace size and the free space. Clean (one agent) and Clean all list each workspace's
+ * top-level items for the user to tick, then log each removal; the last run's log, the daily sweep's included, stays here. */
 function Workspaces() {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
-  // The open preview: whose (an agent's id, or "all"), and the folders the user unticked.
-  const [preview, setPreview] = useState<{ who: string; plan: CleanPlan; unticked: Set<string> } | null>(null);
+  // The open list: whose (an agent's id, or "all"), its items, and the paths ticked.
+  const [preview, setPreview] = useState<Picker | null>(null);
   // The log on screen: live while cleaning, then the summary.
   const [shown, setShown] = useState<CleanLog | null>(null);
   const [last, setLast] = useState<CleanLog | null>(null);
@@ -214,7 +214,8 @@ function Workspaces() {
     setLoading(who);
     setErr(null);
     try {
-      setPreview({ who, plan: await api.cleanPreview(who === "all" ? undefined : who), unticked: new Set() });
+      const { items } = await api.cleanPreview(who === "all" ? undefined : who);
+      setPreview({ who, items, ticked: new Set(items.filter((i) => i.ticked).map((i) => i.path)) });
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -223,9 +224,10 @@ function Workspaces() {
   };
   const confirm = async () => {
     if (!preview) return;
-    const paths = preview.plan.folders.filter((f) => !preview.unticked.has(f.path)).map((f) => f.path);
+    const paths = [...preview.ticked];
     setPreview(null);
-    setShown({ at: null, what: "", running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
+    const title = preview.who === "all" ? "Cleaning all agents…" : `Cleaning ${name(preview.who)}…`;
+    setShown({ at: null, what: "", title, running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
     // The log fills in as Loft removes each folder.
     let done = false;
     const poll = setInterval(() => api.cleanLog().then((l) => l.running && !done && setShown(l)).catch(() => {}), 500);
@@ -285,7 +287,7 @@ function Workspaces() {
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
-              Last: {last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} folder{last.removed === 1 ? "" : "s"}
+              {last.title || last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
               {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
             </span>
             <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
@@ -294,7 +296,7 @@ function Workspaces() {
           </p>
         )}
         <p className="text-[12px] text-fg-3">
-          Clean removes an agent's build output (target, node_modules, …) after showing what goes; its next build starts from scratch. Source, notes and git stay. Loft also cleans workspaces untouched for 3 days, daily.
+          Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
         </p>
       </Section>
       {preview && <CleanPreview preview={preview} name={name} onChange={setPreview} onCancel={() => setPreview(null)} onConfirm={confirm} />}
@@ -361,75 +363,119 @@ function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) =
   );
 }
 
-/** Every folder Clean would remove, by agent, with its size and last change; untick any to keep it. */
+/** An open Clean: whose (an agent's id, or "all"), the items listed, and the paths ticked. */
+type Picker = { who: string; items: CleanItem[]; ticked: Set<string> };
+
+/** Every workspace's top-level items, by agent, with size, last change, kind and command; tick what to remove. A main
+ * clone opens up to its folders, loaded one level at a time. */
 function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
-  preview: { who: string; plan: CleanPlan; unticked: Set<string> };
+  preview: Picker;
   name: (id: string) => string;
-  onChange: (p: { who: string; plan: CleanPlan; unticked: Set<string> }) => void;
+  onChange: (p: Picker) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const { plan, unticked } = preview;
-  const kept = plan.folders.filter((f) => !unticked.has(f.path));
-  const total = kept.reduce((n, f) => n + f.bytes, 0);
-  const toggle = (paths: string[], on: boolean) => {
-    const u = new Set(unticked);
-    for (const p of paths) on ? u.delete(p) : u.add(p);
-    onChange({ ...preview, unticked: u });
+  // Folders listed inside opened items, by path; null while loading.
+  const [inside, setInside] = useState<Map<string, CleanItem[] | null>>(new Map());
+  const [err, setErr] = useState<string | null>(null);
+  const { items, ticked } = preview;
+  const known = [...items, ...[...inside.values()].flatMap((xs) => xs ?? [])];
+  const chosen = known.filter((i) => ticked.has(i.path));
+  const total = chosen.reduce((n, i) => n + i.bytes, 0);
+  const kept = items.reduce((n, i) => n + i.bytes, 0) - total;
+  const toggle = (path: string, on: boolean) => {
+    const t = new Set(ticked);
+    if (on) t.add(path);
+    else t.delete(path);
+    onChange({ ...preview, ticked: t });
   };
-  const agents = new Set(kept.map((f) => f.agent)).size;
+  const open = async (i: CleanItem) => {
+    const m = new Map(inside);
+    if (m.has(i.path)) {
+      m.delete(i.path);
+      return setInside(m);
+    }
+    setInside(new Map(m).set(i.path, null));
+    try {
+      const { items } = await api.cleanFolders(i.agent, i.rel);
+      setInside((cur) => new Map(cur).set(i.path, items));
+    } catch (e) {
+      setInside((cur) => { const n = new Map(cur); n.delete(i.path); return n; });
+      setErr((e as Error).message);
+    }
+  };
+  const row = (i: CleanItem, depth: number): React.ReactNode => {
+    const sub = inside.get(i.path);
+    const on = ticked.has(i.path);
+    return (
+      <li key={i.path}>
+        <div className="flex items-start gap-2" style={{ paddingLeft: depth * 18 }}>
+          {i.opens ? (
+            <button type="button" className="mt-0.5 shrink-0 text-fg-3 hover:text-fg" aria-label={sub !== undefined ? `Close ${i.name}` : `Open ${i.name}`} onClick={() => open(i)}>
+              <ChevronRight className={cx("size-4 transition-transform", sub !== undefined && "rotate-90")} />
+            </button>
+          ) : (
+            <span className="w-4 shrink-0" />
+          )}
+          <input type="checkbox" className="mt-1" aria-label={`Remove ${i.rel}`} checked={on} disabled={!!i.blocked || (i.opens && depth === 0 && !!i.label)} onChange={(e) => toggle(i.path, e.target.checked)} />
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-baseline gap-x-2">
+              <span className="min-w-0 truncate font-mono text-fg">{i.name}</span>
+              <span className="text-[11.5px] text-fg-3">{i.kind === "clone" ? "git clone" : i.kind}</span>
+              {i.label && <span className="text-[11.5px] text-accent">{i.label}</span>}
+              {i.blocked && <span className="text-[11.5px] text-warn">{i.blocked}</span>}
+              {on && i.warning && <span className="text-[11.5px] text-warn">{i.warning}</span>}
+              <span className="flex-1" />
+              <span className="shrink-0 text-[11.5px] text-fg-3">{timeAgo(i.changed)}</span>
+              <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(i.bytes)}</span>
+            </span>
+            {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
+            {i.command && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
+          </span>
+        </div>
+        {sub === null && (
+          <p className="flex items-center gap-2 py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 24 }}>
+            <Loader2 className="size-3.5 animate-spin" /> Measuring…
+          </p>
+        )}
+        {sub && (sub.length === 0 ? (
+          <p className="py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 24 }}>No folders inside.</p>
+        ) : (
+          <ul className="space-y-1.5 pt-1.5">{sub.map((c) => row(c, depth + 1))}</ul>
+        ))}
+      </li>
+    );
+  };
   return (
     <Modal onClose={onCancel}>
       <div>
         <h3 className="text-[15px] font-medium">{preview.who === "all" ? "Clean all?" : `Clean ${name(preview.who)}?`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
-          {plan.folders.length === 0
+          {items.length === 0
             ? "Nothing to remove."
-            : `Removes ${kept.length} folder${kept.length === 1 ? "" : "s"} (${fmtBytes(total)}) from ${agents} agent${agents === 1 ? "" : "s"}; their next build starts from scratch.`}
+            : `Removes ${chosen.length} item${chosen.length === 1 ? "" : "s"} (${fmtBytes(total)}) · keeps ${fmtBytes(Math.max(0, kept))}.`}
         </p>
       </div>
+      {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
-        {byAgent(plan.folders).map(([agent, folders]) => {
-          const all = folders.every((f) => !unticked.has(f.path));
-          return (
-            <div key={agent} className="space-y-1">
-              <label className="flex items-center gap-2 text-[13px] font-medium">
-                <input type="checkbox" checked={all} onChange={(e) => toggle(folders.map((f) => f.path), e.target.checked)} />
-                <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
-                <span className="shrink-0 tabular-nums">{fmtBytes(folders.reduce((n, f) => n + f.bytes, 0))}</span>
-              </label>
-              <ul className="space-y-0.5 pl-6 text-[12.5px]">
-                {folders.map((f) => (
-                  <li key={f.path}>
-                    <label className="flex items-start gap-2">
-                      <input type="checkbox" className="mt-0.5" checked={!unticked.has(f.path)} onChange={(e) => toggle([f.path], e.target.checked)} />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex gap-2">
-                          <span className="min-w-0 flex-1 truncate font-mono text-fg-2">{f.rel}</span>
-                          {f.note && <span className="hidden shrink-0 text-warn sm:inline">{f.note}</span>}
-                          <span className="hidden shrink-0 text-fg-3 sm:inline">{timeAgo(f.changed)}</span>
-                          <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(f.bytes)}</span>
-                        </span>
-                        {f.note && <span className="block text-[11.5px] text-warn sm:hidden">{f.note}</span>}
-                        <span className="block break-all font-mono text-[11.5px] text-fg-3">{f.command}</span>
-                      </span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          );
-        })}
-        <Skipped skipped={plan.skipped} name={name} />
+        {byAgent(items).map(([agent, xs]) => (
+          <div key={agent} className="space-y-1.5">
+            <p className="flex items-center gap-2 text-[13px] font-medium">
+              <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
+              <span className="shrink-0 tabular-nums">{fmtBytes(xs.reduce((n, i) => n + i.bytes, 0))}</span>
+            </p>
+            <ul className="space-y-1.5 text-[12.5px]">{xs.map((i) => row(i, 0))}</ul>
+          </div>
+        ))}
       </div>
-      {plan.folders.length > 0 && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
+      {items.length > 0 && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
       <div className="flex flex-wrap justify-end gap-2">
-        <CopyCommands items={kept} name={name} />
+        <CopyCommands items={chosen} name={name} />
         <span className="flex-1" />
         <button className="btn-ghost" onClick={onCancel}>
           Cancel
         </button>
-        <button className="btn-primary" disabled={kept.length === 0} onClick={onConfirm}>
+        <button className="btn-primary" disabled={chosen.length === 0} onClick={onConfirm}>
           Remove {fmtBytes(total)}
         </button>
       </div>
@@ -442,9 +488,9 @@ function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string
   return (
     <Modal onClose={log.running ? undefined : onClose}>
       <div>
-        <h3 className="text-[15px] font-medium">{log.running ? "Cleaning…" : `${log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
-          Freed {fmtBytes(log.freed_bytes)} · {log.removed} removed · {log.skipped.length} skipped
+          {log.running && log.lines.length === 0 ? "Removing…" : `Freed ${fmtBytes(log.freed_bytes)} · ${log.removed} removed`} · {log.skipped.length} skipped
           {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}
         </p>
       </div>

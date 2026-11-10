@@ -31,13 +31,19 @@ final class BackupsTests: XCTestCase {
         let ok = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.replacingOccurrences(of: "14300000000", with: "50000000000").utf8))
         XCTAssertFalse(ok.isLow)
 
-        let plan = try JSONCoding.decoder.decode(CleanPlan.self, from: Data(#"""
-        {"folders":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"changed":"2026-11-10T13:20:01.123456789+00:00","command":"rm -rf /s/a/loft/target"}],
-         "skipped":[{"agent":"b","rel":"","reason":"agent is working"}],"total_bytes":700}
+        let listing = try JSONCoding.decoder.decode(CleanListing.self, from: Data(#"""
+        {"items":[{"agent":"a","path":"/s/a/loft","rel":"loft","name":"loft","kind":"clone","bytes":700,"changed":"2026-11-10T13:20:01.123456789+00:00","command":"rm -rf /s/a/loft",
+                   "label":"main clone of loft","note":"Kept: this is the agent's working copy.","warning":"","ticked":false,"blocked":"","opens":true},
+                  {"agent":"a","path":"/s/a/old","rel":"old","name":"old","kind":"clone","bytes":5,"changed":"2026-11-01T12:00:00+00:00","command":"rm -rf /s/a/old",
+                   "label":"","note":"","warning":"may contain unpushed work","ticked":true,"blocked":"","opens":false},
+                  {"agent":"b","path":"/s/b/x","rel":"x","name":"x","kind":"folder","bytes":1,"changed":"2026-11-01T12:00:00+00:00","command":"rm -rf /s/b/x",
+                   "label":"","note":"","warning":"","ticked":false,"blocked":"Working","opens":false}]}
         """#.utf8))
-        XCTAssertEqual(plan.folders.map(\.rel), ["loft/target"])
-        XCTAssertEqual(plan.skipped.first?.reason, "agent is working")
-        XCTAssertEqual(plan.totalBytes, 700)
+        let items = listing.items
+        XCTAssertEqual(items.map(\.rel), ["loft", "old", "x"])
+        XCTAssertEqual(items.map(\.canTick), [false, true, false], "a main clone and a working agent's items can't be ticked")
+        XCTAssertEqual(items.map(\.ticked), [false, true, false])
+        XCTAssertEqual(items.first?.command, "rm -rf /s/a/loft")
 
         let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
         {"at":"2026-11-10T13:21:00.5+00:00","what":"Clean all","running":false,
@@ -48,7 +54,13 @@ final class BackupsTests: XCTestCase {
         XCTAssertEqual(log.lines.last?.error, "Permission denied")
         XCTAssertEqual([log.removed, log.failed], [1, 1])
         XCTAssertEqual(groupedByAgent(log.lines, \.agent).map(\.items.count), [2])
-        XCTAssertEqual(plan.folders.first?.command, "rm -rf /s/a/loft/target")
+        XCTAssertNil(log.title, "an older Mac's log has no title")
+    }
+
+    /// Sizes read "0 bytes", never "Zero KB".
+    func testSizesReadZeroBytes() {
+        XCTAssertEqual(bytesText(0), "0 bytes")
+        XCTAssertEqual(bytesText(2_200_000_000), 2_200_000_000.formatted(.byteCount(style: .file)))
     }
 
     /// "Copy commands": each agent's `rm -rf` lines under its name.

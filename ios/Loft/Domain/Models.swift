@@ -320,8 +320,8 @@ enum ServerFeature: String {
     case push
     case backups
     case workspaces
-    /// Clean previews what it removes and logs it.
-    case cleanPreview = "clean_preview"
+    /// Clean lists the workspace for the user to tick what goes, and logs it.
+    case cleanPicker = "clean_picker"
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.
