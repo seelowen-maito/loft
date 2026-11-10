@@ -1257,7 +1257,7 @@ async fn run_process(
     }
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
-    let image_line = crate::uploads::stdin_line(state, agent_id, prompt);
+    let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
     let mut cmd = build_command(state, &agent, resume)?;
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
