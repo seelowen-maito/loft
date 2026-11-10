@@ -217,7 +217,9 @@ mod tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
         let ws = crate::agents::workspace(&st, &a.id);
-        std::fs::create_dir_all(ws.join("loft/.git")).unwrap();
+        // A real clone: the sweep asks git whether it tracks the folder.
+        std::fs::create_dir_all(ws.join("loft")).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(ws.join("loft")).args(["init", "-q"]).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap().success());
         std::fs::write(ws.join("loft/Cargo.toml"), "").unwrap();
         std::fs::create_dir_all(ws.join("loft/target/debug")).unwrap();
         std::fs::write(ws.join("loft/target/debug/app"), "x").unwrap();
