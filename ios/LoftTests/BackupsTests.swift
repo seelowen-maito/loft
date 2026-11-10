@@ -65,6 +65,14 @@ final class BackupsTests: XCTestCase {
         XCTAssertEqual(bytesText(2_200_000_000), 2_200_000_000.formatted(.byteCount(style: .file)))
     }
 
+    /// Clean's Check as the Mac answers it, read with its sign; only clones and worktrees get the button.
+    func testGitCheckReadsWithItsSign() throws {
+        let c = try JSONCoding.decoder.decode(GitCheck.self, from: Data(#"{"state":"unsafe","lines":["2 commits not pushed (main)","Uncommitted changes (1 file)"]}"#.utf8))
+        XCTAssertEqual(c.text, "⚠️ 2 commits not pushed (main) · Uncommitted changes (1 file)")
+        XCTAssertEqual(GitCheck(state: "safe", lines: ["Clean, all pushed: safe to delete"]).text, "✅ Clean, all pushed: safe to delete")
+        XCTAssertEqual(GitCheck(state: "unknown", lines: ["Can't check: unusual git config"]).text, "❔ Can't check: unusual git config")
+    }
+
     /// "Copy commands": each agent's `rm -rf` lines under its name.
     func testCopyCommandsGroupsTheCommandsByAgent() {
         let items = [(agent: "a", command: "rm -rf /s/a/x"), (agent: "a", command: "rm -rf /s/a/y"), (agent: "b", command: "rm -rf /s/b/z")]
