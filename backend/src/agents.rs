@@ -478,6 +478,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 # Workspace
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
+- Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review, and never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
 {team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
 - Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
@@ -1748,6 +1749,17 @@ pub(crate) mod tests {
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn prompt_keeps_the_clone_rule_and_asks_to_reuse_one_clone_per_project() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        assert!(p.contains("Never edit them in place. To work on one, clone it into your workspace (`git clone "));
+        assert!(p.contains("or clone from its remote) and work on the clone."));
+        for key in ["reuse it for every ticket", "pull/<N>/head", "--detach", "Never clone a project again"] {
+            assert!(p.contains(key), "{key}");
+        }
     }
 
     #[test]
