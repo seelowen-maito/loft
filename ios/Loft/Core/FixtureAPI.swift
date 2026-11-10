@@ -931,7 +931,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
     private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
-                                       "auto_update": true, "messaging_rules": true,
+                                       "auto_update": true, "messaging_rules": true, "idle_timeout_hours": .number(4),
                                        "backup_dir": .string(ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? "/Volumes/Backup/Loft backups" : "")]
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []

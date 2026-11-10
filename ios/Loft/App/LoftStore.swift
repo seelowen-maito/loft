@@ -1090,6 +1090,17 @@ final class LoftStore {
         _ = try await requireWrite().putServerSettings(.object(["backup_dir": .string(dir)]))
     }
 
+    /// Settings › Disk: hours with no run before Loft stops an agent's processes and Simulator device; nil on a Mac
+    /// without it.
+    func idleTimeoutHours() async throws -> Int? {
+        try await requireWrite().serverSettings()["idle_timeout_hours"]?.numberValue.map { Int($0) }
+    }
+
+    /// Saves only the idle timeout, as `saveBackupDir` does the folder.
+    func saveIdleTimeout(hours: Int) async throws {
+        _ = try await requireWrite().putServerSettings(.object(["idle_timeout_hours": .number(Double(hours))]))
+    }
+
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {
         try await requireTasks().approveComment(taskId: c.taskId, commentId: c.id, text: text)
     }
