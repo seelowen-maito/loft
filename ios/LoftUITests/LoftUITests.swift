@@ -184,6 +184,17 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(composerValue(app), "@QA Agent ")
         XCTAssertFalse(qa.exists, "the list goes once one is picked")
 
+        // "#" lists specs, issues and PRs to tag; a pick puts its tag in the message, and the hint says both exist.
+        XCTAssertTrue(any("composerHint", app).exists)
+        field.tap()
+        field.typeText("see #")
+        let spec = app.buttons["tag-Implement settings functionality"]
+        XCTAssertTrue(spec.appears(timeout: 5), "the picker opens on #")
+        XCTAssertTrue(app.buttons["tag-Settings endpoints"].exists, "pull requests too")
+        spec.tap()
+        XCTAssertEqual(composerValue(app), "@QA Agent see #42 ", "same project: #N")
+        XCTAssertFalse(spec.exists, "the list goes once one is picked")
+
         app.buttons["Conversation options"].tap()
         // Once the menu is open, Grill me… would be in it: no waiting for something that shouldn't come.
         XCTAssertTrue(app.buttons["Agent details"].appears(timeout: 5))
