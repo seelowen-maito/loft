@@ -359,9 +359,17 @@ struct SettingsView: View {
         .errorAlert($issueSettingsError)
         .task { await loadBackups() }
         .task { await loadDisk() }
+        .task {
+            savedIdleHours = try? await store.idleTimeoutHours()
+            idleHours = savedIdleHours
+        }
         .errorAlert($backupError)
         .errorAlert($idleError)
         .task(id: idleHours) { await saveIdleHours() }
+        .onDisappear {
+            // Leaving within the debounce cancels the save above, so send it now.
+            if let h = idleHours, h != savedIdleHours { Task { try? await store.saveIdleTimeout(hours: h) } }
+        }
         .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
             Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
         } message: {
@@ -405,8 +413,6 @@ struct SettingsView: View {
         disk = try? await store.workspaceSizes()
         if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
         if store.info?.supports(.agentDevices) == true { devices = try? await store.agentDevices() }
-        savedIdleHours = try? await store.idleTimeoutHours()
-        idleHours = savedIdleHours
     }
 
     /// Saves the stepper's value once it stops changing, so tapping + five times sends one save; goes back to the
@@ -466,7 +472,8 @@ struct SettingsView: View {
                 .accessibilityIdentifier("device-\(d.udid)")
             }
             if let h = idleHours {
-                Stepper(value: Binding(get: { h }, set: { idleHours = $0 }), in: 1...168) {
+                // Web Settings has no maximum, so a larger saved value still shows.
+                Stepper(value: Binding(get: { h }, set: { idleHours = $0 }), in: 1...max(168, h)) {
                     LabeledContent("Idle timeout", value: h == 1 ? "1 hour" : "\(h) hours")
                 }
                 .disabled(!store.canWrite)
