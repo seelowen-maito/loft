@@ -50,7 +50,8 @@ struct CleanSheet: View {
                 }
             }
             .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
+            // Large, so the agent's full name fits: inline, the Remove button squeezes it to "Clean Loft…".
+            .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbar }
         }
         .interactiveDismissDisabled(log?.running == true)
@@ -158,7 +159,7 @@ struct CleanSheet: View {
                 if !i.blocked.isEmpty { Text(i.blocked).font(.caption).foregroundStyle(Theme.attentionInk) }
                 if on && !i.warning.isEmpty { Text(i.warning).font(.caption).foregroundStyle(Theme.attentionInk) }
                 if !i.note.isEmpty { Text(i.note).font(.caption).foregroundStyle(.secondary) }
-                if !i.command.isEmpty { Text(i.command).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled) }
+                if !i.shownCommand.isEmpty { Text(i.shownCommand).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled) }
             }
         }
         .padding(.leading, CGFloat(depth) * 16)
@@ -212,7 +213,7 @@ struct CleanSheet: View {
             Section(name(group.agent)) {
                 ForEach(group.items) { l in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(l.error.map { "failed \(l.path): \($0)" } ?? "remove \(l.path) (\(bytes(l.bytes)))")
+                        Text(l.text)
                             .font(.caption.monospaced())
                             .foregroundStyle(l.error == nil ? Color.primary : Theme.failure)
                         if !l.command.isEmpty {

@@ -44,6 +44,7 @@ final class BackupsTests: XCTestCase {
         XCTAssertEqual(items.map(\.canTick), [false, true, false], "a main clone and a working agent's items can't be ticked")
         XCTAssertEqual(items.map(\.ticked), [false, true, false])
         XCTAssertEqual(items.first?.command, "rm -rf /s/a/loft")
+        XCTAssertEqual(items.map(\.shownCommand), ["", "rm -rf /s/a/old", ""], "no command on what can't be removed")
 
         let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
         {"at":"2026-11-10T13:21:00.5+00:00","what":"Clean all","running":false,
@@ -52,6 +53,7 @@ final class BackupsTests: XCTestCase {
         """#.utf8))
         XCTAssertEqual(log.freedBytes, 700)
         XCTAssertEqual(log.lines.last?.error, "Permission denied")
+        XCTAssertEqual(log.lines.map(\.text), ["Removed /s/a/loft/target (\(bytesText(700)))", "failed /s/a/x/node_modules: Permission denied"])
         XCTAssertEqual([log.removed, log.failed], [1, 1])
         XCTAssertEqual(groupedByAgent(log.lines, \.agent).map(\.items.count), [2])
         XCTAssertNil(log.title, "an older Mac's log has no title")

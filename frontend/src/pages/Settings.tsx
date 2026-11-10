@@ -6,7 +6,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
-import { cx, fmtBytes, timeAgo } from "../lib/format";
+import { canTick, cleanLineText, cx, fmtBytes, shownCommand, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -417,7 +417,7 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
           ) : (
             <span className="w-4 shrink-0" />
           )}
-          <input type="checkbox" className="mt-1" aria-label={`Remove ${i.rel}`} checked={on} disabled={!!i.blocked || (i.opens && depth === 0 && !!i.label)} onChange={(e) => toggle(i.path, e.target.checked)} />
+          <input type="checkbox" className="mt-1" aria-label={`Remove ${i.rel}`} checked={on} disabled={!canTick(i, depth)} onChange={(e) => toggle(i.path, e.target.checked)} />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-baseline gap-x-2">
               <span className="min-w-0 truncate font-mono text-fg">{i.name}</span>
@@ -430,7 +430,7 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
               <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(i.bytes)}</span>
             </span>
             {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
-            {i.command && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
+            {shownCommand(i, depth) && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
           </span>
         </div>
         {sub === null && (
@@ -501,7 +501,7 @@ function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string
             <ul className="space-y-0.5 font-mono text-[12px]">
               {lines.map((l) => (
                 <li key={l.path} className="break-all">
-                  <span className={l.error ? "text-bad" : "text-fg-2"}>{l.error ? `failed ${l.path}: ${l.error}` : `remove ${l.path} (${fmtBytes(l.bytes)})`}</span>
+                  <span className={l.error ? "text-bad" : "text-fg-2"}>{cleanLineText(l)}</span>
                   {l.command && <span className="block text-[11.5px] text-fg-3">{l.command}</span>}
                 </li>
               ))}

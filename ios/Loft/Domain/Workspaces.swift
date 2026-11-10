@@ -57,6 +57,8 @@ struct CleanItem: Codable, Hashable, Identifiable {
     var id: String { path }
     /// A main clone itself can't be ticked; the folders inside it can.
     var canTick: Bool { blocked.isEmpty && !(opens && !label.isEmpty) }
+    /// The `rm -rf` shown under it; none when it can't be removed.
+    var shownCommand: String { canTick ? command : "" }
 }
 
 struct CleanListing: Codable, Hashable {
@@ -73,6 +75,8 @@ struct CleanLog: Codable, Hashable {
         var error: String?
         var command: String
         var id: String { path }
+        /// Past tense like the log's header: "Removed /path (2.2 GB)" or "failed /path: why".
+        var text: String { error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))" }
     }
 
     var at: Date?
