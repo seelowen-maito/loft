@@ -97,10 +97,10 @@ func bytesText(_ n: Int64) -> String {
     n == 0 ? "0 bytes" : n.formatted(.byteCount(style: .file))
 }
 
-/// The commands for "Copy commands": each agent's under a `# <name>` line.
+/// The commands for "Copy commands": each agent's under a `# <name>` line, kept to that line whatever the name.
 func commandsText(_ items: [(agent: String, command: String)], name: (String) -> String) -> String {
     groupedByAgent(items, \.agent)
-        .map { (["# \(name($0.agent))"] + $0.items.map(\.command)).joined(separator: "\n") }
+        .map { (["# " + String(String.UnicodeScalarView(name($0.agent).unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))] + $0.items.map(\.command)).joined(separator: "\n") }
         .joined(separator: "\n\n") + "\n"
 }
 

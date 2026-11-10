@@ -89,6 +89,11 @@ export function shownCommand(i: CleanItem, depth: number): string {
   return canTick(i, depth) ? i.command : "";
 }
 
+/** `s` without control characters, so a name stays on its one line (Clean's `# <agent>` in Copy commands). */
+export function oneLine(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
 /** Clean: a log line, past tense like its header: "Removed /path (2.2 GB)" or "failed /path: why". */
 export function cleanLineText(l: CleanLog["lines"][number]): string {
   return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;

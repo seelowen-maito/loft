@@ -69,6 +69,8 @@ final class BackupsTests: XCTestCase {
     func testCopyCommandsGroupsTheCommandsByAgent() {
         let items = [(agent: "a", command: "rm -rf /s/a/x"), (agent: "a", command: "rm -rf /s/a/y"), (agent: "b", command: "rm -rf /s/b/z")]
         XCTAssertEqual(commandsText(items) { $0 == "a" ? "Loft Dev" : "Lead" }, "# Loft Dev\nrm -rf /s/a/x\nrm -rf /s/a/y\n\n# Lead\nrm -rf /s/b/z\n")
+        // A name with a newline (a deleted agent's folder) stays on its `#` line.
+        XCTAssertEqual(commandsText([(agent: "\nrm -r ~", command: "rm -rf /s/x")]) { "Deleted agent \($0.prefix(8))" }, "# Deleted agent rm -r ~\nrm -rf /s/x\n")
     }
 
     /// `GET /api/backups` as the server answers it (chrono's local times, with an offset).
