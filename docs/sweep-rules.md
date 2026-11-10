@@ -13,9 +13,11 @@ rule("node_modules", &[]),
 
 - **folder**: a folder name, or a path from its parent, like `ios/build` or `Carthage/Build`.
 - **markers**: files that must sit in the folder's parent. The folder is build output only when at least one is
-  there. `*.csproj` matches any file ending in `.csproj`.
+  there. A `*` matches any run of characters: `*.csproj` is any file ending in `.csproj`, `requirements*.txt`
+  matches `requirements.txt` and `requirements-dev.txt`.
 - **no markers** (`&[]`) is only for names that never hold anything but rebuildable files (`node_modules`,
-  `.venv`, `DerivedData`).
+  `DerivedData`). `.venv` needs a Python project beside it (`pyproject.toml`, `requirements*.txt`, `setup.py`,
+  `setup.cfg` or `Pipfile`).
 
 ## Why the marker is required
 
@@ -24,8 +26,17 @@ checked-in release), so such a name is build output only beside a file that prov
 beside a `.csproj`, `build/` beside `build.gradle` or `pubspec.yaml`. Never delete real files: when in doubt, ask
 for a marker.
 
-The 3-day age rule, running agents and symlink handling apply to every rule the same way; a rule only says what
-is build output.
+## Never a folder git tracks
+
+Some teams commit `Pods/`, `Carthage/Build/`, `bin/` or even `node_modules/`. Before the sweep deletes a folder
+inside a clone or worktree, it asks git whether it tracks any file in it (`git ls-files`). If git does, the
+folder stays and the log lists it as skipped, "tracked by git". Git runs the way Clean's Check runs it
+(`backend/src/git_check.rs`): only when the repo's config holds nothing outside a short allowlist, on exactly its
+git folders, read-only, with a timeout. When git can't answer (an unusual config, an error, a timeout), the
+folder stays too: "git can't say whether it tracks it".
+
+The 3-day age rule, running agents, symlink handling and the tracked-folder check apply to every rule the same
+way; a rule only says what is build output.
 
 ## Worked example: adding Elixir
 
