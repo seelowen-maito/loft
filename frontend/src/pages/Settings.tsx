@@ -6,6 +6,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
+import { HerdrSetup } from "./HerdrSetup";
 import { cx, fmtBytes, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
@@ -808,6 +809,7 @@ export default function SettingsPage() {
         </Section>
 
         <PairedClients />
+        <HerdrSetup />
 
         <PushSettings />
 

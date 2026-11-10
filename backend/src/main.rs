@@ -16,6 +16,7 @@ mod pairing;
 mod planning;
 mod ports;
 mod guard;
+mod herdr;
 mod kill_guard;
 mod mac_access;
 mod mcp;
@@ -148,6 +149,12 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
         .route("/github/budget", get(github::budget))
+        // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
+        .route("/herdr", get(herdr::status))
+        .route("/herdr/setup", post(herdr::setup_local))
+        .route("/herdr/install.sh", get(herdr::install_script))
+        .route("/herdr/files/{name}", get(herdr::file))
+        .route("/herdr/bin/{platform}", get(herdr::binary))
         // GitHub requests a person's page or click makes count as `user` (a poller's have their own source).
         .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| github::as_source("user", next.run(req))))
         .layer(axum::middleware::from_fn_with_state(state.clone(), pairing::require_paired))

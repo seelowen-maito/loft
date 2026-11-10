@@ -449,6 +449,18 @@ export type AgentsSummary = {
 
 export type FileEntry = { path: string; dir: boolean; depth: number; size: number; is_repo: boolean };
 
+/** Herdr UI on this machine (`GET /api/herdr`). */
+export type HerdrStatus = {
+  herdr: { path: string; version: string | null } | null;
+  /** Loft's plugin as Herdr has it linked, if it is. */
+  linked: { root: string; enabled: boolean } | null;
+  built: boolean;
+  /** This machine's os-arch, e.g. macos-aarch64: other machines like it get a ready-made build. */
+  platform: string;
+  /** The Loft the Herdr UI client on this machine talks to. */
+  url: string | null;
+};
+
 export type UpdateStatus = {
   phase: "disabled" | "up_to_date" | "waiting" | "updating" | "error";
   current: string;
@@ -626,6 +638,9 @@ export const api = {
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  herdrStatus: () => req<HerdrStatus>("GET", "/herdr"),
+  /** Builds the client, links Loft's plugin into this machine's Herdr and opens the agents' tabs. */
+  herdrSetup: () => req<{ ok: boolean; done: string[]; message: string }>("POST", "/herdr/setup"),
   backups: () => req<BackupStatus>("GET", "/backups"),
   workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
   /** What Clean on one agent, or Clean all, lists: each workspace's top-level items. */
