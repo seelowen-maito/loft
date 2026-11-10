@@ -161,7 +161,7 @@ fn paired(state: &AppState, headers: &HeaderMap) -> bool {
     state.db.use_paired_client(&hash(&token))
 }
 
-/// What needs a paired client: every write under the API, plus reading devices, push and settings. Only the
+/// What needs a paired client: every write under the API, plus reading devices, push, settings and Clean's listings. Only the
 /// calls a client with no token must make to get one stay open.
 fn needs_token(method: &Method, path: &str) -> bool {
     let path = path.trim_end_matches('/');
@@ -169,7 +169,9 @@ fn needs_token(method: &Method, path: &str) -> bool {
         return false;
     }
     match *method {
-        Method::GET | Method::HEAD | Method::OPTIONS => matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients"),
+        Method::GET | Method::HEAD | Method::OPTIONS => {
+            matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients" | "/workspaces/clean/preview" | "/workspaces/clean/folders")
+        }
         _ => true,
     }
 }
@@ -393,6 +395,8 @@ mod tests {
         ("POST", "/agents/abc/messages"),
         ("POST", "/agents/abc/uploads"),
         ("POST", "/workspaces/clean"),
+        ("GET", "/workspaces/clean/preview"),
+        ("GET", "/workspaces/clean/folders"),
         ("POST", "/issues"),
         ("POST", "/agents/abc/run"),
         ("POST", "/agents/abc/memories"),

@@ -507,9 +507,6 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
     if parts.len() < 2 || parts[0].starts_with('.') {
         return Err("not in a workspace");
     }
-    if parts.contains(&".git") {
-        return Err("git history: never deleted");
-    }
     let mut p = root.to_path_buf();
     for (i, part) in parts.iter().enumerate() {
         p.push(part);
@@ -520,6 +517,14 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
         if i + 1 < parts.len() && !m.is_dir() {
             return Err("no longer there");
         }
+    }
+    // APFS finds a name whatever its case or Unicode form (`.GIT` is `.git`, `LOFT` is `loft`), so the names
+    // below are compared only once the path is spelled as it is on disk.
+    if p.canonicalize().ok().as_deref() != Some(p.as_path()) {
+        return Err("not the name on disk");
+    }
+    if parts.contains(&".git") {
+        return Err("git history: never deleted");
     }
     let main = mains(parts[0]).contains_key(parts[1]);
     match (parts.len(), main) {
@@ -971,6 +976,35 @@ mod tests {
         // Clean all takes any agent's.
         let l = clean_paths(&st, None, vec![other.join("scratch")]).await;
         assert_eq!((l.removed, l.lines[0].agent.as_str()), (1, b.id.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_path_spelled_unlike_the_disk_is_refused_whatever_its_case_or_unicode_form() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        let nfc = "caf\u{e9}";
+        file(&ws.join(nfc).join("x"));
+        let root = ws.parent().unwrap().to_path_buf();
+        let upper = root.join(a.id.to_uppercase());
+        let paths = vec![ws.join("loft/.GIT"), ws.join("loft/.Git/objects"), ws.join("LOFT"), ws.join("Loft/frontend"), ws.join("cafe\u{301}"), upper.join("loft"), upper.join("scratch")];
+        // Clean on the agent, and Clean all while it runs: the uppercase id names it too on APFS.
+        let l = clean_paths(&st, Some(&a.id), paths.clone()).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        let l = clean_paths(&st, None, paths).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        st.rt.lock().unwrap().running.remove(&a.id);
+        for kept in ["loft/.git/HEAD", "loft/src/main.rs", "loft/frontend/node_modules/vite/index.js", "scratch/out.json", "loft-old/src/main.rs"] {
+            assert!(ws.join(kept).exists(), "{kept} removed");
+        }
+        assert!(ws.join(nfc).join("x").exists());
+        for rel in ["loft/.GIT", "LOFT", "Loft/frontend"] {
+            assert_eq!(folders_of(&st, &a.id, rel).await.err(), Some(axum::http::StatusCode::BAD_REQUEST), "{rel} opened");
+        }
+        assert_eq!(folders_of(&st, &a.id.to_uppercase(), "loft").await.err(), Some(axum::http::StatusCode::BAD_REQUEST));
+        // The on-disk spelling still goes.
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join(nfc)]).await;
+        assert_eq!(l.removed, 1, "{l:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
