@@ -38,6 +38,8 @@ struct Agent: Codable, Identifiable, Hashable {
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
+    /// Loft's own agent, which can't be deleted (nil from older servers).
+    var builtin: Bool? = nil
     /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
     var group: String? = nil
     /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
@@ -298,6 +300,7 @@ enum ServerFeature: String {
     case needsYou = "needs_you"
     case push
     case backups
+    case workspaces
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

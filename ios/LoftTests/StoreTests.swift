@@ -50,6 +50,8 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     }
     func runNow(agentId: String) async throws {}
     func stopRun(agentId: String) async throws {}
+    var deleted: [(String, Bool)] = []
+    func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
     func restartRun(agentId: String) async throws {}
     func resetSession(agentId: String) async throws {}
     func compact(agentId: String) async throws {}
@@ -268,6 +270,17 @@ final class StoreTests: XCTestCase {
         store.apply(.agentDeleted("a1"))
         XCTAssertTrue(store.agents.isEmpty)
         store.deactivate()
+    }
+
+    /// #214: deleting an agent passes the workspace choice on and drops it from the list at once.
+    func testDeleteAgentPassesPurgeFilesAndRemovesIt() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        try await store.deleteAgent("a1", purgeFiles: true)
+        XCTAssertEqual(api.deleted.map(\.0), ["a1"])
+        XCTAssertEqual(api.deleted.map(\.1), [true])
+        XCTAssertTrue(store.agents.isEmpty)
     }
 
     /// #174: the store keeps the Deliveries by spec.

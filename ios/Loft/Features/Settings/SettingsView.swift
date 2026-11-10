@@ -65,6 +65,10 @@ struct SettingsView: View {
     @State private var backingUp = false
     @State private var confirmICloud = false
     @State private var backupError: APIError?
+    /// Settings › Disk: workspace sizes and free space; nil until loaded. `freed` is what Clean now just removed.
+    @State private var disk: WorkspaceSizes?
+    @State private var cleaning = false
+    @State private var freed: Int64?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
@@ -296,6 +300,10 @@ struct SettingsView: View {
                 backupsSection(backup)
             }
 
+            if let disk {
+                diskSection(disk)
+            }
+
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     Text("Dark").tag("dark")
@@ -328,6 +336,7 @@ struct SettingsView: View {
         .task { issueSettings = try? await store.issueSettings() }
         .errorAlert($issueSettingsError)
         .task { await loadBackups() }
+        .task { await loadDisk() }
         .errorAlert($backupError)
         .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
             Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
@@ -357,6 +366,54 @@ struct SettingsView: View {
         guard store.info?.supports(.backups) == true, let b = try? await store.backups() else { return }
         backup = b.status
         backupDir = b.backupDir
+    }
+
+    private func loadDisk() async {
+        guard store.info?.supports(.workspaces) == true else { return }
+        disk = try? await store.workspaceSizes()
+    }
+
+    private func cleanNow() {
+        Task {
+            cleaning = true
+            defer { cleaning = false }
+            do {
+                freed = try await store.cleanWorkspaces().freedBytes
+                await loadDisk()
+            } catch { backupError = APIError.from(error) }
+        }
+    }
+
+    private func diskSection(_ d: WorkspaceSizes) -> some View {
+        Section {
+            LabeledContent("Free") {
+                Text(d.freeBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "Unknown")
+                    .foregroundStyle(d.isLow ? Theme.failure : .primary)
+            }
+            .accessibilityIdentifier("diskFree")
+            ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
+                LabeledContent(r.name, value: r.bytes.formatted(.byteCount(style: .file)))
+            }
+            Button {
+                cleanNow()
+            } label: {
+                if cleaning {
+                    HStack(spacing: 8) { ProgressView(); Text("Cleaning…") }
+                } else {
+                    Text("Clean now")
+                }
+            }
+            .disabled(cleaning)
+            .accessibilityIdentifier("cleanNow")
+            if let freed {
+                Text("Freed \(freed.formatted(.byteCount(style: .file)))").font(.footnote).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("diskFreed")
+            }
+        } header: {
+            Text("Disk")
+        } footer: {
+            Text("Clean now removes build output from workspaces untouched for 3 days. Your Mac does it daily too.")
+        }
     }
 
     private func saveBackupDir(_ dir: String) {

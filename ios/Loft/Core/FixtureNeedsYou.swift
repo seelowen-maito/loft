@@ -425,4 +425,26 @@ enum FixtureNeedsYou {
  "urgency": 1
 }
 """#
+
+    /// `-fixture-disk-low`: under 20 GB free, as the server words it.
+    static let diskLow = #"""
+{
+ "actions": [
+  { "body": {}, "kind": "retry", "label": "Clean now", "method": "POST", "path": "/api/workspaces/clean" },
+  { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#workspaces" } },
+  { "body": {}, "kind": "dismiss", "label": "Dismiss", "method": "POST", "path": "/api/needs-you/disk_low/dismiss" }
+ ],
+ "age_seconds": 0,
+ "agent": null,
+ "created_at": "2026-11-09T09:00:00+00:00",
+ "id": "disk_low",
+ "links": [],
+ "reason": "14.3 GB are free where agents' workspaces live.",
+ "task_id": null,
+ "text": "Clean now removes build output from idle workspaces. Settings shows each workspace's size; deleting an agent deletes its workspace by default.",
+ "title": "Disk almost full",
+ "type": "disk_low",
+ "urgency": 1
+}
+"""#
 }

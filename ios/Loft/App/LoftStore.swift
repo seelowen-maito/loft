@@ -887,6 +887,12 @@ final class LoftStore {
     }
 
     func stopRun(_ agentId: String) async throws { try await requireWrite().stopRun(agentId: agentId) }
+    func workspaceSize(_ agentId: String) async throws -> Int64 { try await requireWrite().workspaceSize(agentId: agentId) }
+    /// Deletes the agent and, with `purgeFiles`, its workspace; it leaves the list without waiting for the event.
+    func deleteAgent(_ agentId: String, purgeFiles: Bool) async throws {
+        try await requireWrite().deleteAgent(id: agentId, purgeFiles: purgeFiles)
+        apply(.agentDeleted(agentId))
+    }
     func restartRun(_ agentId: String) async throws {
         try await requireWrite().restartRun(agentId: agentId)
         // The agent_updated event normally follows; fetch anyway so the bar clears without a live stream.
@@ -1017,6 +1023,8 @@ final class LoftStore {
     }
 
     func backUpNow() async throws -> BackupStatus { try await requireWrite().backUpNow() }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
+    func cleanWorkspaces() async throws -> SweepReport { try await requireWrite().cleanWorkspaces() }
 
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.

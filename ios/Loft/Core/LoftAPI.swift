@@ -44,6 +44,10 @@ protocol LoftAPI: Sendable {
     /// `PATCH /api/agents/{id}` with some of its editable fields (today `fresh_context`).
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent
     func stopRun(agentId: String) async throws
+    /// Bytes in the agent's workspace: what deleting it with the agent frees.
+    func workspaceSize(agentId: String) async throws -> Int64
+    /// Deletes the agent; with `purgeFiles` its workspace folder too.
+    func deleteAgent(id: String, purgeFiles: Bool) async throws
     /// Stops the run and keeps the queue; queued messages run next (`run_watchdog`).
     func restartRun(agentId: String) async throws
     /// Clear context: a fresh Claude session, memory kept.
@@ -80,6 +84,9 @@ protocol LoftAPI: Sendable {
     /// The Mac's backups (`backups`), and Back up now, which answers once it's done or fails with the error.
     func backups() async throws -> BackupStatus
     func backUpNow() async throws -> BackupStatus
+    /// Settings › Disk: every workspace's size and the free space, and Clean now (the sweep of idle build output).
+    func workspaceSizes() async throws -> WorkspaceSizes
+    func cleanWorkspaces() async throws -> SweepReport
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -286,6 +293,13 @@ struct LiveLoftAPI: LoftAPI {
         try decode(Agent.self, try await send("PATCH", "/agents/\(id)", body: .object(fields)))
     }
     func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
+    func workspaceSize(agentId: String) async throws -> Int64 {
+        struct Size: Decodable { let bytes: Int64 }
+        return try await (get("/agents/\(agentId)/workspace-size") as Size).bytes
+    }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws {
+        _ = try await send("DELETE", "/agents/\(id)", query: [URLQueryItem(name: "purge_files", value: String(purgeFiles))])
+    }
     func restartRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/restart") }
     func resetSession(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/reset-session") }
     func compact(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/compact", body: .object(["instructions": .string("")])) }
@@ -349,6 +363,8 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func backups() async throws -> BackupStatus { try await get("/backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await get("/workspaces") }
+    func cleanWorkspaces() async throws -> SweepReport { try decode(SweepReport.self, try await send("POST", "/workspaces/clean", body: [:], timeout: 120)) }
 
     func backUpNow() async throws -> BackupStatus {
         // A backup of a big database takes a while; the server answers once it's done.
@@ -454,12 +470,16 @@ extension LoftAPI {
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
     func mergeDelivery(repo: String, spec: Int) async throws -> String { throw APIError.unsupported("Delivery") }
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent { throw APIError.unsupported("Agent settings") }
+    func workspaceSize(agentId: String) async throws -> Int64 { throw APIError.unsupported("Workspace size") }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws { throw APIError.unsupported("Deleting agents") }
     func taskComments(id: String) async throws -> [TaskComment] { [] }
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }
     func serverSettings() async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
+    func cleanWorkspaces() async throws -> SweepReport { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
