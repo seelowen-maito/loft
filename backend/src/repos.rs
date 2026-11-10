@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn discovers_nested_repos() {
-        let root = std::env::temp_dir().join(format!("loft-discover-{}", std::process::id()));
+        let root = crate::testdir::for_this_test("discover");
         for d in ["top/.git", "top/inner/.git", "work/meuez/.git", "work/notes", ".hidden/x/.git", "a/b/c/d/deep/.git"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn reads_sites() {
-        let dir = std::env::temp_dir().join(format!("loft-sites-{}", std::process::id()));
+        let dir = crate::testdir::for_this_test("sites");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read_sites(&dir).is_empty(), "no file, no sites");
         std::fs::write(
@@ -807,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn many_repos_scanned_at_once_never_fail_to_spawn_git() {
         // Run under `ulimit -n 256` (launchd's default) to see the old failure.
-        let root = std::env::temp_dir().join(format!("loft-spawn-{}", uuid::Uuid::new_v4()));
+        let root = crate::testdir::for_this_test("spawn");
         for n in 0..40 {
             let d = root.join(format!("r{n}"));
             std::fs::create_dir_all(&d).unwrap();

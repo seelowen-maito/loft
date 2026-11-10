@@ -276,7 +276,7 @@ mod tests {
     async fn a_refused_relay_key_shows_as_sign_in_again() {
         use crate::apns::tests::THIS_TEST_DIR;
         crate::apns::tests::fake_apns();
-        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(std::env::temp_dir().join(format!("loft-status-refused-{}", uuid::Uuid::new_v4()))));
+        THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(crate::testdir::for_this_test("status-refused")));
         let st = crate::tasks::tests::state();
         let get = || async { status(State(st.clone()), HeaderMap::new()).await.unwrap().0 };
         crate::apns::store_relay_key("lrk_revoked-relay-key-aaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();

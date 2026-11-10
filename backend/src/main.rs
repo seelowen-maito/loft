@@ -39,6 +39,8 @@ mod system;
 mod tailnet;
 mod tags;
 mod tasks;
+#[cfg(test)]
+mod testdir;
 mod updater;
 mod uploads;
 mod voice;
@@ -288,7 +290,7 @@ mod tests {
         for i in 0..40 {
             tasks::create(&st, &json!({ "title": format!("Issue number {i}"), "body": "Some words that repeat. ".repeat(20) }), "user").unwrap();
         }
-        let dist = std::env::temp_dir().join(format!("loft-dist-{}", uuid::Uuid::new_v4()));
+        let dist = crate::testdir::for_this_test("dist");
         std::fs::create_dir_all(&dist).unwrap();
         for f in ["app.js", "app.css", "pic.png", "clip.mp4"] {
             std::fs::write(dist.join(f), "x".repeat(4096)).unwrap();

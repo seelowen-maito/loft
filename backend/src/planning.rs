@@ -4244,7 +4244,7 @@ pub(crate) mod tests {
 
     #[test]
     fn spec_prs_recorded_before_deliveries_become_delivery_records() {
-        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("loft.db");
         drop(crate::db::Db::open(&path).unwrap());
@@ -4373,7 +4373,7 @@ pub(crate) mod tests {
 
     #[test]
     fn agents_get_the_six_roles_once_and_keep_their_schedules() {
-        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("loft.db");
         let db = crate::db::Db::open(&path).unwrap();

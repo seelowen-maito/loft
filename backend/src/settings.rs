@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     fn store(json: &str) -> Store {
-        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
         let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy());
         std::fs::write(dir.join("settings.json"), json).unwrap();
@@ -212,7 +212,7 @@ mod tests {
     fn settings_and_their_folder_are_owner_only_at_start_and_on_save() {
         use std::os::unix::fs::MetadataExt;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().mode() & 0o777;
-        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
         let file = dir.join("settings.json");
         std::fs::write(&file, format!(r#"{{ "projects_dir": {:?} }}"#, dir.join("projects"))).unwrap();
@@ -224,7 +224,7 @@ mod tests {
         s.save(s.get()).unwrap();
         assert_eq!(mode(&file), 0o600, "on save");
         // A first start, with no settings yet, and the first save.
-        let fresh = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let fresh = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(&fresh).unwrap();
         let s = Store::load(&fresh).unwrap();
         let mut first = s.get();

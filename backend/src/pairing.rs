@@ -347,7 +347,7 @@ mod tests {
     /// The real API behind a real socket: a request from 127.0.0.1 like an agent's `curl`.
     async fn serve() -> (String, AppState) {
         let st = crate::tasks::tests::state();
-        let app = crate::app(&st, &std::env::temp_dir().join("no-dist"));
+        let app = crate::app(&st, std::path::Path::new("/no-dist"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

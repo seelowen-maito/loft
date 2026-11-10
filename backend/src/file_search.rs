@@ -187,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_listing_is_reused_until_it_goes_stale() {
-        let base = std::env::temp_dir().join(format!("loft-find-{}", uuid::Uuid::new_v4()));
+        let base = crate::testdir::for_this_test("find");
         std::fs::create_dir_all(base.join("src")).unwrap();
         std::fs::write(base.join("src/chat.rs"), "").unwrap();
         let listings = Listings::default();

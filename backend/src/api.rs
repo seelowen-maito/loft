@@ -1127,7 +1127,7 @@ pub(crate) mod tests {
     async fn deleting_an_agent_with_purge_files_removes_its_workspace_and_without_it_keeps_it() {
         use axum::extract::{Path, Query, State};
         let st = crate::tasks::tests::state();
-        let outside = std::env::temp_dir().join(format!("loft-outside-{}", uuid::Uuid::new_v4()));
+        let outside = crate::testdir::for_this_test("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("big"), vec![0u8; 1_000_000]).unwrap();
         let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
@@ -1442,7 +1442,7 @@ mod ls_tests {
 
     #[test]
     fn lists_up_to_the_projects_folder_and_no_further() {
-        let root = std::env::temp_dir().join(format!("loft-ls-{}", uuid::Uuid::new_v4()));
+        let root = crate::testdir::for_this_test("ls");
         let projects = root.join("projects");
         let ws = projects.join("loft/agent-local-storage/a1");
         std::fs::create_dir_all(ws.join("notes")).unwrap();
@@ -1529,7 +1529,7 @@ mod find_tests {
         let a = crate::tasks::tests::agent(&st, "Dev");
         let ws = crate::agents::workspace(&st, &a.id);
         write(&ws, &["notes/chat.md", "node_modules/chat/index.js", "target/chat.rs", "app/.DS_Store", "app/src/chatter.ts"]);
-        std::os::unix::fs::symlink(std::env::temp_dir(), ws.join("tmp-link")).unwrap();
+        std::os::unix::fs::symlink(crate::testdir::for_this_test("link-target"), ws.join("tmp-link")).unwrap();
 
         let paths: Vec<String> = find(&st, &a.id, "chat").await.into_iter().map(|(p, _)| p).collect();
         assert_eq!(paths, vec!["notes/chat.md", "app/src/chatter.ts"]);
