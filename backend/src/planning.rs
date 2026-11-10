@@ -4990,6 +4990,26 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn resuming_a_needs_human_ticket_gives_the_dev_that_tickets_notes_not_the_deliverys_last() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/nh-own-notes";
+        let (dev, team) = building(&st, &fake, "nh-own-notes", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "nh-own-notes", slug);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        fake.route("DELETE", &format!("/repos/{slug}/issues/41/labels/needs-human"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([commit("fed4321abcde", "Fix the total\n\nRefs #41")]));
+        three_changes(&st, &dev, &team[0], 1).await;
+        // Another ticket's changes verdict came after: the Delivery's last notes are now its.
+        crate::delivery::update(&st, slug, 40, |d| d.last_notes = "Other ticket: wrong colour.".into()).unwrap();
+        let ticket = github_task(&st, slug, 41);
+        resume_blocked(&st, &ticket.id).await.unwrap();
+        let brief = woken(&st, &dev).last().cloned().unwrap();
+        assert!(brief.contains("Change 3: the total is off by one.") && !brief.contains("wrong colour"), "{brief}");
+        let _ = spec;
+    }
+
+    #[tokio::test]
     async fn resume_on_a_needs_human_ticket_resets_its_rounds_and_wakes_the_dev_with_the_last_notes() {
         let st = state();
         let fake = own_fake(&st);

@@ -1462,7 +1462,8 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
     let dev = dev_of(state, &d, t.as_ref().map_or(&d.dev, |t| builder_id(&d, t)))?;
     let what = t.as_ref().map_or_else(|| final_tag(&d), |t| tag(&d, t));
     let rounds = t.as_ref().map_or(d.final_rounds, |t| t.rounds);
-    let notes = d.last_notes.trim().to_string();
+    // A ticket resumes with its own notes; `last_notes` is the Delivery's latest, whichever ticket it was on.
+    let notes = t.as_ref().map_or(&d.last_notes, |t| &t.notes).trim().to_string();
     let saved = update(state, &repo, spec, |d| {
         match &t {
             Some(t) => {
