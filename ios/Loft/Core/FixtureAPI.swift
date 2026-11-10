@@ -609,10 +609,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func workspaceSizes() async throws -> WorkspaceSizes {
         try check()
         let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
-        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000), .init(id: "a3", name: "Loft Lead", bytes: 410_000_000)],
+        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000, busy: true), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000, busy: false),
+                                       .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
                               freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
     }
-    func cleanWorkspaces() async throws -> SweepReport { try check(); return SweepReport(freedBytes: 21_700_000_000) }
+    func cleanWorkspaces(agentId: String?) async throws -> SweepReport { try check(); return SweepReport(freedBytes: agentId == nil ? 21_700_000_000 : 8_600_000_000) }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {
         try check()
         locked { agentList.removeAll { $0.id == id } }

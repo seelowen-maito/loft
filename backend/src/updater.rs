@@ -123,7 +123,7 @@ async fn before_restart(state: &AppState) {
     while running_agents(state) > 0 {
         tokio::time::sleep(IDLE_POLL).await;
     }
-    crate::sweep::run(state, None).await;
+    crate::sweep::run(state, None, crate::sweep::IDLE).await;
 }
 
 fn short(sha: &str) -> String {

@@ -474,7 +474,7 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     } else {
         // Its files stay: its clones' build output goes once they're idle.
         let (state, id) = (state.clone(), id.clone());
-        tokio::spawn(async move { crate::sweep::run(&state, Some(&id)).await });
+        tokio::spawn(async move { crate::sweep::run(&state, Some(&id), crate::sweep::IDLE).await });
     }
     state.emit(Event::AgentDeleted { agent_id: id });
     Ok(Json(json!({ "ok": true })))

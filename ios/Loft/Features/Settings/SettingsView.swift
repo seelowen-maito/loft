@@ -65,10 +65,12 @@ struct SettingsView: View {
     @State private var backingUp = false
     @State private var confirmICloud = false
     @State private var backupError: APIError?
-    /// Settings › Disk: workspace sizes and free space; nil until loaded. `freed` is what Clean now just removed.
+    /// Settings › Disk: workspace sizes and free space; nil until loaded. `cleaning` is the agent being cleaned
+    /// ("" for Clean all); `freed` what the last Clean removed, by the same key.
     @State private var disk: WorkspaceSizes?
-    @State private var cleaning = false
-    @State private var freed: Int64?
+    @State private var cleaning: String?
+    @State private var freed: (key: String, bytes: Int64)?
+    @State private var confirmCleanAll = false
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
@@ -353,6 +355,12 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { aiStatus = OnDeviceModel.status }
         }
+        .confirmationDialog("Clean all?", isPresented: $confirmCleanAll, titleVisibility: .visible) {
+            Button("Clean all", role: .destructive) { clean(nil) }
+        } message: {
+            let n = disk?.idleCount ?? 0
+            Text("Removes build output from \(n) agent\(n == 1 ? "" : "s"); their next build starts from scratch.")
+        }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
         } message: {
@@ -373,12 +381,13 @@ struct SettingsView: View {
         disk = try? await store.workspaceSizes()
     }
 
-    private func cleanNow() {
+    /// Clean on one agent, or Clean all with nil.
+    private func clean(_ agentId: String?) {
         Task {
-            cleaning = true
-            defer { cleaning = false }
+            cleaning = agentId ?? ""
+            defer { cleaning = nil }
             do {
-                freed = try await store.cleanWorkspaces().freedBytes
+                freed = (agentId ?? "", try await store.cleanWorkspaces(agentId: agentId).freedBytes)
                 await loadDisk()
             } catch { backupError = APIError.from(error) }
         }
@@ -392,27 +401,43 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("diskFree")
             ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
-                LabeledContent(r.name, value: r.bytes.formatted(.byteCount(style: .file)))
-            }
-            Button {
-                cleanNow()
-            } label: {
-                if cleaning {
-                    HStack(spacing: 8) { ProgressView(); Text("Cleaning…") }
-                } else {
-                    Text("Clean now")
+                LabeledContent {
+                    HStack(spacing: 10) {
+                        Text(r.bytes.formatted(.byteCount(style: .file)))
+                        // A Mac without per-agent Clean sends no `busy`.
+                        if let busy = r.busy {
+                            Button(busy ? "Working" : cleaning == r.id ? "Cleaning…" : "Clean") { clean(r.id) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .disabled(busy || cleaning != nil)
+                                .accessibilityIdentifier("clean-\(r.id)")
+                        }
+                    }
+                } label: {
+                    Text(r.name)
+                    if let freed, freed.key == r.id {
+                        Text("Freed \(freed.bytes.formatted(.byteCount(style: .file)))")
+                    }
                 }
             }
-            .disabled(cleaning)
-            .accessibilityIdentifier("cleanNow")
-            if let freed {
-                Text("Freed \(freed.formatted(.byteCount(style: .file)))").font(.footnote).foregroundStyle(.secondary)
+            Button {
+                confirmCleanAll = true
+            } label: {
+                if cleaning == "" {
+                    HStack(spacing: 8) { ProgressView(); Text("Cleaning…") }
+                } else {
+                    Text("Clean all")
+                }
+            }
+            .disabled(cleaning != nil || d.idleCount == 0)
+            .accessibilityIdentifier("cleanAll")
+            if let freed, freed.key == "" {
+                Text("Freed \(freed.bytes.formatted(.byteCount(style: .file)))").font(.footnote).foregroundStyle(.secondary)
                     .accessibilityIdentifier("diskFreed")
             }
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean now removes build output from workspaces untouched for 3 days. Your Mac does it daily too.")
+            Text("Clean removes an agent's build output now; its next build starts from scratch. Source, notes and git stay. Your Mac also cleans workspaces untouched for 3 days, daily.")
         }
     }
 

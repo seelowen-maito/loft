@@ -18,11 +18,16 @@ final class BackupsTests: XCTestCase {
     }
 
     /// `GET /api/workspaces` and `POST /api/workspaces/clean` as the server answers them.
-    func testDecodesWorkspaceSizesAndWhatCleanNowFreed() throws {
-        let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000}],"free_bytes":14300000000,"low_disk_bytes":20000000000,"last_sweep":{"at":null,"removed":[],"freed_bytes":0}}"#
+    func testDecodesWorkspaceSizesAndWhatCleanFreed() throws {
+        let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000,"busy":false},{"id":"b","name":"Lead","bytes":1,"busy":true}],"free_bytes":14300000000,"low_disk_bytes":20000000000,"last_sweep":{"at":null,"removed":[],"freed_bytes":0}}"#
         let s = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.utf8))
         XCTAssertEqual(s.agents.first?.bytes, 5000)
+        XCTAssertEqual(s.agents.map(\.busy), [false, true])
+        XCTAssertEqual(s.idleCount, 1, "Clean all skips the busy agent")
         XCTAssertTrue(s.isLow)
+        // A Mac without per-agent Clean: no `busy`, so no Clean button on the row.
+        let old = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(#"{"agents":[{"id":"a","name":"Dev","bytes":5}],"free_bytes":null,"low_disk_bytes":1}"#.utf8))
+        XCTAssertNil(old.agents.first?.busy)
         let ok = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.replacingOccurrences(of: "14300000000", with: "50000000000").utf8))
         XCTAssertFalse(ok.isLow)
         let r = try JSONCoding.decoder.decode(SweepReport.self, from: Data(#"{"at":"2026-11-10T12:00:00+01:00","removed":["/x"],"freed_bytes":777}"#.utf8))

@@ -476,9 +476,10 @@ export type BackupStatus = {
   icloud: string | null;
 };
 
-/** Every agent's workspace size, the disk's free space and what the last sweep freed. */
+/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), the disk's
+ * free space and what the last sweep freed. */
 export type WorkspaceSizes = {
-  agents: { id: string; name: string; bytes: number }[];
+  agents: { id: string; name: string; bytes: number; busy: boolean }[];
   free_bytes: number | null;
   low_disk_bytes: number;
   last_sweep: SweepReport;
@@ -584,7 +585,8 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   backups: () => req<BackupStatus>("GET", "/backups"),
   workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
-  cleanWorkspaces: () => req<SweepReport>("POST", "/workspaces/clean"),
+  /** Removes build output of any age from one agent's workspace, or from every idle agent's. */
+  cleanWorkspaces: (agent?: string) => req<SweepReport>("POST", agent ? `/workspaces/clean?agent=${encodeURIComponent(agent)}` : "/workspaces/clean"),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),

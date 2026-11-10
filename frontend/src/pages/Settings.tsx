@@ -187,12 +187,15 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   );
 }
 
-/** Disk: each agent's workspace size, the free space, and Clean now (the sweep of idle build output). */
+/** Disk: each agent's workspace size and the free space; Clean removes an agent's build output of any age, Clean
+ * all every idle agent's. */
 function Workspaces() {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
-  const [busy, setBusy] = useState(false);
+  // What is being cleaned: an agent's id, or "all".
+  const [cleaning, setCleaning] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [freed, setFreed] = useState<number | null>(null);
+  const [freed, setFreed] = useState<{ who: string; bytes: number } | null>(null);
   const card = useRef<HTMLDivElement>(null);
   const load = () => api.workspaces().then(setS);
   useEffect(() => {
@@ -201,44 +204,71 @@ function Workspaces() {
       if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
     }).catch((e) => setErr((e as Error).message));
   }, []);
-  const clean = async () => {
-    setBusy(true);
+  const clean = async (who: string) => {
+    setConfirming(false);
+    setCleaning(who);
     setErr(null);
     try {
-      const r = await api.cleanWorkspaces();
-      setFreed(r.freed_bytes);
+      const r = await api.cleanWorkspaces(who === "all" ? undefined : who);
+      setFreed({ who, bytes: r.freed_bytes });
       await load();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setBusy(false);
+      setCleaning(null);
     }
   };
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
   const rows = [...(s?.agents ?? [])].sort((a, b) => b.bytes - a.bytes);
+  const idle = rows.filter((r) => !r.busy).length;
   return (
     <div ref={card} id="workspaces">
       <Section title="Disk">
         <div className="flex flex-wrap items-center gap-3">
           <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
-            {freed !== null && ` · freed ${fmtBytes(freed)}`}
+            {freed?.who === "all" && ` · freed ${fmtBytes(freed.bytes)}`}
           </p>
-          <button type="button" className="btn shrink-0" disabled={busy} onClick={clean}>
-            {busy ? "Cleaning…" : "Clean now"}
+          <button type="button" className="btn shrink-0" disabled={cleaning !== null || idle === 0} onClick={() => setConfirming(true)}>
+            {cleaning === "all" ? "Cleaning…" : "Clean all"}
           </button>
         </div>
         {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
-        <ul className="space-y-1 text-[13px]">
+        <ul className="space-y-1.5 text-[13px]">
           {rows.map((r) => (
-            <li key={r.id} className="flex justify-between gap-3">
-              <span className="min-w-0 truncate text-fg-2">{r.name}</span>
+            <li key={r.id} className="flex items-center gap-3">
+              <span className="min-w-0 flex-1 truncate text-fg-2">{r.name}</span>
+              {freed?.who === r.id && <span className="shrink-0 text-[12px] text-fg-3">freed {fmtBytes(freed.bytes)}</span>}
               <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
+              <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || cleaning !== null} onClick={() => clean(r.id)}>
+                {r.busy ? "Working" : cleaning === r.id ? "Cleaning…" : "Clean"}
+              </button>
             </li>
           ))}
         </ul>
-        <p className="text-[12px] text-fg-3">Clean now removes build output (target, node_modules, …) from workspaces untouched for 3 days. Loft does it daily too.</p>
+        <p className="text-[12px] text-fg-3">
+          Clean removes an agent's build output (target, node_modules, …) now; its next build starts from scratch. Source, notes and git stay. Loft also cleans workspaces untouched for 3 days, daily.
+        </p>
       </Section>
+      {confirming && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setConfirming(false)}>
+          <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-medium">Clean all?</h3>
+            <p className="text-[13px] text-fg-2">
+              Removes build output from {idle} agent{idle === 1 ? "" : "s"}; their next build starts from scratch.
+              {rows.length > idle && <span className="mt-2 block text-fg-3">{rows.length - idle} working agent{rows.length - idle === 1 ? " is" : "s are"} skipped.</span>}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={() => clean("all")}>
+                Clean all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
