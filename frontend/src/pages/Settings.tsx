@@ -303,7 +303,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             <ul className="space-y-1.5 text-[13px]">
               {devices.map((d) => (
                 <li key={d.udid} className="flex items-center gap-3">
-                  <span className="min-w-0 flex-1 truncate text-fg-2" title={d.udid}>{d.agent.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-fg-2" title={d.udid}>{d.agent ? d.agent.name : `Orphaned · ${d.name}`}</span>
                   <span className={cx("shrink-0 text-[12px]", d.state === "Booted" ? "text-good" : "text-fg-3")}>{d.state === "Booted" ? "Booted" : "Shut down"}</span>
                   <span className="w-16 shrink-0 text-right tabular-nums text-fg">{fmtBytes(d.bytes)}</span>
                 </li>
