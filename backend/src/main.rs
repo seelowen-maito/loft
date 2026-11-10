@@ -32,6 +32,7 @@ mod setup;
 mod signing;
 mod simulator;
 mod state;
+mod sweep;
 mod system;
 mod tailnet;
 mod tasks;
@@ -133,6 +134,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
+    tokio::spawn(sweep::scheduler(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))

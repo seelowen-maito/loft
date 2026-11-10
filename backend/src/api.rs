@@ -475,6 +475,10 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     agents::remove_agent_files(&state, &id);
     if q.purge_files {
         let _ = std::fs::remove_dir_all(workspace(&state, &id));
+    } else {
+        // Its files stay: its clones' build output goes once they're idle.
+        let (state, id) = (state.clone(), id.clone());
+        tokio::spawn(async move { crate::sweep::run(&state, Some(&id)).await });
     }
     state.emit(Event::AgentDeleted { agent_id: id });
     Ok(Json(json!({ "ok": true })))
