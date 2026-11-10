@@ -206,6 +206,12 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
     for w in ended {
         let _held = state.publish_locks.of(&w.repo).lock_owned().await;
         let Some(d) = state.db.get_delivery(&w.repo, w.spec).ok().flatten() else { continue };
+        // A Dev whose ticket the Lead moved to another one has nothing left to submit.
+        if let Step::Build { ticket, .. } = &w.step
+            && d.ticket(*ticket).is_some_and(|t| builder_id(&d, t) != agent_id)
+        {
+            continue;
+        }
         if w.step.waiting(&d) {
             stall(state, &d, if failed { "run_failed" } else { "no_call" });
         }
@@ -631,10 +637,11 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     };
     let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
     let name = tag(&d, t);
-    if d.state != "running" {
+    let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
+    // A stalled Delivery (the Dev's run ended without submitting) can still move its ticket to another Dev.
+    if d.state != "running" && !(reassign && d.state == "stalled" && d.resume_to == "running") {
         return Err(format!("{name} can't be assigned: its Delivery isn't running."));
     }
-    let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
     if !reassign && (t.state != "open" || !t.agent.is_empty()) {
         return Err(format!("{name} can't be assigned: it's {}.", match (t.state.as_str(), t.agent.is_empty()) {
             (_, true) => "not open".to_string(),
@@ -657,6 +664,7 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             return Err(format!("{name} is already with {}.", dev.name));
         }
         let d = update(state, &d.repo, d.spec, |d| {
+            d.unstall();
             if d.current == Some(n) {
                 d.dev = dev.id.clone();
             }

@@ -2799,6 +2799,40 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn reassigning_from_a_stalled_delivery_resumes_it_and_the_old_devs_run_end_stalls_nothing() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-reassign-stall";
+        let (a, m) = planned(&st, &fake, "dl-reassign-stall", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-stall", "lead");
+        let first = busy(&st, "First", "dl-reassign-stall", "dev");
+        let second = busy(&st, "Second", "dl-reassign-stall", "dev");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+
+        // First's run ends without submitting: the Delivery stalls. The Lead moves the ticket.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""));
+        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #41")));
+
+        // A run of First that was still going when the ticket moved ends: it has nothing to submit.
+        let (st2, fake2) = (state(), fake_github());
+        let (a2, m2) = planned(&st2, &fake2, "dl-reassign-old", vec![ticket("Store", &[])]).await;
+        let lead2 = busy(&st2, "Lofty", "dl-reassign-old", "lead");
+        let old = busy(&st2, "First", "dl-reassign-old", "dev");
+        busy(&st2, "Second", "dl-reassign-old", "dev");
+        press(&st2, &a2, &m2).await.unwrap();
+        tool(&st2, &lead2, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        run_starts(&st2, &old);
+        tool(&st2, &lead2, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        crate::delivery::run_ended(&st2, &old.id, false).await;
+        assert_eq!(delivery(&st2, "octo/dl-reassign-old").state, "running");
+    }
+
+    #[tokio::test]
     async fn a_lead_whose_main_project_is_another_one_assigns_the_specs_tickets() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-lead-multi", vec![ticket("Store", &[])]).await;
