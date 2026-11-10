@@ -73,6 +73,10 @@ struct SettingsView: View {
     /// Agents whose sizes are measured again after a clean.
     @State private var remeasuring: Set<String> = []
     @State private var measuringDisk = true
+    /// The idle timeout in hours as the stepper shows it, and as the server last saved it; nil on a Mac without it.
+    @State private var idleHours: Int?
+    @State private var savedIdleHours: Int?
+    @State private var idleError: APIError?
     @State private var cleanSheet: CleanSheet.Start?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
@@ -356,6 +360,8 @@ struct SettingsView: View {
         .task { await loadBackups() }
         .task { await loadDisk() }
         .errorAlert($backupError)
+        .errorAlert($idleError)
+        .task(id: idleHours) { await saveIdleHours() }
         .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
             Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
         } message: {
@@ -399,6 +405,23 @@ struct SettingsView: View {
         disk = try? await store.workspaceSizes()
         if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
         if store.info?.supports(.agentDevices) == true { devices = try? await store.agentDevices() }
+        savedIdleHours = try? await store.idleTimeoutHours()
+        idleHours = savedIdleHours
+    }
+
+    /// Saves the stepper's value once it stops changing, so tapping + five times sends one save; goes back to the
+    /// saved value if the Mac refuses it.
+    private func saveIdleHours() async {
+        guard let h = idleHours, h != savedIdleHours else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        guard !Task.isCancelled else { return }
+        do {
+            try await store.saveIdleTimeout(hours: h)
+            savedIdleHours = h
+        } catch {
+            idleError = APIError.from(error)
+            idleHours = savedIdleHours
+        }
     }
 
     /// A Mac whose Clean lists the workspace to tick what goes; an older one's Clean works another way, so it gets none.
@@ -442,6 +465,13 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("device-\(d.udid)")
             }
+            if let h = idleHours {
+                Stepper(value: Binding(get: { h }, set: { idleHours = $0 }), in: 1...168) {
+                    LabeledContent("Idle timeout", value: h == 1 ? "1 hour" : "\(h) hours")
+                }
+                .disabled(!store.canWrite)
+                .accessibilityIdentifier("idleTimeout")
+            }
             if canClean {
                 Button("Clean all") { cleanSheet = .preview(agentId: nil) }
                     .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
@@ -463,7 +493,7 @@ struct SettingsView: View {
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an idle agent.")
+            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
         }
     }
 

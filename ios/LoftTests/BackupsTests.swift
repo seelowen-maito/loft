@@ -17,6 +17,24 @@ final class BackupsTests: XCTestCase {
         store.deactivate()
     }
 
+    /// #302: the iPhone reads and saves the idle timeout Web Settings has, sending only that key.
+    @MainActor
+    func testSavesOnlyTheIdleTimeout() async throws {
+        let api = FixtureAPI()
+        let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("it-\(UUID()).json")))
+        store.activate()
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        let before = try await store.idleTimeoutHours()
+        XCTAssertEqual(before, 4)
+        try await store.saveIdleTimeout(hours: 12)
+        XCTAssertEqual(api.settingsPut.last, ["idle_timeout_hours": .number(12)])
+        let after = try await store.idleTimeoutHours()
+        XCTAssertEqual(after, 12)
+        let now = try await api.serverSettings()
+        XCTAssertEqual(now["auto_update"], true, "the rest stays as saved")
+        store.deactivate()
+    }
+
     /// `GET /api/workspaces`, the clean preview and the clean log as the server answers them.
     func testDecodesWorkspaceSizesTheCleanPreviewAndItsLog() throws {
         let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000,"busy":false},{"id":"b","name":"Lead","bytes":1,"busy":true}],"free_bytes":14300000000,"low_disk_bytes":20000000000}"#
