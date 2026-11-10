@@ -124,6 +124,12 @@ struct ComposerView: View {
                     text = MentionQuery.insert(a, into: text)
                 }
             }
+            if let q = TagQuery.query(in: text) {
+                let project = store.agents.first { $0.name == recipient }?.project ?? ""
+                TagPicker(rows: TagQuery.matches(TagQuery.rows(tasks: store.tasks, prs: store.pullRequests, project: project), q)) { r in
+                    text = TagQuery.insert(r.tag, into: text)
+                }
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 Button { text = MentionQuery.start(text) } label: {
                     Image(systemName: "at").font(.system(size: 18, weight: .semibold)).frame(width: 32, height: 44)
@@ -185,6 +191,10 @@ struct ComposerView: View {
                 .accessibilityIdentifier("sendButton")
                 .sensoryFeedback(.impact(weight: .light), trigger: store.pending.count) { old, new in new > old }
             }
+            Text("@ agents and files · # specs, issues and PRs")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("composerHint")
         }
         .padding(.horizontal, Theme.gutter)
         .padding(.top, 8)
@@ -720,6 +730,76 @@ struct MentionPicker: View {
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Mention an agent")
+        }
+    }
+}
+
+/// The specs, issues and pull requests to tag while "#…" is typed. Picking one puts its tag in the message.
+struct TagPicker: View {
+    let rows: [TagQuery.Row]
+    let pick: (TagQuery.Row) -> Void
+
+    private func symbol(_ k: TagQuery.Kind) -> String {
+        switch k { case .spec: "doc.text"; case .issue: "circle.dotted"; case .pr: "arrow.triangle.pull" }
+    }
+
+    var body: some View {
+        if rows.isEmpty {
+            Text("Nothing to tag by that name").font(.footnote).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { r in
+                        Button { pick(r) } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: symbol(r.kind)).foregroundStyle(r.open ? .secondary : .tertiary).frame(width: 22)
+                                Text(r.title).font(.subheadline).foregroundStyle(.primary).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(r.number.map { "#\($0)" } ?? r.kind.rawValue).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Tag \(r.kind.rawValue): \(r.title)")
+                        .accessibilityIdentifier("tag-\(r.title)")
+                    }
+                }
+            }
+            .frame(maxHeight: 44 * 5.5)
+            .fixedSize(horizontal: false, vertical: rows.count <= 6)
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(10)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Tag a spec, issue or pull request")
+            .accessibilityIdentifier("tagList")
+        }
+    }
+}
+
+/// A `#` tag on a sent message: kind and title, opening the Loft issue or the pull request on GitHub.
+struct TagChip: View {
+    let tag: MessageTag
+
+    var body: some View {
+        let label = HStack(spacing: 4) {
+            Text(tag.kind).foregroundStyle(.tertiary)
+            Text(tag.title).lineLimit(1)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .foregroundStyle(.secondary)
+        if let id = tag.taskId {
+            NavigationLink(value: TaskRoute(id: id)) { label }.buttonStyle(.plain)
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it")
+        } else if let url = tag.url.flatMap(URL.init(string:)) {
+            Link(destination: url) { label }
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it on GitHub")
+        } else {
+            label
         }
     }
 }

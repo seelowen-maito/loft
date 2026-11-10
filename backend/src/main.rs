@@ -35,6 +35,7 @@ mod state;
 mod sweep;
 mod system;
 mod tailnet;
+mod tags;
 mod tasks;
 mod updater;
 mod uploads;

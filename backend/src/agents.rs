@@ -576,7 +576,11 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-        if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) }
+        let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
+        match crate::tags::block(&meta["tags"]) {
+            b if b.is_empty() => p,
+            b => format!("{p}\n\n{b}"),
+        }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
@@ -1064,7 +1068,13 @@ pub fn remove_agent_files(state: &AppState, agent_id: &str) {
 fn loft_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     if cfg!(test) {
-        return Ok(exe.parent().and_then(Path::parent).map(|d| d.join("loft")).unwrap_or(exe));
+        let next_to_tests = exe.parent().and_then(Path::parent).map(|d| d.join("loft"));
+        if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
+            return Ok(bin);
+        }
+        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+        return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }

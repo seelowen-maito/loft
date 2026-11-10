@@ -546,6 +546,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
+    let tags = crate::tags::resolve(&state, &agent, &text);
+    if !tags.is_empty() {
+        meta["tags"] = json!(tags);
+    }
     // Any agent, its own group's first: where two share a name, the "Dev" of this group wins.
     let mut all = state.db.list_agents()?;
     all.sort_by_key(|a| a.team() != agent.team());
