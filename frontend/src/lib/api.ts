@@ -623,8 +623,8 @@ export function grillError(e: unknown) {
 
 /** A booted simulator; `agent` is the agent whose device it is, null for one the user booted. */
 export type Simulator = { udid: string; name: string; runtime: string; agent: { id: string; name: string } | null };
-/** An agent's Simulator device, for Settings → Disk: its size on disk and whether it is booted. */
-export type AgentDevice = { udid: string; name: string; state: string; bytes: number; agent: { id: string; name: string } };
+/** An agent's Simulator device, for Settings → Disk: its size on disk and whether it is booted. No agent: an orphan, which the tidy deletes. */
+export type AgentDevice = { udid: string; name: string; state: string; bytes: number; agent: { id: string; name: string } | null };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =
   | { action: "tap"; x: number; y: number }

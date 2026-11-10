@@ -27,10 +27,10 @@ struct ComposerView: View {
     var onVoiceStop: (() -> Void)?
     /// Shows "Attach an issue" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
-    /// Shows the paperclip: a video picked or recorded is uploaded to this agent and kept here until sent (the
-    /// chat reads it when `send` is called).
+    /// Shows the paperclip: photos and a video picked or taken are uploaded to this agent and kept here until sent
+    /// (the chat reads them when `send` is called).
     var videoAgentId: String?
-    var video: Binding<VideoDraft?> = .constant(nil)
+    var attachments: Binding<[AttachmentDraft]> = .constant([])
     /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
     let send: (String, Bool) -> Void
 
@@ -80,9 +80,14 @@ struct ComposerView: View {
     @AppStorage(Prefs.voiceBrief) private var offerBrief = true
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-    /// A video still reading or uploading, or one that failed, holds the message back until it's up or removed.
-    private var videoHolds: Bool { video.wrappedValue.map { $0.uploaded == nil } ?? false }
-    private var canSend: Bool { (!trimmed.isEmpty || video.wrappedValue?.uploaded != nil) && !videoHolds && store.canWrite }
+    /// A photo or video still reading or uploading, or one that failed, holds the message back until it's up or
+    /// removed; so do photos over the message limit together.
+    private var attachmentsHold: Bool { attachments.wrappedValue.contains { $0.uploaded == nil } || photosRefusal != nil }
+    private var photosRefusal: String? {
+        let a = attachments.wrappedValue
+        return PhotoAttachment.refusal(bytes: a.filter { !$0.isVideo }.map(\.bytes), video: a.contains(where: \.isVideo))
+    }
+    private var canSend: Bool { (!trimmed.isEmpty || !attachments.wrappedValue.isEmpty) && !attachmentsHold && store.canWrite }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 
     var body: some View {
@@ -113,11 +118,18 @@ struct ComposerView: View {
                     .foregroundStyle(Theme.attention)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let v = video.wrappedValue {
-                VideoChip(draft: v) {
-                    v.cancel()
-                    video.wrappedValue = nil
+            let photos = attachments.wrappedValue.filter { !$0.isVideo }
+            if !photos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { ForEach(photos) { p in PhotoChip(draft: p) { remove(p) } } }
                 }
+                .accessibilityIdentifier("draftPhotos")
+                if let why = photosRefusal {
+                    Text(why).font(.caption).foregroundStyle(Theme.failure).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let v = attachments.wrappedValue.first(where: \.isVideo) {
+                VideoChip(draft: v) { remove(v) }
             }
             if let q = MentionQuery.query(in: text) {
                 MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
@@ -148,11 +160,21 @@ struct ComposerView: View {
                     .accessibilityIdentifier("attachTaskButton")
                 }
                 if let agentId = videoAgentId {
-                    VideoAttachMenu { load in
-                        video.wrappedValue?.cancel()
-                        let draft = VideoDraft()
-                        draft.start(load: load) { file, progress in try await store.upload(file, to: agentId, progress: progress) }
-                        video.wrappedValue = draft
+                    let upload = { (file: URL, progress: @escaping @Sendable (Double) -> Void) in
+                        try await store.upload(file, to: agentId, progress: progress)
+                    }
+                    AttachMenu(photosLeft: max(0, PhotoAttachment.maxPerMessage - attachments.wrappedValue.count)) { loads in
+                        for load in loads.prefix(PhotoAttachment.maxPerMessage - attachments.wrappedValue.count) {
+                            let draft = AttachmentDraft(video: false)
+                            draft.start(load: load, upload: upload)
+                            attachments.wrappedValue.append(draft)
+                        }
+                    } pickedVideo: { load in
+                        // At most one video per message: a new one takes the old one's place.
+                        attachments.wrappedValue.first(where: \.isVideo).map(remove)
+                        let draft = AttachmentDraft(video: true)
+                        draft.start(load: load, upload: upload)
+                        attachments.wrappedValue.append(draft)
                     }
                 }
                 TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)
@@ -569,7 +591,7 @@ struct ComposerView: View {
         voiceSending = false
         dictated = false
         let t = trimmed
-        guard !t.isEmpty || video.wrappedValue?.uploaded != nil, !videoHolds, store.canWrite else {
+        guard !t.isEmpty || !attachments.wrappedValue.isEmpty, !attachmentsHold, store.canWrite else {
             VoiceLog.shared.add("send blocked: \(t.isEmpty ? "empty" : "offline")")
             return
         }
@@ -577,6 +599,11 @@ struct ComposerView: View {
         text = ""
         send(t, byVoice)
         if byVoice { onVoiceSent?() }
+    }
+
+    private func remove(_ draft: AttachmentDraft) {
+        draft.cancel()
+        attachments.wrappedValue.removeAll { $0 === draft }
     }
 
     /// Undo on the Sending bar: nothing goes out, the (cleaned) text stays to edit.

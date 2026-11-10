@@ -312,7 +312,8 @@ pub async fn tidier(state: AppState) {
 }
 
 /// `GET /api/simulator/devices`: agents' devices for Settings → Disk, biggest first:
-/// `{ devices: [{ udid, name, state, bytes, agent: { id, name } }] }`, none with no Xcode.
+/// `{ devices: [{ udid, name, state, bytes, agent: { id, name } | null }] }`, none with no Xcode. An orphan (see
+/// [`owner`]) has no agent: the tidy deletes it, and Settings says so.
 pub async fn agent_devices(State(state): State<AppState>) -> Json<Value> {
     let all = simctl_json(&state, &["list", "devices"]).await.unwrap_or_default();
     let agents = state.db.list_agents().unwrap_or_default();
@@ -320,8 +321,8 @@ pub async fn agent_devices(State(state): State<AppState>) -> Json<Value> {
     let mut list: Vec<Value> = devices(&all)
         .into_iter()
         .filter_map(|(_, d)| {
-            let a = owner(d["name"].as_str()?, d["udid"].as_str()?, &agents, &kept)??;
-            Some(json!({ "udid": d["udid"], "name": d["name"], "state": d["state"], "bytes": device_bytes(d), "agent": { "id": a.id, "name": a.name } }))
+            let a = owner(d["name"].as_str()?, d["udid"].as_str()?, &agents, &kept)?;
+            Some(json!({ "udid": d["udid"], "name": d["name"], "state": d["state"], "bytes": device_bytes(d), "agent": a.map(|a| json!({ "id": a.id, "name": a.name })) }))
         })
         .collect();
     list.sort_by_key(|d| std::cmp::Reverse(d["bytes"].as_u64()));
@@ -697,13 +698,13 @@ esac
         assert!(tidy(&st).await.is_empty(), "never during a run");
         // That run ended a minute ago.
         st.rt.lock().unwrap().running.remove(&a.id);
-        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(60));
+        st.db.update_agent(&a.id, |x| x.last_run_ended_at = ago(0)).unwrap();
         assert!(tidy(&st).await.is_empty(), "the timeout counts from the run's end");
         assert_eq!(state_of(&st, &udid).as_deref(), Some("Booted"));
         // The timeout is a setting.
         let mut s = st.settings.get();
         s.idle_timeout_hours = 1;
-        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(2 * 3600));
+        st.db.update_agent(&a.id, |x| x.last_run_ended_at = ago(2)).unwrap();
         st.settings.save(s).unwrap();
         let lines = tidy(&st).await;
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -724,17 +725,23 @@ esac
         st.db.set_agent_device(&a.id, &small).unwrap();
         st.db.set_agent_device(&b.id, &big).unwrap();
         device(&st, "iPhone 17", "Booted", 300);
+        // A deleted agent's device is listed too, as an orphan the tidy deletes.
+        let orphan = device(&st, "Gone (Loft)", "Shutdown", 400);
+        st.db.set_agent_device("deleted-agent", &orphan).unwrap();
         let Json(v) = agent_devices(State(st.clone())).await;
         assert_eq!(v, json!({ "devices": [
+            { "udid": orphan, "name": "Gone (Loft)", "state": "Shutdown", "bytes": 400, "agent": null },
             { "udid": big, "name": "Tester (Loft)", "state": "Shutdown", "bytes": 200, "agent": { "id": b.id, "name": "Tester" } },
             { "udid": small, "name": "Builder (Loft)", "state": "Booted", "bytes": 100, "agent": { "id": a.id, "name": "Builder" } },
         ] }));
 
-        // Both never ran: Builder's booted device is shut down, and the log says so.
+        // Both never ran: Builder's booted device is shut down and the orphan deleted, and the log says so.
         let lines = tidy(&st).await;
         crate::sweep::record(&st, "Simulator cleanup", lines).await;
         let axum::Json(log) = crate::sweep::log(State(st.clone())).await;
-        assert_eq!((log.what.as_str(), log.lines.len(), log.lines[0].done.as_str(), log.lines[0].rel.as_str()), ("Simulator cleanup", 1, "Shut down Simulator device", "Builder (Loft)"));
+        let mut done: Vec<_> = log.lines.iter().map(|l| (l.done.as_str(), l.rel.as_str())).collect();
+        done.sort();
+        assert_eq!((log.what.as_str(), done), ("Simulator cleanup", vec![("Deleted Simulator device", "Gone (Loft)"), ("Shut down Simulator device", "Builder (Loft)")]));
     }
 
     #[tokio::test(flavor = "multi_thread")]

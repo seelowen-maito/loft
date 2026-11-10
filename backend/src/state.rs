@@ -104,8 +104,6 @@ pub struct Subagent {
 pub struct Runtime {
     /// agent id -> kill switch for the currently running claude process
     pub running: HashMap<String, Arc<Notify>>,
-    /// agent id -> when its last run ended, since Loft started (agents::idle)
-    pub ended: HashMap<String, std::time::SystemTime>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
     /// agent id -> the agent messages (their ids in its chat) waiting in `queued` for the current run to end

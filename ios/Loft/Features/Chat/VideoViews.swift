@@ -3,10 +3,10 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A video in the composer: read from Photos or the camera, checked, then uploaded with progress. The message
-/// can go once it's up (spec #203).
+/// A video (spec #203) or photo (#309) in the composer: read from Photos or the camera, checked, then uploaded with
+/// progress. The message can go once it's up.
 @MainActor @Observable
-final class VideoDraft {
+final class AttachmentDraft: Identifiable {
     enum State: Equatable {
         case preparing
         case uploading(Double)
@@ -15,9 +15,15 @@ final class VideoDraft {
         case failed(String)
     }
 
+    let isVideo: Bool
     private(set) var state: State = .preparing
     private(set) var length: Double?
+    /// A photo's size as it goes up, and a small copy for the draft.
+    private(set) var bytes = 0
+    private(set) var preview: UIImage?
     private var work: Task<Void, Never>?
+
+    init(video: Bool) { isVideo = video }
 
     var uploaded: String? { if case .ready(let f) = state { f } else { nil } }
     /// Still reading or uploading: the message waits for it.
@@ -28,15 +34,19 @@ final class VideoDraft {
         }
     }
 
-    /// Reads the video (`load`: nil when nothing was picked), refuses one over 200 MB, then uploads it.
+    /// Reads the file (`load`: nil when it couldn't be read), refuses a video over 200 MB, then uploads it.
     func start(load: @escaping () async throws -> URL?,
                upload: @escaping (URL, @escaping @Sendable (Double) -> Void) async throws -> String) {
         work = Task {
             do {
-                guard let file = try await load() else { return state = .failed("Couldn't read that video.") }
-                let bytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                if let why = VideoAttachment.refusal(bytes: bytes) { return state = .failed(why) }
-                length = try? await AVURLAsset(url: file).load(.duration).seconds
+                guard let file = try await load() else { return state = .failed(isVideo ? "Couldn't read that video." : "Couldn't read that photo.") }
+                bytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                if isVideo {
+                    if let why = VideoAttachment.refusal(bytes: bytes) { return state = .failed(why) }
+                    length = try? await AVURLAsset(url: file).load(.duration).seconds
+                } else {
+                    preview = await Task.detached { PhotoAttachment.thumbnail(file, side: 160).map(UIImage.init) }.value
+                }
                 state = .uploading(0)
                 let name = try await upload(file) { p in
                     Task { @MainActor in
@@ -75,62 +85,114 @@ struct PickedVideo: Transferable {
     }
 }
 
-/// The composer's paperclip: choose a video from Photos (screen recordings too) or record one.
-struct VideoAttachMenu: View {
-    let picked: (@escaping () async throws -> URL?) -> Void
-    @State private var choosing = false
-    @State private var recording = false
+/// A photo Photos or the camera hands over, made a JPEG the server takes, in a temporary file of ours. One at a time:
+/// decoding ten full-size photos at once would spike memory.
+actor PickedPhoto {
+    private static let shared = PickedPhoto()
+
+    static func save(_ image: Data) async -> URL? { await shared.save(image) }
+
+    private func save(_ image: Data) -> URL? {
+        guard let jpeg = PhotoAttachment.jpeg(image) else { return nil }
+        let to = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("jpg")
+        return (try? jpeg.write(to: to)) == nil ? nil : to
+    }
+}
+
+/// The composer's paperclip: choose photos or a video from Photos (screen recordings too), or take one.
+struct AttachMenu: View {
+    /// How many more photos the message can take.
+    let photosLeft: Int
+    let pickedPhotos: ([() async throws -> URL?]) -> Void
+    let pickedVideo: (@escaping () async throws -> URL?) -> Void
+    @State private var choosingVideo = false
+    @State private var choosingPhotos = false
+    @State private var camera: Camera.Mode?
     @State private var item: PhotosPickerItem?
+    @State private var photoItems: [PhotosPickerItem] = []
 
     var body: some View {
         Menu {
-            Button { choose() } label: { Label("Choose a video", systemImage: "photo.on.rectangle") }
+            Button { choosePhotos() } label: { Label("Choose photos", systemImage: "photo.on.rectangle") }
+                .disabled(photosLeft == 0)
+                .accessibilityIdentifier("choosePhotos")
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button { camera = .photo } label: { Label("Take a photo", systemImage: "camera") }
+                    .disabled(photosLeft == 0)
+            }
+            Button { chooseVideo() } label: { Label("Choose a video", systemImage: "film") }
                 .accessibilityIdentifier("chooseVideo")
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                Button { recording = true } label: { Label("Record a video", systemImage: "video") }
+                Button { camera = .video } label: { Label("Record a video", systemImage: "video") }
             }
         } label: {
             Image(systemName: "paperclip").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 44)
         }
         .foregroundStyle(.secondary)
-        .accessibilityLabel("Attach a video")
+        .accessibilityLabel("Attach a photo or video")
         .accessibilityIdentifier("attachVideoButton")
-        .photosPicker(isPresented: $choosing, selection: $item, matching: .videos, preferredItemEncoding: .current)
+        .photosPicker(isPresented: $choosingVideo, selection: $item, matching: .videos, preferredItemEncoding: .current)
+        .photosPicker(isPresented: $choosingPhotos, selection: $photoItems, maxSelectionCount: max(photosLeft, 1),
+                      selectionBehavior: .ordered, matching: .images)
         .onChange(of: item) { _, i in
             guard let i else { return }
             item = nil
-            picked { try await i.loadTransferable(type: PickedVideo.self)?.url }
+            pickedVideo { try await i.loadTransferable(type: PickedVideo.self)?.url }
         }
-        .fullScreenCover(isPresented: $recording) {
-            CameraRecorder { url in
-                recording = false
-                if let url { picked { try PickedVideo.copy(url) } }
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            pickedPhotos(items.map { i in {
+                guard let d = try await i.loadTransferable(type: Data.self) else { return nil }
+                return await PickedPhoto.save(d)
+            } })
+        }
+        .fullScreenCover(item: $camera) { mode in
+            Camera(mode: mode) { info in
+                camera = nil
+                if mode == .video, let url = info?[.mediaURL] as? URL {
+                    pickedVideo { try PickedVideo.copy(url) }
+                } else if mode == .photo, let photo = (info?[.originalImage] as? UIImage)?.jpegData(compressionQuality: 1) {
+                    pickedPhotos([{ await PickedPhoto.save(photo) }])
+                }
             }
             .ignoresSafeArea()
         }
     }
 
-    private func choose() {
+    private func choosePhotos() {
+        #if DEBUG
+        // `-fixture-photos <path>,<path>`: as if those photos were chosen in Photos (UI tests; the picker is another process).
+        if let paths = FixtureAPI.launchText("fixture-photos") {
+            return pickedPhotos(paths.split(separator: ",").map { p in { await PickedPhoto.save(try Data(contentsOf: URL(fileURLWithPath: String(p)))) } })
+        }
+        #endif
+        choosingPhotos = true
+    }
+
+    private func chooseVideo() {
         #if DEBUG
         // `-fixture-video <path>`: as if that video was chosen in Photos (UI tests; the picker is another process).
         if let path = FixtureAPI.launchText("fixture-video") {
-            return picked { try PickedVideo.copy(URL(fileURLWithPath: path)) }
+            return pickedVideo { try PickedVideo.copy(URL(fileURLWithPath: path)) }
         }
         #endif
-        choosing = true
+        choosingVideo = true
     }
 }
 
-/// The camera, recording one video.
-private struct CameraRecorder: UIViewControllerRepresentable {
-    let done: (URL?) -> Void
+/// The camera, taking one photo or recording one video.
+private struct Camera: UIViewControllerRepresentable {
+    enum Mode: Identifiable { case photo, video; var id: Self { self } }
+    let mode: Mode
+    let done: ([UIImagePickerController.InfoKey: Any]?) -> Void
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let c = UIImagePickerController()
         c.sourceType = .camera
-        c.mediaTypes = [UTType.movie.identifier]
-        c.cameraCaptureMode = .video
-        c.videoQuality = .typeHigh
+        c.mediaTypes = [mode == .photo ? UTType.image.identifier : UTType.movie.identifier]
+        c.cameraCaptureMode = mode == .photo ? .photo : .video
+        if mode == .video { c.videoQuality = .typeHigh }
         c.delegate = context.coordinator
         return c
     }
@@ -139,10 +201,10 @@ private struct CameraRecorder: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(done: done) }
 
     final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let done: (URL?) -> Void
-        init(done: @escaping (URL?) -> Void) { self.done = done }
+        let done: ([UIImagePickerController.InfoKey: Any]?) -> Void
+        init(done: @escaping ([UIImagePickerController.InfoKey: Any]?) -> Void) { self.done = done }
         func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            done(info[.mediaURL] as? URL)
+            done(info)
         }
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { done(nil) }
     }
@@ -150,7 +212,7 @@ private struct CameraRecorder: UIViewControllerRepresentable {
 
 /// The video above the message field: its length, the upload's progress or why it can't go, and a remove button.
 struct VideoChip: View {
-    let draft: VideoDraft
+    let draft: AttachmentDraft
     let remove: () -> Void
 
     var body: some View {
@@ -183,6 +245,108 @@ struct VideoChip: View {
     }
 
     private var title: String { draft.length.map { "Video · \(VideoAttachment.length($0))" } ?? "Video" }
+}
+
+/// A photo above the message field: a thumbnail with the upload's progress, or why it can't go, and a remove button.
+struct PhotoChip: View {
+    let draft: AttachmentDraft
+    let remove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let p = draft.preview {
+                    Image(uiImage: p).resizable().scaledToFill()
+                } else {
+                    Theme.card
+                }
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                switch draft.state {
+                case .preparing:
+                    ProgressView()
+                case .uploading(let p):
+                    ProgressView(value: p).tint(.white).padding(8).frame(maxHeight: .infinity, alignment: .bottom)
+                        .accessibilityLabel("Uploading").accessibilityValue("\(Int(p * 100)) percent")
+                case .ready:
+                    EmptyView()
+                case .failed:
+                    Image(systemName: "exclamationmark.triangle.fill").font(.title3).foregroundStyle(Theme.failure)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Button(action: remove) {
+                Image(systemName: "xmark.circle.fill").font(.title3).symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .frame(width: 44, height: 44, alignment: .topTrailing)
+            .offset(x: 6, y: -6)
+            .accessibilityLabel("Remove the photo")
+            .accessibilityIdentifier("removePhoto")
+        }
+        .frame(width: 70, height: 70, alignment: .bottomLeading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("photoChip")
+    }
+
+    private var label: String {
+        switch draft.state {
+        case .preparing: "Photo, reading"
+        case .uploading: "Photo, uploading"
+        case .ready: "Photo, ready to send"
+        case .failed(let why): "Photo, \(why)"
+        }
+    }
+}
+
+/// A photo sent in the chat; tapping it opens it full screen.
+struct ChatPhoto: View {
+    let url: URL
+    @State private var full = false
+
+    var body: some View {
+        Button { full = true } label: {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Theme.card.overlay(ProgressView())
+            }
+            .frame(width: 120, height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Photo")
+        .accessibilityHint("Opens it full screen")
+        .accessibilityIdentifier("chatPhoto")
+        .fullScreenCover(isPresented: $full) { FullScreenPhoto(url: url) }
+    }
+}
+
+/// A sent photo on black, fitted to the screen, with Done.
+private struct FullScreenPhoto: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFit()
+            } placeholder: {
+                ProgressView().tint(.white)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black)
+            .accessibilityLabel("Photo")
+            .accessibilityIdentifier("fullScreenPhoto")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+    }
 }
 
 /// A video sent in the chat: an inline player with its length under it.

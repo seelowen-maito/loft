@@ -237,6 +237,9 @@ pub struct Agent {
     #[serde(default)]
     pub context_tokens: Option<u64>,
     pub last_run_at: Option<String>,
+    /// When its last run ended, so the idle time survives a restart. None until a run ends.
+    #[serde(default)]
+    pub last_run_ended_at: Option<String>,
     pub next_run_at: Option<String>,
     pub total_cost_usd: f64,
     /// The running total Claude Code last reported for `session_id`, so a run's cost is what it added.
@@ -1933,7 +1936,7 @@ mod tests {
             "id": id, "name": id, "title": "", "personality": "", "prompt": "", "model": "sonnet", "effort": "",
             "interval_minutes": 0, "allowed_tools": [], "disallowed_tools": [], "mcp_servers": {},
             "permission_mode": "auto", "avatar": { "svg": "" }, "status": "idle", "status_text": "",
-            "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
+            "session_id": null, "last_run_at": null, "last_run_ended_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
     }
