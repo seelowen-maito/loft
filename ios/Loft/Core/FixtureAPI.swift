@@ -407,7 +407,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -606,6 +606,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     func stopRun(agentId: String) async throws { try check() }
     func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
+    func workspaceSizes() async throws -> WorkspaceSizes {
+        try check()
+        let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
+        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000), .init(id: "a3", name: "Loft Lead", bytes: 410_000_000)],
+                              freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
+    }
+    func cleanWorkspaces() async throws -> SweepReport { try check(); return SweepReport(freedBytes: 21_700_000_000) }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {
         try check()
         locked { agentList.removeAll { $0.id == id } }
@@ -655,6 +662,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
         if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
         list.items.removeAll { done.contains($0.id) }
         list.count = list.items.count

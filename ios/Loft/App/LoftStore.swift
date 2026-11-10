@@ -1023,6 +1023,8 @@ final class LoftStore {
     }
 
     func backUpNow() async throws -> BackupStatus { try await requireWrite().backUpNow() }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
+    func cleanWorkspaces() async throws -> SweepReport { try await requireWrite().cleanWorkspaces() }
 
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.

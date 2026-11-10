@@ -31,6 +31,44 @@ pub struct Report {
     pub freed_bytes: u64,
 }
 
+/// Under this much free disk, Needs you says the disk is almost full.
+pub const LOW_DISK: u64 = 20_000_000_000;
+
+#[cfg(test)]
+thread_local!(pub(crate) static FAKE_FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+
+/// Bytes free on the disk that holds `path` (or its nearest existing parent).
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(f) = FAKE_FREE.with(|f| f.get()) {
+        return Some(f);
+    }
+    let dir = path.ancestors().find(|p| p.exists())?;
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+}
+
+/// `GET /api/workspaces`: every agent's workspace size, the disk's free space and what the last sweep freed.
+pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) -> crate::api::ApiResult<serde_json::Value> {
+    let agents = state.db.list_agents()?;
+    let storage = state.cfg.storage_dir.clone();
+    let dirs: Vec<(String, String, PathBuf)> = agents.iter().map(|a| (a.id.clone(), a.name.clone(), crate::agents::workspace(&state, &a.id))).collect();
+    let (rows, free) = tokio::task::spawn_blocking(move || {
+        let rows: Vec<_> = dirs.into_iter().map(|(id, name, d)| serde_json::json!({ "id": id, "name": name, "bytes": crate::agents::dir_size(&d) })).collect();
+        (rows, free_bytes(&storage))
+    })
+    .await
+    .unwrap_or_default();
+    let last = state.rt.lock().unwrap().sweep.clone();
+    Ok(axum::Json(serde_json::json!({ "agents": rows, "free_bytes": free, "low_disk_bytes": LOW_DISK, "last_sweep": last })))
+}
+
+/// `POST /api/workspaces/clean`: Clean now. Runs the sweep and answers what it freed.
+pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<Report> {
+    axum::Json(run(&state, None).await)
+}
+
 /// One sweep at a time.
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -223,6 +261,40 @@ mod tests {
 
     fn later() -> SystemTime {
         SystemTime::now() + Duration::from_secs(4 * 24 * 60 * 60)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_lists_workspace_sizes_and_free_disk_and_clean_now_reports_what_it_freed() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ws = crate::agents::workspace(&st, &a.id);
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("big.bin"), vec![0u8; 5000]).unwrap();
+        let axum::Json(v) = sizes(axum::extract::State(st.clone())).await.unwrap();
+        let row = v["agents"].as_array().unwrap().iter().find(|r| r["id"] == a.id.as_str()).unwrap();
+        assert_eq!(row["bytes"], 5000);
+        assert!(v["free_bytes"].as_u64().unwrap() > 0);
+        // A clone built just now isn't idle: nothing freed, and the report is what Settings shows after.
+        clone(&ws.join("loft"));
+        let axum::Json(r) = clean(axum::extract::State(st.clone())).await;
+        assert_eq!(r.freed_bytes, 0);
+        assert!(r.at.is_some());
+        let axum::Json(v) = sizes(axum::extract::State(st)).await.unwrap();
+        assert!(v["last_sweep"]["at"].is_string());
+    }
+
+    #[test]
+    fn needs_you_says_disk_almost_full_under_20_gb_free() {
+        let st = crate::tasks::tests::state();
+        let items = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "disk_low").cloned().collect::<Vec<_>>();
+        FAKE_FREE.with(|f| f.set(Some(19_000_000_000)));
+        let low = items(&st);
+        FAKE_FREE.with(|f| f.set(Some(21_000_000_000)));
+        let ok = items(&st);
+        FAKE_FREE.with(|f| f.set(None));
+        assert_eq!(low.len(), 1);
+        assert_eq!(low[0]["title"], "Disk almost full");
+        assert!(ok.is_empty());
     }
 
     #[test]

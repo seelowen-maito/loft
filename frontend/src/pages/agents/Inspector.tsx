@@ -293,9 +293,21 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 
+      <WorkspaceSize id={agent.id} />
+
       <DangerZone agent={agent} onCleared={onCleared} />
     </div>
   );
+}
+
+/** How much disk the agent's workspace takes. */
+function WorkspaceSize({ id }: { id: string }) {
+  const [bytes, setBytes] = useState<number | null>(null);
+  useEffect(() => {
+    setBytes(null);
+    api.workspaceSize(id).then((r) => setBytes(r.bytes)).catch(() => {});
+  }, [id]);
+  return <div className="text-[12.5px] text-fg-3">Workspace {bytes === null ? "…" : fmtBytes(bytes)}</div>;
 }
 
 function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void }) {

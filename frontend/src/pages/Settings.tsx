@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
-import { cx, timeAgo } from "../lib/format";
+import { cx, fmtBytes, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -182,6 +182,62 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad">{folderErr}</p>}
+      </Section>
+    </div>
+  );
+}
+
+/** Disk: each agent's workspace size, the free space, and Clean now (the sweep of idle build output). */
+function Workspaces() {
+  const [s, setS] = useState<WorkspaceSizes | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [freed, setFreed] = useState<number | null>(null);
+  const card = useRef<HTMLDivElement>(null);
+  const load = () => api.workspaces().then(setS);
+  useEffect(() => {
+    load().then(() => {
+      // Needs you links here when the disk is almost full.
+      if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
+    }).catch((e) => setErr((e as Error).message));
+  }, []);
+  const clean = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.cleanWorkspaces();
+      setFreed(r.freed_bytes);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
+  const rows = [...(s?.agents ?? [])].sort((a, b) => b.bytes - a.bytes);
+  return (
+    <div ref={card} id="workspaces">
+      <Section title="Disk">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
+            {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
+            {freed !== null && ` · freed ${fmtBytes(freed)}`}
+          </p>
+          <button type="button" className="btn shrink-0" disabled={busy} onClick={clean}>
+            {busy ? "Cleaning…" : "Clean now"}
+          </button>
+        </div>
+        {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+        <ul className="space-y-1 text-[13px]">
+          {rows.map((r) => (
+            <li key={r.id} className="flex justify-between gap-3">
+              <span className="min-w-0 truncate text-fg-2">{r.name}</span>
+              <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="text-[12px] text-fg-3">Clean now removes build output (target, node_modules, …) from workspaces untouched for 3 days. Loft does it daily too.</p>
       </Section>
     </div>
   );
@@ -422,6 +478,8 @@ export default function SettingsPage() {
         </Section>
 
         <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
+
+        <Workspaces />
 
         <GithubUsage />
         <Spend />

@@ -10,8 +10,9 @@ struct AgentDetailView: View {
     @State private var busy = false
     @State private var showAllActivity = false
     @State private var confirmDelete = false
-    /// The workspace's size, fetched when Delete agent is tapped; nil when the server couldn't say.
+    /// The workspace's size, fetched when the screen opens and again when Delete agent is tapped; nil when the server couldn't say.
     @State private var workspaceBytes: Int64?
+    private var sizeText: String { workspaceBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "…" }
 
     var body: some View {
         if let agent = store.agent(agentId) {
@@ -50,6 +51,10 @@ struct AgentDetailView: View {
 
             Section {
                 actions(agent, state: state)
+                if store.info?.supports(.workspaces) == true {
+                    LabeledContent("Workspace", value: sizeText)
+                        .accessibilityIdentifier("workspaceSize")
+                }
             }
 
             let approvals = store.pendingApprovals(for: agent.id)
@@ -177,6 +182,7 @@ struct AgentDetailView: View {
                  + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
         }
         .errorAlert($error)
+        .task { workspaceBytes = try? await store.workspaceSize(agent.id) }
     }
 
     private func askToDelete(_ agent: Agent) {

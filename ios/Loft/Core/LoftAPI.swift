@@ -84,6 +84,9 @@ protocol LoftAPI: Sendable {
     /// The Mac's backups (`backups`), and Back up now, which answers once it's done or fails with the error.
     func backups() async throws -> BackupStatus
     func backUpNow() async throws -> BackupStatus
+    /// Settings › Disk: every workspace's size and the free space, and Clean now (the sweep of idle build output).
+    func workspaceSizes() async throws -> WorkspaceSizes
+    func cleanWorkspaces() async throws -> SweepReport
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -360,6 +363,8 @@ struct LiveLoftAPI: LoftAPI {
     }
 
     func backups() async throws -> BackupStatus { try await get("/backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await get("/workspaces") }
+    func cleanWorkspaces() async throws -> SweepReport { try decode(SweepReport.self, try await send("POST", "/workspaces/clean", body: [:], timeout: 120)) }
 
     func backUpNow() async throws -> BackupStatus {
         // A backup of a big database takes a while; the server answers once it's done.
@@ -473,6 +478,8 @@ extension LoftAPI {
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
+    func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
+    func cleanWorkspaces() async throws -> SweepReport { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }
