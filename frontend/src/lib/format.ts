@@ -1,4 +1,4 @@
-import type { Agent, QuietWindow } from "./api";
+import type { Agent, CleanItem, CleanLog, QuietWindow } from "./api";
 
 
 export function timeAgo(input: string | number | null | undefined): string {
@@ -77,4 +77,19 @@ export function isQuiet(windows: QuietWindow[], day: number, minute: number): bo
 
 export function cx(...c: (string | false | null | undefined)[]) {
   return c.filter(Boolean).join(" ");
+}
+
+/** Clean: a main clone itself (labelled, opens, at the top) can't be ticked, nor can a blocked item; folders inside one can. */
+export function canTick(i: CleanItem, depth: number): boolean {
+  return !i.blocked && !(i.opens && depth === 0 && !!i.label);
+}
+
+/** Clean: the `rm -rf` shown under an item; none when it can't be removed. */
+export function shownCommand(i: CleanItem, depth: number): string {
+  return canTick(i, depth) ? i.command : "";
+}
+
+/** Clean: a log line, past tense like its header: "Removed /path (2.2 GB)" or "failed /path: why". */
+export function cleanLineText(l: CleanLog["lines"][number]): string {
+  return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;
 }

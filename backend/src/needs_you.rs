@@ -653,6 +653,33 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // A new device asking to pair: paired devices compare its code and allow or deny it. With none paired yet,
+    // the Mac's dialog (or its terminal) answers instead.
+    if crate::pairing::count(state) > 0 {
+        for (code, name, since) in state.pairing.waiting_list() {
+            let body = json!({ "code": code });
+            items.push(Item {
+                id: format!("pairing:{code}"),
+                kind: "pairing",
+                urgency: 3,
+                agent: None,
+                task_id: None,
+                title: text("A new device wants to pair", MAX_TITLE),
+                reason: text(&format!("{name} shows the code {code}. Allow it only if the code on that device matches."), MAX_REASON),
+                text: text(&format!("{name} · code {code}"), MAX_TEXT),
+                created_at: since,
+                links: vec![],
+                actions: vec![
+                    action("approve", "Allow", "POST", "/api/pair/approve".into(), body.clone()),
+                    action("deny", "Deny", "POST", "/api/pair/deny".into(), body),
+                ],
+                push: ("A new device wants to pair".to_string(), format!("Code {code}")),
+                project: None,
+                pr: None,
+            });
+        }
+    }
+
     // macOS asking on a Mac nobody's looking at: an agent's file read waits until someone answers.
     let asking = state.rt.lock().unwrap().tcc.asking(std::time::Instant::now());
     let host = crate::tailnet::host();
@@ -805,7 +832,7 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     PushItem {
         id: i.id.clone(),
         // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
-        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
+        kind: if i.kind == "mac_access" { "stuck" } else if i.kind == "pairing" { "permission" } else { i.kind },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),
@@ -847,9 +874,9 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<J
 }
 
 /// `POST /api/needs-you/{id}/dismiss`: hide an item until it changes (a changed item gets a new id).
-/// Permission prompts and open grill rounds can't be dismissed: they block an agent until answered.
+/// Permission prompts, open grill rounds and pairing requests can't be dismissed: they block an agent until answered.
 pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    if id.starts_with("permission:") || id.starts_with("grill:") {
+    if id.starts_with("permission:") || id.starts_with("grill:") || id.starts_with("pairing:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
     let known = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?.iter().any(|i| i.id == id);

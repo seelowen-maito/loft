@@ -12,6 +12,7 @@ mod github_inbox;
 mod greenfield;
 mod grill;
 mod needs_you;
+mod pairing;
 mod planning;
 mod ports;
 mod guard;
@@ -64,85 +65,22 @@ fn main() -> anyhow::Result<()> {
     serve()
 }
 
-#[tokio::main]
-async fn serve() -> anyhow::Result<()> {
-    // Loft takes no arguments. Refuse any before opening the db or binding a port: an older binary run as a newer
-    // Loft's hook (`loft kill-guard`, or a later subcommand) must not start a whole server on every call.
-    if let Some(arg) = std::env::args().nth(1) {
-        anyhow::bail!("unknown argument {arg:?}: loft takes no arguments");
-    }
-    tracing_subscriber::fmt().init();
-    signing::ensure();
-
-    // The repo root is the parent of the backend crate, unless overridden.
-    let root = std::env::var("LOFT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf());
-    let data_dir = root.join(".loft");
-    let cfg = Config {
-        port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
-        storage_dir: root.join("agent-local-storage"),
-        xcrun: "xcrun".into(),
-        xcode: state::XcodeLookup::system(),
-    };
-    std::fs::create_dir_all(&cfg.storage_dir)?;
-    std::fs::create_dir_all(&data_dir)?;
-    agents::remove_old_agent_files(&cfg.storage_dir);
-
-    let (events, _) = broadcast::channel(1024);
-    let state = AppState {
-        db: db::Db::open(&data_dir.join("loft.db"))?,
-        cfg: Arc::new(cfg),
-        events,
-        rt: Arc::new(Mutex::new(Runtime::default())),
-        repos: Arc::new(repos::RepoCache::default()),
-        http: reqwest::Client::new(),
-        gh_token: Arc::new(github::TokenCache::default()),
-        gh_pace: Arc::new(github::Pace::default()),
-        gh_budget: Arc::new(Default::default()),
-        update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
-        settings: Arc::new(settings::Store::load(&data_dir)?),
-        usage: Arc::new(usage::Cache::default()),
-        system: Arc::new(system::Cache::default()),
-        grill_locks: Arc::new(grill::Locks::default()),
-        publish_locks: Arc::new(planning::Locks::default()),
-        publish_known: Arc::new(planning::Known::default()),
-        mirror: Arc::new(Default::default()),
-        listings: Arc::new(Default::default()),
-        xcode: Arc::new(Default::default()),
-    };
-    setup::ensure_loft(&state);
-    {
-        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
-        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
-            tracing::warn!("GitHub settings migration: {e}");
-        }
-    }
-    // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
-    delivery::stall_lost_runs(&state);
-    tokio::spawn(agents::scheduler(state.clone()));
-    tokio::spawn(prs::poller(state.clone()));
-    tokio::spawn(github_inbox::poller(state.clone()));
-    tokio::spawn(prs::backfill(state.clone()));
-    tokio::spawn(delivery::track_open_prs(state.clone()));
-    tokio::spawn(agents::backfill_context(state.clone()));
-    tokio::spawn(updater::updater(state.clone(), root.clone()));
-    tokio::spawn(system::sampler(state.clone()));
-    tokio::spawn(grill::sweeper(state.clone()));
-    tokio::spawn(needs_you::watcher(state.clone()));
-    tokio::spawn(agents::quiet_watcher(state.clone()));
-    tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
-    tokio::spawn(mac_access::watcher(state.clone()));
-    tokio::spawn(mirror::poller(state.clone()));
-    tokio::spawn(backup::scheduler(state.clone()));
-    tokio::spawn(sweep::scheduler(state.clone()));
-
-    let api = Router::new()
+/// Everything under `/api`. Writes, and reads of devices, push and settings, need a paired client (pairing.rs).
+fn api_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
         .route("/info", get(api::info))
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
+        .route("/pair", post(pairing::start))
+        .route("/pair/poll", post(pairing::poll))
+        .route("/pair/cancel", post(pairing::cancel))
+        .route("/pair/approve", post(pairing::approve))
+        .route("/pair/deny", post(pairing::deny))
+        .route("/paired-clients", get(pairing::list))
+        .route("/paired-clients/unpair-all", post(pairing::unpair_all))
+        .route("/paired-clients/{id}", axum::routing::delete(pairing::forget))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
@@ -158,6 +96,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/workspaces", get(sweep::sizes))
         .route("/workspaces/clean", post(sweep::clean))
         .route("/workspaces/clean/preview", get(sweep::preview))
+        .route("/workspaces/clean/folders", get(sweep::folders))
         .route("/workspaces/log", get(sweep::log))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
@@ -218,21 +157,102 @@ async fn serve() -> anyhow::Result<()> {
         .route("/herdr/bin/{platform}", get(herdr::binary))
         // GitHub requests a person's page or click makes count as `user` (a poller's have their own source).
         .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| github::as_source("user", next.run(req))))
-        .layer(axum::middleware::from_fn(guard::same_origin_writes));
+        .layer(axum::middleware::from_fn_with_state(state.clone(), pairing::require_paired))
+        .layer(axum::middleware::from_fn(guard::same_origin_writes))
+}
 
-    // Serve the built frontend when present (production mode).
-    let dist = root.join("frontend").join("dist");
-    let app = Router::new()
-        .nest("/api", api)
+/// The whole server. `dist` is the built frontend, served when present (production mode).
+fn app(state: &AppState, dist: &std::path::Path) -> Router {
+    Router::new()
+        .nest("/api", api_routes(state))
         .route("/mcp/{agent_id}", post(mcp::handle))
         // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
         .route("/kill/{agent_id}", post(processes::handle))
         // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.
-        .fallback_service(ServeDir::new(&dist).fallback(ServeFile::new(dist.join("index.html"))))
+        .fallback_service(ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html"))))
         .layer(compression())
-        .with_state(state.clone());
+        .with_state(state.clone())
+}
+
+#[tokio::main]
+async fn serve() -> anyhow::Result<()> {
+    // Loft takes no arguments. Refuse any before opening the db or binding a port: an older binary run as a newer
+    // Loft's hook (`loft kill-guard`, or a later subcommand) must not start a whole server on every call.
+    if let Some(arg) = std::env::args().nth(1) {
+        anyhow::bail!("unknown argument {arg:?}: loft takes no arguments");
+    }
+    tracing_subscriber::fmt().init();
+    signing::ensure();
+
+    // The repo root is the parent of the backend crate, unless overridden.
+    let root = std::env::var("LOFT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf());
+    let data_dir = root.join(".loft");
+    let cfg = Config {
+        port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
+        storage_dir: root.join("agent-local-storage"),
+        xcrun: "xcrun".into(),
+        xcode: state::XcodeLookup::system(),
+    };
+    std::fs::create_dir_all(&cfg.storage_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
+    agents::remove_old_agent_files(&cfg.storage_dir);
+
+    let (events, _) = broadcast::channel(1024);
+    let state = AppState {
+        db: db::Db::open(&data_dir.join("loft.db"))?,
+        cfg: Arc::new(cfg),
+        events,
+        rt: Arc::new(Mutex::new(Runtime::default())),
+        repos: Arc::new(repos::RepoCache::default()),
+        http: reqwest::Client::new(),
+        gh_token: Arc::new(github::TokenCache::default()),
+        gh_pace: Arc::new(github::Pace::default()),
+        gh_budget: Arc::new(Default::default()),
+        update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
+        settings: Arc::new(settings::Store::load(&data_dir)?),
+        usage: Arc::new(usage::Cache::default()),
+        system: Arc::new(system::Cache::default()),
+        grill_locks: Arc::new(grill::Locks::default()),
+        publish_locks: Arc::new(planning::Locks::default()),
+        publish_known: Arc::new(planning::Known::default()),
+        mirror: Arc::new(Default::default()),
+        listings: Arc::new(Default::default()),
+        xcode: Arc::new(Default::default()),
+        pairing: Arc::new(pairing::Pairing::with_prompts()),
+    };
+    setup::ensure_loft(&state);
+    {
+        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
+        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+            tracing::warn!("GitHub settings migration: {e}");
+        }
+    }
+    // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
+    delivery::stall_lost_runs(&state);
+    tokio::spawn(agents::scheduler(state.clone()));
+    tokio::spawn(prs::poller(state.clone()));
+    tokio::spawn(github_inbox::poller(state.clone()));
+    tokio::spawn(prs::backfill(state.clone()));
+    tokio::spawn(delivery::track_open_prs(state.clone()));
+    tokio::spawn(agents::backfill_context(state.clone()));
+    tokio::spawn(updater::updater(state.clone(), root.clone()));
+    tokio::spawn(system::sampler(state.clone()));
+    tokio::spawn(grill::sweeper(state.clone()));
+    tokio::spawn(needs_you::watcher(state.clone()));
+    tokio::spawn(agents::quiet_watcher(state.clone()));
+    tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
+    tokio::spawn(mac_access::watcher(state.clone()));
+    tokio::spawn(mirror::poller(state.clone()));
+    tokio::spawn(backup::scheduler(state.clone()));
+    tokio::spawn(sweep::scheduler(state.clone()));
+    tokio::spawn(pairing::read_terminal(state.clone()));
+
+    // Serve the built frontend when present (production mode).
+    let app = app(&state, &root.join("frontend").join("dist"));
 
     let addr = format!("127.0.0.1:{}", state.cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -44,13 +44,32 @@ enum TagQuery {
     }
 
     /// The picker's rows for what's typed after `#`: specs, issues, then pull requests. Nothing typed lists a few
-    /// open ones of each; otherwise titles containing the text, or the number.
+    /// open ones of each; otherwise the web's ⌘K search (frontend lib/shortcuts.ts `searchRows`) picks them.
     static func matches(_ rows: [Row], _ q: String) -> [Row] {
-        let q = q.trimmingCharacters(in: .whitespaces).lowercased()
-        let per = q.isEmpty ? 3 : 4
+        let blank = q.trimmingCharacters(in: .whitespaces).isEmpty
+        let per = blank ? 3 : 4
         return [Kind.spec, .issue, .pr].flatMap { kind in
-            rows.filter { $0.kind == kind && (q.isEmpty ? $0.open : $0.title.lowercased().contains(q) || $0.number.map { String($0).hasPrefix(q) } == true) }.prefix(per)
+            let of = rows.filter { $0.kind == kind }
+            return blank ? Array(of.filter(\.open).prefix(per)) : search(of, q, limit: per)
         }
+    }
+
+    /// `searchRows` from the web: `#123` or `123` finds that number. Otherwise every word must appear in the title or
+    /// project; open rows come first, then titles that start with the query, then titles containing it.
+    static func search(_ rows: [Row], _ query: String, limit: Int) -> [Row] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return [] }
+        let digits = q.hasPrefix("#") ? q.dropFirst() : Substring(q)
+        if !digits.isEmpty, digits.allSatisfy(\.isASCII), digits.allSatisfy(\.isNumber), let n = Int(digits) {
+            return Array(rows.filter { $0.number == n }.enumerated().sorted { ($0.element.open ? 0 : 1, $0.offset) < ($1.element.open ? 0 : 1, $1.offset) }.map(\.element).prefix(limit))
+        }
+        let words = q.split(whereSeparator: \.isWhitespace)
+        func score(_ r: Row) -> Int {
+            let title = r.title.lowercased()
+            return (r.open ? 0 : 3) + (title.hasPrefix(q) ? 0 : title.contains(q) ? 1 : 2)
+        }
+        let found = rows.filter { r in let text = "\(r.title) \(r.project)".lowercased(); return words.allSatisfy { text.contains($0) } }
+        return Array(found.enumerated().sorted { (score($0.element), $0.offset) < (score($1.element), $1.offset) }.map(\.element).prefix(limit))
     }
 
     /// `text` with the `#…` being typed replaced by the tag and a space.

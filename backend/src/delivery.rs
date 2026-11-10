@@ -61,6 +61,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             resume_to: String::new(),
             stall_reason: String::new(),
             stalled_at: String::new(),
+            stalled_on: vec![],
             done_at: String::new(),
             tech_debt: vec![],
             ready_retry: false,
@@ -132,7 +133,7 @@ pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new(), agent: String::new() });
+        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new(), agent: String::new(), notes: String::new() });
     });
 }
 
@@ -206,15 +207,35 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
     for w in ended {
         let _held = state.publish_locks.of(&w.repo).lock_owned().await;
         let Some(d) = state.db.get_delivery(&w.repo, w.spec).ok().flatten() else { continue };
+        // A Dev whose ticket the Lead moved to another one has nothing left to submit.
+        if let Step::Build { ticket, .. } = &w.step
+            && d.ticket(*ticket).is_some_and(|t| builder_id(&d, t) != agent_id)
+        {
+            continue;
+        }
         if w.step.waiting(&d) {
-            stall(state, &d, if failed { "run_failed" } else { "no_call" });
+            let ticket = match &w.step {
+                Step::Build { ticket, .. } | Step::Review { ticket, .. } => Some(*ticket),
+                _ => None,
+            };
+            stall(state, &d, if failed { "run_failed" } else { "no_call" }, ticket.into_iter().collect());
         }
     }
 }
 
 /// Marks `d` stalled with `reason`, remembering the state to go back to. Only a Delivery whose step an
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`).
-fn stall(state: &AppState, d: &Delivery, reason: &str) -> Option<Delivery> {
+fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>) -> Option<Delivery> {
+    // Already stalled: another ticket's step joins the ones that stall it.
+    if d.state == "stalled" && !tickets.is_empty() {
+        return update(state, &d.repo, d.spec, |d| {
+            for n in &tickets {
+                if !d.stalled_on.contains(n) {
+                    d.stalled_on.push(*n);
+                }
+            }
+        });
+    }
     if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") {
         return None;
     }
@@ -222,6 +243,7 @@ fn stall(state: &AppState, d: &Delivery, reason: &str) -> Option<Delivery> {
     update(state, &d.repo, d.spec, |d| {
         d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
         (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
+        d.stalled_on = tickets;
     })
 }
 
@@ -246,7 +268,7 @@ pub fn stall_lost_runs(state: &AppState) {
                 _ => true,
             };
             if lost
-                && let Some(d) = stall(state, &d, "restart")
+                && let Some(d) = stall(state, &d, "restart", d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review")).map(|t| t.number).collect())
             {
                 state.rt.lock().unwrap().news_at_start.insert(stalled_item_id(&d));
             }
@@ -254,19 +276,20 @@ pub fn stall_lost_runs(state: &AppState) {
     }
 }
 
-/// The call a stalled Delivery waited on came after all (say the user nudged the agent): it carries on.
-fn unstalled(state: &AppState, d: Delivery) -> Delivery {
+/// The call a stalled Delivery waited on for ticket #n came after all (say the user nudged the agent): it
+/// carries on, unless another ticket still stalls it.
+fn unstalled(state: &AppState, d: Delivery, n: i64) -> Delivery {
     if d.state != "stalled" {
         return d;
     }
-    update(state, &d.repo.clone(), d.spec, Delivery::unstall).unwrap_or(d)
+    update(state, &d.repo.clone(), d.spec, |d| d.clear_stall(n)).unwrap_or(d)
 }
 
 /// Adds a published ticket to its spec's Delivery, after the tickets that block it. One already there is left as it is.
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
     update(state, repo, spec, |d| {
         if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new() });
+            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new(), notes: String::new() });
         }
     });
 }
@@ -631,20 +654,61 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     };
     let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
     let name = tag(&d, t);
-    if d.state != "running" {
+    let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
+    // A stalled Delivery (the Dev's run ended without submitting) can still move its ticket to another Dev.
+    if d.state != "running" && !(reassign && d.state == "stalled" && d.resume_to == "running") {
         return Err(format!("{name} can't be assigned: its Delivery isn't running."));
     }
-    if t.state != "open" || !t.agent.is_empty() {
-        return Err(format!("{name} can't be assigned: it's {}.", if t.agent.is_empty() { "not open" } else { "already with a Dev" }));
+    if !reassign && (t.state != "open" || !t.agent.is_empty()) {
+        return Err(format!("{name} can't be assigned: it's {}.", match (t.state.as_str(), t.agent.is_empty()) {
+            (_, true) => "not open".to_string(),
+            ("review", _) => "under review: reassign it once its round ends".to_string(),
+            ("started", _) => "already with a Dev (pass `reassign: true` to move it to another)".to_string(),
+            _ => "already with a Dev".to_string(),
+        }));
     }
     let open: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
-    if !open.is_empty() {
+    if !reassign && !open.is_empty() {
         return Err(format!("{name} is blocked by {}: assign it once they close.", open.join(", ")));
     }
     let key = args["dev"].as_str().unwrap_or("").trim();
     let agents = state.db.list_agents().map_err(|e| e.to_string())?;
     let dev = agents.iter().find(|a| a.id == key || a.name.eq_ignore_ascii_case(key)).filter(|a| is_team_dev(&d, a));
     let dev = dev.ok_or_else(|| format!("{key:?} isn't a Dev on your team."))?;
+    if reassign {
+        // Unlike a first assignment, this skips the blocked-by check on purpose: the ticket is already started.
+        let old = t.agent.clone();
+        if old == dev.id {
+            return Err(format!("{name} is already with {}.", dev.name));
+        }
+        let d = update(state, &d.repo, d.spec, |d| {
+            d.clear_stall(n);
+            // `d.dev` is the Dev of the ticket in `current` (the final fixes and fallbacks read it); a parallel
+            // ticket's Dev is only its `agent`, so moving that one must not take `d.dev` from the current ticket.
+            if d.current == Some(n) {
+                d.dev = dev.id.clone();
+            }
+            if let Some(x) = d.ticket_mut(n) {
+                x.agent = dev.id.clone();
+            }
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
+        let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+        if d.local {
+            note(state, &t.id, &dev.id, &format!("Reassigned to {} by the Lead.", dev.name));
+        }
+        if let Some(old) = agents.iter().find(|a| a.id == old) {
+            crate::agents::fyi_from_agent(state, me, old, &format!("{name} is now with {}: the Lead moved it. Don't submit it; your commits stay on the spec branch.", dev.name));
+        }
+        let step = Step::Build { ticket: n, round: t.rounds };
+        let mut brief = dev_brief(state, &d, t);
+        let notes = t.notes.trim();
+        if t.rounds > 0 && !notes.is_empty() {
+            brief.push_str(&format!("\n\nRound {} of changes was asked:\n\n{notes}", t.rounds));
+        }
+        crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, Some(n)), true, brief, wake_for(&d, step));
+        return Ok(format!("{name} moved to {}: Loft woke them with the ticket and told the previous Dev.", dev.name));
+    }
     begin(state, &d, n, dev).await?;
     Ok(format!("{name} is with {}: Loft woke them with the ticket.", dev.name))
 }
@@ -774,7 +838,8 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "As the Lead on a Delivery: hand a ready ticket to a Dev of the team. Loft sets the ticket's agent and wakes the Dev with its brief. Hand several ready tickets to different Devs at once; a ticket still blocked by an open ticket is refused.",
         "inputSchema": { "type": "object", "properties": {
             "ticket": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft." },
-            "dev": { "type": "string", "description": "The Dev's name." }
+            "dev": { "type": "string", "description": "The Dev's name." },
+            "reassign": { "type": "boolean", "description": "true to move a ticket that is already started (or back with its Dev for changes) to another Dev, keeping its commits and rounds. Refused while it's under review." }
         }, "required": ["ticket", "dev"] }
     }), json!({
         "name": "submit_ticket",
@@ -858,6 +923,43 @@ fn refuse_paused(d: &Delivery) -> Result<(), String> {
     Err(format!("The Delivery of {} is paused: the user paused it, so Loft took nothing in. Stop here: when they resume it, Loft wakes the agent its step waits on with what's already done.", subject(d)))
 }
 
+/// The PR Loft tracks for the Delivery, if it has one on GitHub.
+fn tracked_pr(state: &AppState, d: &Delivery) -> Option<crate::db::PullRequest> {
+    let n = d.pr.filter(|_| !d.local)?;
+    state.db.list_pull_requests(None).ok()?.into_iter().find(|p| p.slug == d.repo && p.number == n)
+}
+
+/// Refuses a submission whose branch is behind the base of its PR, by GitHub's compare (Loft runs no git in
+/// agents' clones), and keeps the count on the PR for its card and the Delivery's. When Loft can't tell (no
+/// PR, or GitHub didn't answer) it lets the submission through.
+async fn refuse_behind(state: &AppState, d: &Delivery) -> Result<(), String> {
+    let Some(mut pr) = tracked_pr(state, d).filter(|p| !p.base_ref.is_empty() && !d.branch.is_empty()) else { return Ok(()) };
+    let v = match crate::github::get(state, &format!("/repos/{}/compare/{}...{}", d.repo, pr.base_ref, d.branch)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("delivery {}#{}: couldn't compare `{}` with `{}`: {e}", d.repo, d.spec, d.branch, pr.base_ref);
+            return Ok(());
+        }
+    };
+    let behind = v["behind_by"].as_i64().unwrap_or(0);
+    if behind != pr.behind_by {
+        pr.behind_by = behind;
+        if state.db.save_pull_request(&pr).is_ok() {
+            crate::prs::emit(state, &pr);
+            changed(state, d);
+        }
+    }
+    if behind == 0 {
+        return Ok(());
+    }
+    let base = &pr.base_ref;
+    Err(format!(
+        "`{}` is {behind} commit{} behind origin/{base}, so Loft took nothing in: `git fetch origin`, `git merge origin/{base}` into it (merge, not rebase), resolve any conflicts, re-run the tests, push, then submit again.",
+        d.branch,
+        if behind == 1 { "" } else { "s" },
+    ))
+}
+
 /// The tickets being built or in review on `slug`, for a refusal.
 fn in_progress(state: &AppState, slug: &str) -> String {
     let ds = state.db.deliveries(slug, true).unwrap_or_default();
@@ -889,8 +991,9 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let who = state.db.get_agent(builder_id(&d, t)).ok().flatten().map_or("another agent".to_string(), |a| a.name);
         return Err(format!("{name} is with {who}: only the agent building it submits it."));
     }
+    refuse_behind(state, &d).await?;
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
-    let d = unstalled(state, d);
+    let d = unstalled(state, d, n);
     let d = update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.state = "review".into();
@@ -976,18 +1079,19 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             return Ok(format!("Posted your pass on {on}.{labelled} {name} waits for its other reviewers."));
         }
         // The last verdict: the review step is done, so a stalled Delivery carries on.
-        let d = unstalled(state, d);
+        let d = unstalled(state, d, n);
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Posted your pass on {on}.{labelled}{closed}"));
     }
 
     // Changes end the review step for every reviewer: the ticket goes back to the Dev (or the user).
-    let d = unstalled(state, d);
+    let d = unstalled(state, d, n);
     let rounds = t.rounds + 1;
     let stuck = rounds >= MAX_ROUNDS;
     update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.rounds = rounds;
+            t.notes = notes.into();
             t.verdicts.clear();
             t.state = if stuck { "needs_human" } else { "started" }.into();
         }
@@ -1358,7 +1462,8 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
     let dev = dev_of(state, &d, t.as_ref().map_or(&d.dev, |t| builder_id(&d, t)))?;
     let what = t.as_ref().map_or_else(|| final_tag(&d), |t| tag(&d, t));
     let rounds = t.as_ref().map_or(d.final_rounds, |t| t.rounds);
-    let notes = d.last_notes.trim().to_string();
+    // A ticket resumes with its own notes; `last_notes` is the Delivery's latest, whichever ticket it was on.
+    let notes = t.as_ref().map_or(&d.last_notes, |t| &t.notes).trim().to_string();
     let saved = update(state, &repo, spec, |d| {
         match &t {
             Some(t) => {
@@ -1770,7 +1875,7 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                 let title = x["title"].as_str().unwrap_or_default().to_string();
                 match d.ticket_mut(n) {
                     Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
-                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: skipped.unwrap_or_default(), agent: String::new() }),
+                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: skipped.unwrap_or_default(), agent: String::new(), notes: String::new() }),
                 }
             }
             // A ticket taken off the spec on GitHub isn't the Delivery's any more.
@@ -1839,6 +1944,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
         "agent_name": dev.as_ref().map(|a| a.name.clone()),
         "pr": d.pr,
+        "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
         v["spec"] = json!(true);
@@ -2010,6 +2116,9 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     if d.dev != me.id {
         return Some(Err(format!("{n}'s fixes are with another agent: only the agent fixing it submits them.")));
     }
+    if let Err(e) = refuse_behind(state, &d).await {
+        return Some(Err(e));
+    }
     let Some(cr) = with_role(state, &d, "code_reviewer") else {
         return Some(Err("The team has no Code reviewer any more: ask the user to look at the spec PR.".into()));
     };
@@ -2060,7 +2169,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
             .map_err(|e| format!("Couldn't post the verdict on #{pr}: {e}. Call review_ticket again."))?;
         format!("#{pr}")
     };
-    let d = unstalled(state, d);
+    let d = if d.state == "stalled" { update(state, &slug, d.spec, Delivery::unstall).unwrap_or(d) } else { d };
     let filed_line = match (filed.0.is_empty(), filed.1.is_empty()) {
         (true, true) => String::new(),
         _ => format!(" Tech debt: {}{}.", filed.0.join(", "), filed.1),
@@ -2359,7 +2468,7 @@ mod tests {
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
-        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new(), agent: String::new() });
+        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new(), agent: String::new(), notes: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 
@@ -2473,7 +2582,7 @@ mod tests {
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
-        DeliveryTicket { number, title: format!("T{number}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new(), agent: String::new() }
+        DeliveryTicket { number, title: format!("T{number}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new(), agent: String::new(), notes: String::new() }
     }
 
     /// Agents often send a GitHub number as text ("85"): both tools take it like 85, a Loft issue id still

@@ -42,8 +42,14 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let mode: Mode = args.contains("-fixture-offline") ? .offline
             : args.contains("-fixture-empty") ? .empty
             : args.contains("-fixture-fail-sends") ? .failSends : .normal
-        return FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
+        let api = FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
+        api.paired = !args.contains("-fixture-unpaired")
+        return api
     }
+
+    /// `-fixture-unpaired`: the server refuses this app until it pairs (code 4821, allowed on the second poll).
+    private var paired = true
+    private var pairPolls = 0
 
     /// What the sample issues are about (spec #144: the demo's issues open with a description).
     static let descriptions: [String: String] = [
@@ -410,7 +416,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_preview"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -621,39 +627,61 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                        .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
                               freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
     }
-    func cleanPreview(agentId: String?) async throws -> CleanPlan {
+    /// One of the fixture's Clean items, in `/Users/me/loft/agent-local-storage`.
+    private func cleanItem(_ agent: String, _ rel: String, _ kind: String, _ bytes: Int64, hoursAgo: Double, label: String = "", note: String = "",
+                           ticked: Bool = true, blocked: String = "", opens: Bool = false) -> CleanItem {
+        let path = "/Users/me/loft/agent-local-storage/\(agent)/\(rel)"
+        return CleanItem(agent: agent, path: path, rel: rel, name: String(rel.split(separator: "/").last ?? ""), kind: kind, bytes: bytes,
+                         changed: Date().addingTimeInterval(-hoursAgo * 3600), command: rel.hasSuffix(".git") ? "" : "rm -rf \(path)", label: label, note: note,
+                         warning: ticked && (kind == "clone" || kind == "worktree") ? "may contain unpushed work" : "", ticked: ticked, blocked: blocked, opens: opens)
+    }
+    private static let kept = "Kept: this is the agent's working copy. Its own build stays (e.g. backend/target or node_modules/), usually 1–5 GB, and the agent reuses it on its next build."
+    func cleanPreview(agentId: String?) async throws -> [CleanItem] {
         try check()
         await measure()
-        let ws = "/Users/me/loft/agent-local-storage"
-        let changed = Date().addingTimeInterval(-26 * 3600)
-        let folders: [CleanPlan.Folder] = [
-            .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/backend/target"),
-            .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/frontend/node_modules"),
-            .init(agent: "a3", path: "\(ws)/a3/homebase/backend/target/debug/deps", rel: "homebase/backend/target/debug/deps", bytes: 2_100_000_000, changed: Date().addingTimeInterval(-1200),
-                  command: "rm -rf \(ws)/a3/homebase/backend/target/debug/deps", note: "duplicate of .cargo-build"),
-        ].filter { agentId == nil || $0.agent == agentId }
-        let skipped = agentId == nil ? [CleanSkip(agent: "a1", rel: "", reason: "agent is working"), CleanSkip(agent: "a3", rel: "homebase", reason: "changed in the last hour")] : []
-        return CleanPlan(folders: folders, skipped: skipped, totalBytes: folders.reduce(0) { $0 + $1.bytes })
+        let items: [CleanItem] = [
+            cleanItem("a2", "loft", "clone", 4_800_000_000, hoursAgo: 0.2, label: "main clone of loft", note: Self.kept, ticked: false, opens: true),
+            cleanItem("a2", ".cargo-build", "folder", 2_200_000_000, hoursAgo: 2.7),
+            cleanItem("a2", "loft-review", "clone", 1_900_000_000, hoursAgo: 216),
+            cleanItem("a2", "wt-253", "worktree", 730_000_000, hoursAgo: 216),
+            cleanItem("a2", "test-run.log", "file", 12_000_000, hoursAgo: 50),
+            cleanItem("a2", "notes", "folder", 1_200_000, hoursAgo: 1, label: "reports and notes", ticked: false),
+            cleanItem("a2", "uploads", "folder", 3_100_000, hoursAgo: 30, label: "chat attachments", ticked: false),
+            cleanItem("a1", "loft", "clone", 9_400_000_000, hoursAgo: 0.1, label: "main clone of loft", note: Self.kept, ticked: false, blocked: "Working", opens: true),
+            cleanItem("a1", ".cargo-build", "folder", 3_600_000_000, hoursAgo: 0.1, ticked: false, blocked: "Working"),
+        ]
+        return items.filter { agentId == nil || $0.agent == agentId }
+    }
+    func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] {
+        try check()
+        let inside: [String: [(String, Int64)]] = ["loft": [("backend", 2_400_000_000), ("frontend", 1_300_000_000), (".git", 420_000_000), ("ios", 310_000_000)],
+                                                   "loft/backend": [("target", 2_380_000_000), ("src", 4_000_000)],
+                                                   "loft/frontend": [("node_modules", 1_290_000_000), ("src", 2_000_000)]]
+        return (inside[rel] ?? []).map { name, bytes in
+            name == ".git" ? cleanItem(agentId, "\(rel)/\(name)", "folder", bytes, hoursAgo: 0.2, ticked: false, blocked: "git history: never deleted")
+                : cleanItem(agentId, "\(rel)/\(name)", "folder", bytes, hoursAgo: 0.3, ticked: false, opens: true)
+        }
     }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
-        let plan = try await cleanPreview(agentId: agentId)
-        let lines = plan.folders.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }
-        let unticked = plan.folders.filter { !paths.contains($0.path) }.map { CleanSkip(agent: $0.agent, rel: $0.rel, reason: "unticked") }
-        let log = CleanLog(at: Date(), what: agentId == nil ? "Clean all" : "Clean", running: false, lines: lines, skipped: unticked + plan.skipped,
-                           freedBytes: lines.reduce(0) { $0 + $1.bytes }, removed: lines.count, failed: 0)
-        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk"), let first = lines.first {
-            // Mid-run, for the live log: the first folder is gone, the rest still to go.
+        let items = try await cleanPreview(agentId: agentId) + cleanFolders(agentId: "a2", rel: "loft/backend") + cleanFolders(agentId: "a2", rel: "loft/frontend")
+        let lines = items.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }
+        let name = agentId.map { id in workspaceNames[id] ?? id }
+        let log = CleanLog(at: Date(), what: agentId == nil ? "Clean all" : "Clean", title: name.map { "Cleaned \($0)" } ?? "Cleaned all agents", running: false, lines: lines,
+                           skipped: [], freedBytes: lines.reduce(0) { $0 + $1.bytes }, removed: lines.count, failed: 0)
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk") {
+            // Mid-run, for the live log: nothing freed yet.
             var live = log
-            (live.running, live.lines, live.freedBytes, live.removed) = (true, [first], first.bytes, 1)
+            (live.running, live.title, live.lines, live.freedBytes, live.removed) = (true, name.map { "Cleaning \($0)…" } ?? "Cleaning all agents…", [], 0, 0)
             locked { lastClean = live }
             try? await Task.sleep(for: .seconds(8))
         }
         locked { lastClean = log }
         return log
     }
+    private var workspaceNames: [String: String] { ["a1": "Loft Dev", "a2": "Loft Reviewer", "a3": "Loft Lead"] }
     func cleanLog() async throws -> CleanLog {
         try check()
-        return locked { lastClean } ?? CleanLog(at: Date().addingTimeInterval(-5 * 3600), what: "Daily sweep", running: false,
+        return locked { lastClean } ?? CleanLog(at: Date().addingTimeInterval(-5 * 3600), what: "Daily sweep", title: "Daily sweep", running: false,
                                                  lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
                                                                command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
                                                  skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
@@ -891,7 +919,62 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []
 
-    func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+    func serverSettings() async throws -> JSONValue {
+        try check()
+        guard locked({ paired }) else {
+            Pairing.reportUnpaired()
+            throw APIError.server(status: 401, message: "pair this client with Loft first")
+        }
+        return locked { settings }
+    }
+
+    func startPairing(name: String) async throws -> PairingStart {
+        try check()
+        locked { pairPolls = 0 }
+        return PairingStart(secret: "fixture-secret", code: "4821", expiresIn: 120)
+    }
+
+    func pollPairing(secret: String) async throws -> PairingPoll {
+        try check()
+        return locked {
+            pairPolls += 1
+            guard pairPolls >= 2 else { return PairingPoll(status: "pending") }
+            paired = true
+            return PairingPoll(status: "allowed", token: "fixture-token")
+        }
+    }
+
+    func cancelPairing(secret: String) async throws {}
+
+    /// Paired devices on fixture data: this iPhone plus two others.
+    private var clients = [
+        PairedClient(id: "c1", name: "iPhone", pairedAt: Date(timeIntervalSinceNow: -6 * 86_400), lastUsedAt: Date(), this: true),
+        PairedClient(id: "c2", name: "Chrome on Mac", pairedAt: Date(timeIntervalSinceNow: -7 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -1_500), this: false),
+        PairedClient(id: "c3", name: "Safari on iOS", pairedAt: Date(timeIntervalSinceNow: -13 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -9 * 86_400), this: false),
+    ]
+
+    func pairedClients() async throws -> [PairedClient] {
+        try check()
+        guard locked({ paired }) else {
+            Pairing.reportUnpaired()
+            throw APIError.server(status: 401, message: "pair this client with Loft first")
+        }
+        return locked { clients }
+    }
+
+    /// Forgetting this iPhone unpairs it: the next request is refused, like Loft does.
+    func forgetClient(id: String) async throws {
+        try check()
+        locked {
+            if clients.contains(where: { $0.id == id && $0.this }) { paired = false }
+            clients.removeAll { $0.id == id }
+        }
+    }
+
+    func unpairAll() async throws {
+        try check()
+        locked { clients.removeAll { !$0.this } }
+    }
 
     /// The Mac's backups: one this morning; with `-fixture-backup-failed`, none since two days ago and the error.
     private var backupStatus = BackupStatus(

@@ -116,6 +116,11 @@ pub async fn upload(State(state): State<AppState>, Path(id): Path<String>, body:
         }
         chunk = stream.next().await;
     };
+    // tokio's File finishes its last write in the background: flush, so the file is whole once we answer.
+    let result = match result {
+        Ok(()) => out.flush().await.map_err(|e| anyhow::Error::from(e).into()),
+        e => e,
+    };
     if let Err(e) = result {
         drop(out);
         let _ = tokio::fs::remove_file(&path).await;
@@ -429,6 +434,8 @@ mod tests {
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         png.resize(MAX_BYTES, 0);
         let pngs = [upload_bytes(&st, &a.id, png.clone()).await.unwrap(), upload_bytes(&st, &a.id, png.clone()).await.unwrap(), upload_bytes(&st, &a.id, png.clone()).await.unwrap(), upload_bytes(&st, &a.id, png.clone()).await.unwrap()];
+        // Each upload is whole on disk once it's answered, or the sizes below would come up short.
+        assert!(pngs.iter().all(|f| std::fs::metadata(dir(&st, &a.id).join(f)).unwrap().len() == MAX_BYTES as u64));
         // 4 x 3.75 MB = 15 MB fits alone, but not with a video's 6 MB.
         assert!(validate(&st, &a.id, &pngs).is_ok());
         let with_video = [pngs.to_vec(), vec![video.clone()]].concat();

@@ -1206,6 +1206,8 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     pub(crate) fn state() -> AppState {
+        // Tests don't read the real disk: plenty is free unless a test sets `FAKE_FREE` itself.
+        crate::sweep::FAKE_FREE.with(|f| f.set(Some(u64::MAX)));
         let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
         // Boot with a temp projects folder so no test writes into the real ~/projects.
         let projects = dir.join("projects");
@@ -1237,6 +1239,7 @@ pub(crate) mod tests {
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
             xcode: Arc::new(Default::default()),
+            pairing: Arc::new(Default::default()),
         }
     }
 

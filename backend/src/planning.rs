@@ -2774,6 +2774,152 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_lead_reassigns_a_started_ticket_but_not_one_under_review() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-reassign";
+        let (a, m) = planned(&st, &fake, "dl-reassign", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign", "lead");
+        let first = busy(&st, "First", "dl-reassign", "dev");
+        let second = busy(&st, "Second", "dl-reassign", "dev");
+        busy(&st, "Tester", "dl-reassign", "qa");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second" })).await.unwrap_err();
+        assert!(err.contains("already with a Dev") && err.contains("reassign"), "{err}");
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #41 \"Store\"")));
+        let shown = crate::delivery::delivery_json(&st, &delivery(&st, slug));
+        assert_eq!(shown["tickets"][0]["agent_name"].as_str(), Some("Second"));
+        assert!(tool(&st, &first, "submit_ticket", submit_41()).await.unwrap_err().contains("is with Second"));
+        tool(&st, &second, "submit_ticket", submit_41()).await.unwrap();
+
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First", "reassign": true })).await.unwrap_err();
+        assert!(err.contains("under review"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reassigning_a_ticket_back_for_changes_gives_the_new_dev_the_reviewers_notes() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "dl-reassign-notes", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-notes", "lead");
+        let first = busy(&st, "First", "dl-reassign-notes", "dev");
+        let second = busy(&st, "Second", "dl-reassign-notes", "dev");
+        let qa = busy(&st, "Tester", "dl-reassign-notes", "qa");
+        press(&st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments"] {
+            fake.route("POST", &format!("/repos/octo/dl-reassign-notes/{p}"), 201, json!({}));
+        }
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        let brief = woken(&st, &second).last().cloned().unwrap();
+        assert!(brief.contains("build ticket #41 \"Store\"") && brief.contains("Round 1 of changes was asked:\n\nOff by one."), "{brief}");
+    }
+
+    #[tokio::test]
+    async fn reassigning_gives_the_new_dev_that_tickets_notes_not_the_last_ones_of_the_delivery() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "dl-reassign-two", vec![ticket("Store", &[]), ticket("Show", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-two", "lead");
+        let first = busy(&st, "First", "dl-reassign-two", "dev");
+        let second = busy(&st, "Second", "dl-reassign-two", "dev");
+        let third = busy(&st, "Third", "dl-reassign-two", "dev");
+        let qa = busy(&st, "Tester", "dl-reassign-two", "qa");
+        press(&st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments", "issues/42/comments"] {
+            fake.route("POST", &format!("/repos/octo/dl-reassign-two/{p}"), 201, json!({}));
+        }
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &second, "submit_ticket", json!({ "number": 42, "commits": ["abc1234def"] })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 42, "verdict": "changes", "notes": "Wrong colour." })).await.unwrap();
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Third", "reassign": true })).await.unwrap();
+        let brief = woken(&st, &third).last().cloned().unwrap();
+        assert!(brief.contains("Off by one.") && !brief.contains("Wrong colour."), "{brief}");
+    }
+
+    #[tokio::test]
+    async fn reassigning_from_a_stalled_delivery_resumes_it_and_the_old_devs_run_end_stalls_nothing() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-reassign-stall";
+        let (a, m) = planned(&st, &fake, "dl-reassign-stall", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-stall", "lead");
+        let first = busy(&st, "First", "dl-reassign-stall", "dev");
+        let second = busy(&st, "Second", "dl-reassign-stall", "dev");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+
+        // First's run ends without submitting: the Delivery stalls. The Lead moves the ticket.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""));
+        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #41")));
+
+        // A run of First that was still going when the ticket moved ends: it has nothing to submit.
+        let (st2, fake2) = (state(), fake_github());
+        let (a2, m2) = planned(&st2, &fake2, "dl-reassign-old", vec![ticket("Store", &[])]).await;
+        let lead2 = busy(&st2, "Lofty", "dl-reassign-old", "lead");
+        let old = busy(&st2, "First", "dl-reassign-old", "dev");
+        busy(&st2, "Second", "dl-reassign-old", "dev");
+        press(&st2, &a2, &m2).await.unwrap();
+        tool(&st2, &lead2, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        run_starts(&st2, &old);
+        tool(&st2, &lead2, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        crate::delivery::run_ended(&st2, &old.id, false).await;
+        assert_eq!(delivery(&st2, "octo/dl-reassign-old").state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_stall_stays_while_a_ticket_that_caused_it_waits_whatever_happens_to_the_others() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-stall-per-ticket";
+        let (a, m) = planned(&st, &fake, "dl-stall-per-ticket", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-stall-per-ticket", "lead");
+        let first = busy(&st, "First", "dl-stall-per-ticket", "dev");
+        busy(&st, "Second", "dl-stall-per-ticket", "dev");
+        let third = busy(&st, "Third", "dl-stall-per-ticket", "dev");
+        busy(&st, "Tester", "dl-stall-per-ticket", "qa");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
+
+        // First's run ends without submitting #41: the Delivery stalls on it.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).stalled_on), ("stalled", vec![41]));
+
+        // Reassigning and submitting #42 leave it stalled on #41.
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Third", "reassign": true })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &third, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stalled_on.as_slice()), ("stalled", &[41][..]));
+
+        // Resuming wakes First on #41 again.
+        let before = woken(&st, &first).len();
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(woken(&st, &first).len() > before);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stalled_on.len()), ("running", 0));
+
+        // Moving #41 itself, the ticket that stalled it, clears the stall.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "running");
+    }
+
+    #[tokio::test]
     async fn a_lead_whose_main_project_is_another_one_assigns_the_specs_tickets() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-lead-multi", vec![ticket("Store", &[])]).await;
@@ -3125,6 +3271,33 @@ pub(crate) mod tests {
         let d = st.db.get_delivery("octo/rv-submit", 40).unwrap().unwrap();
         assert_eq!((d.tickets[0].state.as_str(), d.tickets[0].commits.len()), ("review", 2));
         assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "qa": "pending", "security": "pending" }));
+    }
+
+    #[tokio::test]
+    async fn a_branch_behind_its_base_is_refused_and_one_up_to_date_or_ahead_is_taken() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-behind";
+        let (dev, _team) = building(&st, &fake, "rv-behind", &["qa"]).await;
+        let mut pr = st.db.list_pull_requests(None).unwrap().into_iter().find(|p| p.slug == slug && p.number == 500).expect("the spec PR is tracked");
+        pr.base_ref = "main".into();
+        st.db.save_pull_request(&pr).unwrap();
+        fake.in_turn("GET", &format!("/repos/{slug}/compare/main...spec/40-rounds"), vec![
+            (200, json!({ "status": "diverged", "ahead_by": 2, "behind_by": 3 })),
+            (200, json!({ "status": "ahead", "ahead_by": 3, "behind_by": 0 })),
+        ]);
+
+        let err = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err();
+        assert!(err.starts_with("`spec/40-rounds` is 3 commits behind origin/main") && err.contains("`git merge origin/main`"), "{err}");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.tickets[0].state, "started", "nothing taken in");
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["behind"], json!({ "count": 3, "base": "main" }), "the Delivery card shows it");
+
+        // Merged the base: only ahead now, so it goes to review and the card no longer shows it.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41"), "{out}");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["behind"], Value::Null);
+        assert!(fake.seen(&format!("/repos/{slug}/compare/")).iter().all(|s| s.method == "GET"), "a read on GitHub, no git in the Dev's clone");
     }
 
     #[tokio::test]
@@ -3611,7 +3784,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -4446,7 +4619,7 @@ pub(crate) mod tests {
         let slug = "octo/st-restart";
         planner_on(&st, "st-restart", Some("git@github.com:octo/st-restart.git"));
         let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": slug, "spec": 40, "project": "st-restart", "state": "running", "created_at": "" })).unwrap();
-        let t = |n: i64, state: &str| crate::db::DeliveryTicket { number: n, title: format!("T{n}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new() };
+        let t = |n: i64, state: &str| crate::db::DeliveryTicket { number: n, title: format!("T{n}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new(), notes: String::new() };
         let mut save = |spec: i64, state: &str, tickets: Vec<crate::db::DeliveryTicket>| {
             (d.spec, d.state, d.tickets) = (spec, state.into(), tickets);
             st.db.save_delivery(&d).unwrap();
@@ -4814,6 +4987,26 @@ pub(crate) mod tests {
 
     fn github_task(st: &AppState, slug: &str, n: i64) -> crate::db::Task {
         st.db.list_tasks().unwrap().into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo == slug && g.number == n)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn resuming_a_needs_human_ticket_gives_the_dev_that_tickets_notes_not_the_deliverys_last() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/nh-own-notes";
+        let (dev, team) = building(&st, &fake, "nh-own-notes", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "nh-own-notes", slug);
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        fake.route("DELETE", &format!("/repos/{slug}/issues/41/labels/needs-human"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/commits"), 200, json!([commit("fed4321abcde", "Fix the total\n\nRefs #41")]));
+        three_changes(&st, &dev, &team[0], 1).await;
+        // Another ticket's changes verdict came after: the Delivery's last notes are now its.
+        crate::delivery::update(&st, slug, 40, |d| d.last_notes = "Other ticket: wrong colour.".into()).unwrap();
+        let ticket = github_task(&st, slug, 41);
+        resume_blocked(&st, &ticket.id).await.unwrap();
+        let brief = woken(&st, &dev).last().cloned().unwrap();
+        assert!(brief.contains("Change 3: the total is off by one.") && !brief.contains("wrong colour"), "{brief}");
+        let _ = spec;
     }
 
     #[tokio::test]

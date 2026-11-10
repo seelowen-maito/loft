@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_preview"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker"],
     }))
 }
 
@@ -474,7 +474,7 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     } else {
         // Its files stay: its clones' build output goes once they're idle.
         let (state, id) = (state.clone(), id.clone());
-        tokio::spawn(async move { crate::sweep::run(&state, None, Some(&id), crate::sweep::IDLE, None).await });
+        tokio::spawn(async move { crate::sweep::run(&state, None, Some(&id), crate::sweep::IDLE).await });
     }
     state.emit(Event::AgentDeleted { agent_id: id });
     Ok(Json(json!({ "ok": true })))

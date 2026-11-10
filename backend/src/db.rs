@@ -48,6 +48,10 @@ pub struct Delivery {
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
     #[serde(default)]
     pub stalled_at: String,
+    /// The tickets whose step stalled it. Acting on another ticket leaves them stalled; empty when the stall
+    /// isn't about a ticket (the Lead's wake, the final steps).
+    #[serde(default)]
+    pub stalled_on: Vec<i64>,
     /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
@@ -118,6 +122,18 @@ impl Delivery {
             self.state = std::mem::take(&mut self.resume_to);
         }
         (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
+        self.stalled_on.clear();
+    }
+
+    /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
+    /// other ticket still stalls it.
+    pub fn clear_stall(&mut self, n: i64) {
+        if self.state == "stalled" {
+            self.stalled_on.retain(|t| *t != n);
+            if self.stalled_on.is_empty() {
+                self.unstall();
+            }
+        }
     }
 }
 
@@ -150,6 +166,9 @@ pub struct DeliveryTicket {
     /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
     #[serde(default)]
     pub agent: String,
+    /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
+    #[serde(default)]
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +413,8 @@ pub struct PullRequest {
     /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
     pub kind: String,
     pub kind_sha: String,
+    /// Commits on the base branch the head doesn't have, from GitHub's compare; 0 when up to date or unknown.
+    pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
 }
@@ -634,6 +655,13 @@ CREATE TABLE IF NOT EXISTS all_time_spend (
 CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
+);
+-- Clients the user paired with Loft (pairing.rs): the SHA-256 of each one's token, never the token.
+CREATE TABLE IF NOT EXISTS paired_clients (
+    hash TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
 );
 -- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
 CREATE TABLE IF NOT EXISTS agent_devices (
@@ -1250,6 +1278,42 @@ impl Db {
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
     }
 
+    pub fn add_paired_client(&self, hash: &str, name: &str) -> Result<()> {
+        let now = now();
+        self.0.lock().unwrap().execute("INSERT INTO paired_clients (hash, name, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)", params![hash, name, now])?;
+        Ok(())
+    }
+
+    pub fn paired_client_count(&self) -> i64 {
+        self.0.lock().unwrap().query_row("SELECT COUNT(*) FROM paired_clients", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// Whether a client with this token hash is paired; counts as its use, written at most once a minute.
+    pub fn use_paired_client(&self, hash: &str) -> bool {
+        let c = self.0.lock().unwrap();
+        let Ok(last) = c.query_row("SELECT last_used_at FROM paired_clients WHERE hash = ?1", params![hash], |r| r.get::<_, Option<String>>(0)) else { return false };
+        let fresh = last.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).is_some_and(|t| Utc::now().signed_duration_since(t) < chrono::Duration::seconds(60));
+        fresh || c.execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now(), hash]).is_ok()
+    }
+
+    /// Every paired client as (token hash, name, paired, last used), most recently used first.
+    pub fn paired_clients(&self) -> Result<Vec<(String, String, String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT hash, name, created_at, last_used_at FROM paired_clients ORDER BY last_used_at DESC")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Unpairs the client whose token hash starts with this id. False when none does.
+    pub fn forget_paired_client(&self, id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE substr(hash, 1, 16) = ?1", params![id])? > 0)
+    }
+
+    /// Unpairs every client but the one with this token hash; how many went.
+    pub fn unpair_all_but(&self, hash: &str) -> Result<usize> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE hash != ?1", params![hash])?)
+    }
+
     /// The database file, for backups (backup.rs), which read it through a connection of their own.
     pub fn path(&self) -> Option<std::path::PathBuf> {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
@@ -1438,6 +1502,7 @@ impl Db {
                     id: String::new(),
                     skipped: String::new(),
                     agent: String::new(),
+                    notes: String::new(),
                 })
                 .collect();
             let d = Delivery {
@@ -1451,6 +1516,7 @@ impl Db {
                 resume_to: String::new(),
                 stall_reason: String::new(),
                 stalled_at: String::new(),
+                stalled_on: vec![],
                 done_at: String::new(),
                 tech_debt: vec![],
                 ready_retry: has(&retry),
