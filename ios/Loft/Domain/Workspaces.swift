@@ -74,13 +74,13 @@ struct CleanLog: Codable, Hashable {
         var bytes: Int64
         var error: String?
         var command: String
-        /// What was done when it isn't a removal, like "Shut down" a Simulator device (`rel` is its name); nil for a removal.
+        /// What was done when it isn't a removal, with its noun: "Shut down Simulator device" or "Stopped process" (`rel` names it); nil for a removal.
         var done: String?
         var id: String { path }
         /// Past tense like the log's header: "Removed /path (2.2 GB)" or "failed /path: why".
         var text: String {
             if let done, !done.isEmpty {
-                let what = "\(done) Simulator device \(rel)"
+                let what = "\(done) \(rel)"
                 return error.map { "failed: \(what): \($0)" } ?? (bytes > 0 ? "\(what) (\(bytesText(bytes)))" : what)
             }
             return error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))"

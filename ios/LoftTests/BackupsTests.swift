@@ -69,12 +69,13 @@ final class BackupsTests: XCTestCase {
 
         let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
         {"at":"2026-11-10T13:21:00+00:00","what":"Simulator cleanup","title":"Simulator cleanup","running":false,
-         "lines":[{"agent":"","path":"/sim/U3","rel":"Loft Dev 93543007","bytes":700,"error":null,"command":"xcrun simctl delete U3","done":"Deleted"},
-                  {"agent":"a","path":"/sim/U1","rel":"Loft Dev (Loft)","bytes":0,"error":null,"command":"xcrun simctl shutdown U1","done":"Shut down"},
-                  {"agent":"","path":"/sim/U4","rel":"Gone (Loft)","bytes":0,"error":"busy","command":"xcrun simctl delete U4","done":"Deleted"}],
+         "lines":[{"agent":"","path":"/sim/U3","rel":"Loft Dev 93543007","bytes":700,"error":null,"command":"xcrun simctl delete U3","done":"Deleted Simulator device"},
+                  {"agent":"a","path":"/sim/U1","rel":"Loft Dev (Loft)","bytes":0,"error":null,"command":"xcrun simctl shutdown U1","done":"Shut down Simulator device"},
+                  {"agent":"","path":"/sim/U4","rel":"Gone (Loft)","bytes":0,"error":"busy","command":"xcrun simctl delete U4","done":"Deleted Simulator device"},
+                  {"agent":"a","path":"pid:4242","rel":"node vite --port 20070","bytes":0,"error":null,"command":"kill 4242","done":"Stopped process"}],
          "skipped":[],"freed_bytes":700,"removed":2,"failed":1}
         """#.utf8))
-        XCTAssertEqual(log.lines.map(\.text), ["Deleted Simulator device Loft Dev 93543007 (\(bytesText(700)))", "Shut down Simulator device Loft Dev (Loft)", "failed: Deleted Simulator device Gone (Loft): busy"])
+        XCTAssertEqual(log.lines.map(\.text), ["Deleted Simulator device Loft Dev 93543007 (\(bytesText(700)))", "Shut down Simulator device Loft Dev (Loft)", "failed: Deleted Simulator device Gone (Loft): busy", "Stopped process node vite --port 20070"])
     }
 
     /// Sizes read "0 bytes", never "Zero KB".
