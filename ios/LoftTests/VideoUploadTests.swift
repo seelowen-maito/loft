@@ -1,3 +1,5 @@
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import Loft
 
@@ -29,7 +31,7 @@ final class VideoUploadTests: XCTestCase {
         return store
     }
 
-    private func settle(_ draft: VideoDraft) async throws {
+    private func settle(_ draft: AttachmentDraft) async throws {
         for _ in 0..<200 where draft.busy { try await Task.sleep(for: .milliseconds(10)) }
     }
 
@@ -53,8 +55,8 @@ final class VideoUploadTests: XCTestCase {
         let store = try await connectedStore(api)
         defer { store.deactivate() }
         let video = try file(bytes: 1_000)
-        let draft = VideoDraft()
-        var seen: [VideoDraft.State] = []
+        let draft = AttachmentDraft(video: true)
+        var seen: [AttachmentDraft.State] = []
         draft.start(load: { video }) { f, p in try await store.upload(f, to: "a1", progress: p) }
         for _ in 0..<200 where draft.busy {
             if seen.last != draft.state { seen.append(draft.state) }
@@ -71,7 +73,7 @@ final class VideoUploadTests: XCTestCase {
         let store = try await connectedStore(api)
         defer { store.deactivate() }
         let big = try file(bytes: 200_000_001)
-        let draft = VideoDraft()
+        let draft = AttachmentDraft(video: true)
         draft.start(load: { big }) { f, p in try await store.upload(f, to: "a1", progress: p) }
         try await settle(draft)
         XCTAssertEqual(draft.state, .failed("This video is over 200 MB. Send a shorter one."))
@@ -85,7 +87,7 @@ final class VideoUploadTests: XCTestCase {
         let store = try await connectedStore(api)
         defer { store.deactivate() }
         let video = try file(bytes: 1_000)
-        let draft = VideoDraft()
+        let draft = AttachmentDraft(video: true)
         draft.start(load: { video }) { f, p in try await store.upload(f, to: "a1", progress: p) }
         try await settle(draft)
         guard case .failed = draft.state else { return XCTFail("\(draft.state)") }
@@ -102,5 +104,66 @@ final class VideoUploadTests: XCTestCase {
         await store.send("Look", to: "a1")
         XCTAssertEqual(api.sentImages, [["v1.mp4"], []])
         XCTAssertTrue(store.pending.isEmpty)
+    }
+
+    // #309: photos.
+
+    /// A `width`×`height` image of noise (which compresses badly, as a detailed photo does), encoded as `type`.
+    private func noise(width: Int, height: Int, as type: UTType) throws -> Data {
+        let ctx = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        arc4random_buf(try XCTUnwrap(ctx.data), width * height * 4)
+        let out = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(out, type.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, try XCTUnwrap(ctx.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return out as Data
+    }
+
+    func testA48MegapixelHEICIsSentAsAJPEGUnderTheLimit() throws {
+        let heic = try noise(width: 8000, height: 6000, as: .heic)
+        let jpeg = try XCTUnwrap(PhotoAttachment.jpeg(heic))
+        XCTAssertLessThanOrEqual(jpeg.count, 3_750_000)
+        XCTAssertEqual(Array(jpeg.prefix(3)), [0xFF, 0xD8, 0xFF], "a JPEG, which the server takes")
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        XCTAssertLessThanOrEqual(max(image.width, image.height), 4096)
+        XCTAssertEqual(Double(image.width) / Double(image.height), 4.0 / 3, accuracy: 0.01, "the same shape")
+    }
+
+    func testASmallPhotoKeepsItsSizeAndNonImagesAreRefused() throws {
+        let png = try noise(width: 300, height: 200, as: .png)
+        let jpeg = try XCTUnwrap(PhotoAttachment.jpeg(png))
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        XCTAssertEqual([image.width, image.height], [300, 200], "not scaled up")
+        XCTAssertNil(PhotoAttachment.jpeg(Data("not an image".utf8)))
+    }
+
+    func testPhotosOver20MBTogetherAreRefused() {
+        XCTAssertNil(PhotoAttachment.refusal(bytes: [3_750_000, 3_750_000, 3_750_000, 3_750_000, 3_750_000]))
+        XCTAssertEqual(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 6)),
+                       "These photos add up to over 20 MB. Send them in a few messages.")
+    }
+
+    func testWhichImagesArePhotos() {
+        let m = ChatMessage(id: 1, agentId: "a1", runId: nil, role: "user", kind: "text", content: "",
+                            meta: ["images": .array([.string("a.png"), .string("b.MOV"), .string("c.jpg"), .string("d.webp")])], createdAt: .now)
+        XCTAssertEqual(m.photos, ["a.png", "c.jpg", "d.webp"])
+    }
+
+    func testAPhotoUploadsWithItsSizeAndAPreview() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let saved = await PickedPhoto.save(try noise(width: 400, height: 300, as: .heic))
+        let photo = try XCTUnwrap(saved)
+        files.append(photo)
+        let bytes = try XCTUnwrap(photo.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let draft = AttachmentDraft(video: false)
+        draft.start(load: { photo }) { f, p in try await store.upload(f, to: "a1", progress: p) }
+        try await settle(draft)
+        XCTAssertEqual(draft.uploaded, "v1.mp4", "MockAPI's name for any upload")
+        XCTAssertEqual(draft.bytes, bytes)
+        XCTAssertEqual(draft.preview.map { max($0.size.width, $0.size.height) }, 160)
+        XCTAssertNil(draft.length)
     }
 }
