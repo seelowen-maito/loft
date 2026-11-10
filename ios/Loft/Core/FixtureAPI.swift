@@ -416,7 +416,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -662,6 +662,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 : cleanItem(agentId, "\(rel)/\(name)", "folder", bytes, hoursAgo: 0.3, ticked: false, opens: true)
         }
     }
+    /// Each state Check can show: the main clone clean and pushed, a clone with unpushed work, a worktree it won't check.
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck {
+        try check()
+        try? await Task.sleep(for: .milliseconds(400))
+        switch rel {
+        case "loft": return GitCheck(state: "safe", lines: ["Clean, all pushed: safe to delete", "the agent clones it again on its next ticket"])
+        case "loft-review": return GitCheck(state: "unsafe", lines: ["2 commits not pushed (fix/260-clean-handles)", "Uncommitted changes (3 files)"])
+        default: return GitCheck(state: "unknown", lines: ["Can't check: unusual git config"])
+        }
+    }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let items = try await cleanPreview(agentId: agentId) + cleanFolders(agentId: "a2", rel: "loft/backend") + cleanFolders(agentId: "a2", rel: "loft/frontend")
         let lines = items.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }
@@ -685,6 +695,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                                  lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
                                                                command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
                                                  skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
+    }
+    func agentDevices() async throws -> [AgentDevice] {
+        try check()
+        return [
+            AgentDevice(udid: "24B1D07C-CFC2-4DCE-8367-F4B9D9347656", name: "Loft Dev (Loft)", state: "Booted", bytes: 2_878_722_048, agent: .init(id: "a1", name: "Loft Dev")),
+            AgentDevice(udid: "B478038F-179F-4CD2-9B0D-CD3FD7405EC8", name: "Loft Lead (Loft)", state: "Shutdown", bytes: 2_474_229_760, agent: .init(id: "a3", name: "Loft Lead")),
+        ]
     }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {
         try check()
@@ -914,7 +931,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
     private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
-                                       "auto_update": true, "messaging_rules": true,
+                                       "auto_update": true, "messaging_rules": true, "idle_timeout_hours": .number(4),
                                        "backup_dir": .string(ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? "/Volumes/Backup/Loft backups" : "")]
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []

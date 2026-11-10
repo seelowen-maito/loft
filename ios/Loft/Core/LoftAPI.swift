@@ -91,9 +91,13 @@ protocol LoftAPI: Sendable {
     func cleanPreview(agentId: String?) async throws -> [CleanItem]
     /// The folders in `rel` inside one of the agent's main clones.
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem]
+    /// Clean's read-only git check of one of the agent's clones or worktrees; only on the user's tap.
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog
     /// The running or last clean's log, the daily sweep's included.
     func cleanLog() async throws -> CleanLog
+    /// Agents' Simulator devices, biggest first.
+    func agentDevices() async throws -> [AgentDevice]
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -393,11 +397,18 @@ struct LiveLoftAPI: LoftAPI {
         let l: CleanListing = try await get("/workspaces/clean/folders", query: [URLQueryItem(name: "agent", value: agentId), URLQueryItem(name: "rel", value: rel)])
         return l.items
     }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck {
+        try decode(GitCheck.self, try await send("POST", "/workspaces/clean/check", body: .object(["agent": .string(agentId), "rel": .string(rel)]), timeout: 60))
+    }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let body: JSONValue = .object(["agent": agentId.map { .string($0) } ?? .null, "paths": .array(paths.map { .string($0) })])
         return try decode(CleanLog.self, try await send("POST", "/workspaces/clean", body: body, timeout: 600))
     }
     func cleanLog() async throws -> CleanLog { try await get("/workspaces/log") }
+    func agentDevices() async throws -> [AgentDevice] {
+        let l: AgentDevices = try await get("/simulator/devices")
+        return l.devices
+    }
 
     func backUpNow() async throws -> BackupStatus {
         // A backup of a big database takes a while; the server answers once it's done.
@@ -531,8 +542,10 @@ extension LoftAPI {
     func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
     func cleanPreview(agentId: String?) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { throw APIError.unsupported("Disk usage") }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
+    func agentDevices() async throws -> [AgentDevice] { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }

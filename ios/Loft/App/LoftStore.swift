@@ -1078,14 +1078,27 @@ final class LoftStore {
     func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
     func cleanPreview(agentId: String?) async throws -> [CleanItem] { try await requireWrite().cleanPreview(agentId: agentId) }
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { try await requireWrite().cleanFolders(agentId: agentId, rel: rel) }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { try await requireWrite().cleanCheck(agentId: agentId, rel: rel) }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { try await requireWrite().clean(agentId: agentId, paths: paths) }
     func cleanLog() async throws -> CleanLog { try await requireWrite().cleanLog() }
+    func agentDevices() async throws -> [AgentDevice] { try await requireWrite().agentDevices() }
 
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.
     func saveBackupDir(_ dir: String) async throws {
         // Only the folder: the server keeps every key left out, so a change made on the web meanwhile stays.
         _ = try await requireWrite().putServerSettings(.object(["backup_dir": .string(dir)]))
+    }
+
+    /// Settings › Disk: hours with no run before Loft stops an agent's processes and Simulator device; nil on a Mac
+    /// without it.
+    func idleTimeoutHours() async throws -> Int? {
+        try await requireWrite().serverSettings()["idle_timeout_hours"]?.numberValue.map { Int($0) }
+    }
+
+    /// Saves only the idle timeout, as `saveBackupDir` does the folder.
+    func saveIdleTimeout(hours: Int) async throws {
+        _ = try await requireWrite().putServerSettings(.object(["idle_timeout_hours": .number(Double(hours))]))
     }
 
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {

@@ -59,6 +59,17 @@ struct CleanItem: Codable, Hashable, Identifiable {
     var canTick: Bool { blocked.isEmpty && !(opens && !label.isEmpty) }
     /// The `rm -rf` shown under it; none when it can't be removed.
     var shownCommand: String { canTick ? command : "" }
+    /// It gets a Check button: a clone or worktree (only top-level items are).
+    var canCheck: Bool { kind == "clone" || kind == "worktree" }
+}
+
+/// `POST /api/workspaces/clean/check`: whether a clone or worktree is safe to delete. `state` is "safe" (clean and
+/// pushed), "unsafe" (unpushed commits or uncommitted changes) or "unknown" (the Mac wouldn't run git there).
+struct GitCheck: Codable, Hashable {
+    var state: String
+    var lines: [String]
+    /// "✅ Clean, all pushed: safe to delete" or "⚠️ 2 commits not pushed (main) · …".
+    var text: String { "\(state == "safe" ? "✅" : state == "unsafe" ? "⚠️" : "❔") \(lines.joined(separator: " · "))" }
 }
 
 struct CleanListing: Codable, Hashable {
@@ -74,9 +85,17 @@ struct CleanLog: Codable, Hashable {
         var bytes: Int64
         var error: String?
         var command: String
+        /// What was done when it isn't a removal, with its noun: "Shut down Simulator device" or "Stopped process" (`rel` names it); nil for a removal.
+        var done: String?
         var id: String { path }
         /// Past tense like the log's header: "Removed /path (2.2 GB)" or "failed /path: why".
-        var text: String { error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))" }
+        var text: String {
+            if let done, !done.isEmpty {
+                let what = "\(done) \(rel)"
+                return error.map { "failed: \(what): \($0)" } ?? (bytes > 0 ? "\(what) (\(bytesText(bytes)))" : what)
+            }
+            return error.map { "failed \(path): \($0)" } ?? "Removed \(path) (\(bytesText(bytes)))"
+        }
     }
 
     var at: Date?
@@ -92,15 +111,36 @@ struct CleanLog: Codable, Hashable {
     var failed: Int
 }
 
+/// `GET /api/simulator/devices`: an agent's Simulator device, its size on disk and whether it is booted.
+struct AgentDevice: Codable, Hashable, Identifiable {
+    struct Owner: Codable, Hashable {
+        var id: String
+        var name: String
+    }
+
+    var udid: String
+    var name: String
+    /// "Booted" or "Shutdown", as simctl says.
+    var state: String
+    var bytes: Int64
+    var agent: Owner
+    var id: String { udid }
+    var stateText: String { state == "Booted" ? "Booted" : "Shut down" }
+}
+
+struct AgentDevices: Codable, Hashable {
+    var devices: [AgentDevice]
+}
+
 /// A size as Settings › Disk says it: "0 bytes", never "Zero KB".
 func bytesText(_ n: Int64) -> String {
     n == 0 ? "0 bytes" : n.formatted(.byteCount(style: .file))
 }
 
-/// The commands for "Copy commands": each agent's under a `# <name>` line.
+/// The commands for "Copy commands": each agent's under a `# <name>` line, kept to that line whatever the name.
 func commandsText(_ items: [(agent: String, command: String)], name: (String) -> String) -> String {
     groupedByAgent(items, \.agent)
-        .map { (["# \(name($0.agent))"] + $0.items.map(\.command)).joined(separator: "\n") }
+        .map { (["# " + String(String.UnicodeScalarView(name($0.agent).unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))] + $0.items.map(\.command)).joined(separator: "\n") }
         .joined(separator: "\n\n") + "\n"
 }
 

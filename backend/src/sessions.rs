@@ -145,7 +145,7 @@ pub mod tests {
     use super::*;
 
     pub fn tmp() -> PathBuf {
-        std::env::temp_dir().join(format!("loft-sessions-{}", uuid::Uuid::new_v4()))
+        crate::testdir::for_this_test("sessions")
     }
 
     pub fn write(dir: &Path, id: &str, lines: &[&str]) {

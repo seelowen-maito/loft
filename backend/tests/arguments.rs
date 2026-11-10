@@ -1,18 +1,20 @@
 //! The loft binary as a process: what it does with arguments it doesn't know.
 
+#[path = "../src/testdir.rs"]
+#[allow(dead_code)]
+mod testdir;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
 fn an_unknown_argument_exits_before_opening_the_db_or_a_port() {
-    let root = std::env::temp_dir().join(format!("loft-args-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = testdir::TempDir::new("args");
     // A port nothing else uses, so a server that did start would be seen (and stopped) rather than collide.
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_loft"))
         .arg("some-later-subcommand")
-        .env("LOFT_ROOT", &root)
+        .env("LOFT_ROOT", &*root)
         .env("LOFT_PORT", port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -37,5 +39,4 @@ fn an_unknown_argument_exits_before_opening_the_db_or_a_port() {
     assert!(!root.join(".loft").exists(), "it opened the db");
     assert!(!root.join("agent-local-storage").exists());
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "it bound the port");
-    let _ = std::fs::remove_dir_all(&root);
 }

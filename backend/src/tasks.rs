@@ -1208,7 +1208,8 @@ pub(crate) mod tests {
     pub(crate) fn state() -> AppState {
         // Tests don't read the real disk: plenty is free unless a test sets `FAKE_FREE` itself.
         crate::sweep::FAKE_FREE.with(|f| f.set(Some(u64::MAX)));
-        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        // Removed when the test's thread ends.
+        let dir = crate::testdir::for_this_test("test");
         // Boot with a temp projects folder so no test writes into the real ~/projects.
         let projects = dir.join("projects");
         std::fs::create_dir_all(&projects).unwrap();

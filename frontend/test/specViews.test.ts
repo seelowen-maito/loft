@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, deliveryOf, parseBoard, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, boardIssues, deliveryOf, parseBoard, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -49,10 +49,10 @@ test("a spec's tickets: its Delivery's, each with its own issue, else its sub-is
 });
 
 test("board options round-trip through the URL and keep the other params", () => {
-  const p = withBoard(new URLSearchParams("project=loft&x=1"), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  const p = withBoard(new URLSearchParams("project=loft&x=1"), { type: "issues", stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
   assert.equal(p.get("project"), "loft");
-  assert.deepEqual(parseBoard(p), { stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
-  assert.equal(withBoard(p, { stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&x=1", "defaults leave no trace");
+  assert.deepEqual(parseBoard(p), { type: "issues", stages: ["delivery", "ready"], hideShipped: true, showDropped: true, byProject: true, sort: "progress", dense: true, needsMe: true });
+  assert.equal(withBoard(p, { type: "all", stages: [], hideShipped: false, showDropped: false, byProject: false, sort: "activity", dense: false, needsMe: false }).toString(), "project=loft&x=1", "defaults leave no trace");
   assert.deepEqual(parseBoard(new URLSearchParams("stage=nope,ready")).stages, ["ready"]);
 });
 
@@ -99,4 +99,31 @@ test("on the board a spec is an agent's when it owns the spec or builds its Deli
   assert.ok(!specOfAgent(neither, ds, "x"));
   assert.ok(!specOfAgent(none, ds, "x"));
   assert.ok([delivered, owned, neither, none].every((s) => specOfAgent(s, ds, "")), "no agent filter: every spec");
+});
+
+test("the type filter is in the URL, All being the default", () => {
+  assert.equal(parseBoard(new URLSearchParams()).type, "all");
+  assert.equal(parseBoard(new URLSearchParams("type=issues")).type, "issues");
+  assert.equal(parseBoard(new URLSearchParams("type=nope")).type, "all");
+  assert.equal(withBoard(new URLSearchParams("project=loft"), { type: "specs" }).toString(), "project=loft&type=specs");
+  assert.equal(withBoard(new URLSearchParams("type=specs&project=loft"), { type: "all" }).toString(), "project=loft");
+});
+
+test("the Issues column holds the issues that are no spec and no spec's ticket, open first then the newest", () => {
+  const t = (o: object) => ({ id: "x", state: "open", status: "inbox", labels: [], description: "", parent_id: null, updated_at: "2026-01-01", github: null, ...o }) as unknown as Task;
+  const standalone = t({ id: "a", updated_at: "2026-01-02", github: { repo: "o/r", number: 1 } });
+  const newer = t({ id: "b", updated_at: "2026-01-03" });
+  const aSpec = t({ id: "s", labels: ["Spec"], github: { repo: "o/r", number: 9 } });
+  const child = t({ id: "c", parent_id: "s" });
+  const named = t({ id: "d", description: "## Parent\n\n#9\n" });
+  const inDelivery = t({ id: "e", github: { repo: "o/r", number: 11 } });
+  const done = t({ id: "f", state: "closed", status: "done", updated_at: "2026-01-09" });
+  const ds = [del({ spec: 9, tickets: [{ number: 11, title: "T", state: "open", skipped: "" }] })];
+  const all = [standalone, newer, aSpec, child, named, inDelivery, done];
+  const o = parseBoard(new URLSearchParams());
+  assert.deepEqual(boardIssues(all, ds, true, o, false).map((x) => x.id), ["b", "a"], "no specs, no spec tickets, no closed");
+  assert.deepEqual(boardIssues(all, ds, true, o, true).map((x) => x.id), ["b", "a", "f"], "closed ones last");
+  assert.deepEqual(boardIssues(all.map((x) => (x.id === "a" ? { ...x, status: "blocked" } : x)), ds, true, { ...o, needsMe: true }, false).map((x) => x.id), ["a"]);
+  assert.deepEqual(boardIssues(all, ds, false, o, true), [], "nothing is decided before the Deliveries load, so no ticket flickers in");
+  assert.deepEqual(boardIssues(all, [], true, o, false).map((x) => x.id), ["b", "a", "e"], "loaded with no Deliveries: all stay");
 });

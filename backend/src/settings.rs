@@ -38,6 +38,8 @@ pub struct Settings {
     pub push: Push,
     /// Where the daily backups go (see backup.rs). Empty: `~/Library/Application Support/Loft/backups`.
     pub backup_dir: String,
+    /// Hours with no run after which an agent counts as idle: Loft then shuts its Simulator device down.
+    pub idle_timeout_hours: u32,
 }
 
 impl Settings {
@@ -87,6 +89,7 @@ impl Default for Settings {
             comment_approval_default: "ask".into(),
             push: Push::default(),
             backup_dir: String::new(),
+            idle_timeout_hours: 4,
         }
     }
 }
@@ -117,6 +120,11 @@ impl Store {
         self.current.read().unwrap().clone()
     }
 
+    /// Loft's data folder, which holds `settings.json` and the database.
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new("."))
+    }
+
     /// Values in effect for restart-only fields.
     pub fn boot(&self) -> &Settings {
         &self.boot
@@ -132,6 +140,9 @@ impl Store {
         let backups = Path::new(s.backup_dir.trim());
         if !s.backup_dir.trim().is_empty() && (!backups.is_absolute() || backups.components().any(|c| c == std::path::Component::ParentDir)) {
             bail!("Backups folder must be a full path, like /Volumes/Disk/Loft backups");
+        }
+        if s.idle_timeout_hours == 0 {
+            bail!("Idle timeout must be at least 1 hour");
         }
         let tmp = self.path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
@@ -190,7 +201,7 @@ mod tests {
     use super::*;
 
     fn store(json: &str) -> Store {
-        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
         let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy());
         std::fs::write(dir.join("settings.json"), json).unwrap();
@@ -207,7 +218,7 @@ mod tests {
     fn settings_and_their_folder_are_owner_only_at_start_and_on_save() {
         use std::os::unix::fs::MetadataExt;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().mode() & 0o777;
-        let dir = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
         let file = dir.join("settings.json");
         std::fs::write(&file, format!(r#"{{ "projects_dir": {:?} }}"#, dir.join("projects"))).unwrap();
@@ -219,13 +230,22 @@ mod tests {
         s.save(s.get()).unwrap();
         assert_eq!(mode(&file), 0o600, "on save");
         // A first start, with no settings yet, and the first save.
-        let fresh = std::env::temp_dir().join(format!("loft-settings-{}", uuid::Uuid::new_v4()));
+        let fresh = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(&fresh).unwrap();
         let s = Store::load(&fresh).unwrap();
         let mut first = s.get();
         first.projects_dir = dir.join("projects");
         s.save(first).unwrap();
         assert_eq!((mode(&fresh), mode(&fresh.join("settings.json"))), (0o700, 0o600));
+    }
+
+    #[test]
+    fn the_idle_timeout_defaults_to_4_hours_and_is_at_least_1() {
+        let s = store(r#"{ "projects_dir": "PROJECTS" }"#);
+        assert_eq!(s.get().idle_timeout_hours, 4, "settings saved before it");
+        let mut zero = s.get();
+        zero.idle_timeout_hours = 0;
+        assert!(s.save(zero).is_err());
     }
 
     #[test]

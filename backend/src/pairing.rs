@@ -163,7 +163,7 @@ pub fn paired(state: &AppState, headers: &HeaderMap) -> bool {
     state.db.use_paired_client(&hash(&token))
 }
 
-/// What needs a paired client: every write under the API, plus reading devices, push, settings and Clean's listings. Only the
+/// What needs a paired client: every write under the API, plus reading devices, push, settings and Clean's listings and log. Only the
 /// calls a client with no token must make to get one stay open.
 fn needs_token(method: &Method, path: &str) -> bool {
     let path = path.trim_end_matches('/');
@@ -172,7 +172,7 @@ fn needs_token(method: &Method, path: &str) -> bool {
     }
     match *method {
         Method::GET | Method::HEAD | Method::OPTIONS => {
-            matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients" | "/workspaces/clean/preview" | "/workspaces/clean/folders")
+            matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients" | "/workspaces/clean/preview" | "/workspaces/clean/folders" | "/workspaces/log")
         }
         _ => true,
     }
@@ -347,7 +347,7 @@ mod tests {
     /// The real API behind a real socket: a request from 127.0.0.1 like an agent's `curl`.
     async fn serve() -> (String, AppState) {
         let st = crate::tasks::tests::state();
-        let app = crate::app(&st, &std::env::temp_dir().join("no-dist"));
+        let app = crate::app(&st, std::path::Path::new("/no-dist"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -400,8 +400,10 @@ mod tests {
         ("POST", "/agents/abc/messages"),
         ("POST", "/agents/abc/uploads"),
         ("POST", "/workspaces/clean"),
+        ("POST", "/workspaces/clean/check"),
         ("GET", "/workspaces/clean/preview"),
         ("GET", "/workspaces/clean/folders"),
+        ("GET", "/workspaces/log"),
         ("POST", "/issues"),
         ("POST", "/agents/abc/run"),
         ("POST", "/agents/abc/memories"),

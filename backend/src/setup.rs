@@ -1036,7 +1036,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
 
     #[test]
     fn features_look_one_folder_down() {
-        let dir = std::env::temp_dir().join(format!("loft-features-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("features");
         std::fs::create_dir_all(dir.join("backend")).unwrap();
         std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
         std::fs::write(dir.join("backend/Cargo.toml"), "").unwrap();

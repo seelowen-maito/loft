@@ -1,4 +1,4 @@
-import type { Agent, CleanItem, CleanLog, QuietWindow } from "./api";
+import type { Agent, CleanItem, CleanLog, GitCheck, QuietWindow } from "./api";
 
 
 export function timeAgo(input: string | number | null | undefined): string {
@@ -89,7 +89,23 @@ export function shownCommand(i: CleanItem, depth: number): string {
   return canTick(i, depth) ? i.command : "";
 }
 
+/** `s` without control characters, so a name stays on its one line (Clean's `# <agent>` in Copy commands). */
+export function oneLine(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+/** Clean: whether a row gets a Check button (a clone or worktree at the top of a workspace). */
+export function canCheck(i: CleanItem, depth: number): boolean {
+  return depth === 0 && (i.kind === "clone" || i.kind === "worktree");
+}
+
+/** Clean: what a Check found, after its sign: "✅ Clean, all pushed: safe to delete" or "⚠️ 2 commits not pushed (main) · …". */
+export function gitCheckText(c: GitCheck): string {
+  return `${c.state === "safe" ? "✅" : c.state === "unsafe" ? "⚠️" : "❔"} ${c.lines.join(" · ")}`;
+}
+
 /** Clean: a log line, past tense like its header: "Removed /path (2.2 GB)" or "failed /path: why". */
 export function cleanLineText(l: CleanLog["lines"][number]): string {
+  if (l.done) return l.error ? `failed: ${l.done} ${l.rel}: ${l.error}` : `${l.done} ${l.rel}${l.bytes ? ` (${fmtBytes(l.bytes)})` : ""}`;
   return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;
 }

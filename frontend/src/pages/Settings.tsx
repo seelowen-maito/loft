@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, Loader2, RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { HerdrSetup } from "./HerdrSetup";
-import { canTick, cleanLineText, cx, fmtBytes, shownCommand, timeAgo } from "../lib/format";
+import { canCheck, canTick, cleanLineText, cx, fmtBytes, gitCheckText, oneLine, shownCommand, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -191,8 +191,9 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
 
 /** Disk: each agent's workspace size and the free space. Clean (one agent) and Clean all list each workspace's
  * top-level items for the user to tick, then log each removal; the last run's log, the daily sweep's included, stays here. */
-function Workspaces() {
+function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours: (v: number) => void }) {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
+  const [devices, setDevices] = useState<AgentDevice[] | null>(null);
   // The open list: whose (an agent's id, or "all"), its items, and the paths ticked.
   const [preview, setPreview] = useState<Picker | null>(null);
   // The log on screen: live while cleaning, then the summary.
@@ -203,7 +204,7 @@ function Workspaces() {
   const [remeasuring, setRemeasuring] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
   const card = useRef<HTMLDivElement>(null);
-  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast)]);
+  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices))]);
   useEffect(() => {
     load().then(() => {
       // Needs you links here when the disk is almost full.
@@ -296,6 +297,29 @@ function Workspaces() {
             </button>
           </p>
         )}
+        {devices && devices.length > 0 && (
+          <div className="space-y-1.5">
+            <h4 className="text-[12px] font-medium uppercase tracking-wide text-fg-3">Simulator devices</h4>
+            <ul className="space-y-1.5 text-[13px]">
+              {devices.map((d) => (
+                <li key={d.udid} className="flex items-center gap-3">
+                  <span className="min-w-0 flex-1 truncate text-fg-2" title={d.udid}>{d.agent.name}</span>
+                  <span className={cx("shrink-0 text-[12px]", d.state === "Booted" ? "text-good" : "text-fg-3")}>{d.state === "Booted" ? "Booted" : "Shut down"}</span>
+                  <span className="w-16 shrink-0 text-right tabular-nums text-fg">{fmtBytes(d.bytes)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops the processes the agent left running (like a dev server) and shuts its Simulator device down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
+          <input
+            className="input w-24"
+            type="number"
+            min={1}
+            value={idleHours}
+            onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
+          />
+        </Field>
         <p className="text-[12px] text-fg-3">
           Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
         </p>
@@ -327,7 +351,7 @@ function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
 function CopyCommands({ items, name }: { items: { agent: string; command: string }[]; name: (id: string) => string }) {
   const [copied, setCopied] = useState(false);
   const text = byAgent(items)
-    .map(([agent, xs]) => [`# ${name(agent)}`, ...xs.map((x) => x.command)].join("\n"))
+    .map(([agent, xs]) => [`# ${oneLine(name(agent))}`, ...xs.map((x) => x.command)].join("\n"))
     .join("\n\n");
   return (
     <button
@@ -379,6 +403,8 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
   // Folders listed inside opened items, by path; null while loading.
   const [inside, setInside] = useState<Map<string, CleanItem[] | null>>(new Map());
   const [err, setErr] = useState<string | null>(null);
+  // Check results by path; null while checking. Git runs only when the user clicks, and nothing gets ticked.
+  const [checks, setChecks] = useState<Map<string, GitCheck | null>>(new Map());
   const { items, ticked } = preview;
   const known = [...items, ...[...inside.values()].flatMap((xs) => xs ?? [])];
   const chosen = known.filter((i) => ticked.has(i.path));
@@ -405,8 +431,22 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
       setErr((e as Error).message);
     }
   };
+  const check = async (i: CleanItem) => {
+    setChecks((cur) => new Map(cur).set(i.path, null));
+    let c: GitCheck;
+    try {
+      c = await api.cleanCheck(i.agent, i.rel);
+    } catch (e) {
+      c = { state: "unknown", lines: [`Can't check: ${(e as Error).message}`] };
+    }
+    setChecks((cur) => new Map(cur).set(i.path, c));
+  };
+  const checkAll = async (xs: CleanItem[]) => {
+    for (const i of xs.filter((i) => canCheck(i, 0))) await check(i);
+  };
   const row = (i: CleanItem, depth: number): React.ReactNode => {
     const sub = inside.get(i.path);
+    const checked = checks.get(i.path);
     const on = ticked.has(i.path);
     return (
       <li key={i.path}>
@@ -425,11 +465,22 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
               <span className="text-[11.5px] text-fg-3">{i.kind === "clone" ? "git clone" : i.kind}</span>
               {i.label && <span className="text-[11.5px] text-accent">{i.label}</span>}
               {i.blocked && <span className="text-[11.5px] text-warn">{i.blocked}</span>}
-              {on && i.warning && <span className="text-[11.5px] text-warn">{i.warning}</span>}
+              {on && i.warning && !checked && <span className="text-[11.5px] text-warn">{i.warning}</span>}
+              {canCheck(i, depth) && checked !== null && (
+                <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => check(i)}>
+                  {checked ? "Check again" : "Check"}
+                </button>
+              )}
               <span className="flex-1" />
               <span className="shrink-0 text-[11.5px] text-fg-3">{timeAgo(i.changed)}</span>
               <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(i.bytes)}</span>
             </span>
+            {checked === null && (
+              <span className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+                <Loader2 className="size-3 animate-spin" /> Checking git…
+              </span>
+            )}
+            {checked && <span className={cx("block text-[11.5px]", checked.state === "safe" ? "text-good" : checked.state === "unsafe" ? "text-warn" : "text-fg-3")}>{gitCheckText(checked)}</span>}
             {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
             {shownCommand(i, depth) && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
           </span>
@@ -463,6 +514,11 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
           <div key={agent} className="space-y-1.5">
             <p className="flex items-center gap-2 text-[13px] font-medium">
               <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
+              {xs.some((i) => canCheck(i, 0)) && (
+                <button type="button" className="shrink-0 text-[11.5px] font-normal text-accent hover:underline" onClick={() => checkAll(xs)}>
+                  Check all
+                </button>
+              )}
               <span className="shrink-0 tabular-nums">{fmtBytes(xs.reduce((n, i) => n + i.bytes, 0))}</span>
             </p>
             <ul className="space-y-1.5 text-[12.5px]">{xs.map((i) => row(i, 0))}</ul>
@@ -760,7 +816,7 @@ export default function SettingsPage() {
 
         <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
 
-        <Workspaces />
+        <Workspaces idleHours={draft.idle_timeout_hours ?? 4} onIdleHours={(v) => set("idle_timeout_hours", v)} />
 
         <GithubUsage />
         <Spend />
