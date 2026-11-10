@@ -1122,6 +1122,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
+        // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
+        .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1913,6 +1915,7 @@ while [ $# -gt 0 ]; do
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
+printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 : "${cost:=0}" "${sid:=s1}"
@@ -2125,6 +2128,18 @@ esac
         assert_eq!(ports_seen(&st, &c.id), ["20000 20000-20009"]);
         run(&st, &b.id, "again", 2).await;
         assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_agent_builds_cargo_dependencies_in_its_own_workspace() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        run(&st, &a.id, "hello", 1).await;
+        run(&st, &b.id, "hello", 1).await;
+        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("cargo-build.log")).unwrap().trim().to_string();
+        assert_eq!(seen(&a.id), workspace(&st, &a.id).join(".cargo-build").to_string_lossy());
+        assert_eq!(seen(&b.id), workspace(&st, &b.id).join(".cargo-build").to_string_lossy());
+        assert_ne!(seen(&a.id), seen(&b.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
