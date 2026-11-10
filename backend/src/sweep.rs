@@ -45,6 +45,8 @@ pub struct Folder {
     pub bytes: u64,
     /// The newest change to its clone, what the age rule goes by.
     pub changed: DateTime<Local>,
+    /// The shell command equivalent to its removal, for the user to read or copy; Loft removes by path.
+    pub command: String,
 }
 
 /// What a clean leaves, and why.
@@ -72,6 +74,8 @@ pub struct Line {
     pub rel: String,
     pub bytes: u64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub command: String,
 }
 
 /// A run's log: each removal as it happens, what was skipped, and the totals.
@@ -313,7 +317,18 @@ fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, 
         return;
     }
     let bytes = size(&path);
-    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into() });
+    let command = rm_command(&path);
+    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command });
+}
+
+/// `rm -rf <path>`, quoted for the shell when it needs to be.
+fn rm_command(path: &Path) -> String {
+    let p = path.to_string_lossy();
+    if p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
+        format!("rm -rf {p}")
+    } else {
+        format!("rm -rf '{}'", p.replace('\'', "'\\''"))
+    }
 }
 
 /// Removes the folders, reporting each as it goes; an agent that started working keeps its.
@@ -321,7 +336,7 @@ fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &
     for f in folders {
         let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
         let bytes = if error.is_none() { f.bytes } else { 0 };
-        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error });
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command });
     }
 }
 
@@ -756,6 +771,17 @@ mod tests {
         let line = r.lines.iter().find(|l| l.path.ends_with("loft/target")).unwrap();
         assert_eq!(line.bytes, before);
         assert!(before >= 4096, "a 1-byte file takes a block: {before}");
+    }
+
+    #[test]
+    fn each_folder_carries_its_equivalent_command() {
+        let storage = temp();
+        clone(&storage.join("a/loft"));
+        let p = plan(&storage, None, &|_| false, later(), IDLE);
+        let f = p.folders.iter().find(|f| f.rel == "loft/target").unwrap();
+        assert!(f.path.is_absolute());
+        assert_eq!(f.command, format!("rm -rf {}", f.path.display()));
+        assert_eq!(rm_command(Path::new("/w/it's here/target")), r"rm -rf '/w/it'\''s here/target'");
     }
 
     #[test]

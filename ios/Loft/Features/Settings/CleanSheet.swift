@@ -17,14 +17,15 @@ struct CleanSheet: View {
     let start: Start
     /// Agent names by id; a deleted agent's workspace shows its id.
     let names: [String: String]
-    /// After a clean, so the sizes refresh.
-    var onCleaned: () async -> Void
+    /// After a clean, with the agents it cleaned, so their sizes refresh.
+    var onCleaned: (Set<String>) async -> Void
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var plan: CleanPlan?
     @State private var unticked: Set<String> = []
     @State private var log: CleanLog?
     @State private var error: APIError?
+    @State private var copied = false
 
     private var agentId: String? {
         if case .preview(let a) = start { return a }
@@ -40,7 +41,7 @@ struct CleanSheet: View {
                 } else if let plan {
                     previewSections(plan)
                 } else {
-                    ProgressView().frame(maxWidth: .infinity)
+                    ProgressView("Measuring workspaces…").frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle(title)
@@ -75,7 +76,7 @@ struct CleanSheet: View {
         } else {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Remove \(bytes(kept.reduce(0) { $0 + $1.bytes }))", role: .destructive) { confirm() }
+                Button(plan == nil ? "Remove" : "Remove \(bytes(kept.reduce(0) { $0 + $1.bytes }))", role: .destructive) { confirm() }
                     .disabled(kept.isEmpty)
                     .accessibilityIdentifier("cleanConfirm")
             }
@@ -96,6 +97,7 @@ struct CleanSheet: View {
                     Toggle(isOn: Binding(get: { !unticked.contains(f.path) }, set: { on in tick([f.path], on) })) {
                         Text(f.rel).font(.footnote.monospaced()).lineLimit(1).truncationMode(.middle)
                         Text("\(bytes(f.bytes)) · changed \(f.changed.formatted(.relative(presentation: .named)))")
+                        Text(f.command).font(.caption2.monospaced()).textSelection(.enabled)
                     }
                 }
             } header: {
@@ -105,7 +107,24 @@ struct CleanSheet: View {
                 }
             }
         }
+        commandsSection(kept.map { ($0.agent, $0.command) })
         skippedSection(plan.skipped)
+    }
+
+    /// The equivalent commands, labelled as such, with "Copy commands".
+    @ViewBuilder
+    private func commandsSection(_ items: [(agent: String, command: String)]) -> some View {
+        if !items.isEmpty {
+            Section {
+                Button(copied ? "Copied" : "Copy commands") {
+                    UIPasteboard.general.string = commandsText(items, name: name)
+                    copied = true
+                }
+                .accessibilityIdentifier("copyCommands")
+            } footer: {
+                Text("Commands are the equivalent of each removal; your Mac removes the paths itself.")
+            }
+        }
     }
 
     private func tick(_ paths: [String], _ on: Bool) {
@@ -126,15 +145,22 @@ struct CleanSheet: View {
         ForEach(groupedByAgent(log.lines, \.agent), id: \.agent) { group in
             Section(name(group.agent)) {
                 ForEach(group.items) { l in
-                    Text(l.error.map { "failed \(l.rel): \($0)" } ?? "remove <workspace>/\(l.rel) (\(bytes(l.bytes)))")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(l.error == nil ? Color.primary : Theme.failure)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l.error.map { "failed \(l.path): \($0)" } ?? "remove \(l.path) (\(bytes(l.bytes)))")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(l.error == nil ? Color.primary : Theme.failure)
+                        if !l.command.isEmpty {
+                            Text(l.command).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                        }
+                    }
+                    .textSelection(.enabled)
                 }
             }
         }
         if !log.running && log.lines.isEmpty {
             Text("Nothing was removed.").foregroundStyle(.secondary)
         }
+        if !log.running { commandsSection(log.lines.filter { !$0.command.isEmpty }.map { ($0.agent, $0.command) }) }
         skippedSection(log.skipped)
     }
 
@@ -156,6 +182,7 @@ struct CleanSheet: View {
 
     private func confirm() {
         let paths = kept.map(\.path)
+        copied = false
         log = CleanLog(at: nil, what: "", running: true, lines: [], skipped: [], freedBytes: 0, removed: 0, failed: 0)
         Task {
             // The log fills in as the Mac removes each folder.
@@ -167,8 +194,9 @@ struct CleanSheet: View {
             }
             defer { poll.cancel() }
             do {
-                log = try await store.clean(agentId: agentId, paths: paths)
-                await onCleaned()
+                let done = try await store.clean(agentId: agentId, paths: paths)
+                log = done
+                await onCleaned(Set(done.lines.map(\.agent)))
             } catch {
                 log = nil
                 self.error = APIError.from(error)

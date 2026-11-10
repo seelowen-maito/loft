@@ -607,8 +607,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     func stopRun(agentId: String) async throws { try check() }
     func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
+    /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
+    private func measure() async {
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk") { try? await Task.sleep(for: .seconds(20)) }
+    }
     func workspaceSizes() async throws -> WorkspaceSizes {
         try check()
+        await measure()
         let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
         return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000, busy: true), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000, busy: false),
                                        .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
@@ -616,29 +621,38 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     func cleanPreview(agentId: String?) async throws -> CleanPlan {
         try check()
+        await measure()
         let ws = "/Users/me/loft/agent-local-storage"
         let changed = Date().addingTimeInterval(-26 * 3600)
         let folders: [CleanPlan.Folder] = [
-            .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed),
-            .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed),
-            .init(agent: "a3", path: "\(ws)/a3/.cargo-build", rel: ".cargo-build", bytes: 300_000_000, changed: changed.addingTimeInterval(-86400)),
+            .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/backend/target"),
+            .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/frontend/node_modules"),
+            .init(agent: "a3", path: "\(ws)/a3/.cargo-build", rel: ".cargo-build", bytes: 300_000_000, changed: changed.addingTimeInterval(-86400), command: "rm -rf \(ws)/a3/.cargo-build"),
         ].filter { agentId == nil || $0.agent == agentId }
         let skipped = agentId == nil ? [CleanSkip(agent: "a1", rel: "", reason: "agent is working"), CleanSkip(agent: "a3", rel: "homebase", reason: "changed in the last hour")] : []
         return CleanPlan(folders: folders, skipped: skipped, totalBytes: folders.reduce(0) { $0 + $1.bytes })
     }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let plan = try await cleanPreview(agentId: agentId)
-        let lines = plan.folders.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil) }
+        let lines = plan.folders.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }
         let unticked = plan.folders.filter { !paths.contains($0.path) }.map { CleanSkip(agent: $0.agent, rel: $0.rel, reason: "unticked") }
         let log = CleanLog(at: Date(), what: agentId == nil ? "Clean all" : "Clean", running: false, lines: lines, skipped: unticked + plan.skipped,
                            freedBytes: lines.reduce(0) { $0 + $1.bytes }, removed: lines.count, failed: 0)
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk"), let first = lines.first {
+            // Mid-run, for the live log: the first folder is gone, the rest still to go.
+            var live = log
+            (live.running, live.lines, live.freedBytes, live.removed) = (true, [first], first.bytes, 1)
+            locked { lastClean = live }
+            try? await Task.sleep(for: .seconds(8))
+        }
         locked { lastClean = log }
         return log
     }
     func cleanLog() async throws -> CleanLog {
         try check()
         return locked { lastClean } ?? CleanLog(at: Date().addingTimeInterval(-5 * 3600), what: "Daily sweep", running: false,
-                                                 lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil)],
+                                                 lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
+                                                               command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
                                                  skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
     }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {

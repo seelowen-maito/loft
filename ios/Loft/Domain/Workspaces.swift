@@ -37,6 +37,8 @@ struct CleanPlan: Codable, Hashable {
         var bytes: Int64
         /// Its clone's newest change.
         var changed: Date
+        /// The equivalent `rm -rf`, to read or copy; the Mac removes by path.
+        var command: String
         var id: String { path }
     }
 
@@ -53,6 +55,7 @@ struct CleanLog: Codable, Hashable {
         var rel: String
         var bytes: Int64
         var error: String?
+        var command: String
         var id: String { path }
     }
 
@@ -65,6 +68,13 @@ struct CleanLog: Codable, Hashable {
     var freedBytes: Int64
     var removed: Int
     var failed: Int
+}
+
+/// The commands for "Copy commands": each agent's under a `# <name>` line.
+func commandsText(_ items: [(agent: String, command: String)], name: (String) -> String) -> String {
+    groupedByAgent(items, \.agent)
+        .map { (["# \(name($0.agent))"] + $0.items.map(\.command)).joined(separator: "\n") }
+        .joined(separator: "\n\n") + "\n"
 }
 
 /// Groups by agent, in the order they come.

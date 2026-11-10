@@ -68,6 +68,9 @@ struct SettingsView: View {
     /// Settings › Disk: workspace sizes and free space, nil until loaded; the last clean's log; the open clean.
     @State private var disk: WorkspaceSizes?
     @State private var lastClean: CleanLog?
+    /// Agents whose sizes are measured again after a clean.
+    @State private var remeasuring: Set<String> = []
+    @State private var measuringDisk = true
     @State private var cleanSheet: CleanSheet.Start?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
@@ -302,6 +305,10 @@ struct SettingsView: View {
 
             if let disk {
                 diskSection(disk)
+            } else if measuringDisk, store.info?.supports(.workspaces) == true {
+                Section("Disk") {
+                    ProgressView("Measuring workspaces…").frame(maxWidth: .infinity)
+                }
             }
 
             Section("Appearance") {
@@ -354,7 +361,11 @@ struct SettingsView: View {
             if phase == .active { aiStatus = OnDeviceModel.status }
         }
         .sheet(item: $cleanSheet) { start in
-            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) { await loadDisk() }
+            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) { cleaned in
+                remeasuring = cleaned
+                await loadDisk()
+                remeasuring = []
+            }
         }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
@@ -373,6 +384,7 @@ struct SettingsView: View {
 
     private func loadDisk() async {
         guard store.info?.supports(.workspaces) == true else { return }
+        defer { measuringDisk = false }
         disk = try? await store.workspaceSizes()
         if store.info?.supports(.cleanPreview) == true { lastClean = try? await store.cleanLog() }
     }
@@ -390,11 +402,15 @@ struct SettingsView: View {
             ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
                 LabeledContent {
                     HStack(spacing: 10) {
-                        Text(r.bytes.formatted(.byteCount(style: .file)))
+                        if remeasuring.contains(r.id) {
+                            ProgressView().accessibilityLabel("Measuring")
+                        } else {
+                            Text(r.bytes.formatted(.byteCount(style: .file)))
+                        }
                         if canClean, let busy = r.busy {
                             Button(busy ? "Working" : "Clean") { cleanSheet = .preview(agentId: r.id) }
                                 .buttonStyle(.bordered).controlSize(.small)
-                                .disabled(busy)
+                                .disabled(busy || !remeasuring.isEmpty)
                                 .accessibilityIdentifier("clean-\(r.id)")
                         }
                     }
@@ -404,7 +420,7 @@ struct SettingsView: View {
             }
             if canClean {
                 Button("Clean all") { cleanSheet = .preview(agentId: nil) }
-                    .disabled(d.idleCount == 0)
+                    .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
                     .accessibilityIdentifier("cleanAll")
             }
             if let last = lastClean, let at = last.at {

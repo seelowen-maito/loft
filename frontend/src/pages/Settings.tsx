@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RotateCw } from "lucide-react";
+import { Loader2, RotateCw } from "lucide-react";
 import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanPlan, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
@@ -197,6 +197,8 @@ function Workspaces() {
   const [shown, setShown] = useState<CleanLog | null>(null);
   const [last, setLast] = useState<CleanLog | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
+  // Agents whose sizes are measured again after a clean.
+  const [remeasuring, setRemeasuring] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
   const card = useRef<HTMLDivElement>(null);
   const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast)]);
@@ -231,7 +233,8 @@ function Workspaces() {
       done = true;
       setShown(l);
       setLast(l);
-      await load();
+      setRemeasuring(new Set(l.lines.map((x) => x.agent)));
+      await load().finally(() => setRemeasuring(new Set()));
     } catch (e) {
       done = true;
       setShown(null);
@@ -242,7 +245,9 @@ function Workspaces() {
   };
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
   const rows = [...(s?.agents ?? [])].sort((a, b) => b.bytes - a.bytes);
-  const busy = loading !== null || shown?.running === true;
+  // Sizes are measured on the first load and for a preview; Clean waits for them.
+  const measuring = !s || loading !== null;
+  const busy = measuring || remeasuring.size > 0 || shown?.running === true;
   return (
     <div ref={card} id="workspaces">
       <Section title="Disk">
@@ -251,21 +256,31 @@ function Workspaces() {
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
           </p>
           <button type="button" className="btn shrink-0" disabled={busy || rows.every((r) => r.busy)} onClick={() => open("all")}>
-            {loading === "all" ? "Checking…" : "Clean all"}
+            Clean all
           </button>
         </div>
         {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
-        <ul className="space-y-1.5 text-[13px]">
-          {rows.map((r) => (
-            <li key={r.id} className="flex items-center gap-3">
-              <span className="min-w-0 flex-1 truncate text-fg-2">{r.name}</span>
-              <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
-              <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || busy} onClick={() => open(r.id)}>
-                {r.busy ? "Working" : loading === r.id ? "Checking…" : "Clean"}
-              </button>
-            </li>
-          ))}
-        </ul>
+        {measuring ? (
+          <p className="flex items-center gap-2 py-2 text-[13px] text-fg-2">
+            <Loader2 className="size-4 animate-spin" /> Measuring workspaces…
+          </p>
+        ) : (
+          <ul className="space-y-1.5 text-[13px]">
+            {rows.map((r) => (
+              <li key={r.id} className="flex items-center gap-3">
+                <span className="min-w-0 flex-1 truncate text-fg-2">{r.name}</span>
+                {remeasuring.has(r.id) ? (
+                  <Loader2 className="size-4 shrink-0 animate-spin text-fg-3" aria-label="Measuring" />
+                ) : (
+                  <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
+                )}
+                <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || busy} onClick={() => open(r.id)}>
+                  {r.busy ? "Working" : "Clean"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
@@ -303,6 +318,27 @@ function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
   for (const i of items) m.set(i.agent, [...(m.get(i.agent) ?? []), i]);
   return [...m];
 }
+
+/** Copies the equivalent `rm -rf` commands, by agent. */
+function CopyCommands({ items, name }: { items: { agent: string; command: string }[]; name: (id: string) => string }) {
+  const [copied, setCopied] = useState(false);
+  const text = byAgent(items)
+    .map(([agent, xs]) => [`# ${name(agent)}`, ...xs.map((x) => x.command)].join("\n"))
+    .join("\n\n");
+  return (
+    <button
+      type="button"
+      className="btn-ghost text-[12.5px]"
+      disabled={items.length === 0}
+      onClick={() => navigator.clipboard.writeText(text + "\n").then(() => setCopied(true))}
+    >
+      {copied ? "Copied" : "Copy commands"}
+    </button>
+  );
+}
+
+/** Says the commands shown are what Loft's removal amounts to, not what it runs. */
+const EQUIVALENT = "Commands are the equivalent of each removal; Loft removes the paths itself.";
 
 function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) => string }) {
   if (skipped.length === 0) return null;
@@ -364,11 +400,16 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
               <ul className="space-y-0.5 pl-6 text-[12.5px]">
                 {folders.map((f) => (
                   <li key={f.path}>
-                    <label className="flex items-center gap-2" title={f.path}>
-                      <input type="checkbox" checked={!unticked.has(f.path)} onChange={(e) => toggle([f.path], e.target.checked)} />
-                      <span className="min-w-0 flex-1 truncate font-mono text-fg-2">{f.rel}</span>
-                      <span className="hidden shrink-0 text-fg-3 sm:inline">{timeAgo(f.changed)}</span>
-                      <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(f.bytes)}</span>
+                    <label className="flex items-start gap-2">
+                      <input type="checkbox" className="mt-0.5" checked={!unticked.has(f.path)} onChange={(e) => toggle([f.path], e.target.checked)} />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex gap-2">
+                          <span className="min-w-0 flex-1 truncate font-mono text-fg-2">{f.rel}</span>
+                          <span className="hidden shrink-0 text-fg-3 sm:inline">{timeAgo(f.changed)}</span>
+                          <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(f.bytes)}</span>
+                        </span>
+                        <span className="block break-all font-mono text-[11.5px] text-fg-3">{f.command}</span>
+                      </span>
                     </label>
                   </li>
                 ))}
@@ -378,7 +419,10 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
         })}
         <Skipped skipped={plan.skipped} name={name} />
       </div>
-      <div className="flex justify-end gap-2">
+      {plan.folders.length > 0 && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
+      <div className="flex flex-wrap justify-end gap-2">
+        <CopyCommands items={kept} name={name} />
+        <span className="flex-1" />
         <button className="btn-ghost" onClick={onCancel}>
           Cancel
         </button>
@@ -407,8 +451,9 @@ function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string
             <p className="text-[13px] font-medium">{name(agent)}</p>
             <ul className="space-y-0.5 font-mono text-[12px]">
               {lines.map((l) => (
-                <li key={l.path} title={l.path} className={cx("break-all", l.error ? "text-bad" : "text-fg-2")}>
-                  {l.error ? `failed ${l.rel}: ${l.error}` : `remove <workspace>/${l.rel} (${fmtBytes(l.bytes)})`}
+                <li key={l.path} className="break-all">
+                  <span className={l.error ? "text-bad" : "text-fg-2"}>{l.error ? `failed ${l.path}: ${l.error}` : `remove ${l.path} (${fmtBytes(l.bytes)})`}</span>
+                  {l.command && <span className="block text-[11.5px] text-fg-3">{l.command}</span>}
                 </li>
               ))}
             </ul>
@@ -417,7 +462,10 @@ function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string
         {!log.running && log.lines.length === 0 && <p className="text-[13px] text-fg-3">Nothing was removed.</p>}
         <Skipped skipped={log.skipped} name={name} />
       </div>
-      <div className="flex justify-end">
+      {log.lines.some((l) => l.command) && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
+      <div className="flex justify-end gap-2">
+        <CopyCommands items={log.lines.filter((l) => l.command)} name={name} />
+        <span className="flex-1" />
         <button className="btn-primary" disabled={log.running} onClick={onClose}>
           {log.running ? "Cleaning…" : "Done"}
         </button>

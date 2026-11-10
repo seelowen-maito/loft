@@ -32,7 +32,7 @@ final class BackupsTests: XCTestCase {
         XCTAssertFalse(ok.isLow)
 
         let plan = try JSONCoding.decoder.decode(CleanPlan.self, from: Data(#"""
-        {"folders":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"changed":"2026-11-10T13:20:01.123456789+00:00"}],
+        {"folders":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"changed":"2026-11-10T13:20:01.123456789+00:00","command":"rm -rf /s/a/loft/target"}],
          "skipped":[{"agent":"b","rel":"","reason":"agent is working"}],"total_bytes":700}
         """#.utf8))
         XCTAssertEqual(plan.folders.map(\.rel), ["loft/target"])
@@ -41,13 +41,20 @@ final class BackupsTests: XCTestCase {
 
         let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
         {"at":"2026-11-10T13:21:00.5+00:00","what":"Clean all","running":false,
-         "lines":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"error":null},{"agent":"a","path":"/s/a/x/node_modules","rel":"x/node_modules","bytes":0,"error":"Permission denied"}],
+         "lines":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"error":null,"command":"rm -rf /s/a/loft/target"},{"agent":"a","path":"/s/a/x/node_modules","rel":"x/node_modules","bytes":0,"error":"Permission denied","command":"rm -rf /s/a/x/node_modules"}],
          "skipped":[{"agent":"a","rel":"loft/ios/build","reason":"unticked"}],"freed_bytes":700,"removed":1,"failed":1}
         """#.utf8))
         XCTAssertEqual(log.freedBytes, 700)
         XCTAssertEqual(log.lines.last?.error, "Permission denied")
-        XCTAssertEqual((log.removed, log.failed), (1, 1))
+        XCTAssertEqual([log.removed, log.failed], [1, 1])
         XCTAssertEqual(groupedByAgent(log.lines, \.agent).map(\.items.count), [2])
+        XCTAssertEqual(plan.folders.first?.command, "rm -rf /s/a/loft/target")
+    }
+
+    /// "Copy commands": each agent's `rm -rf` lines under its name.
+    func testCopyCommandsGroupsTheCommandsByAgent() {
+        let items = [(agent: "a", command: "rm -rf /s/a/x"), (agent: "a", command: "rm -rf /s/a/y"), (agent: "b", command: "rm -rf /s/b/z")]
+        XCTAssertEqual(commandsText(items) { $0 == "a" ? "Loft Dev" : "Lead" }, "# Loft Dev\nrm -rf /s/a/x\nrm -rf /s/a/y\n\n# Lead\nrm -rf /s/b/z\n")
     }
 
     /// `GET /api/backups` as the server answers it (chrono's local times, with an offset).
