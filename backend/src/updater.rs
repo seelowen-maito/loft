@@ -123,7 +123,7 @@ async fn before_restart(state: &AppState) {
     while running_agents(state) > 0 {
         tokio::time::sleep(IDLE_POLL).await;
     }
-    crate::sweep::run(state, Some("Sweep before update"), None, crate::sweep::IDLE, None).await;
+    crate::sweep::run(state, Some("Sweep before update"), None, crate::sweep::IDLE).await;
 }
 
 fn short(sha: &str) -> String {
@@ -216,7 +216,7 @@ mod tests {
         std::fs::write(ws.join("loft/target/debug/app"), "x").unwrap();
         // Untouched for 4 days.
         let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
-        for p in ["loft/Cargo.toml", "loft/target", "loft/.git", "loft"] {
+        for p in ["loft/Cargo.toml", "loft/target/debug/app", "loft/target", "loft/.git", "loft"] {
             std::fs::File::open(ws.join(p)).unwrap().set_modified(then).unwrap();
         }
         super::before_restart(&st).await;
