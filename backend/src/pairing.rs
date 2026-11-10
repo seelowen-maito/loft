@@ -93,17 +93,19 @@ impl Pairing {
         Ok((secret, code))
     }
 
-    /// What the client polling with this secret gets. The token leaves once: the pairing is gone after it.
+    /// What the client polling with this secret gets. A denial is dropped once told. An allowed pairing stays
+    /// until `collected`, so a failed insert of its token doesn't lose it.
     fn poll(&self, secret: &str) -> Polled {
         let mut i = self.inner.lock().unwrap();
         i.pending.retain(|_, p| p.at.elapsed() < EXPIRES);
-        match i.pending.get(secret).map(|p| &p.answer) {
+        match i.pending.get(secret) {
             None => Polled::Gone,
-            Some(Answer::Waiting) => Polled::Waiting,
-            Some(_) => match i.pending.remove(secret).unwrap() {
-                Pending { answer: Answer::Allowed(token), name, .. } => Polled::Allowed(token, name),
-                _ => Polled::Denied,
-            },
+            Some(Pending { answer: Answer::Waiting, .. }) => Polled::Waiting,
+            Some(Pending { answer: Answer::Allowed(token), name, .. }) => Polled::Allowed(token.clone(), name.clone()),
+            Some(_) => {
+                i.pending.remove(secret);
+                Polled::Denied
+            }
         }
     }
 
@@ -217,8 +219,11 @@ pub async fn poll(State(state): State<AppState>, Json(b): Json<SecretBody>) -> R
         Polled::Denied => Json(json!({ "status": "denied" })).into_response(),
         Polled::Gone => Json(json!({ "status": "gone" })).into_response(),
         Polled::Allowed(token, name) => {
+            // Store first, then drop the pairing: if the insert fails the client can poll again.
             state.db.add_paired_client(&hash(&token), &name)?;
+            state.pairing.inner.lock().unwrap().pending.remove(&b.secret);
             if b.cookie {
+                // Secure: Safari drops it on plain http://localhost, so web pairing there needs https (ADR 0004).
                 let cookie = format!("{COOKIE}={token}; Secure; HttpOnly; Path=/; SameSite=Strict; Max-Age=34560000");
                 ([(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap())], Json(json!({ "status": "allowed" }))).into_response()
             } else {
@@ -599,6 +604,31 @@ mod tests {
         assert_eq!(req("GET", &format!("{base}/api/devices"), Some(&token), Value::Null).await.0, 200);
         let after: String = st.db.conn().query_row("SELECT last_used_at FROM paired_clients", [], |r| r.get(0)).unwrap();
         assert!(after.as_str() > "2000-01-01T00:00:00Z" && !before.is_empty());
+    }
+
+    #[tokio::test]
+    async fn last_used_is_written_at_most_once_a_minute() {
+        let (base, st) = serve().await;
+        let token = pair(&base, &st, "iPhone").await;
+        let recent = (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339();
+        st.db.conn().execute("UPDATE paired_clients SET last_used_at = ?1", [&recent]).unwrap();
+        assert_eq!(req("GET", &format!("{base}/api/devices"), Some(&token), Value::Null).await.0, 200);
+        let after: String = st.db.conn().query_row("SELECT last_used_at FROM paired_clients", [], |r| r.get(0)).unwrap();
+        assert_eq!(after, recent, "used 10 seconds ago: not written again");
+    }
+
+    #[tokio::test]
+    async fn a_failed_insert_keeps_the_pairing_so_the_client_can_poll_again() {
+        let (base, st) = serve().await;
+        let (_, v) = req("POST", &format!("{base}/api/pair"), None, json!({ "name": "iPhone" })).await;
+        assert!(st.pairing.decide(v["code"].as_str().unwrap(), true));
+        st.db.conn().execute("ALTER TABLE paired_clients RENAME TO paired_away", []).unwrap();
+        let poll = json!({ "secret": v["secret"] });
+        assert_eq!(req("POST", &format!("{base}/api/pair/poll"), None, poll.clone()).await.0, 500);
+        st.db.conn().execute("ALTER TABLE paired_away RENAME TO paired_clients", []).unwrap();
+        let (code, v) = req("POST", &format!("{base}/api/pair/poll"), None, poll).await;
+        assert_eq!((code, &v["status"]), (200, &json!("allowed")));
+        assert!(v["token"].is_string());
     }
 
     #[tokio::test]
