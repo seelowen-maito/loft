@@ -9,6 +9,8 @@ struct IssueDelivery: Codable, Hashable {
         /// open | started | review | needs_human | closed | elsewhere
         var state: String
         var skipped: String
+        /// The agent on it while it's started, in review, closing or needs you; nil otherwise.
+        var agentName: String? = nil
     }
     struct Current: Codable, Hashable {
         var number: Int
@@ -39,6 +41,9 @@ struct IssueDelivery: Codable, Hashable {
     var spec: Bool? = nil
     var current: Current? = nil
     var tickets: [Ticket]? = nil
+    /// Ready tickets nobody has yet, while the Lead hands them out.
+    var waitingForLead: [Int]? = nil
+    var waitingOnYou: [Int]? = nil
 
     /// How a card's state line reads: the colour it takes.
     enum Tone: String { case running, stalled, paused, needsYou = "needs_you", final, done }
@@ -78,11 +83,17 @@ struct IssueDelivery: Codable, Hashable {
 
     var ticketsDone: Int { (tickets ?? []).filter { $0.state == "closed" }.count }
     var skippedTickets: [Ticket] { (tickets ?? []).filter { $0.state == "elsewhere" } }
+    /// Every ticket with an agent on it: "#43 Backend endpoints is with Backend Agent".
+    var runningLines: [String] { (tickets ?? []).compactMap { t in t.agentName.map { "#\(t.number) \(t.title) is with \($0)" } } }
 
     /// The progress line once it started: who has which ticket, on which PR and, for a spec, how many are done.
     func progressLine(issue number: Int) -> String {
         let who = agentName ?? "the team"
         if spec == true {
+            // Several tickets can run at once: the card lists each with its agent under this line.
+            if !runningLines.isEmpty {
+                return "\(pr.map { "On spec PR #\($0). " } ?? "")\(ticketsDone) of \((tickets ?? []).count) tickets done."
+            }
             let with = current.map { "#\($0.number) \($0.title) is with \(who)" } ?? "With \(who)"
             return "\(with)\(pr.map { " on spec PR #\($0)" } ?? ""). \(ticketsDone) of \((tickets ?? []).count) tickets done."
         }

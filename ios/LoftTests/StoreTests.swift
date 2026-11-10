@@ -41,6 +41,10 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
+    /// Every spec's Delivery, and how many times the app fetched them.
+    var deliveryList: [DeliverySummary] = []
+    var summaryLoads = 0
+    func deliverySummaries() async throws -> [DeliverySummary] { summaryLoads += 1; return deliveryList }
     var taskList: [HBTask] = []
     func tasks() async throws -> [HBTask] { try check(); return taskList }
     /// Each issue's Delivery, and how many times the app fetched one.
@@ -247,5 +251,40 @@ final class StoreTests: XCTestCase {
         store.apply(.agentDeleted("a1"))
         XCTAssertTrue(store.agents.isEmpty)
         store.deactivate()
+    }
+
+    /// #174: the store keeps the Deliveries by spec.
+    func testDeliveriesAreKeptBySpec() async throws {
+        let api = MockAPI()
+        api.deliveryList = [DeliverySummary(state: "running", repo: "o/r", spec: 7, local: false, tickets: [])]
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        store.loadDeliveries()
+        for _ in 0..<100 where store.deliverySummaries.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(store.deliverySummaries["o/r#7"]?.state, "running")
+    }
+
+    /// #175: a review verdict comes as a pull request change, a Delivery ready or needing you as a needs-you one, the rest
+    /// as a Delivery event; an open Specs view reloads the Deliveries on each, and nothing reloads them when none is open.
+    func testPullRequestAndNeedsYouChangesReloadWatchedDeliveries() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let pr = PullRequest(id: "p", agentId: "a1", slug: "o/r", number: 9, url: "u", title: "Spec", state: "open")
+        let before = api.summaryLoads
+        store.apply(.pullRequest(pr))
+        try await Task.sleep(for: .seconds(2))
+        XCTAssertEqual(api.summaryLoads, before, "no Specs view open")
+
+        store.deliveryWatchers = 1
+        store.apply(.pullRequest(pr))
+        for _ in 0..<150 where api.summaryLoads == before { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 1, "a verdict on a pull request")
+        store.apply(.needsYou(count: 1, ids: []))
+        for _ in 0..<150 where api.summaryLoads == before + 1 { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 2, "a Delivery ready or needing you")
+        store.apply(.delivery(repo: "o/r", spec: 7))
+        for _ in 0..<150 where api.summaryLoads == before + 2 { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 3, "a Delivery event")
     }
 }

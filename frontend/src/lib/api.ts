@@ -31,7 +31,7 @@ export type Agent = {
   max_subagents: number | null;
   /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
-  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default), "above_100k" … "above_200k" or "always". */
   fresh_context?: string;
   /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
   fresh_context_applies?: boolean;
@@ -60,6 +60,8 @@ export type Agent = {
   subagents?: RunningSubagent[];
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
+  /** Agent messages in its chat (their ids) waiting for its current run to end. */
+  queued_messages?: number[];
 };
 
 /** The roles an agent can have, as stored in `Agent.role`, with what each does. */
@@ -120,7 +122,11 @@ export type IssueDelivery = {
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
+  waiting_for_lead?: number[];
+  /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
+  waiting_on_you?: number[];
 };
 
 export type Task = {
@@ -457,6 +463,15 @@ export type Settings = {
   auto_publish_all: boolean;
   /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
+  /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
+  backup_dir: string;
+};
+
+/** The backups folder, its newest backup and the last attempt's error (a good backup clears it). */
+export type BackupStatus = {
+  dir: string;
+  last: { at: string; bytes: number; path: string } | null;
+  error: { message: string; at: string } | null;
 };
 
 export type ApprovalMode = "ask" | "own" | "all";
@@ -554,8 +569,10 @@ export const api = {
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
-  saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
+  saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  backups: () => req<BackupStatus>("GET", "/backups"),
+  backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),

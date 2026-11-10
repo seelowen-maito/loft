@@ -56,6 +56,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
+| `backup_failed` | 1 | The last backup of Loft's database failed and the last good one is more than 2 days old (or there is none). One item until a good backup; not pushed | retry (Back up now: `POST /api/backups`), open (Settings → Backups, when the Mac has a tailnet name), dismiss |
 | `task_done` | 0 | An issue **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
 
 ### Action

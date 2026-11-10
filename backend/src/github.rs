@@ -125,11 +125,10 @@ pub fn token(state: &AppState) -> Option<String> {
         return Some(t.trim().to_string());
     }
     let mut cache = state.gh_token.0.lock().unwrap();
-    if let Some((at, t)) = &*cache {
-        if at.elapsed() < TOKEN_TTL {
+    if let Some((at, t)) = &*cache
+        && at.elapsed() < TOKEN_TTL {
             return t.clone();
         }
-    }
     let t = gh_auth_token();
     *cache = Some((Instant::now(), t.clone()));
     t
@@ -310,10 +309,13 @@ pub(crate) mod tests {
         pub body: Value,
     }
 
+    /// Keyed by (method, path).
+    type ByRoute<T> = Mutex<HashMap<(String, String), T>>;
+
     #[derive(Default)]
     pub(crate) struct Fake {
-        routes: Mutex<HashMap<(String, String), std::collections::VecDeque<(u16, Value)>>>,
-        headers: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
+        routes: ByRoute<std::collections::VecDeque<(u16, Value)>>,
+        headers: ByRoute<Vec<(String, String)>>,
         seen: Mutex<Vec<Seen>>,
     }
 

@@ -10,6 +10,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var agentList: [Agent]
     private var taskList: [HBTask]
+    private var deliveryList: [DeliverySummary] = []
     private var msgs: [String: [ChatMessage]]
     private var perms: [PermissionRequest]
     private var nextId: Int64 = 1000
@@ -136,6 +137,39 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         taskList[0].github = .init(repo: "octo/loft", number: 42, url: "https://github.com/octo/loft/issues/42", state: "open", subTotal: 4, subDone: 1)
         taskList[1].labels = ["ready-for-agent"]
         taskList[1].github = .init(repo: "octo/loft", number: 43, url: "https://github.com/octo/loft/issues/43", state: "closed")
+        // `-fixture-specs`: a spec in each stage of the Specs view (t1 is the one in Delivery), one only in Loft, one dropped.
+        if ProcessInfo.processInfo.arguments.contains("-fixture-specs") {
+            func spec(_ id: String, _ title: String, _ status: String, _ number: Int?, project: String = "loft", minutes: Double) -> HBTask {
+                var t = task(id, title, status, agent: nil, minutes: minutes)
+                t.kind = "work"; t.project = project; t.labels = ["spec"]
+                if let number { t.github = .init(repo: "octo/loft", number: number, url: "https://github.com/octo/loft/issues/\(number)", state: status == "inbox" || status == "ready" ? "open" : "closed") }
+                return t
+            }
+            taskList += [
+                spec("s2", "Offline mode", "ready", 50, minutes: 200),
+                spec("s3", "Widget gallery", "ready", 51, minutes: 100),
+                spec("s4", "Dark theme", "done", 52, minutes: 500),
+                spec("s5", "Old idea", "cancelled", 53, minutes: 600),
+                spec("s6", "Garden notes", "ready", nil, project: "garden", minutes: 250),
+            ]
+            for i in taskList.indices where taskList[i].id == "s2" || taskList[i].id == "s3" { taskList[i].github?.state = "open" }
+            func ticket(_ n: Int, _ title: String, _ state: String, _ verdicts: [String: String]? = nil, agent: String? = nil) -> DeliverySummary.Ticket {
+                .init(number: n, title: title, state: state, agentName: agent, verdicts: verdicts)
+            }
+            deliveryList = [
+                DeliverySummary(state: "running", agentName: "Backend Agent", repo: "octo/loft", spec: 42, specId: nil, local: false, pr: 47,
+                                current: .init(number: 43, title: "Backend endpoints"),
+                                // Two tickets running at once, each on its own Dev, and one ready ticket waiting for the Lead.
+                                tickets: [ticket(43, "Backend endpoints", "started", agent: "Backend Agent"), ticket(44, "iOS screen", "open"),
+                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"]),
+                                          ticket(47, "Release notes", "needs_human")],
+                                waitingForLead: [44], waitingOnYou: [47]),
+                DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
+                                tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
+                DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
+                                tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
+            ]
+        }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
         }
@@ -690,6 +724,29 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
+    func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }
+    /// A GitHub spec's Delivery card, from its Delivery in the list; nil for a spec without one.
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? {
+        try check()
+        return locked {
+            guard let g = taskList.first(where: { $0.id == taskId })?.github,
+                  let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
+            return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
+                                 agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
+        }
+    }
+    func mergeDelivery(repo: String, spec: Int) async throws -> String {
+        try check()
+        try await Task.sleep(for: .milliseconds(800))
+        return try locked {
+            guard let i = deliveryList.firstIndex(where: { $0.repo == repo && $0.spec == spec }) else { throw APIError.server(status: 404, message: "not found") }
+            deliveryList[i].state = "merged"
+            if let t = taskList.firstIndex(where: { $0.id == deliveryList[i].specId }) { taskList[t].status = "done" }
+            return "Merged ticket branch into main"
+        }
+    }
 
     func createTask(_ f: [String: JSONValue]) async throws -> HBTask {
         try check()

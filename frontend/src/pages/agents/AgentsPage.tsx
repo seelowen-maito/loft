@@ -269,6 +269,11 @@ export default function AgentsPage() {
                           <span className="truncate text-[13.5px]">{a.name}</span>
                           {showsUnreadDot(a, selectedId) && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label="Unread reply" title="Unread reply" />}
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
+                          {a.running && !!a.queued_messages?.length && (
+                            <span className="shrink-0 rounded-full border border-line px-1.5 font-mono text-[10px] text-fg-2" title="Agent messages waiting for this run to end">
+                              {a.queued_messages.length} queued
+                            </span>
+                          )}
                           {!!a.project_problems?.length && (
                             <span className="shrink-0 rounded-full border border-warn/60 px-1.5 font-mono text-[10px] text-warn" title={a.project_problems.map((f) => `${f.project}: ${f.problem}`).join("\n")}>
                               pick projects

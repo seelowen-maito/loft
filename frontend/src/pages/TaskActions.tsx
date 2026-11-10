@@ -311,6 +311,9 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const tickets = d?.tickets ?? [];
   const done = tickets.filter((x) => x.state === "closed").length;
   const skipped = tickets.filter((x) => x.state === "elsewhere");
+  // With a Lead, several tickets run at once, each with its own agent.
+  const running = tickets.filter((x) => x.agent_id);
+  const waiting = d?.waiting_for_lead ?? [];
   return (
     <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -319,8 +322,8 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
           <div className="mt-0.5 text-[12.5px] text-fg-3">
             {started ? (
               <>
-                {started.current ? <>#{started.current.number} {started.current.title} is with </> : <>With </>}
-                {started.agent_id ? <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link> : "the team"}
+                {running.length > 1 ? <>{running.length} tickets are running</> : started.current ? <>#{started.current.number} {started.current.title} is with </> : <>With </>}
+                {running.length > 1 ? "" : started.agent_id ? <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link> : running.length === 1 ? "" : "the team"}
                 {started.pr ? ` on spec PR #${started.pr}` : ""}. {done} of {tickets.length} tickets done.
               </>
             ) : (
@@ -335,6 +338,24 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         <DeliveryButtons d={started} a={r} />
       </div>
       <Said said={r.said} />
+      {running.length > 0 && (
+        <ul className="mt-3 space-y-1 text-[12.5px]">
+          {running.map((x) => (
+            <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
+              <span className="font-mono text-fg-3">#{x.number}</span>
+              <span>{x.title}</span>
+              <span className="text-fg-3">· {x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state} ·</span>
+              <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
+            </li>
+          ))}
+        </ul>
+      )}
+      {(d?.waiting_on_you ?? []).length > 0 && (
+        <div className="mt-2 text-[12.5px] text-warn">Waiting on you: {(d?.waiting_on_you ?? []).map((n) => `#${n}`).join(", ")}</div>
+      )}
+      {waiting.length > 0 && (
+        <div className="mt-2 text-[12.5px] text-fg-3">Waiting for the Lead to assign {waiting.map((n) => `#${n}`).join(", ")}</div>
+      )}
       {skipped.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-[12px] text-fg-3">
           {skipped.map((x) => (

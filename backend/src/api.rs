@@ -106,6 +106,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
     let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
     // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
     let keep_push = body.get("push").is_none();
+    let keep_backup_dir = body.get("backup_dir").is_none();
     let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
     if keep_push {
         s.push = state.settings.get().push;
@@ -113,9 +114,19 @@ pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Va
         // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
         s.push.relay_url = state.settings.get().push.relay_url;
     }
+    if keep_backup_dir {
+        s.backup_dir = state.settings.get().backup_dir;
+    }
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
+    }
+    // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
+    // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
+    if s.backup_dir != state.settings.get().backup_dir
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+    {
+        return Err(bad(why));
     }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),
@@ -265,7 +276,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
     }
     if let Some(v) = str_field("fresh_context") {
         if !crate::agents::FRESH_CONTEXT.contains(&v.as_str()) {
-            return Err(bad("fresh_context must be one of off, above_80k or always"));
+            return Err(bad(format!("fresh_context must be one of {}", crate::agents::FRESH_CONTEXT.join(", "))));
         }
         a.fresh_context = v;
     }
@@ -317,11 +328,10 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
-    if a.role == "lead" {
-        if a.team().is_empty() {
+    if a.role == "lead"
+        && a.team().is_empty() {
             return Err(bad("Only an agent with a group can be Lead: a Lead leads the agents that share its group."));
         }
-    }
     Ok(())
 }
 
@@ -493,11 +503,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     }
     crate::uploads::validate(&state, &id, &m.images)?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
-    if let Some(c) = &client_id {
-        if let Some(prev) = state.db.find_client_message(&id, c)? {
+    if let Some(c) = &client_id
+        && let Some(prev) = state.db.find_client_message(&id, c)? {
             return Ok(Json(json!({ "ok": true, "queued": false, "duplicate": true, "message": prev })));
         }
-    }
     let queued = is_running(&state, &id);
     let mut meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
     // Images go in before routing: a grill answer keeps them too.

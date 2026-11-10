@@ -24,8 +24,8 @@ function Verdicts({ v }: { v: Record<string, string> }) {
 }
 
 /** A ticket as a card: opens its own issue. */
-function TicketCard({ t, d, dense, agentById, open }: { t: BoardTicket; d: DeliverySummary | null; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
-  const l = ticketLabel(t.state), a = t.current && d?.agent_id ? agentById.get(d.agent_id) : undefined;
+function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
+  const l = ticketLabel(t.state), a = t.agentId ? agentById.get(t.agentId) : undefined;
   const body = (
     <>
       <div className="flex items-start gap-1.5">
@@ -89,7 +89,7 @@ function Cards(v: View) {
                               <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} />)}</span>
                               <span className="ml-auto font-mono text-[10.5px]">{ts.length} {ts.length === 1 ? "ticket" : "tickets"}</span>
                             </button>
-                            {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} d={d} dense agentById={v.agentById} open={v.openTicket} />)}</div>}
+                            {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} dense agentById={v.agentById} open={v.openTicket} />)}</div>}
                           </>
                         )}
                       </div>
