@@ -65,10 +65,13 @@ struct SettingsView: View {
     @State private var backingUp = false
     @State private var confirmICloud = false
     @State private var backupError: APIError?
-    /// Settings › Disk: workspace sizes and free space; nil until loaded. `freed` is what Clean now just removed.
+    /// Settings › Disk: workspace sizes and free space, nil until loaded; the last clean's log; the open clean.
     @State private var disk: WorkspaceSizes?
-    @State private var cleaning = false
-    @State private var freed: Int64?
+    @State private var lastClean: CleanLog?
+    /// Agents whose sizes are measured again after a clean.
+    @State private var remeasuring: Set<String> = []
+    @State private var measuringDisk = true
+    @State private var cleanSheet: CleanSheet.Start?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
@@ -302,6 +305,10 @@ struct SettingsView: View {
 
             if let disk {
                 diskSection(disk)
+            } else if measuringDisk, store.info?.supports(.workspaces) == true {
+                Section("Disk") {
+                    ProgressView("Measuring workspaces…").frame(maxWidth: .infinity)
+                }
             }
 
             Section("Appearance") {
@@ -353,6 +360,13 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { aiStatus = OnDeviceModel.status }
         }
+        .sheet(item: $cleanSheet) { start in
+            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) { cleaned in
+                remeasuring = cleaned
+                await loadDisk()
+                remeasuring = []
+            }
+        }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
         } message: {
@@ -370,19 +384,13 @@ struct SettingsView: View {
 
     private func loadDisk() async {
         guard store.info?.supports(.workspaces) == true else { return }
+        defer { measuringDisk = false }
         disk = try? await store.workspaceSizes()
+        if store.info?.supports(.cleanPreview) == true { lastClean = try? await store.cleanLog() }
     }
 
-    private func cleanNow() {
-        Task {
-            cleaning = true
-            defer { cleaning = false }
-            do {
-                freed = try await store.cleanWorkspaces().freedBytes
-                await loadDisk()
-            } catch { backupError = APIError.from(error) }
-        }
-    }
+    /// A Mac whose Clean previews what it removes; an older one's Clean would remove blind, so it gets none.
+    private var canClean: Bool { store.info?.supports(.cleanPreview) == true }
 
     private func diskSection(_ d: WorkspaceSizes) -> some View {
         Section {
@@ -392,27 +400,46 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("diskFree")
             ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
-                LabeledContent(r.name, value: r.bytes.formatted(.byteCount(style: .file)))
-            }
-            Button {
-                cleanNow()
-            } label: {
-                if cleaning {
-                    HStack(spacing: 8) { ProgressView(); Text("Cleaning…") }
-                } else {
-                    Text("Clean now")
+                LabeledContent {
+                    HStack(spacing: 10) {
+                        if remeasuring.contains(r.id) {
+                            ProgressView().accessibilityLabel("Measuring")
+                        } else {
+                            Text(r.bytes.formatted(.byteCount(style: .file)))
+                        }
+                        if canClean, let busy = r.busy {
+                            Button(busy ? "Working" : "Clean") { cleanSheet = .preview(agentId: r.id) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .disabled(busy || !remeasuring.isEmpty)
+                                .accessibilityIdentifier("clean-\(r.id)")
+                        }
+                    }
+                } label: {
+                    Text(r.name)
                 }
             }
-            .disabled(cleaning)
-            .accessibilityIdentifier("cleanNow")
-            if let freed {
-                Text("Freed \(freed.formatted(.byteCount(style: .file)))").font(.footnote).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("diskFreed")
+            if canClean {
+                Button("Clean all") { cleanSheet = .preview(agentId: nil) }
+                    .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
+                    .accessibilityIdentifier("cleanAll")
+            }
+            if let last = lastClean, let at = last.at {
+                Button {
+                    cleanSheet = .log(last)
+                } label: {
+                    LabeledContent {
+                        Text("View log")
+                    } label: {
+                        Text("Last: \(last.what) \(at.formatted(.relative(presentation: .named)))")
+                        Text("Freed \(last.freedBytes.formatted(.byteCount(style: .file))) from \(last.removed) folder\(last.removed == 1 ? "" : "s")\(last.failed > 0 ? " · \(last.failed) failed" : "")")
+                    }
+                }
+                .accessibilityIdentifier("lastClean")
             }
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean now removes build output from workspaces untouched for 3 days. Your Mac does it daily too.")
+            Text("Clean shows the build output it would remove first; its next build starts from scratch. Source, notes and git stay. Your Mac also cleans workspaces untouched for 3 days, daily.")
         }
     }
 

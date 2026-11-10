@@ -123,7 +123,7 @@ async fn before_restart(state: &AppState) {
     while running_agents(state) > 0 {
         tokio::time::sleep(IDLE_POLL).await;
     }
-    crate::sweep::run(state, None).await;
+    crate::sweep::run(state, Some("Sweep before update"), None, crate::sweep::IDLE, None).await;
 }
 
 fn short(sha: &str) -> String {
@@ -221,6 +221,6 @@ mod tests {
         }
         super::before_restart(&st).await;
         assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");
-        assert!(st.rt.lock().unwrap().sweep.at.is_some());
+        assert!(st.rt.lock().unwrap().clean.at.is_some());
     }
 }
