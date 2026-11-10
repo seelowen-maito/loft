@@ -1,5 +1,5 @@
 /** The Issues page's spec views: which Delivery a spec has and where it stands. Pure, so the board, its URL options and a spec's own page agree. */
-import type { IssueDelivery, Task } from "./api";
+import type { IssueDelivery, Task, TaskStatus } from "./api";
 
 /** `GET /api/deliveries/summary`: a spec's Delivery, with the spec it belongs to. */
 export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
@@ -125,15 +125,18 @@ export function arrange(specs: Task[], deliveries: DeliverySummary[], tasks: Tas
 
 /* ---------- the Issues column ---------- */
 
-const NEEDS_YOU = ["waiting_approval", "blocked", "failed"];
+/** Statuses that wait for the user. */
+export const NEEDS_YOU: TaskStatus[] = ["waiting_approval", "blocked", "failed"];
 
 /** A spec's ticket: it has a parent, names its spec in the template's `## Parent` section, or is in a Delivery's tickets. */
 export const isSpecTicket = (t: Task, deliveries: DeliverySummary[]) =>
   !!t.parent_id || /^## Parent\s+#\d+/m.test(t.description) || deliveries.some((d) => d.tickets.some((x) => (x.id ? x.id === t.id : !!t.github && d.repo === t.github.repo && x.number === t.github.number)));
 
-/** The Issues column: the issues (of `tasks`, already through the shared filters) that are no spec and no spec's ticket. Closed ones only when asked for, open ones first, then the most recently updated. */
-export function boardIssues(tasks: Task[], deliveries: DeliverySummary[], o: BoardOptions, showClosed: boolean): Task[] {
-  const closed = (t: Task) => t.status === "done" || t.status === "cancelled";
+/** The Issues column: the issues (of `tasks`, already through the shared filters) that are no spec and no spec's ticket. Closed ones only when asked for, open ones first, then the most recently updated.
+ * Whether an issue is a spec's ticket is only known once the Deliveries have loaded, so until then the column is empty. */
+export function boardIssues(tasks: Task[], deliveries: DeliverySummary[], loaded: boolean, o: BoardOptions, showClosed: boolean): Task[] {
+  if (!loaded) return [];
+  const closed = (t: Task) => t.state === "closed";
   return tasks
     .filter((t) => !t.labels.some((l) => l.toLowerCase() === "spec") && !isSpecTicket(t, deliveries) && (showClosed || !closed(t)) && (!o.needsMe || NEEDS_YOU.includes(t.status)))
     .sort((a, b) => Number(closed(a)) - Number(closed(b)) || b.updated_at.localeCompare(a.updated_at));
