@@ -701,6 +701,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return [
             AgentDevice(udid: "24B1D07C-CFC2-4DCE-8367-F4B9D9347656", name: "Loft Dev (Loft)", state: "Booted", bytes: 2_878_722_048, agent: .init(id: "a1", name: "Loft Dev")),
             AgentDevice(udid: "B478038F-179F-4CD2-9B0D-CD3FD7405EC8", name: "Loft Lead (Loft)", state: "Shutdown", bytes: 2_474_229_760, agent: .init(id: "a3", name: "Loft Lead")),
+            AgentDevice(udid: "0C5A3E12-6B1D-4D7E-9A44-8E2F51B7C3D0", name: "Loft Old (Loft)", state: "Shutdown", bytes: 1_903_165_440, agent: nil),
         ]
     }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {

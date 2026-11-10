@@ -466,7 +466,7 @@ struct SettingsView: View {
                         Text(bytesText(d.bytes))
                     }
                 } label: {
-                    Label(d.agent.name, systemImage: "iphone")
+                    Label(d.title, systemImage: "iphone")
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("device-\(d.udid)")
