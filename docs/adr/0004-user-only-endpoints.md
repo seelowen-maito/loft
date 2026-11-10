@@ -1,6 +1,6 @@
 # Only a paired client can change things through the API
 
-Status: proposed (design for review; nothing is built yet)
+Status: accepted. The backend half is built (`pairing.rs`); the web and iPhone screens follow.
 
 ## Context
 An agent runs as the same Mac user and can `curl` Loft's API on localhost:7420. Loft can't tell that from the web app, the iOS app or a script, so today an agent could change the push keys and the relay address (`PUT /api/push`), approve its own permission requests (`POST /api/permissions/{id}`), approve comments, merge PRs, or delete agents. Agents don't need the REST API at all: everything they do goes through `/mcp/{agent_id}`.
@@ -11,9 +11,9 @@ Protects against an agent, or a prompt injected into one, that uses the API the 
 ## Decision
 1. **Default deny for writes.** Every `POST/PUT/PATCH/DELETE` under `/api` needs a user token. One middleware, so a new endpoint is covered without anyone remembering to add it. Only `POST /api/pair` (below) stays open. `/mcp/*` is unchanged and never takes the token.
 2. **Named sensitive reads** need it too: `GET /api/devices` and `GET /api/push` (device tokens, key status), `GET /api/settings`. Other reads stay as today: images, SSE and `<img>` loads can't send headers, and agents can already read each other's chat through MCP.
-3. **Pairing needs a person at the Mac.** A client with no token calls `POST /api/pair`; Loft shows a native macOS dialog ("Allow a browser or phone to control Loft? Code 4821") and the client shows the same code. The user clicks Allow; the client, polling, receives its token once. No click within 2 minutes, or Deny: nothing is issued. One pairing waits at a time. This is the same shape as the relay sign-in code (ADR 0003): the code is shown only where an agent can't read it. A Mac nobody is looking at pairs nobody, which is the point.
-4. **Token.** 32 random bytes, hex. One per paired client, stored only as a SHA-256 hash (table `paired_clients`: hash, name, created). Compared in constant time. Never logged, never in an agent's environment, files or prompt (agents get none of Loft's own env, see `agents.rs`).
-5. **How clients carry it.** Web: an `HttpOnly; SameSite=Strict` cookie set by the pairing response, so it never reaches page scripts. iOS: the Keychain, sent as `Authorization: Bearer`. The existing `Sec-Fetch-Site` guard stays and covers cookie CSRF.
+3. **Pairing needs a person.** A client with no token calls `POST /api/pair` and gets a short display code plus a 32-byte secret, and shows the code. It polls `POST /api/pair/poll` with the secret, never the code, and receives its token once. Several pairings wait at once, in memory only (a restart drops them, and so does 2 minutes without an answer); the pair endpoint is rate-limited. A paired client allows or denies one by its code (`POST /api/pair/approve|deny`), after comparing it with the one the new device shows. The very first client has no paired device to ask, so the Mac does: a native dialog ("Allow a browser or phone to control Loft? Code 4821") or the code typed into the terminal Loft runs in. It is never trusted automatically, and the code is printed, not logged. Loopback requests are not trusted: Tailscale makes every request look local.
+4. **Token.** 32 random bytes, hex. One per paired client, stored only as a SHA-256 hash (table `paired_clients`: hash, name, created, last used). Compared in constant time. Never logged, never in an agent's environment, files or prompt (agents get none of Loft's own env, see `agents.rs`).
+5. **How clients carry it.** Web: a `__Host-loft` cookie (`Secure; HttpOnly; Path=/; SameSite=Strict`) set by the poll response, so it never reaches page scripts. iOS: the Keychain, sent as `Authorization: Bearer`. The existing `Sec-Fetch-Site` guard stays and covers cookie CSRF.
 6. **Existing installs** pair on first use after the update: the web app and the iOS app show a "Pair this client" screen on a 401.
 
 ## User-only endpoints (all writes, plus the named reads)

@@ -632,6 +632,13 @@ CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
 );
+-- Clients the user paired with Loft (pairing.rs): the SHA-256 of each one's token, never the token.
+CREATE TABLE IF NOT EXISTS paired_clients (
+    hash TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
+);
 -- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
 CREATE TABLE IF NOT EXISTS agent_devices (
     agent_id TEXT PRIMARY KEY,
@@ -1252,6 +1259,22 @@ impl Db {
     }
 
     /// The database file, for backups (backup.rs), which read it through a connection of their own.
+    pub fn add_paired_client(&self, hash: &str, name: &str) -> Result<()> {
+        let now = now();
+        self.0.lock().unwrap().execute("INSERT INTO paired_clients (hash, name, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)", params![hash, name, now])?;
+        Ok(())
+    }
+
+    pub fn paired_client_count(&self) -> i64 {
+        self.0.lock().unwrap().query_row("SELECT COUNT(*) FROM paired_clients", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// Whether a client with this token hash is paired; counts as its use.
+    pub fn use_paired_client(&self, hash: &str) -> bool {
+        let now = now();
+        self.0.lock().unwrap().execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now, hash]).is_ok_and(|n| n > 0)
+    }
+
     pub fn path(&self) -> Option<std::path::PathBuf> {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
     }
