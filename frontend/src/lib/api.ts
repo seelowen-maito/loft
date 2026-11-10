@@ -522,6 +522,9 @@ export type SystemReading = {
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
+/** Fired when Loft refuses a request because this browser is not paired (or was unpaired). */
+export const UNPAIRED = "loft:unpaired";
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
@@ -529,6 +532,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) window.dispatchEvent(new Event(UNPAIRED));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
 }
