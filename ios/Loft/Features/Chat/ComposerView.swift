@@ -83,7 +83,10 @@ struct ComposerView: View {
     /// A photo or video still reading or uploading, or one that failed, holds the message back until it's up or
     /// removed; so do photos over the message limit together.
     private var attachmentsHold: Bool { attachments.wrappedValue.contains { $0.uploaded == nil } || photosRefusal != nil }
-    private var photosRefusal: String? { PhotoAttachment.refusal(bytes: attachments.wrappedValue.filter { !$0.isVideo }.map(\.bytes)) }
+    private var photosRefusal: String? {
+        let a = attachments.wrappedValue
+        return PhotoAttachment.refusal(bytes: a.filter { !$0.isVideo }.map(\.bytes), video: a.contains(where: \.isVideo))
+    }
     private var canSend: Bool { (!trimmed.isEmpty || !attachments.wrappedValue.isEmpty) && !attachmentsHold && store.canWrite }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 

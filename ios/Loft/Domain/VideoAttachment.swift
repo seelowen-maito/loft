@@ -42,10 +42,14 @@ enum PhotoAttachment {
     static let maxMessageBytes = 20_000_000
     /// The server's limit of images per message, a video counting as one.
     static let maxPerMessage = 10
+    /// What the server counts a video as toward `maxMessageBytes`: its frames (`uploads::VIDEO_ALLOWANCE`).
+    static let videoAllowance = 6_000_000
 
-    /// Why photos of these sizes can't go in one message, or nil when they can.
-    static func refusal(bytes: [Int]) -> String? {
-        bytes.reduce(0, +) > maxMessageBytes ? "These photos add up to over 20 MB. Send them in a few messages." : nil
+    /// Why photos of these sizes, and a video if there is one, can't go in one message, or nil when they can.
+    static func refusal(bytes: [Int], video: Bool) -> String? {
+        guard bytes.reduce(0, +) + (video ? videoAllowance : 0) > maxMessageBytes else { return nil }
+        return video ? "These photos and the video add up to over 20 MB. Send them in a few messages."
+                     : "These photos add up to over 20 MB. Send them in a few messages."
     }
 
     /// `image` (HEIC, PNG, JPEG…) as an upright JPEG under `maxBytes`: at most 4096 px on its long side, smaller

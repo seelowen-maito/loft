@@ -139,9 +139,17 @@ final class VideoUploadTests: XCTestCase {
     }
 
     func testPhotosOver20MBTogetherAreRefused() {
-        XCTAssertNil(PhotoAttachment.refusal(bytes: [3_750_000, 3_750_000, 3_750_000, 3_750_000, 3_750_000]))
-        XCTAssertEqual(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 6)),
+        XCTAssertNil(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 5), video: false))
+        XCTAssertEqual(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 6), video: false),
                        "These photos add up to over 20 MB. Send them in a few messages.")
+    }
+
+    /// The server counts a video as 6 MB of frames toward the 20 MB, so the composer does too.
+    func testAVideoCountsAs6MBTowardThe20MB() {
+        XCTAssertNil(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 3), video: true))
+        XCTAssertEqual(PhotoAttachment.refusal(bytes: Array(repeating: 3_750_000, count: 4), video: true),
+                       "These photos and the video add up to over 20 MB. Send them in a few messages.")
+        XCTAssertNil(PhotoAttachment.refusal(bytes: [], video: true))
     }
 
     func testWhichImagesArePhotos() {

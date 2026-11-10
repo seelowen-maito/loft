@@ -85,14 +85,17 @@ struct PickedVideo: Transferable {
     }
 }
 
-/// A photo Photos or the camera hands over, made a JPEG the server takes, in a temporary file of ours.
-enum PickedPhoto {
-    static func save(_ image: Data) async -> URL? {
-        await Task.detached {
-            guard let jpeg = PhotoAttachment.jpeg(image) else { return nil }
-            let to = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("jpg")
-            return (try? jpeg.write(to: to)) == nil ? nil : to
-        }.value
+/// A photo Photos or the camera hands over, made a JPEG the server takes, in a temporary file of ours. One at a time:
+/// decoding ten full-size photos at once would spike memory.
+actor PickedPhoto {
+    private static let shared = PickedPhoto()
+
+    static func save(_ image: Data) async -> URL? { await shared.save(image) }
+
+    private func save(_ image: Data) -> URL? {
+        guard let jpeg = PhotoAttachment.jpeg(image) else { return nil }
+        let to = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("jpg")
+        return (try? jpeg.write(to: to)) == nil ? nil : to
     }
 }
 
