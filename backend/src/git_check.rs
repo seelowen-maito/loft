@@ -1,12 +1,14 @@
 //! Clean's Check: whether a clone or worktree in an agent's workspace is safe to delete, asked only when the
 //! user clicks Check (`POST /api/workspaces/clean/check`). Loft never runs git in agents' repos on its own.
 //!
-//! The agent owns the repo and its config, and git runs as Loft, so Loft reads the config files first and runs
-//! nothing when they hold any key outside a short allowlist (filter drivers, promisor remotes, fsmonitor,
-//! includes…, and a ref storage other than files). Then only two read-only commands run, each with a timeout:
-//! `git status --porcelain`, and `git rev-list --count <branch> --not --remotes` for each branch its refs files
-//! name. With hooks and fsmonitor off, no lazy fetch, no optional locks (status doesn't refresh the index) and the
-//! workspace as git's ceiling.
+//! The agent owns the repo and its config, and git runs as Loft, so Loft finds the git folders itself and reads
+//! their config files first, and runs nothing when they hold any key outside a short allowlist (filter drivers,
+//! promisor remotes, fsmonitor, includes…, and a ref storage other than files). Git is then told those exact
+//! folders (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`) and discovers nothing, so it reads no config Loft didn't.
+//! Only read-only commands run, each with a timeout and capped output: `git status --porcelain`, and
+//! `git rev-list --count <ref> --not --remotes` for each branch its refs files name and for a detached HEAD. With
+//! hooks and fsmonitor off, no lazy fetch and no optional locks (status doesn't refresh the index). The config
+//! files are read again after git: changed meanwhile, the answer is "unknown". Not while the agent runs.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,6 +19,9 @@ use crate::state::AppState;
 
 /// How long one git call may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Past this many branches, or this much output from one git call, Check answers "unknown".
+const MAX_BRANCHES: usize = 200;
+const MAX_OUTPUT: u64 = 4 << 20;
 
 #[derive(Deserialize)]
 pub struct CheckBody {
@@ -40,8 +45,20 @@ fn unknown(why: &str) -> GitCheck {
 
 /// `POST /api/workspaces/clean/check`: checks one clone or worktree. Never ticks anything.
 pub async fn check(axum::extract::State(state): axum::extract::State<AppState>, axum::Json(b): axum::Json<CheckBody>) -> axum::Json<GitCheck> {
+    if state.rt.lock().unwrap().running.contains_key(&b.agent) {
+        return axum::Json(unknown("the agent is working"));
+    }
     let projects = crate::sweep::projects(&state).remove(&b.agent).unwrap_or_default();
     axum::Json(run(&state.cfg.storage_dir, &b.agent, &b.rel, &projects).await)
+}
+
+/// The repo's git folders, found by Loft: `dir` (the clone's `.git`, or a worktree's folder in its base clone) and
+/// `common` (the folder with the refs and config: the same, or the base clone's `.git`).
+struct GitDirs {
+    dir: PathBuf,
+    common: PathBuf,
+    /// The config files read, and what they held (None: not there), to compare after git.
+    configs: Vec<(PathBuf, Option<String>)>,
 }
 
 pub async fn run(storage: &Path, agent: &str, rel: &str, projects: &[String]) -> GitCheck {
@@ -49,19 +66,32 @@ pub async fn run(storage: &Path, agent: &str, rel: &str, projects: &[String]) ->
         Ok(p) => p,
         Err(why) => return unknown(why),
     };
-    let common = match plain_config(&ws, &repo) {
-        Ok(c) => c,
+    let dirs = match plain_config(&ws, &repo) {
+        Ok(d) => d,
         Err(why) => return unknown(why),
     };
-    let Some(status) = git(&ws, &repo, &["status", "--porcelain", "--ignore-submodules=all"]).await else { return unknown("git failed") };
+    let Some(branches) = branches(&dirs.common) else { return unknown("too many branches") };
+    let Some(status) = git(&repo, &dirs, &["status", "--porcelain", "--ignore-submodules=all"]).await else { return unknown("git failed") };
+    let mut refs: Vec<(String, String)> = branches.into_iter().map(|b| (format!("refs/heads/{b}"), b)).collect();
+    // A detached HEAD's commits are on no branch.
+    let head = std::fs::read_to_string(dirs.dir.join("HEAD")).unwrap_or_default();
+    if !head.starts_with("ref:") {
+        refs.push(("HEAD".into(), "detached HEAD".into()));
+    }
     let mut lines = vec![];
-    for b in branches(&common) {
-        let Some(n) = git(&ws, &repo, &["rev-list", "--count", &format!("refs/heads/{b}"), "--not", "--remotes"]).await else { return unknown("git failed") };
+    for (r, name) in refs {
+        let Some(n) = git(&repo, &dirs, &["rev-list", "--count", &r, "--not", "--remotes"]).await else { return unknown("git failed") };
         match n.trim().parse::<usize>() {
             Ok(0) => {}
-            Ok(n) => lines.push(format!("{n} commit{} not pushed ({b})", if n == 1 { "" } else { "s" })),
+            Ok(n) => lines.push(format!("{n} commit{} not pushed ({name})", if n == 1 { "" } else { "s" })),
             Err(_) => return unknown("git failed"),
         }
+    }
+    if dirs.configs.iter().any(|(f, before)| read_config(f).ok().as_ref() != Some(before)) {
+        return unknown("its git config changed during the check");
+    }
+    if has_stash(&dirs.common) {
+        lines.push("Stashed changes".into());
     }
     let changed = status.lines().filter(|l| !l.is_empty()).count();
     if changed > 0 {
@@ -99,44 +129,69 @@ fn place(storage: &Path, agent: &str, rel: &str) -> Result<(PathBuf, PathBuf), &
     Ok((ws, repo))
 }
 
-/// Whether the repo's own config files (the clone's, or a worktree's and its base clone's) hold only plain keys.
-/// Read as files, before any git runs. The user's global and system config are theirs, and stay out of it. The
-/// folder that holds the repo's refs and config: the clone's `.git`, or a worktree's base clone's.
-fn plain_config(ws: &Path, repo: &Path) -> Result<PathBuf, &'static str> {
+/// The repo's git folders, when its own config files (the clone's, or a worktree's and its base clone's) hold only
+/// plain keys. Read as files, before any git runs. The user's global and system config are theirs, and stay out of
+/// it.
+fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
     let dot_git = repo.join(".git");
     let m = dot_git.symlink_metadata().map_err(|_| "not a git repo")?;
-    let (git_dir, common) = if m.is_dir() {
+    let (dir, common) = if m.is_dir() {
+        // Git honours a `commondir` file in any git folder; a clone's own has none.
+        if dot_git.join("commondir").symlink_metadata().is_ok() {
+            return Err("unusual git folder");
+        }
         (dot_git.clone(), dot_git)
     } else if m.is_file() {
         // A worktree: `.git` names its folder in the base clone, which names the base's own.
         let text = std::fs::read_to_string(&dot_git).map_err(|_| "not a git repo")?;
         let dir = text.trim().strip_prefix("gitdir:").ok_or("not a git repo")?.trim();
-        let git_dir = repo.join(dir);
-        let common = std::fs::read_to_string(git_dir.join("commondir")).map(|c| git_dir.join(c.trim())).map_err(|_| "not a git repo")?;
-        (git_dir, common)
+        let dir = repo.join(dir);
+        let common = std::fs::read_to_string(dir.join("commondir")).map(|c| dir.join(c.trim())).map_err(|_| "not a git repo")?;
+        (dir, common)
     } else {
         return Err("not a git repo");
     };
     // An agent could point them anywhere; git would then read config and objects from there.
-    for d in [&git_dir, &common] {
-        if !d.canonicalize().is_ok_and(|c| c.starts_with(ws)) {
-            return Err("git folder outside the workspace");
+    let mut real = vec![];
+    for d in [&dir, &common] {
+        match d.canonicalize() {
+            Ok(c) if c.starts_with(ws) => real.push(c),
+            _ => return Err("git folder outside the workspace"),
         }
     }
-    for f in [common.join("config"), git_dir.join("config.worktree"), common.join("config.worktree")] {
-        match std::fs::read_to_string(&f) {
-            Ok(text) if keys(&text).is_some_and(|ks| ks.iter().all(|k| plain_key(k))) => {}
-            Ok(_) => return Err("unusual git config"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("can't read its git config"),
-        }
+    let (dir, common) = (real.remove(0), real.remove(0));
+    // Git gets exactly these folders; without HEAD or config they aren't a repo it would read the same.
+    if !dir.join("HEAD").is_file() || !common.join("config").is_file() {
+        return Err("not a git repo");
     }
-    Ok(common)
+    let mut configs = vec![];
+    for f in [common.join("config"), dir.join("config.worktree"), common.join("config.worktree")] {
+        let text = read_config(&f).map_err(|_| "can't read its git config")?;
+        if text.as_deref().is_some_and(|t| !keys(t).is_some_and(|ks| ks.iter().all(|k| plain_key(k)))) {
+            return Err("unusual git config");
+        }
+        configs.push((f, text));
+    }
+    Ok(GitDirs { dir, common, configs })
+}
+
+/// A config file's text; None when it isn't there.
+fn read_config(f: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(f) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the repo has a stash, loose or packed.
+fn has_stash(common: &Path) -> bool {
+    common.join("refs/stash").symlink_metadata().is_ok() || std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default().lines().any(|l| l.ends_with(" refs/stash"))
 }
 
 /// The branches the repo's refs files name (loose under `refs/heads/`, and `packed-refs`), sorted; symlinks and
-/// names git wouldn't write are left out.
-fn branches(common: &Path) -> Vec<String> {
+/// names git wouldn't write are left out. None past [`MAX_BRANCHES`].
+fn branches(common: &Path) -> Option<Vec<String>> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let (Ok(t), Some(name)) = (e.file_type(), e.file_name().to_str().map(str::to_string)) else { continue };
@@ -152,10 +207,10 @@ fn branches(common: &Path) -> Vec<String> {
     walk(&common.join("refs/heads"), "", &mut out);
     let packed = std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default();
     out.extend(packed.lines().filter_map(|l| l.split_once(' ')?.1.strip_prefix("refs/heads/").map(str::to_string)));
-    out.retain(|b| !b.is_empty() && !b.starts_with('-') && !b.contains(|c: char| c.is_control() || c.is_whitespace()) && !b.split('/').any(|p| p.is_empty() || p == "." || p == ".."));
+    out.retain(|b| !b.is_empty() && b.len() <= 255 && !b.starts_with('-') && !b.contains(|c: char| c.is_control() || c.is_whitespace()) && !b.split('/').any(|p| p.is_empty() || p == "." || p == ".."));
     out.sort();
     out.dedup();
-    out
+    (out.len() <= MAX_BRANCHES).then_some(out)
 }
 
 /// The keys a git config file sets, as `section[.subsection].name`; None when a line isn't plainly one.
@@ -208,22 +263,34 @@ fn plain_key(key: &str) -> bool {
     }
 }
 
-/// Runs read-only git in `repo` with hooks and fsmonitor off, no lazy fetch, no optional locks and `ws` as the
-/// ceiling, killed after [`TIMEOUT`]; its output if it succeeded.
-async fn git(ws: &Path, repo: &Path, args: &[&str]) -> Option<String> {
+/// Runs read-only git on exactly the repo's folders, with hooks and fsmonitor off, no lazy fetch and no optional
+/// locks, killed after [`TIMEOUT`]; its output if it succeeded within [`MAX_OUTPUT`].
+async fn git(repo: &Path, dirs: &GitDirs, args: &[&str]) -> Option<String> {
+    use tokio::io::AsyncReadExt;
     let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(repo)
+    cmd.current_dir(repo)
         .args(crate::repos::SAFE_GIT)
         .args(args)
+        .env("GIT_DIR", &dirs.dir)
+        .env("GIT_COMMON_DIR", &dirs.common)
+        .env("GIT_WORK_TREE", repo)
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CEILING_DIRECTORIES", ws)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let out = tokio::time::timeout(TIMEOUT, cmd.output()).await.ok()?.ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let run = async {
+        let mut child = cmd.spawn().ok()?;
+        let mut out = vec![];
+        child.stdout.take()?.take(MAX_OUTPUT + 1).read_to_end(&mut out).await.ok()?;
+        if out.len() as u64 > MAX_OUTPUT {
+            return None;
+        }
+        child.wait().await.ok()?.success().then(|| String::from_utf8_lossy(&out).into_owned())
+    };
+    tokio::time::timeout(TIMEOUT, run).await.ok()?
 }
 
 #[cfg(test)]
@@ -318,7 +385,8 @@ mod tests {
         ];
         // A changed file, so `git status` would run a clean filter if it got that far.
         fs::write(loft.join(".gitattributes"), "* filter=x\n").unwrap();
-        fs::write(loft.join("a.txt"), "changed").unwrap();
+        // The same size as "a", so git has to run the filter to compare.
+        fs::write(loft.join("a.txt"), "b").unwrap();
         let config = fs::read_to_string(loft.join(".git/config")).unwrap();
         for extra in extras {
             fs::write(loft.join(".git/config"), format!("{config}{extra}")).unwrap();
@@ -330,6 +398,65 @@ mod tests {
         fs::write(loft.join(".git/worktrees/wt/config.worktree"), format!("[core]\n\tfsmonitor = {cmd}\n")).unwrap();
         assert_eq!(run(&storage, "a", "wt", &[]).await, unknown("unusual git config"));
         assert!(!marker.exists(), "a command from the repo's config ran");
+    }
+
+    #[tokio::test]
+    async fn a_detached_head_s_commits_and_a_stash_are_not_safe() {
+        let (storage, loft) = setup();
+        sh(&loft, &["worktree", "add", "-q", "--detach", "../wt"]);
+        let wt = storage.join("a/wt");
+        commit(&wt, "w.txt");
+        assert_eq!(run(&storage, "a", "wt", &[]).await, GitCheck { state: "unsafe", lines: vec!["1 commit not pushed (detached HEAD)".into()] });
+        sh(&loft, &["switch", "-q", "--detach"]);
+        commit(&loft, "d.txt");
+        assert_eq!(run(&storage, "a", "loft", &[]).await.lines, ["1 commit not pushed (detached HEAD)"]);
+        sh(&loft, &["switch", "-q", "main"]);
+        fs::write(loft.join("a.txt"), "x").unwrap();
+        sh(&loft, &["stash", "-q"]);
+        assert_eq!(run(&storage, "a", "loft", &[]).await, GitCheck { state: "unsafe", lines: vec!["Stashed changes".into()] });
+        sh(&loft, &["pack-refs", "--all"]);
+        assert_eq!(run(&storage, "a", "loft", &[]).await.lines, ["Stashed changes"], "packed too");
+    }
+
+    #[tokio::test]
+    async fn a_commondir_file_in_a_plain_clone_runs_nothing() {
+        let (storage, loft) = setup();
+        let marker = storage.join("ran");
+        let evil = storage.join("a/evil");
+        assert!(Command::new("cp").arg("-R").arg(loft.join(".git")).arg(&evil).status().unwrap().success());
+        let cfg = fs::read_to_string(evil.join("config")).unwrap();
+        fs::write(evil.join("config"), format!("{cfg}[filter \"x\"]\n\tclean = touch {}; cat\n", marker.display())).unwrap();
+        fs::write(loft.join(".git/commondir"), "../../evil\n").unwrap();
+        fs::write(loft.join(".gitattributes"), "* filter=x\n").unwrap();
+        fs::write(loft.join("a.txt"), "b").unwrap(); // same size as "a", so git must run the filter
+        let c = run(&storage, "a", "loft", &[]).await;
+        assert!(!marker.exists(), "{c:?}");
+        assert_eq!(c, unknown("unusual git folder"));
+    }
+
+    #[tokio::test]
+    async fn a_bare_layout_beside_an_empty_dot_git_runs_nothing() {
+        let (storage, loft) = setup();
+        let marker = storage.join("ran");
+        let trap = storage.join("a/trap");
+        assert!(Command::new("cp").arg("-R").arg(loft.join(".git")).arg(&trap).status().unwrap().success());
+        fs::create_dir_all(trap.join(".git")).unwrap();
+        let cfg = fs::read_to_string(trap.join("config")).unwrap();
+        fs::write(trap.join("config"), format!("{cfg}[core]\n\tworktree = {}\n[filter \"x\"]\n\tclean = touch {}; cat\n", trap.display(), marker.display())).unwrap();
+        fs::write(trap.join(".gitattributes"), "* filter=x\n").unwrap();
+        fs::write(trap.join("a.txt"), "b").unwrap();
+        let c = run(&storage, "a", "trap", &[]).await;
+        assert!(!marker.exists(), "{c:?}");
+        assert_eq!(c, unknown("not a git repo"));
+    }
+
+    #[tokio::test]
+    async fn too_many_branches_is_unknown() {
+        let (storage, loft) = setup();
+        for i in 0..=MAX_BRANCHES {
+            fs::write(loft.join(format!(".git/refs/heads/b{i}")), fs::read_to_string(loft.join(".git/refs/heads/main")).unwrap()).unwrap();
+        }
+        assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("too many branches"));
     }
 
     #[tokio::test]
