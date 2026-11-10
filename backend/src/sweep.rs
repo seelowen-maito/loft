@@ -347,11 +347,13 @@ static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str>, idle: Duration) -> Log {
     let _one = RUNNING.lock().await;
     let (st, only) = (state.clone(), only.map(str::to_string));
+    let rt = tokio::runtime::Handle::current();
     let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
         // Asked again before each removal, so a run that starts mid-sweep keeps its build output.
         let busy = busy_check(&st);
         let p = plan(storage, only.as_deref(), &busy, SystemTime::now(), idle);
+        let p = untracked(&rt, p);
         let what = what.unwrap_or_default();
         let mut log = Log { at: Some(Local::now()), what: what.into(), title: format!("{what}…"), running: true, skipped: p.skipped, ..Default::default() };
         let show = |log: &Log| {
@@ -616,6 +618,23 @@ pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now
     p
 }
 
+/// The plan without the folders in a clone that git tracks any file in, or can't say: they are skipped. Some teams
+/// commit `Pods/` or `bin/`.
+fn untracked(rt: &tokio::runtime::Handle, mut p: Plan) -> Plan {
+    let folders = std::mem::take(&mut p.folders);
+    for f in folders {
+        // The clone or worktree it's in: the nearest folder above it with a `.git`, inside the workspace.
+        let ws = f.path.ancestors().nth(f.rel.split('/').count()).unwrap_or(&f.path).to_path_buf();
+        let repo = f.path.ancestors().skip(1).take_while(|a| a.starts_with(&ws)).find(|a| a.join(".git").symlink_metadata().is_ok());
+        match repo.map(|r| rt.block_on(crate::git_check::tracks(&ws, r, &f.path))) {
+            None | Some(Some(false)) => p.folders.push(f),
+            Some(Some(true)) => p.skipped.push(skip(&f.agent, &f.rel, "tracked by git")),
+            Some(None) => p.skipped.push(skip(&f.agent, &f.rel, "git can't say whether it tracks it")),
+        }
+    }
+    p
+}
+
 fn skip(agent: &str, rel: &str, reason: &str) -> Skip {
     Skip { agent: one_line(agent), rel: one_line(rel), reason: reason.into() }
 }
@@ -738,7 +757,7 @@ fn find_clones(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 /// One kind of build output: a `folder` (a name, or a path like `ios/build`) and the `markers` that must sit
-/// beside it, in the folder's parent (`*.csproj` matches any file with that ending). A folder is build output
+/// beside it, in the folder's parent (a `*` matches any run of characters: `*.csproj`, `requirements*.txt`). A folder is build output
 /// only when one marker is there, so a `build/` or `bin/` that is somebody's real files stays. No markers means
 /// the name never holds anything but rebuildable files.
 struct Rule {
@@ -752,6 +771,7 @@ const fn rule(folder: &'static str, markers: &'static [&'static str]) -> Rule {
 
 const GRADLE: &[&str] = &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"];
 const DOTNET: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
+const PYTHON: &[&str] = &["pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg", "Pipfile"];
 
 /// Everything the sweep and Clean's preview count as build output. To teach them a new stack, add a row here and
 /// a case to `every_rule_is_swept_beside_its_marker_and_kept_without_it`; see docs/sweep-rules.md.
@@ -783,7 +803,7 @@ const RULES: &[Rule] = &[
     rule("build", &["pubspec.yaml"]),
     rule(".dart_tool", &["pubspec.yaml"]),
     // Python
-    rule(".venv", &[]),
+    rule(".venv", PYTHON),
     rule("__pycache__", &[]),
     rule(".pytest_cache", &[]),
     rule(".mypy_cache", &[]),
@@ -799,8 +819,11 @@ impl Rule {
 }
 
 fn has_marker(dir: &Path, marker: &str) -> bool {
-    match marker.strip_prefix('*') {
-        Some(ending) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().ends_with(ending)),
+    match marker.split_once('*') {
+        Some((start, end)) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.len() >= start.len() + end.len() && n.starts_with(start) && n.ends_with(end)
+        }),
         None => dir.join(marker).exists(),
     }
 }
@@ -975,9 +998,16 @@ mod tests {
         fs::write(p, "x").unwrap();
     }
 
+    fn git(dir: &Path, args: &[&str]) {
+        fs::create_dir_all(dir).unwrap();
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// A clone with Rust, web and iOS build output.
     fn clone(dir: &Path) {
-        for f in [".git/HEAD", ".git/index", "Cargo.toml", "src/main.rs", "ios/App/App.swift", "frontend/package.json"] {
+        git(dir, &["init", "-q"]);
+        for f in ["Cargo.toml", "src/main.rs", "ios/App/App.swift", "frontend/package.json"] {
             file(&dir.join(f));
         }
         for f in ["target/debug/app", "frontend/node_modules/vite/index.js", "ios/build/App.app/App", "ios/DerivedData/x", "Pkg/.build/x"] {
@@ -998,7 +1028,8 @@ mod tests {
     /// Plans and removes everything, as the daily sweep does.
     fn sweep(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Log {
         *SIZES.lock().unwrap() = None;
-        let p = plan(storage, only, busy, now, idle);
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let p = untracked(rt.handle(), plan(storage, only, busy, now, idle));
         let mut log = Log { skipped: p.skipped, ..Default::default() };
         apply(&storage.canonicalize().unwrap(), p.folders, busy, &mut |l| log.push(l));
         log
@@ -1038,7 +1069,12 @@ mod tests {
         (".build", None),
         ("build", Some("pubspec.yaml")),
         (".dart_tool", Some("pubspec.yaml")),
-        (".venv", None),
+        (".venv", Some("pyproject.toml")),
+        (".venv", Some("requirements.txt")),
+        (".venv", Some("requirements-dev.txt")),
+        (".venv", Some("setup.py")),
+        (".venv", Some("setup.cfg")),
+        (".venv", Some("Pipfile")),
         ("__pycache__", None),
         (".pytest_cache", None),
         (".mypy_cache", None),
@@ -1049,7 +1085,7 @@ mod tests {
     fn swept(folder: &str, marker: Option<&str>) -> bool {
         let storage = temp();
         let clone = storage.join("agent/app");
-        file(&clone.join(".git/HEAD"));
+        git(&clone, &["init", "-q"]);
         file(&clone.join("src/Program.cs"));
         file(&clone.join(folder).join("out.bin"));
         if let Some(m) = marker {
@@ -1074,6 +1110,40 @@ mod tests {
         }
     }
 
+    /// A clone with a stale `Pods/` beside its `Podfile`.
+    fn pods_clone() -> (PathBuf, PathBuf) {
+        let storage = temp();
+        let clone = storage.join("agent/app");
+        git(&clone, &["init", "-q"]);
+        file(&clone.join("Podfile"));
+        file(&clone.join("Pods/Lib/lib.m"));
+        (storage, clone)
+    }
+
+    #[test]
+    fn a_folder_git_tracks_is_kept_and_logged_and_the_same_folder_untracked_goes() {
+        let (storage, clone) = pods_clone();
+        git(&clone, &["add", "Podfile", "Pods"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(clone.join("Pods/Lib/lib.m").exists());
+        assert!(log.skipped.contains(&skip("agent", "app/Pods", "tracked by git")), "{:?}", log.skipped);
+
+        let (storage, clone) = pods_clone();
+        git(&clone, &["add", "Podfile"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert_eq!(log.removed_paths(), [clone.join("Pods")]);
+    }
+
+    #[test]
+    fn a_folder_in_a_clone_git_can_t_be_asked_about_is_kept() {
+        let (storage, clone) = pods_clone();
+        // A config key outside Check's allowlist: git isn't run.
+        git(&clone, &["config", "filter.x.clean", "cat"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(clone.join("Pods/Lib/lib.m").exists());
+        assert!(log.skipped.contains(&skip("agent", "app/Pods", "git can't say whether it tracks it")), "{:?}", log.skipped);
+    }
+
     #[test]
     fn a_bare_build_dist_or_bin_with_no_marker_is_never_swept() {
         for folder in ["build", "dist", "bin", "obj", "out", "target"] {
@@ -1091,7 +1161,7 @@ mod tests {
         for f in ["Api/Api.csproj", "Api/Program.cs", "Api/bin/Debug/Api.dll", "Api/obj/project.assets.json"] {
             file(&ws.join("app").join(f));
         }
-        file(&ws.join("app/.git/HEAD"));
+        git(&ws.join("app"), &["init", "-q"]);
         let planned = plan(&storage, None, &|_| false, later(), IDLE);
         let rels: Vec<&str> = planned.folders.iter().map(|f| f.rel.as_str()).collect();
         assert!(rels.contains(&"app/Api/bin") && rels.contains(&"app/Api/obj"), "{rels:?}");

@@ -1,12 +1,14 @@
 //! Clean's Check: whether a clone or worktree in an agent's workspace is safe to delete, asked only when the
-//! user clicks Check (`POST /api/workspaces/clean/check`). Loft never runs git in agents' repos on its own.
+//! user clicks Check (`POST /api/workspaces/clean/check`). The sweep also asks, before it deletes a build folder
+//! in a clone, whether git tracks any file in it ([`tracks`]), the same way.
 //!
 //! The agent owns the repo and its config, and git runs as Loft, so Loft finds the git folders itself and reads
 //! their config files first, and runs nothing when they hold any key outside a short allowlist (filter drivers,
 //! promisor remotes, fsmonitor, includes…, and a ref storage other than files). Git is then told those exact
 //! folders (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`) and discovers nothing, so it reads no config Loft didn't.
-//! Only read-only commands run, each with a timeout and capped output: `git status --porcelain`, and
-//! `git rev-list --count <ref> --not --remotes` for each branch its refs files name and for a detached HEAD. With
+//! Only read-only commands run, each with a timeout and capped output: `git status --porcelain`,
+//! `git rev-list --count <ref> --not --remotes` for each branch its refs files name and for a detached HEAD, and
+//! the sweep's `git ls-files`. With
 //! hooks and fsmonitor off, no lazy fetch and no optional locks (status doesn't refresh the index). The config
 //! files are read again after git: changed meanwhile, the answer is "unknown". Not while the agent runs.
 
@@ -52,6 +54,15 @@ pub async fn check(axum::extract::State(state): axum::extract::State<AppState>, 
     }
     let projects = crate::sweep::projects(&state).remove(&b.agent).unwrap_or_default();
     axum::Json(run(&state.cfg.storage_dir, &b.agent, &b.rel, &projects).await)
+}
+
+/// Whether git tracks any file in `folder`, inside the clone or worktree `repo` of workspace `ws`; None when git
+/// can't answer (an unusual config, git folders outside `ws`, an error, a timeout, too much output).
+pub async fn tracks(ws: &Path, repo: &Path, folder: &Path) -> Option<bool> {
+    let rel = folder.strip_prefix(repo).ok()?.to_str()?;
+    let dirs = plain_config(ws, repo).ok()?;
+    let out = git(repo, &dirs, &["ls-files", "-z", "--", &format!(":(literal){rel}/")]).await?;
+    Some(!out.is_empty())
 }
 
 /// The repo's git folders, found by Loft: `dir` (the clone's `.git`, or a worktree's folder in its base clone) and
