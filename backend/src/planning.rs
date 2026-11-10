@@ -2799,6 +2799,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn reassigning_a_ticket_back_for_changes_gives_the_new_dev_the_reviewers_notes() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "dl-reassign-notes", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-notes", "lead");
+        let first = busy(&st, "First", "dl-reassign-notes", "dev");
+        let second = busy(&st, "Second", "dl-reassign-notes", "dev");
+        let qa = busy(&st, "Tester", "dl-reassign-notes", "qa");
+        press(&st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments"] {
+            fake.route("POST", &format!("/repos/octo/dl-reassign-notes/{p}"), 201, json!({}));
+        }
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        let brief = woken(&st, &second).last().cloned().unwrap();
+        assert!(brief.contains("build ticket #41 \"Store\"") && brief.contains("Round 1 of changes was asked:\n\nOff by one."), "{brief}");
+    }
+
+    #[tokio::test]
     async fn reassigning_from_a_stalled_delivery_resumes_it_and_the_old_devs_run_end_stalls_nothing() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-reassign-stall";

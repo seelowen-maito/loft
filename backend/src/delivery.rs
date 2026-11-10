@@ -676,12 +676,15 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let dev = agents.iter().find(|a| a.id == key || a.name.eq_ignore_ascii_case(key)).filter(|a| is_team_dev(&d, a));
     let dev = dev.ok_or_else(|| format!("{key:?} isn't a Dev on your team."))?;
     if reassign {
+        // Unlike a first assignment, this skips the blocked-by check on purpose: the ticket is already started.
         let old = t.agent.clone();
         if old == dev.id {
             return Err(format!("{name} is already with {}.", dev.name));
         }
         let d = update(state, &d.repo, d.spec, |d| {
             d.clear_stall(n);
+            // `d.dev` is the Dev of the ticket in `current` (the final fixes and fallbacks read it); a parallel
+            // ticket's Dev is only its `agent`, so moving that one must not take `d.dev` from the current ticket.
             if d.current == Some(n) {
                 d.dev = dev.id.clone();
             }
@@ -698,7 +701,12 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             crate::agents::fyi_from_agent(state, me, old, &format!("{name} is now with {}: the Lead moved it. Don't submit it; your commits stay on the spec branch.", dev.name));
         }
         let step = Step::Build { ticket: n, round: t.rounds };
-        crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, Some(n)), true, dev_brief(state, &d, t), wake_for(&d, step));
+        let mut brief = dev_brief(state, &d, t);
+        let notes = d.last_notes.trim();
+        if t.rounds > 0 && !notes.is_empty() {
+            brief.push_str(&format!("\n\nRound {} of changes was asked:\n\n{notes}", t.rounds));
+        }
+        crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, Some(n)), true, brief, wake_for(&d, step));
         return Ok(format!("{name} moved to {}: Loft woke them with the ticket and told the previous Dev.", dev.name));
     }
     begin(state, &d, n, dev).await?;
