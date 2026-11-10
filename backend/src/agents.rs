@@ -1077,7 +1077,13 @@ pub fn remove_agent_files(state: &AppState, agent_id: &str) {
 fn loft_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     if cfg!(test) {
-        return Ok(exe.parent().and_then(Path::parent).map(|d| d.join("loft")).unwrap_or(exe));
+        let next_to_tests = exe.parent().and_then(Path::parent).map(|d| d.join("loft"));
+        if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
+            return Ok(bin);
+        }
+        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+        return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }
