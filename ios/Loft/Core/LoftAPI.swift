@@ -71,6 +71,9 @@ protocol LoftAPI: Sendable {
     /// The server's settings object (`GET /api/settings`'s `settings`), and replacing it.
     func serverSettings() async throws -> JSONValue
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue
+    /// The Mac's backups (`backups`), and Back up now, which answers once it's done or fails with the error.
+    func backups() async throws -> BackupStatus
+    func backUpNow() async throws -> BackupStatus
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -308,6 +311,13 @@ struct LiveLoftAPI: LoftAPI {
         return v["settings"] ?? .null
     }
 
+    func backups() async throws -> BackupStatus { try await get("/backups") }
+
+    func backUpNow() async throws -> BackupStatus {
+        // A backup of a big database takes a while; the server answers once it's done.
+        try decode(BackupStatus.self, try await send("POST", "/backups", body: [:], timeout: 120))
+    }
+
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws {
         _ = try await send("POST", "/tasks/\(taskId)/comments/\(commentId)/approve", body: text.map { ["text": .string($0)] } ?? [:])
     }
@@ -391,6 +401,8 @@ extension LoftAPI {
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws { throw APIError.unsupported("Comments") }
     func serverSettings() async throws -> JSONValue { throw APIError.unsupported("Server settings") }
     func putServerSettings(_ settings: JSONValue) async throws -> JSONValue { throw APIError.unsupported("Server settings") }
+    func backups() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
+    func backUpNow() async throws -> BackupStatus { throw APIError.unsupported("Backups") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }

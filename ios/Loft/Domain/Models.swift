@@ -297,6 +297,7 @@ enum ServerFeature: String {
     case plans
     case needsYou = "needs_you"
     case push
+    case backups
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

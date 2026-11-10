@@ -1019,6 +1019,41 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(loft.value as? String, "Collapsed")
     }
 
+    /// #176: Settings › Backups shows the last backup and its error, Back up now clears it, and iCloud Drive is one
+    /// tap after the privacy warning. A failing backup's Needs you item has Back up now too.
+    func testBackupsInSettingsAndNeedsYou() {
+        let app = launch(["-fixture-backup-failed"])
+        app.buttons["Settings"].firstMatch.tap()
+        let now = app.buttons["backUpNow"]
+        for _ in 0..<10 where !now.isHittable { app.swipeUp() }
+        XCTAssertTrue(now.isHittable)
+        XCTAssertTrue(any("backupLast", app).label.contains("2 days ago"), any("backupLast", app).label)
+        XCTAssertTrue(any("backupError", app).label.contains("can't create /Volumes/Backup/Loft backups"))
+        now.tap()
+        XCTAssertTrue(any("backupError", app).disappears(timeout: 5), "a good backup clears the error")
+        XCTAssertFalse(any("backupLast", app).label.contains("2 days ago"))
+
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "stored by Apple", app).appears(timeout: 3), "the warning comes first")
+        app.buttons["Use iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "com~apple~CloudDocs/Loft backups", app).appears(timeout: 5))
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["This Mac"].tap()
+        XCTAssertTrue(text(containing: "Application Support/Loft/backups", app).appears(timeout: 5))
+
+        app.terminate()
+        let again = launch(["-fixture-backup-failed"])
+        again.buttons["needsYouSeeAll"].firstMatch.tap()
+        let item = any("needsYou-backup_failed", again)
+        XCTAssertTrue(any("needsYou-permission", again).appears(timeout: 5))
+        for _ in 0..<6 where !item.exists { again.swipeUp() }
+        XCTAssertTrue(item.exists)
+        XCTAssertTrue(item.staticTexts["Loft's backups are failing"].exists)
+        item.buttons["Back up now"].tap()
+        XCTAssertTrue(item.disappears(timeout: 5), "the item clears")
+    }
+
     /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.
     func testReplyingToAnIssueWithNobodyOnItAsksForAnAgent() {
         let app = launch()

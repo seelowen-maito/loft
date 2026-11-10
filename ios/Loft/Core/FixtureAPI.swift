@@ -407,7 +407,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -621,6 +621,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            make("pr:c", "acme/api", "api#1765: Scope menu discounts to the restaurant", urgency: 2),
                            make("pr:d", "Octo/loft", "loft#111: Make it a brief", urgency: 0)]
         }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
+        }
         list.items.removeAll { done.contains($0.id) }
         list.count = list.items.count
         list.urgent = list.items.filter { $0.urgency >= 2 }.count
@@ -630,6 +633,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Any action resolves its item, as the real server's next list would show.
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws {
         try check()
+        if path == "/api/backups" { _ = try await backUpNow(); return }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }
@@ -795,11 +799,47 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
     private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
-                                       "auto_update": true, "messaging_rules": true]
+                                       "auto_update": true, "messaging_rules": true,
+                                       "backup_dir": .string(ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? "/Volumes/Backup/Loft backups" : "")]
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []
 
     func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+
+    /// The Mac's backups: one this morning; with `-fixture-backup-failed`, none since two days ago and the error.
+    private var backupStatus = BackupStatus(
+        dir: "", last: .init(at: Date(timeIntervalSinceNow: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? -55 * 3600 : -5 * 3600), bytes: 152_400_000, path: ""),
+        error: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed")
+            ? .init(message: "can't create /Volumes/Backup/Loft backups: No such file or directory", at: Date(timeIntervalSinceNow: -20 * 60)) : nil,
+        icloud: "/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Loft backups")
+
+    private func backupDir() -> String {
+        let d = settings["backup_dir"]?.stringValue ?? ""
+        return d.isEmpty ? "/Users/you/Library/Application Support/Loft/backups" : d
+    }
+
+    func backups() async throws -> BackupStatus {
+        try check()
+        return locked {
+            var s = backupStatus
+            s.dir = backupDir()
+            return s
+        }
+    }
+
+    /// Always works, into whichever folder Settings names now, and clears the Needs you item.
+    func backUpNow() async throws -> BackupStatus {
+        try check()
+        return locked {
+            let dir = backupDir()
+            backupStatus.last = .init(at: Date(), bytes: 152_600_000, path: dir + "/" + Date().formatted(.iso8601.year().month().day()))
+            backupStatus.error = nil
+            needsYouDone.insert("backup:2026-11-07T03:00:00+00:00")
+            var s = backupStatus
+            s.dir = dir
+            return s
+        }
+    }
 
     func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
         try check()
