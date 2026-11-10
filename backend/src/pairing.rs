@@ -158,7 +158,7 @@ fn token_of(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Whether the request carries a paired client's token. Counts as that client's use.
-fn paired(state: &AppState, headers: &HeaderMap) -> bool {
+pub fn paired(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(token) = token_of(headers) else { return false };
     state.db.use_paired_client(&hash(&token))
 }
@@ -695,5 +695,17 @@ mod tests {
         // The agents' MCP route is not under `/api`, so it never asks for a token.
         let res = reqwest::Client::new().post(format!("{base}/mcp/nobody")).json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })).send().await.unwrap();
         assert_ne!(res.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn the_herdr_client_is_built_only_for_a_paired_client() {
+        // The test state has no herdr folder, so nothing is built yet.
+        let (base, st) = serve().await;
+        let url = format!("{base}/api/herdr/bin/{}", crate::herdr::platform());
+        let (code, _) = req("GET", &url, None, Value::Null).await;
+        assert_eq!(code, 401, "an unpaired client doesn't start a build");
+        let token = pair(&base, &st, "loft-herdr").await;
+        let (code, _) = req("GET", &url, Some(&token), Value::Null).await;
+        assert_ne!(code, 401, "a paired client gets as far as the build");
     }
 }
