@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, type To, useParams, useSearchParams } f
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
-import { api, type MirrorSync, type Agent, type Task, type TaskComment, type TaskStatus } from "../lib/api";
+import { api, type MirrorSync, type Agent, type Task, type TaskComment } from "../lib/api";
 import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
@@ -15,11 +15,8 @@ import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialo
 import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
-import { boardIssues, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
+import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
-
-/** Statuses that wait for the user. */
-const NEEDS_YOU: TaskStatus[] = ["waiting_approval", "blocked", "failed"];
 
 const STATUS_TONE: Record<string, string> = {
   waiting_approval: "text-warn",
@@ -60,7 +57,8 @@ export default function TasksPage() {
     [setParams],
   );
   const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
-  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}); }, []);
+  const [deliveriesLoaded, setDeliveriesLoaded] = useState(false);
+  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}).finally(() => setDeliveriesLoaded(true)); }, []);
   useEffect(() => { loadDeliveries(); }, [loadDeliveries]);
   const [query, setQuery] = useState(filters.q);
   // Back/forward to another search shows it in the box.
@@ -152,7 +150,7 @@ export default function TasksPage() {
   const unread = filtered.filter((t) => NEEDS_YOU.includes(t.status)).length;
   const specs = useMemo(() => anyAgent.filter(isSpec), [anyAgent]);
   const kept = useMemo(() => boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId), [specs, deliveries, tasks, params, agentId]);
-  const issues = useMemo(() => boardIssues(filtered, deliveries, parseBoard(params), showClosed), [filtered, deliveries, params, showClosed]);
+  const issues = useMemo(() => boardIssues(filtered, deliveries, deliveriesLoaded, parseBoard(params), showClosed), [filtered, deliveries, deliveriesLoaded, params, showClosed]);
   const count = `${issues.length} issues · ${kept.length === specs.length ? specs.length : `${kept.length} of ${specs.length}`} specs`;
 
   // The header with the filters the Issues and the specs share.
@@ -212,7 +210,7 @@ export default function TasksPage() {
       {header}
       <div className="min-h-0 flex-1 overflow-hidden">
         {tasks === null ? <div className="p-6 font-mono text-[12px] text-fg-3">Loading…</div> : (
-          <BoardPage kept={kept} issues={issues} tasks={tasks} deliveries={deliveries} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
+          <BoardPage kept={kept} issues={issues} tasks={tasks} deliveries={deliveries} loaded={deliveriesLoaded} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
         )}
       </div>
       {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
