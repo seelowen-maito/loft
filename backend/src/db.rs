@@ -166,6 +166,9 @@ pub struct DeliveryTicket {
     /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
     #[serde(default)]
     pub agent: String,
+    /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
+    #[serde(default)]
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1499,6 +1502,7 @@ impl Db {
                     id: String::new(),
                     skipped: String::new(),
                     agent: String::new(),
+                    notes: String::new(),
                 })
                 .collect();
             let d = Delivery {

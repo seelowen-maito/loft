@@ -2820,6 +2820,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn reassigning_gives_the_new_dev_that_tickets_notes_not_the_last_ones_of_the_delivery() {
+        let (fake, st) = (fake_github(), state());
+        let (a, m) = planned(&st, &fake, "dl-reassign-two", vec![ticket("Store", &[]), ticket("Show", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign-two", "lead");
+        let first = busy(&st, "First", "dl-reassign-two", "dev");
+        let second = busy(&st, "Second", "dl-reassign-two", "dev");
+        let third = busy(&st, "Third", "dl-reassign-two", "dev");
+        let qa = busy(&st, "Tester", "dl-reassign-two", "qa");
+        press(&st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments", "issues/42/comments"] {
+            fake.route("POST", &format!("/repos/octo/dl-reassign-two/{p}"), 201, json!({}));
+        }
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &second, "submit_ticket", json!({ "number": 42, "commits": ["abc1234def"] })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 42, "verdict": "changes", "notes": "Wrong colour." })).await.unwrap();
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Third", "reassign": true })).await.unwrap();
+        let brief = woken(&st, &third).last().cloned().unwrap();
+        assert!(brief.contains("Off by one.") && !brief.contains("Wrong colour."), "{brief}");
+    }
+
+    #[tokio::test]
     async fn reassigning_from_a_stalled_delivery_resumes_it_and_the_old_devs_run_end_stalls_nothing() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-reassign-stall";
@@ -4594,7 +4619,7 @@ pub(crate) mod tests {
         let slug = "octo/st-restart";
         planner_on(&st, "st-restart", Some("git@github.com:octo/st-restart.git"));
         let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": slug, "spec": 40, "project": "st-restart", "state": "running", "created_at": "" })).unwrap();
-        let t = |n: i64, state: &str| crate::db::DeliveryTicket { number: n, title: format!("T{n}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new() };
+        let t = |n: i64, state: &str| crate::db::DeliveryTicket { number: n, title: format!("T{n}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new(), notes: String::new() };
         let mut save = |spec: i64, state: &str, tickets: Vec<crate::db::DeliveryTicket>| {
             (d.spec, d.state, d.tickets) = (spec, state.into(), tickets);
             st.db.save_delivery(&d).unwrap();
