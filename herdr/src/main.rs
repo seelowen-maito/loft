@@ -58,7 +58,7 @@ fn run_sync() -> Result<()> {
 
 fn setup(url: Option<&String>) -> Result<()> {
     let url = config::normalize(url.ok_or_else(|| anyhow!("usage: loft-herdr setup <loft-url>"))?);
-    let mut token = config::token();
+    let mut token = config::token_for(&url);
     // A token kept from an earlier setup is good while Loft still lists this client as paired.
     if Loft::new(&url).get("/paired-clients").is_err() {
         token = pair(&url).map_err(|e| anyhow!("couldn't pair with Loft at {url}: {e}"))?;

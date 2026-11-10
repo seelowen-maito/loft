@@ -28,7 +28,7 @@ impl Loft {
             .timeout(Duration::from_secs(60))
             .user_agent("loft-herdr")
             .build();
-        Self { base: base.to_string(), http, token: crate::config::token() }
+        Self { base: base.to_string(), http, token: crate::config::token_for(base) }
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
