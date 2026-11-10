@@ -46,3 +46,25 @@ test("a check reads as its sign and lines", () => {
   assert.equal(gitCheckText({ state: "unsafe", lines: ["2 commits not pushed (main)", "Uncommitted changes (1 file)"] }), "⚠️ 2 commits not pushed (main) · Uncommitted changes (1 file)");
   assert.equal(gitCheckText({ state: "unknown", lines: ["Can't check: unusual git config"] }), "❔ Can't check: unusual git config");
 });
+
+test("status says Working, why a row is locked, or Deletable", async () => {
+  const { cleanStatus, cleanType } = await import("../src/lib/format.ts");
+  assert.deepEqual(cleanStatus(item({ blocked: "Working" }), 0), { text: "Working", locked: true });
+  assert.deepEqual(cleanStatus(item({ blocked: "symlink" }), 0), { text: "Locked: symlink", locked: true });
+  assert.deepEqual(cleanStatus(item({ label: "main clone of loft", opens: true }), 0), { text: "Kept: main clone of loft", locked: true });
+  assert.deepEqual(cleanStatus(item(), 0), { text: "Deletable", locked: false });
+  assert.equal(cleanType(item()), "git clone");
+  assert.equal(cleanType({ ...item(), kind: "build" }), "build output");
+});
+
+test("the table sorts by size, agent or last change, either way", async () => {
+  const { sortClean } = await import("../src/lib/format.ts");
+  const a = { ...item(), agent: "b", name: "x", bytes: 5, changed: "2026-01-02T00:00:00Z" };
+  const b = { ...item(), agent: "a", name: "y", bytes: 9, changed: "2026-01-01T00:00:00Z" };
+  const c = { ...item(), agent: "a", name: "z", bytes: 1, changed: "2026-01-03T00:00:00Z" };
+  const names = (s: "size" | "agent" | "changed", desc: boolean) => sortClean([a, b, c], { by: s, desc }, (id) => id).map((i) => i.name).join("");
+  assert.equal(names("size", true), "yxz");
+  assert.equal(names("size", false), "zxy");
+  assert.equal(names("agent", false), "yzx");
+  assert.equal(names("changed", true), "zxy");
+});

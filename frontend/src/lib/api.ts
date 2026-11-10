@@ -517,7 +517,7 @@ export type CleanItem = {
   path: string;
   rel: string;
   name: string;
-  kind: "clone" | "worktree" | "folder" | "file" | "symlink";
+  kind: "clone" | "worktree" | "build" | "folder" | "file" | "symlink";
   bytes: number;
   changed: string;
   command: string;

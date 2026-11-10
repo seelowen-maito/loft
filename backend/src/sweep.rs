@@ -96,7 +96,7 @@ pub struct Item {
     /// Inside the agent's workspace, like `loft` or `loft/backend/target`.
     pub rel: String,
     pub name: String,
-    /// "clone", "worktree", "folder", "file" or "symlink".
+    /// "clone", "worktree", "build" (build output), "folder", "file" or "symlink".
     pub kind: &'static str,
     pub bytes: u64,
     /// Its newest file's change.
@@ -491,6 +491,7 @@ fn item(agent: &str, rel: String, path: PathBuf) -> Item {
         Some(m) if m.is_dir() => match path.join(".git").symlink_metadata() {
             Ok(g) if g.is_dir() => "clone",
             Ok(_) => "worktree",
+            Err(_) if is_build(&path) => "build",
             Err(_) => "folder",
         },
         _ => "file",
@@ -1730,6 +1731,22 @@ mod tests {
         sweep(&storage, Some("a"), &|_| false, later(), IDLE);
         assert!(!storage.join("a/loft/target").exists());
         assert!(storage.join("b/loft/target").exists());
+    }
+
+    #[test]
+    fn clean_lists_every_agents_items_with_their_type() {
+        let storage = temp();
+        clone(&storage.join("a/loft"));
+        file(&storage.join("a/node_modules/x/index.js"));
+        file(&storage.join("a/notes.md"));
+        clone(&storage.join("b/loft"));
+        let items = listing(&storage, None, &|_| vec![], &|id| id == "b");
+        let kind = |agent: &str, name: &str| items.iter().find(|i| i.agent == agent && i.name == name).map(|i| i.kind);
+        assert_eq!(kind("a", "loft"), Some("clone"));
+        assert_eq!(kind("a", "node_modules"), Some("build"));
+        assert_eq!(kind("a", "notes.md"), Some("file"));
+        assert!(items.iter().filter(|i| i.agent == "b").all(|i| i.blocked == "Working"), "a Working agent's rows are locked");
+        assert!(items.iter().filter(|i| i.agent == "a").all(|i| i.blocked.is_empty() || i.blocked == "symlink"));
     }
 
     #[test]
