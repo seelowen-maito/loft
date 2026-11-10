@@ -375,8 +375,9 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
     let mut out = vec![];
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
-        // `.agent-files` and the like are Loft's; a symlinked workspace leads outside.
-        if id.starts_with('.') || only.is_some_and(|o| o != id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+        // `.agent-files` and the like are Loft's; a symlinked workspace leads outside; no agent's id has a
+        // control character, and one would break the `# <agent>` line of Copy commands.
+        if id.starts_with('.') || id.contains(char::is_control) || only.is_some_and(|o| o != id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let ws = root.join(&id);
@@ -510,7 +511,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
             _ => Err("not a plain path"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if parts.len() < 2 || parts[0].starts_with('.') {
+    if parts.len() < 2 || parts[0].starts_with('.') || parts[0].contains(char::is_control) {
         return Err("not in a workspace");
     }
     let mut p = root.to_path_buf();
@@ -565,8 +566,8 @@ pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now
     let Ok(root) = storage.canonicalize() else { return p };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
-        // `.agent-files` and the like are Loft's.
-        if id.starts_with('.') || only.is_some_and(|o| o != id) {
+        // `.agent-files` and the like are Loft's; no agent's id has a control character.
+        if id.starts_with('.') || id.contains(char::is_control) || only.is_some_and(|o| o != id) {
             continue;
         }
         let Ok(t) = e.file_type() else { continue };
@@ -1209,6 +1210,26 @@ mod tests {
         assert_eq!((l.skipped[0].rel.as_str(), l.skipped[0].reason.as_str()), ("gone\\nrm -rf ~", "no longer there"));
         assert!(l.lines.iter().map(|x| format!("{}{}{}", x.rel, x.path.display(), x.command)).chain(l.skipped.iter().map(|x| x.rel.clone())).all(|t| !t.contains('\n')));
         assert_eq!(rm_command(Path::new("/w/it's\n\\x")), r"rm -rf $'/w/it\'s\n\\x'");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workspace_folder_with_a_newline_in_its_name_is_neither_listed_swept_nor_cleaned() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        let root = ws.parent().unwrap().to_path_buf();
+        let odd = root.join("\nrm -r ~");
+        clone(&odd.join("app"));
+        file(&odd.join("scratch/x"));
+        age(&odd);
+
+        let items = preview_of(&st, None).await;
+        assert!(items.iter().all(|i| i.agent == a.id), "{items:?}");
+        let p = plan(&root, None, &|_| false, later(), IDLE);
+        assert!(p.folders.iter().all(|f| f.agent == a.id) && p.skipped.iter().all(|s| !s.agent.contains('\n')), "{p:?}");
+        let l = clean_paths(&st, None, vec![odd.join("scratch"), odd.join("app/target")]).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        assert!(l.skipped.iter().all(|s| s.reason == "not in a workspace" && !s.agent.contains('\n')), "{l:?}");
+        assert!(odd.join("scratch/x").exists() && odd.join("app/target/debug/app").exists());
     }
 
     #[test]

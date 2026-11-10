@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanLineText, shownCommand } from "../src/lib/format.ts";
+import { cleanLineText, oneLine, shownCommand } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -19,4 +19,9 @@ test("only items that can be removed show their command", () => {
   assert.equal(shownCommand(item({ label: "main clone of loft", opens: true }), 0), "", "a main clone");
   assert.equal(shownCommand(item({ blocked: "Working" }), 0), "", "a working agent's item");
   assert.equal(shownCommand(item({ label: "kept", opens: true }), 1), "rm -rf /s/a/loft", "a folder inside a main clone");
+});
+
+test("a name keeps to its one line in Copy commands", () => {
+  assert.equal(oneLine("Deleted agent \nrm -r ~\r\t\u0085x"), "Deleted agent rm -r ~x");
+  assert.equal(oneLine("Loft Dev"), "Loft Dev");
 });
