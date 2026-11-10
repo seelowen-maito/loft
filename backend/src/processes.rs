@@ -313,6 +313,8 @@ pub async fn left_running(State(state): State<AppState>) -> Json<Value> {
 /// running, the way the idle stop does (see [`stop`]). A run that starts meanwhile keeps its processes. The stops
 /// are the clean log's. 409 for an agent in a run.
 pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPath<String>) -> crate::api::ApiResult<Value> {
+    // The id names a real agent: a path like `./<id>` must not reach its sessions.
+    let id = state.db.get_agent(&id)?.ok_or_else(crate::api::not_found)?.id;
     let st = state.clone();
     let agent = id.clone();
     let not_running = move || !st.rt.lock().unwrap().running.contains_key(&agent);
@@ -882,6 +884,14 @@ mod tests {
         assert!(left_running(State(st.clone())).await.0.as_object().unwrap().is_empty());
         let err = stop_left_running(State(st.clone()), UrlPath(a.id.clone())).await.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::CONFLICT);
+        assert!(server.alive());
+        // A path that only resolves to the agent's id is no agent: 404, and nothing stops.
+        for odd in [format!("./{}", a.id), format!("bin/../{}", a.id)] {
+            st.rt.lock().unwrap().running.remove(&a.id);
+            let err = stop_left_running(State(st.clone()), UrlPath(odd)).await.unwrap_err();
+            assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+            st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        }
         assert!(server.alive());
 
         // Idle again: Stop them stops the server, logs it, and leaves the helper.
