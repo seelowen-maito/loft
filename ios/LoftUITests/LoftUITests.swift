@@ -194,6 +194,11 @@ final class LoftUITests: XCTestCase {
         spec.tap()
         XCTAssertEqual(composerValue(app), "@QA Agent see #42 ", "same project: #N")
         XCTAssertFalse(spec.exists, "the list goes once one is picked")
+        // No match shows nothing, as on the web: "#fff" is often just text.
+        field.typeText("#fff")
+        XCTAssertFalse(any("tagList", app).exists)
+        XCTAssertFalse(app.staticTexts["Nothing to tag by that name"].exists)
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
 
         app.buttons["Conversation options"].tap()
         // Once the menu is open, Grill me… would be in it: no waiting for something that shouldn't come.

@@ -46,4 +46,22 @@ final class TagQueryTests: XCTestCase {
         XCTAssertEqual(TagQuery.matches(rows, "7").map(\.tag), ["#7"])
         XCTAssertEqual(TagQuery.matches(rows, "").count, 3, "nothing typed: the open ones")
     }
+
+    func testMatchingIsTheWebSearch() {
+        let rows = TagQuery.rows(
+            tasks: [task("1", "Old tag work", github: link("o/loft", 199)),
+                    task("2", "Fix tags", github: link("o/loft", 1)),
+                    task("3", "Billing", project: "api", github: link("o/api", 12)),
+                    task("4", "Retag the board", github: link("o/loft", 3))],
+            prs: [], project: "loft")
+        XCTAssertEqual(TagQuery.matches(rows, "1").map(\.tag), ["#1"], "a number finds that number only, not #199 or #12")
+        XCTAssertEqual(TagQuery.matches(rows, "api").map(\.title), ["Billing"], "the project counts too")
+        XCTAssertEqual(TagQuery.matches(rows, "tag").map(\.title), ["Old tag work", "Fix tags", "Retag the board"], "titles containing it, in order")
+        XCTAssertEqual(TagQuery.matches(rows, "TAG").map(\.title), ["Old tag work", "Fix tags", "Retag the board"], "case doesn't matter")
+        XCTAssertEqual(TagQuery.matches(rows, "fix").map(\.title), ["Fix tags"])
+
+        var closed = task("5", "Tag closed", github: link("o/loft", 5)); closed.status = "done"
+        let ranked = TagQuery.rows(tasks: [closed, task("6", "A tag", github: link("o/loft", 6)), task("7", "Tag open", github: link("o/loft", 7))], prs: [], project: "loft")
+        XCTAssertEqual(TagQuery.matches(ranked, "tag").map(\.title), ["Tag open", "A tag", "Tag closed"], "open first, then titles starting with it")
+    }
 }
