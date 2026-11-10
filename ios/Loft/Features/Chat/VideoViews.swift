@@ -253,7 +253,7 @@ struct PhotoChip: View {
     let remove: () -> Void
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        VStack(spacing: 0) {
             Group {
                 if let p = draft.preview {
                     Image(uiImage: p).resizable().scaledToFill()
@@ -276,16 +276,16 @@ struct PhotoChip: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            // Under the photo, not on it, and capped so the glyph fits its 44-pt target at every text size (#316).
             Button(action: remove) {
-                Image(systemName: "xmark.circle.fill").font(.title3).symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.6))
+                Image(systemName: "xmark.circle.fill").font(.title3).foregroundStyle(.secondary)
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                    .frame(width: 44, height: 44)
             }
-            .frame(width: 44, height: 44, alignment: .topTrailing)
-            .offset(x: 6, y: -6)
             .accessibilityLabel("Remove the photo")
             .accessibilityIdentifier("removePhoto")
         }
-        .frame(width: 70, height: 70, alignment: .bottomLeading)
+        .frame(width: 64)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
         .accessibilityIdentifier("photoChip")

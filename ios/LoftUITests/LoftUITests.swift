@@ -296,6 +296,31 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("fullScreenPhoto", app).disappears(timeout: 3))
     }
 
+    /// #316: at accessibility-extra-large text, each photo's remove button sits under the thumbnail, not on it,
+    /// and keeps a 44-pt target.
+    func testPhotoRemoveButtonClearsThumbnailAtLargeText() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 600)).image { c in
+            UIColor.systemTeal.setFill()
+            c.fill(CGRect(x: 0, y: 0, width: 600, height: 600))
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("photo-\(UUID().uuidString).png")
+        try XCTUnwrap(image.pngData()).write(to: url)
+        let app = launch(["-fixture-photos", url.path,
+                          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
+        openOrchestratorChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["choosePhotos"].tap()
+        let chip = any("photoChip", app)
+        XCTAssertTrue(chip.appears(timeout: 5))
+        let remove = app.buttons["removePhoto"].firstMatch
+        XCTAssertGreaterThanOrEqual(remove.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(remove.frame.height, 44)
+        let thumbnail = CGRect(x: chip.frame.minX, y: chip.frame.minY, width: 64, height: 64)
+        XCTAssertFalse(remove.frame.intersects(thumbnail), "\(remove.frame) covers \(thumbnail)")
+    }
+
     /// The agent screen shows the agent's group and its projects, main first.
     func testAgentDetailsShowGroupAndProjects() {
         let app = launch()
