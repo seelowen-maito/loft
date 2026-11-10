@@ -905,7 +905,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(any("deliveryWaiting", app).label, "Waiting for the Lead to assign #44")
         XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
         XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
-        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 4 tickets done")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 5 tickets done")
         // The tickets sit below the card and the progress.
         for _ in 0..<3 where !any("ticketRow-QA", app).exists { app.swipeUp() }
         for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
