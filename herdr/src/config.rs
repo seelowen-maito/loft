@@ -30,10 +30,14 @@ pub fn url() -> String {
     normalize(&from_env.or_else(from_file).unwrap_or_else(|| DEFAULT_URL.to_string()))
 }
 
-/// The paired client's token, from `config.json` (written by `loft-herdr setup`, see ADR 0004).
-pub fn token() -> Option<String> {
+/// The paired client's token, from `config.json` (written by `loft-herdr setup`, see ADR 0004), only when
+/// `url` is the Loft it was issued for: the file's `url`. Any other Loft gets none.
+pub fn token_for(url: &str) -> Option<String> {
     let raw = std::fs::read_to_string(dir().join("config.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if normalize(v.get("url")?.as_str()?) != normalize(url) {
+        return None;
+    }
     v.get("token")?.as_str().map(str::to_string).filter(|t| !t.is_empty())
 }
 
@@ -72,7 +76,8 @@ mod tests {
         std::fs::write(tmp.join("config.json"), "{}").unwrap();
         std::fs::set_permissions(tmp.join("config.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
         save("http://x:1", Some("abc")).unwrap();
-        assert_eq!(token().as_deref(), Some("abc"));
+        assert_eq!(token_for("http://x:1/").as_deref(), Some("abc"));
+        assert_eq!(token_for("http://other:1"), None);
         assert_eq!(std::fs::metadata(tmp.join("config.json")).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
