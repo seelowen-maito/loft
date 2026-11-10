@@ -58,7 +58,7 @@ export default function TasksPage() {
   );
   const [deliveries, setDeliveries] = useState<DeliverySummary[]>([]);
   const [deliveriesLoaded, setDeliveriesLoaded] = useState(false);
-  const loadDeliveries = useCallback(() => { api.deliverySummaries().then((d) => { setDeliveries(d); setDeliveriesLoaded(true); }).catch(() => {}); }, []);
+  const loadDeliveries = useCallback(() => { api.deliverySummaries().then(setDeliveries).catch(() => {}).finally(() => setDeliveriesLoaded(true)); }, []);
   useEffect(() => { loadDeliveries(); }, [loadDeliveries]);
   const [query, setQuery] = useState(filters.q);
   // Back/forward to another search shows it in the box.
