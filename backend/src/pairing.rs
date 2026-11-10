@@ -391,6 +391,8 @@ mod tests {
         ("POST", "/simulator/input"),
         ("POST", "/agents/abc/open-editor"),
         ("POST", "/agents/abc/messages"),
+        ("POST", "/agents/abc/uploads"),
+        ("POST", "/workspaces/clean"),
         ("POST", "/issues"),
         ("POST", "/agents/abc/run"),
         ("POST", "/agents/abc/memories"),

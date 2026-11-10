@@ -37,12 +37,21 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
 }
 
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
-  if (!d?.current) return null;
-  const a = d.agent_id ? agentById.get(d.agent_id) : undefined;
+  const running = d?.tickets.filter((t) => t.agent_id) ?? [];
+  if (!d || (!running.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
   return (
-    <div className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-fg-2">
-      {a && <Sticker avatar={a.avatar} lead={a.role === "lead"} size={16} />}
-      <span className="truncate"><span className="text-fg">{d.agent_name ?? "An agent"}</span> on #{d.current.number} {d.current.title}</span>
+    <div className="space-y-0.5 text-[11.5px] text-fg-2">
+      {running.map((t) => {
+        const a = agentById.get(t.agent_id!);
+        return (
+          <div key={t.number} className="flex min-w-0 items-center gap-1.5">
+            {a && <Sticker avatar={a.avatar} lead={a.role === "lead"} size={16} />}
+            <span className="truncate"><span className="text-fg">{t.agent_name ?? "An agent"}</span> on #{t.number} {t.title}</span>
+          </div>
+        );
+      })}
+      {!!d.waiting_on_you?.length && <div className="text-warn">Waiting on you: {d.waiting_on_you.map((n) => `#${n}`).join(", ")}</div>}
+      {!!d.waiting_for_lead?.length && <div className="text-warn">Waiting for the Lead: {d.waiting_for_lead.map((n) => `#${n}`).join(", ")}</div>}
     </div>
   );
 }
@@ -93,7 +102,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
             </div>
           )}
           <ol className="relative ml-2 border-l border-line pl-4">
-            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={d.current?.number === t.number} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
+            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
           </ol>
         </>
       )}

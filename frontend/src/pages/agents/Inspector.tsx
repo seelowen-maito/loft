@@ -4,7 +4,7 @@ import {
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
-import { cx, timeAgo } from "../../lib/format";
+import { cx, fmtBytes, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
@@ -99,10 +99,15 @@ export const roleHint = (team: string) =>
     : "What it does in its group's team. Only an agent with a group can be Lead: set one first.";
 
 export const FRESH_CONTEXT_HINT =
-  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k only once it is past the smart zone. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
+  "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k (the smart zone) or a higher threshold only once its context reaches it. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
 
 export const FRESH_CONTEXT = [
   { value: "above_80k", label: "Above 80k (default)" },
+  { value: "above_100k", label: "Above 100k" },
+  { value: "above_120k", label: "Above 120k" },
+  { value: "above_150k", label: "Above 150k" },
+  { value: "above_180k", label: "Above 180k" },
+  { value: "above_200k", label: "Above 200k" },
   { value: "always", label: "Always" },
   { value: "off", label: "Off" },
 ];
@@ -288,14 +293,30 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 
+      <WorkspaceSize id={agent.id} />
+
       <DangerZone agent={agent} onCleared={onCleared} />
     </div>
   );
 }
 
+/** How much disk the agent's workspace takes. */
+function WorkspaceSize({ id }: { id: string }) {
+  const [bytes, setBytes] = useState<number | null>(null);
+  useEffect(() => {
+    setBytes(null);
+    api.workspaceSize(id).then((r) => setBytes(r.bytes)).catch(() => {});
+  }, [id]);
+  return <div className="text-[12.5px] text-fg-3">Workspace {bytes === null ? "…" : fmtBytes(bytes)}</div>;
+}
+
 function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void }) {
   const [confirm, setConfirm] = useState(false);
-  const [purge, setPurge] = useState(false);
+  const [purge, setPurge] = useState(true);
+  const [size, setSize] = useState<number | null>(null);
+  useEffect(() => {
+    if (confirm) api.workspaceSize(agent.id).then((r) => setSize(r.bytes)).catch(() => {});
+  }, [confirm, agent.id]);
   return (
     <div className="space-y-3 rounded-2xl border border-bad/20 p-4">
       <div className="eyebrow text-bad/80">Danger zone</div>
@@ -304,14 +325,14 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
         {agent.builtin ? (
           <span className="self-center text-[12.5px] text-fg-3">{agent.name} comes with Loft and can't be deleted.</span>
         ) : !confirm ? (
-          <button className="btn border-bad/30 text-bad" onClick={() => setConfirm(true)}>
+          <button className="btn border-bad/30 text-bad" onClick={() => { setPurge(true); setConfirm(true); }}>
             <Trash2 className="size-3.5" /> Delete agent
           </button>
         ) : (
           <div className="w-full space-y-2 rounded-xl bg-bad/[0.06] p-3">
             <label className="flex items-center gap-2 text-[12.5px] text-fg-2">
               <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
-              Also delete its workspace folder
+              Also delete its workspace{size !== null && ` (frees ${fmtBytes(size)})`}
             </label>
             <div className="flex gap-2">
               <button className="btn border-bad/40 bg-bad/20 text-fg" onClick={() => api.deleteAgent(agent.id, purge)}>Delete {agent.name}</button>

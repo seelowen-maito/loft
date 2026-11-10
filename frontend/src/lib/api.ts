@@ -31,7 +31,7 @@ export type Agent = {
   max_subagents: number | null;
   /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
-  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default), "above_100k" … "above_200k" or "always". */
   fresh_context?: string;
   /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
   fresh_context_applies?: boolean;
@@ -60,6 +60,8 @@ export type Agent = {
   subagents?: RunningSubagent[];
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
+  /** Agent messages in its chat (their ids) waiting for its current run to end. */
+  queued_messages?: number[];
 };
 
 /** The roles an agent can have, as stored in `Agent.role`, with what each does. */
@@ -120,7 +122,13 @@ export type IssueDelivery = {
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
+  waiting_for_lead?: number[];
+  /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
+  waiting_on_you?: number[];
+  /** Its open PR's branch is behind its base by `count` commits; null when it isn't. An older server doesn't send it. */
+  behind?: { count: number; base: string } | null;
 };
 
 export type Task = {
@@ -400,6 +408,8 @@ export type PullRequest = {
   created_at: string;
   /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
   labels?: string[];
+  /** Commits on the base the branch doesn't have; 0 when up to date. An older server doesn't send it. */
+  behind_by?: number;
 };
 
 export type AgentSummary = {
@@ -469,6 +479,36 @@ export type BackupStatus = {
   dir: string;
   last: { at: string; bytes: number; path: string } | null;
   error: { message: string; at: string } | null;
+  /** iCloud Drive → Loft backups, the one-click choice; null when iCloud Drive is off on the Mac. */
+  icloud: string | null;
+};
+
+/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), and the disk's
+ * free space. */
+export type WorkspaceSizes = {
+  agents: { id: string; name: string; bytes: number; busy: boolean }[];
+  free_bytes: number | null;
+  low_disk_bytes: number;
+};
+/** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
+export type CleanSkip = { agent: string; rel: string; reason: string };
+/** What Clean (one agent) or Clean all would remove: build folders by agent, and what it skips. `path` is absolute;
+ * `command` is the equivalent `rm -rf`, to read or copy (Loft removes by path); `note` says why it goes whatever its age. */
+export type CleanPlan = {
+  folders: { agent: string; path: string; rel: string; bytes: number; changed: string; command: string; note?: string }[];
+  skipped: CleanSkip[];
+  total_bytes: number;
+};
+/** A clean's log, live while `running`: each removal (or its error), what was skipped, and the totals. */
+export type CleanLog = {
+  at: string | null;
+  what: string;
+  running: boolean;
+  lines: { agent: string; path: string; rel: string; bytes: number; error: string | null; command: string }[];
+  skipped: CleanSkip[];
+  freed_bytes: number;
+  removed: number;
+  failed: number;
 };
 
 export type ApprovalMode = "ask" | "own" | "all";
@@ -573,6 +613,13 @@ export const api = {
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   backups: () => req<BackupStatus>("GET", "/backups"),
+  workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
+  /** What Clean on one agent, or Clean all, would remove. */
+  cleanPreview: (agent?: string) => req<CleanPlan>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
+  /** Removes the previewed folders the user kept ticked. */
+  clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
+  /** The running or last clean's log, the daily sweep's included. */
+  cleanLog: () => req<CleanLog>("GET", "/workspaces/log"),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
@@ -592,6 +639,8 @@ export const api = {
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
+  /** What deleting the agent with its workspace would free. */
+  workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */

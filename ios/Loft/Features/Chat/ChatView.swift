@@ -42,6 +42,8 @@ struct ChatView: View {
     @State private var routeSuggestion: RouteSuggestion?
     /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
+    /// A video picked in the composer, uploading or up, until it goes with a message.
+    @State private var video: VideoDraft?
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
     @State private var resuming = false
@@ -242,10 +244,17 @@ struct ChatView: View {
                              startVoice: { Task { await voice.start(agentId: agentId) } },
                              onVoiceSent: continueByVoice,
                              onVoiceStop: stopByVoice,
-                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text, byVoice in
+                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
+                             videoAgentId: currentQuestion == nil ? agentId : nil, video: $video) { text, byVoice in
+                    if let file = video?.uploaded {
+                        // A message with a video is always plain chat.
+                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        attached = nil
+                        video = nil
+                        Task { await store.send(text, to: agentId, meta: meta, images: [file]) }
                     // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
                     // on another one) and the voice moves on; typed text is always chat, as on the web.
-                    if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
+                    } else if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
                         Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
                     } else if VoicePresentation.shared.statusAgentId == agentId, attached == nil {
                         // A Talk dictation sent from here gets the full-screen status (Sent, Thinking, the reply).
@@ -769,6 +778,11 @@ private struct MessageBubble: View {
                 Text(message.content).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
         default:
+            ForEach(message.videos, id: \.self) { f in
+                if let url = store.uploadURL(agentId: message.agentId, file: f) {
+                    ChatVideo(url: url).frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+                }
+            }
             HStack(alignment: .bottom) {
                 if isUser { Spacer(minLength: 48) }
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
@@ -802,13 +816,22 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("taskChips")
                     }
-                    CollapsibleText(text: message.displayContent)
-                        .font(.body)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .foregroundStyle(isUser ? Theme.onAccent : .primary)
-                        .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
-                                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    if !message.tags.isEmpty {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { ForEach(message.tags) { TagChip(tag: $0) } }
+                            VStack(alignment: isUser ? .trailing : .leading, spacing: 4) { ForEach(message.tags) { TagChip(tag: $0) } }
+                        }
+                        .accessibilityIdentifier("tagChips")
+                    }
+                    if message.videos.isEmpty || !message.displayContent.isEmpty {
+                        CollapsibleText(text: message.displayContent)
+                            .font(.body)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .foregroundStyle(isUser ? Theme.onAccent : .primary)
+                            .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
+                                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
                              : "\(message.fromAgentName == nil && message.role != "user" ? agent.name + " · " : "")\(message.createdAt.formatted(date: .omitted, time: .shortened))")
@@ -1031,11 +1054,16 @@ private struct PendingBubble: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 4) {
-                Text(message.text)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(Theme.onAccent)
-                    .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if let files = message.images, !files.isEmpty {
+                    Label("Video", systemImage: "video.fill").font(.caption).foregroundStyle(.secondary)
+                }
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(Theme.onAccent)
+                        .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
                 if let failure = message.failure {
                     Label("Not sent: \(failure)", systemImage: "exclamationmark.circle")
                         .font(.caption)

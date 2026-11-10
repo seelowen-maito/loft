@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_preview"],
     }))
 }
 
@@ -102,21 +102,17 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Replace the settings. `github_token`: absent or null keeps the saved one, "" clears it.
-pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Value>) -> ApiResult<Value> {
-    let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
-    // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
-    let keep_push = body.get("push").is_none();
-    let keep_backup_dir = body.get("backup_dir").is_none();
-    let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
-    if keep_push {
-        s.push = state.settings.get().push;
-    } else {
-        // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
-        s.push.relay_url = state.settings.get().push.relay_url;
+pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult<Value> {
+    let Value::Object(mut body) = body else { return Err(bad("settings must be an object")) };
+    let token = body.remove("github_token");
+    // Keys a client leaves out keep their saved value, so a client can send only what it changed.
+    let mut merged = serde_json::to_value(state.settings.get()).map_err(|e| bad(e.to_string()))?;
+    if let Some(o) = merged.as_object_mut() {
+        o.extend(body);
     }
-    if keep_backup_dir {
-        s.backup_dir = state.settings.get().backup_dir;
-    }
+    let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
+    // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
+    s.push.relay_url = state.settings.get().push.relay_url;
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;
@@ -276,7 +272,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
     }
     if let Some(v) = str_field("fresh_context") {
         if !crate::agents::FRESH_CONTEXT.contains(&v.as_str()) {
-            return Err(bad("fresh_context must be one of off, above_80k or always"));
+            return Err(bad(format!("fresh_context must be one of {}", crate::agents::FRESH_CONTEXT.join(", "))));
         }
         a.fresh_context = v;
     }
@@ -328,11 +324,10 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         let av: Avatar = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
         a.avatar = av.validate().map_err(|e| bad(e.to_string()))?;
     }
-    if a.role == "lead" {
-        if a.team().is_empty() {
+    if a.role == "lead"
+        && a.team().is_empty() {
             return Err(bad("Only an agent with a group can be Lead: a Lead leads the agents that share its group."));
         }
-    }
     Ok(())
 }
 
@@ -449,6 +444,14 @@ pub async fn reorder_agents(State(state): State<AppState>, Json(o): Json<Order>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// What deleting the agent with its workspace would free.
+pub async fn workspace_size(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let dir = workspace(&state, &id);
+    let bytes = tokio::task::spawn_blocking(move || crate::sweep::size(&dir)).await.unwrap_or(0);
+    Ok(Json(json!({ "bytes": bytes })))
+}
+
 #[derive(Deserialize)]
 pub struct DeleteOpts {
     #[serde(default)]
@@ -468,6 +471,10 @@ pub async fn delete_agent(State(state): State<AppState>, Path(id): Path<String>,
     agents::remove_agent_files(&state, &id);
     if q.purge_files {
         let _ = std::fs::remove_dir_all(workspace(&state, &id));
+    } else {
+        // Its files stay: its clones' build output goes once they're idle.
+        let (state, id) = (state.clone(), id.clone());
+        tokio::spawn(async move { crate::sweep::run(&state, None, Some(&id), crate::sweep::IDLE, None).await });
     }
     state.emit(Event::AgentDeleted { agent_id: id });
     Ok(Json(json!({ "ok": true })))
@@ -504,11 +511,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     }
     crate::uploads::validate(&state, &id, &m.images)?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
-    if let Some(c) = &client_id {
-        if let Some(prev) = state.db.find_client_message(&id, c)? {
+    if let Some(c) = &client_id
+        && let Some(prev) = state.db.find_client_message(&id, c)? {
             return Ok(Json(json!({ "ok": true, "queued": false, "duplicate": true, "message": prev })));
         }
-    }
     let queued = is_running(&state, &id);
     let mut meta = client_id.map(|c| json!({ "client_id": c })).unwrap_or(json!({}));
     // Images go in before routing: a grill answer keeps them too.
@@ -539,6 +545,10 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     }
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
+    }
+    let tags = crate::tags::resolve(&state, &agent, &text);
+    if !tags.is_empty() {
+        meta["tags"] = json!(tags);
     }
     // Any agent, its own group's first: where two share a name, the "Dev" of this group wins.
     let mut all = state.db.list_agents()?;
@@ -1111,6 +1121,36 @@ pub(crate) mod tests {
         let card = &s["agents"][0];
         assert_eq!(card["days"], 14);
         assert_eq!(card["cost_usd"], 255.0, "the agent card still counts 14 days");
+    }
+
+    #[tokio::test]
+    async fn deleting_an_agent_with_purge_files_removes_its_workspace_and_without_it_keeps_it() {
+        use axum::extract::{Path, Query, State};
+        let st = crate::tasks::tests::state();
+        let outside = std::env::temp_dir().join(format!("loft-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("big"), vec![0u8; 1_000_000]).unwrap();
+        let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
+        for id in [&a.id, &b.id] {
+            let ws = super::workspace(&st, id);
+            std::fs::create_dir_all(ws.join("clone/target")).unwrap();
+            std::fs::write(ws.join("notes.md"), "hello").unwrap();
+            std::fs::write(ws.join("clone/target/lib.rlib"), vec![0u8; 1000]).unwrap();
+            std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        }
+        let size = super::workspace_size(State(st.clone()), Path(a.id.clone())).await.ok().unwrap().0;
+        let bytes = size["bytes"].as_u64().unwrap();
+        assert!((1005..1_000_000).contains(&bytes), "symlinks aren't followed: {bytes}");
+
+        let del = |id: String, purge: &str| {
+            let uri: axum::http::Uri = format!("/?purge_files={purge}").parse().unwrap();
+            super::delete_agent(State(st.clone()), Path(id), Query::try_from_uri(&uri).unwrap())
+        };
+        let _ = del(a.id.clone(), "true").await.ok().unwrap();
+        assert!(!super::workspace(&st, &a.id).exists());
+        let _ = del(b.id.clone(), "false").await.ok().unwrap();
+        assert!(super::workspace(&st, &b.id).join("clone/target/lib.rlib").exists());
+        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 1_000_000, "a symlink's target is never touched");
     }
 
     #[tokio::test]

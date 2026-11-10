@@ -25,6 +25,12 @@ struct LoftApp: App {
 
     private static func makeAPI() -> LoftAPI? {
         #if DEBUG
+        // A UI test starts on the List, not on the Issues view the last test left; `-keep-issues-view` is a relaunch
+        // that checks it's kept.
+        let args = ProcessInfo.processInfo.arguments
+        if (args.contains("-ui-testing") || args.contains("-ui-onboarding")) && !args.contains("-keep-issues-view") {
+            UserDefaults.standard.removeObject(forKey: "issuesView")
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-onboarding") { return nil }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
             // Each UI test starts from nothing, not from the last test's cached state.

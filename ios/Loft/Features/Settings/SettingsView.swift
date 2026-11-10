@@ -59,6 +59,19 @@ struct SettingsView: View {
     /// Settings › GitHub issues, from the server; nil until loaded, or on a server without them.
     @State private var issueSettings: IssueSettings?
     @State private var issueSettingsError: APIError?
+    /// Settings › Backups, from the server: the status and the saved `backup_dir`; nil until loaded.
+    @State private var backup: BackupStatus?
+    @State private var backupDir = ""
+    @State private var backingUp = false
+    @State private var confirmICloud = false
+    @State private var backupError: APIError?
+    /// Settings › Disk: workspace sizes and free space, nil until loaded; the last clean's log; the open clean.
+    @State private var disk: WorkspaceSizes?
+    @State private var lastClean: CleanLog?
+    /// Agents whose sizes are measured again after a clean.
+    @State private var remeasuring: Set<String> = []
+    @State private var measuringDisk = true
+    @State private var cleanSheet: CleanSheet.Start?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
     /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
@@ -295,6 +308,18 @@ struct SettingsView: View {
                 .disabled(!store.canWrite)
             }
 
+            if let backup {
+                backupsSection(backup)
+            }
+
+            if let disk {
+                diskSection(disk)
+            } else if measuringDisk, store.info?.supports(.workspaces) == true {
+                Section("Disk") {
+                    ProgressView("Measuring workspaces…").frame(maxWidth: .infinity)
+                }
+            }
+
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     Text("Dark").tag("dark")
@@ -326,6 +351,14 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task { issueSettings = try? await store.issueSettings() }
         .errorAlert($issueSettingsError)
+        .task { await loadBackups() }
+        .task { await loadDisk() }
+        .errorAlert($backupError)
+        .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
+            Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
+        } message: {
+            Text(Self.iCloudWarning)
+        }
         .task { notificationStatus = await store.notifier.authorizationStatus() }
         .task {
             while !Task.isCancelled {
@@ -336,11 +369,161 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { aiStatus = OnDeviceModel.status }
         }
+        .sheet(item: $cleanSheet) { start in
+            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) { cleaned in
+                remeasuring = cleaned
+                await loadDisk()
+                remeasuring = []
+            }
+        }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
         } message: {
             Text("The saved address and cached data on this iPhone are removed. Nothing changes on the Mac.")
         }
+    }
+
+    static let iCloudWarning = "Backups in iCloud Drive leave your Mac: all your chats and your GitHub token are then stored by Apple."
+
+    private func loadBackups() async {
+        guard store.info?.supports(.backups) == true, let b = try? await store.backups() else { return }
+        backup = b.status
+        backupDir = b.backupDir
+    }
+
+    private func loadDisk() async {
+        guard store.info?.supports(.workspaces) == true else { return }
+        defer { measuringDisk = false }
+        disk = try? await store.workspaceSizes()
+        if store.info?.supports(.cleanPreview) == true { lastClean = try? await store.cleanLog() }
+    }
+
+    /// A Mac whose Clean previews what it removes; an older one's Clean would remove blind, so it gets none.
+    private var canClean: Bool { store.info?.supports(.cleanPreview) == true }
+
+    private func diskSection(_ d: WorkspaceSizes) -> some View {
+        Section {
+            LabeledContent("Free") {
+                Text(d.freeBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "Unknown")
+                    .foregroundStyle(d.isLow ? Theme.failure : .primary)
+            }
+            .accessibilityIdentifier("diskFree")
+            ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
+                LabeledContent {
+                    HStack(spacing: 10) {
+                        if remeasuring.contains(r.id) {
+                            ProgressView().accessibilityLabel("Measuring")
+                        } else {
+                            Text(r.bytes.formatted(.byteCount(style: .file)))
+                        }
+                        if canClean, let busy = r.busy {
+                            Button(busy ? "Working" : "Clean") { cleanSheet = .preview(agentId: r.id) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .disabled(busy || !remeasuring.isEmpty)
+                                .accessibilityIdentifier("clean-\(r.id)")
+                        }
+                    }
+                } label: {
+                    Text(r.name)
+                }
+            }
+            if canClean {
+                Button("Clean all") { cleanSheet = .preview(agentId: nil) }
+                    .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
+                    .accessibilityIdentifier("cleanAll")
+            }
+            if let last = lastClean, let at = last.at {
+                Button {
+                    cleanSheet = .log(last)
+                } label: {
+                    LabeledContent {
+                        Text("View log")
+                    } label: {
+                        Text("Last: \(last.what) \(at.formatted(.relative(presentation: .named)))")
+                        Text("Freed \(last.freedBytes.formatted(.byteCount(style: .file))) from \(last.removed) folder\(last.removed == 1 ? "" : "s")\(last.failed > 0 ? " · \(last.failed) failed" : "")")
+                    }
+                }
+                .accessibilityIdentifier("lastClean")
+            }
+        } header: {
+            Text("Disk")
+        } footer: {
+            Text("Clean shows the build output it would remove first; its next build starts from scratch. Source, notes and git stay. Your Mac also cleans workspaces untouched for 3 days, daily.")
+        }
+    }
+
+    private func saveBackupDir(_ dir: String) {
+        Task {
+            do { try await store.saveBackupDir(dir) } catch { backupError = APIError.from(error) }
+            await loadBackups()
+        }
+    }
+
+    private func backUpNow() {
+        Task {
+            backingUp = true
+            defer { backingUp = false }
+            do { backup = try await store.backUpNow() } catch {
+                backupError = APIError.from(error)
+                // The failure is recorded: show it next to the last good backup.
+                await loadBackups()
+            }
+        }
+    }
+
+    /// The last backup and any error, Back up now, and where backups go: this Mac or iCloud Drive in one tap.
+    private func backupsSection(_ b: BackupStatus) -> some View {
+        let folder = b.folder(backupDir)
+        return Section {
+            LabeledContent("Last backup") {
+                if let last = b.last {
+                    Text("\(last.at.formatted(.relative(presentation: .named))) · \(last.bytes.formatted(.byteCount(style: .file)))")
+                } else {
+                    Text("None yet")
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("backupLast")
+            if let e = b.error {
+                Label("Failed \(e.at.formatted(.relative(presentation: .named))): \(e.message)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.failure)
+                    .accessibilityIdentifier("backupError")
+            }
+            Picker("Back up to", selection: Binding(get: { folder }, set: { new in
+                switch new {
+                case .local: saveBackupDir("")
+                case .icloud: confirmICloud = true
+                case .other: break
+                }
+            })) {
+                Text("This Mac").tag(BackupStatus.Folder.local)
+                if b.icloud != nil { Text("iCloud Drive").tag(BackupStatus.Folder.icloud) }
+                if case .other(let d) = folder { Text((d as NSString).lastPathComponent).tag(folder) }
+            }
+            .accessibilityIdentifier("backupFolderPicker")
+            LabeledContent("Folder") {
+                Text(b.dir).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+            }
+            Button {
+                backUpNow()
+            } label: {
+                if backingUp {
+                    HStack(spacing: 8) { ProgressView(); Text("Backing up…") }
+                } else {
+                    Text("Back up now")
+                }
+            }
+            .disabled(backingUp)
+            .accessibilityIdentifier("backUpNow")
+        } header: {
+            Text("Backups")
+        } footer: {
+            Text(folder == .icloud
+                 ? Self.iCloudWarning
+                 : "Your Mac backs up Loft's database and settings once a day, and keeps 7 daily and 4 weekly backups. iCloud Drive keeps them off the Mac too.")
+        }
+        .disabled(!store.canWrite)
     }
 
     /// The device language as a name ("English (United States)"), without region overrides like "@rg=iszzzz"

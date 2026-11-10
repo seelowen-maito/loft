@@ -1514,9 +1514,9 @@ pub(crate) mod tests {
         let ids = qids(&st, &o);
         let (shot, logo, mock) = (upload(&st, &o), upload(&st, &o), upload(&st, &o));
         // Text with an image, an image alone, and an image alone as a comment to discuss.
-        answer_with(&st, &o, &ids[0], "Like this one", &[shot.clone()], false).await.unwrap();
-        answer_with(&st, &o, &ids[1], "", &[logo.clone()], false).await.unwrap();
-        answer_with(&st, &o, &ids[2], "  ", &[mock.clone()], true).await.unwrap();
+        answer_with(&st, &o, &ids[0], "Like this one", std::slice::from_ref(&shot), false).await.unwrap();
+        answer_with(&st, &o, &ids[1], "", std::slice::from_ref(&logo), false).await.unwrap();
+        answer_with(&st, &o, &ids[2], "  ", std::slice::from_ref(&mock), true).await.unwrap();
         let qs = active(&st, &o.id).unwrap().rounds[0].questions.clone();
         assert_eq!((qs[0].state.as_str(), qs[0].answer.as_deref(), qs[0].images.clone()), ("answered", Some("Like this one"), vec![shot.clone()]));
         assert_eq!((qs[1].state.as_str(), qs[1].answer.as_deref(), qs[1].images.clone()), ("answered", Some(""), vec![logo.clone()]));
@@ -1529,7 +1529,7 @@ pub(crate) mod tests {
         for f in [&shot, &logo, &mock] {
             assert!(wake.contains(&format!("[loft-image:{f}]")), "{wake}");
         }
-        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).unwrap().contains("\"type\":\"image\""));
+        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).await.unwrap().contains("\"type\":\"image\""));
         // The chat's copy of the answers says how many images each had.
         let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == json!("answers")).unwrap();
         assert!(posted.content.contains("1. Like this one [1 image]\n2. [1 image]\n3. Let's discuss: [1 image]"), "{}", posted.content);
@@ -1596,7 +1596,7 @@ pub(crate) mod tests {
         let got: Vec<(&str, &str, &str, Option<u32>)> = qs.iter().map(|q| (q.text.as_str(), q.recommendation.as_str(), q.state.as_str(), q.from_round)).collect();
         assert_eq!(got, [("B?", "rec for B?", "open", Some(1)), ("C?", "rec for C?", "open", Some(1)), ("D?", "rec for D?", "open", None)]);
         assert!(qs.iter().all(|q| !ids.contains(&q.id)), "carried questions get new ids in the new round");
-        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.meta["grill"]["role"] == "round").last().unwrap();
+        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.meta["grill"]["role"] == "round").unwrap();
         assert_eq!(posted.meta["grill"]["questions"][0]["from_round"], json!(1));
         assert!(posted.content.contains("1. B?") && posted.content.contains("3. D?"), "{}", posted.content);
 
@@ -1624,7 +1624,7 @@ pub(crate) mod tests {
         assert!(apply_command(&st, &mut s, "decide", Some(&ids[1]), None).unwrap().is_none(), "deciding doesn't run the agent");
         let q = &active(&st, &o.id).unwrap().rounds[0].questions[1];
         assert_eq!((q.state.as_str(), q.answer.as_deref()), ("decided", Some("rec for Oferecer teste grátis?")));
-        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").last().unwrap();
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.kind == "notice").unwrap();
         assert_eq!(row.content, "Pergunta 2 decidida pelo agente: rec for Oferecer teste grátis?");
         assert_eq!((row.meta["grill"]["state"].clone(), row.meta["grill"]["question_id"].clone()), (json!("decided"), json!(ids[1])));
         // Deciding it again (the voice went back to it) succeeds and leaves it as it was.

@@ -9,7 +9,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private let mode: Mode
     private let lock = NSLock()
     private var agentList: [Agent]
+    private var lastClean: CleanLog?
     private var taskList: [HBTask]
+    private var deliveryList: [DeliverySummary] = []
     private var msgs: [String: [ChatMessage]]
     private var perms: [PermissionRequest]
     private var nextId: Int64 = 1000
@@ -142,6 +144,39 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         taskList[0].github = .init(repo: "octo/loft", number: 42, url: "https://github.com/octo/loft/issues/42", state: "open", subTotal: 4, subDone: 1)
         taskList[1].labels = ["ready-for-agent"]
         taskList[1].github = .init(repo: "octo/loft", number: 43, url: "https://github.com/octo/loft/issues/43", state: "closed")
+        // `-fixture-specs`: a spec in each stage of the Specs view (t1 is the one in Delivery), one only in Loft, one dropped.
+        if ProcessInfo.processInfo.arguments.contains("-fixture-specs") {
+            func spec(_ id: String, _ title: String, _ status: String, _ number: Int?, project: String = "loft", minutes: Double) -> HBTask {
+                var t = task(id, title, status, agent: nil, minutes: minutes)
+                t.kind = "work"; t.project = project; t.labels = ["spec"]
+                if let number { t.github = .init(repo: "octo/loft", number: number, url: "https://github.com/octo/loft/issues/\(number)", state: status == "inbox" || status == "ready" ? "open" : "closed") }
+                return t
+            }
+            taskList += [
+                spec("s2", "Offline mode", "ready", 50, minutes: 200),
+                spec("s3", "Widget gallery", "ready", 51, minutes: 100),
+                spec("s4", "Dark theme", "done", 52, minutes: 500),
+                spec("s5", "Old idea", "cancelled", 53, minutes: 600),
+                spec("s6", "Garden notes", "ready", nil, project: "garden", minutes: 250),
+            ]
+            for i in taskList.indices where taskList[i].id == "s2" || taskList[i].id == "s3" { taskList[i].github?.state = "open" }
+            func ticket(_ n: Int, _ title: String, _ state: String, _ verdicts: [String: String]? = nil, agent: String? = nil) -> DeliverySummary.Ticket {
+                .init(number: n, title: title, state: state, agentName: agent, verdicts: verdicts)
+            }
+            deliveryList = [
+                DeliverySummary(state: "running", agentName: "Backend Agent", repo: "octo/loft", spec: 42, specId: nil, local: false, pr: 47,
+                                current: .init(number: 43, title: "Backend endpoints"),
+                                // Two tickets running at once, each on its own Dev, and one ready ticket waiting for the Lead.
+                                tickets: [ticket(43, "Backend endpoints", "started", agent: "Backend Agent"), ticket(44, "iOS screen", "open"),
+                                          ticket(45, "Docs", "review", ["qa": "pass", "security": "pending"], agent: "Docs Agent"), ticket(46, "QA", "closed", ["qa": "pass", "security": "pass"]),
+                                          ticket(47, "Release notes", "needs_human")],
+                                waitingForLead: [44], waitingOnYou: [47]),
+                DeliverySummary(state: "ready", agentName: nil, repo: "loft:garden", spec: 1, specId: "s6", local: true, current: nil,
+                                tickets: [ticket(1, "Notes list", "closed", ["qa": "pass"])]),
+                DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
+                                tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
+            ]
+        }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
         }
@@ -158,6 +193,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   meta: ["mentions": .array([["id": "qa", "name": "QA Agent"]]), "mentions_only": true]),
                 m(11, "orch", "assistant", "text", "The iPhone 17 Pro on iOS 26.5. I can switch if you need another one.", 36,
                   meta: ["from_agent": ["id": "qa", "name": "QA Agent"], "mention_reply": true]),
+                m(21, "orch", "user", "text", "Is #42 still on track?", 35,
+                  meta: ["tags": .array([["tag": "#42", "kind": "spec", "title": "Implement settings functionality", "state": "open", "url": "https://github.com/octo/loft/issues/42", "task_id": "t1"]])]),
                 // A task handed to the orchestrator, and reports from the agents it delegated to (`meta.task_role`).
                 m(6, "orch", "user", "text", "[Task t6] Renew the domain\n\nThe loft.dev domain expires on Nov 3. Renew it for two years and turn on auto-renew.\n\n[Report progress on this task with update_task.]", 20,
                   meta: ["task_id": "t6", "task_role": "brief"]),
@@ -379,7 +416,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_preview"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -406,11 +443,38 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse {
+        try await sendMessage(agentId: agentId, text: text, clientId: clientId, meta: meta, images: [])
+    }
+
+    /// Uploads, by name, kept where they were read from so a sent video plays.
+    private var uploads: [String: URL] = [:]
+
+    /// Goes up in quarters a fifth of a second apart, so the progress shows.
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try check()
+        if mode == .failSends { throw APIError.timeout }
+        for p in [0.25, 0.5, 0.75, 1] {
+            try await Task.sleep(for: .milliseconds(200))
+            progress(p)
+        }
+        let name = UUID().uuidString.lowercased() + "." + (file.pathExtension.isEmpty ? "mov" : file.pathExtension.lowercased())
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-" + name)
+        try FileManager.default.copyItem(at: file, to: kept)
+        locked { uploads[name] = kept }
+        return name
+    }
+
+    func uploadURL(agentId: String, file: String) -> URL {
+        locked { uploads[file] } ?? baseURL.appendingPathComponent("api/agents/\(agentId)/uploads/\(file)")
+    }
+
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         try check()
         if mode == .failSends { throw APIError.timeout }
         return try locked {
             nextId += 1
             var tags: [String: JSONValue] = ["client_id": .string(clientId)]
+            if !images.isEmpty { tags["images"] = .array(images.map(JSONValue.string)) }
             if let g = meta?["grill"] { tags["grill"] = g }
             // An attached task, as the backend stores it (#116): `task_id`, and first in `task_refs`.
             if let t = meta?["task_id"]?.stringValue {
@@ -550,6 +614,60 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     func stopRun(agentId: String) async throws { try check() }
+    func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
+    /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
+    private func measure() async {
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk") { try? await Task.sleep(for: .seconds(20)) }
+    }
+    func workspaceSizes() async throws -> WorkspaceSizes {
+        try check()
+        await measure()
+        let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
+        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000, busy: true), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000, busy: false),
+                                       .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
+                              freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
+    }
+    func cleanPreview(agentId: String?) async throws -> CleanPlan {
+        try check()
+        await measure()
+        let ws = "/Users/me/loft/agent-local-storage"
+        let changed = Date().addingTimeInterval(-26 * 3600)
+        let folders: [CleanPlan.Folder] = [
+            .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/backend/target"),
+            .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/frontend/node_modules"),
+            .init(agent: "a3", path: "\(ws)/a3/homebase/backend/target/debug/deps", rel: "homebase/backend/target/debug/deps", bytes: 2_100_000_000, changed: Date().addingTimeInterval(-1200),
+                  command: "rm -rf \(ws)/a3/homebase/backend/target/debug/deps", note: "duplicate of .cargo-build"),
+        ].filter { agentId == nil || $0.agent == agentId }
+        let skipped = agentId == nil ? [CleanSkip(agent: "a1", rel: "", reason: "agent is working"), CleanSkip(agent: "a3", rel: "homebase", reason: "changed in the last hour")] : []
+        return CleanPlan(folders: folders, skipped: skipped, totalBytes: folders.reduce(0) { $0 + $1.bytes })
+    }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
+        let plan = try await cleanPreview(agentId: agentId)
+        let lines = plan.folders.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }
+        let unticked = plan.folders.filter { !paths.contains($0.path) }.map { CleanSkip(agent: $0.agent, rel: $0.rel, reason: "unticked") }
+        let log = CleanLog(at: Date(), what: agentId == nil ? "Clean all" : "Clean", running: false, lines: lines, skipped: unticked + plan.skipped,
+                           freedBytes: lines.reduce(0) { $0 + $1.bytes }, removed: lines.count, failed: 0)
+        if ProcessInfo.processInfo.arguments.contains("-fixture-slow-disk"), let first = lines.first {
+            // Mid-run, for the live log: the first folder is gone, the rest still to go.
+            var live = log
+            (live.running, live.lines, live.freedBytes, live.removed) = (true, [first], first.bytes, 1)
+            locked { lastClean = live }
+            try? await Task.sleep(for: .seconds(8))
+        }
+        locked { lastClean = log }
+        return log
+    }
+    func cleanLog() async throws -> CleanLog {
+        try check()
+        return locked { lastClean } ?? CleanLog(at: Date().addingTimeInterval(-5 * 3600), what: "Daily sweep", running: false,
+                                                 lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
+                                                               command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
+                                                 skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
+    }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws {
+        try check()
+        locked { agentList.removeAll { $0.id == id } }
+    }
     /// The plan view the backend builds, from the fixture's tasks.
     func taskPlan(id: String) async throws -> TaskPlan {
         try check()
@@ -593,6 +711,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            make("pr:c", "acme/api", "api#1765: Scope menu discounts to the restaurant", urgency: 2),
                            make("pr:d", "Octo/loft", "loft#111: Make it a brief", urgency: 0)]
         }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
+        }
         list.items.removeAll { done.contains($0.id) }
         list.count = list.items.count
         list.urgent = list.items.filter { $0.urgency >= 2 }.count
@@ -602,6 +726,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Any action resolves its item, as the real server's next list would show.
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws {
         try check()
+        if path == "/api/backups" { _ = try await backUpNow(); return }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }
@@ -696,6 +821,29 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
     }
     func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
+    func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }
+    /// A GitHub spec's Delivery card, from its Delivery in the list; nil for a spec without one.
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? {
+        try check()
+        return locked {
+            guard let g = taskList.first(where: { $0.id == taskId })?.github,
+                  let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
+            return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
+                                 agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
+        }
+    }
+    func mergeDelivery(repo: String, spec: Int) async throws -> String {
+        try check()
+        try await Task.sleep(for: .milliseconds(800))
+        return try locked {
+            guard let i = deliveryList.firstIndex(where: { $0.repo == repo && $0.spec == spec }) else { throw APIError.server(status: 404, message: "not found") }
+            deliveryList[i].state = "merged"
+            if let t = taskList.firstIndex(where: { $0.id == deliveryList[i].specId }) { taskList[t].status = "done" }
+            return "Merged ticket branch into main"
+        }
+    }
 
     func createTask(_ f: [String: JSONValue]) async throws -> HBTask {
         try check()
@@ -744,7 +892,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// `/api/settings`'s object as the server keeps it, with an empty `github_token` as it sends it.
     private var settings: JSONValue = ["comment_approval_default": "ask", "auto_publish_all": false, "github_token": "",
-                                       "auto_update": true, "messaging_rules": true]
+                                       "auto_update": true, "messaging_rules": true,
+                                       "backup_dir": .string(ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? "/Volumes/Backup/Loft backups" : "")]
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []
 
@@ -805,13 +954,48 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         locked { clients.removeAll { !$0.this } }
     }
 
+    /// The Mac's backups: one this morning; with `-fixture-backup-failed`, none since two days ago and the error.
+    private var backupStatus = BackupStatus(
+        dir: "", last: .init(at: Date(timeIntervalSinceNow: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") ? -55 * 3600 : -5 * 3600), bytes: 152_400_000, path: ""),
+        error: ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed")
+            ? .init(message: "can't create /Volumes/Backup/Loft backups: No such file or directory", at: Date(timeIntervalSinceNow: -20 * 60)) : nil,
+        icloud: "/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Loft backups")
+
+    private func backupDir() -> String {
+        let d = settings["backup_dir"]?.stringValue ?? ""
+        return d.isEmpty ? "/Users/you/Library/Application Support/Loft/backups" : d
+    }
+
+    func backups() async throws -> BackupStatus {
+        try check()
+        return locked {
+            var s = backupStatus
+            s.dir = backupDir()
+            return s
+        }
+    }
+
+    /// Always works, into whichever folder Settings names now, and clears the Needs you item.
+    func backUpNow() async throws -> BackupStatus {
+        try check()
+        return locked {
+            let dir = backupDir()
+            backupStatus.last = .init(at: Date(), bytes: 152_600_000, path: dir + "/" + Date().formatted(.iso8601.year().month().day()))
+            backupStatus.error = nil
+            needsYouDone.insert("backup:2026-11-07T03:00:00+00:00")
+            var s = backupStatus
+            s.dir = dir
+            return s
+        }
+    }
+
     func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
         try check()
         return locked {
             settingsPut.append(s)
-            guard case .object(var o) = s else { return settings }
-            // As the server: no `github_token` keeps the saved one.
-            if o["github_token"] == nil { o["github_token"] = settings["github_token"] }
+            // As the server: keys left out (`github_token` too) keep their saved value.
+            guard case .object(let sent) = s, case .object(var o) = settings else { return settings }
+            o.merge(sent) { _, new in new }
             settings = .object(o)
             return settings
         }

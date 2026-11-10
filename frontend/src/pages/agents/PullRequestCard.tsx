@@ -167,6 +167,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
                 <span className="rounded bg-white/[0.05] px-1.5 py-px text-fg-2">{pr.base_ref}</span>
               </span>
             )}
+            {pr.state === "open" && !!pr.behind_by && <span className="text-warn">{pr.behind_by} behind {pr.base_ref}</span>}
             {(pr.additions > 0 || pr.deletions > 0) && (
               <span>
                 <span className="text-good">+{pr.additions}</span> <span className="text-bad">−{pr.deletions}</span>

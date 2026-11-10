@@ -41,7 +41,7 @@ pub fn creates_pr(tool: &str, input: &Value) -> bool {
     cmd.contains("gh pr create") || api_post
 }
 
-fn emit(state: &AppState, pr: &PullRequest) {
+pub(crate) fn emit(state: &AppState, pr: &PullRequest) {
     state.emit(Event::PullRequest { pr: serde_json::to_value(pr).unwrap() });
 }
 
@@ -411,7 +411,9 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
         .enumerate()
         .filter_map(|(i, pr)| {
             let (owner, name) = pr.slug.split_once('/')?;
-            Some(format!("p{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {PR_FIELDS} }} }}", json!(owner), json!(name), pr.number))
+            // How far its branch is behind the base, by the head branch the last read named.
+            let behind = if pr.head_ref.is_empty() { String::new() } else { format!(" baseRef {{ compare(headRef: {}) {{ behindBy }} }}", json!(pr.head_ref)) };
+            Some(format!("p{i}: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {PR_FIELDS}{behind} }} }}", json!(owner), json!(name), pr.number))
         })
         .collect();
     if parts.is_empty() {
@@ -462,6 +464,7 @@ fn apply_graphql(pr: &mut PullRequest, n: &Value) {
     pr.head_ref = s(&n["headRefName"]);
     pr.head_sha = s(&n["headRefOid"]);
     pr.base_ref = s(&n["baseRefName"]);
+    pr.behind_by = n["baseRef"]["compare"]["behindBy"].as_i64().unwrap_or(0);
     pr.author = s(&n["author"]["login"]);
     pr.additions = n["additions"].as_i64().unwrap_or(0);
     pr.deletions = n["deletions"].as_i64().unwrap_or(0);
@@ -687,6 +690,23 @@ mod tests {
         assert_eq!(get(2).state, "merged");
         let gone = get(3);
         assert!(gone.gone && !due(&gone, true), "not found: gone, and not polled again");
+    }
+
+    #[tokio::test]
+    async fn the_poller_reads_how_far_a_branch_is_behind_its_base() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let pr = PullRequest { id: "pr-behind".into(), agent_id: a.id.clone(), slug: "octo/pr-behind".into(), number: 1, state: "open".into(), head_ref: "b".into(), created_at: now(), ..Default::default() };
+        st.db.save_pull_request(&pr).unwrap();
+        let mut node = gql_pr(1, "OPEN", "aaa", json!([]));
+        node["pullRequest"]["baseRef"] = json!({ "compare": { "behindBy": 4 } });
+        fake.route("POST", "/graphql", 200, json!({ "data": { "p0": node } }));
+
+        refresh_batch(&st, &[pr]).await.unwrap();
+        let q = fake.seen("/graphql")[0].body["query"].as_str().unwrap().to_string();
+        assert!(q.contains(r#"baseRef { compare(headRef: "b") { behindBy } }"#), "{q}");
+        assert_eq!(st.db.get_pull_request("pr-behind").unwrap().unwrap().behind_by, 4);
     }
 
 
