@@ -790,6 +790,7 @@ export const api = {
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),
   mergePullRequest: (id: string, method: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, { method }),
-  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string) =>
-    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule }),
+  /** `answers` answers an `AskUserQuestion` prompt: the pick per question text. */
+  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string, answers?: Record<string, string>) =>
+    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule, answers }),
 };

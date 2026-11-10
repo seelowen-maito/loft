@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, not_found};
-use crate::db::{Agent, Message, Task};
+use crate::db::{Agent, Message, PermissionRequest, Task};
 use crate::state::{AppState, Event};
 
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
@@ -201,6 +201,28 @@ fn permission_text(tool: &str, input: &Value) -> String {
     }
 }
 
+/// An agent's multiple-choice questions (`AskUserQuestion`): answered on its chat, where the options show.
+fn questions_item(p: &PermissionRequest, who: Option<(String, String)>, project: Option<String>) -> Item {
+    let asked: Vec<String> = p.input["questions"].as_array().into_iter().flatten().filter_map(|q| q["question"].as_str().map(String::from)).collect();
+    let name = who.as_ref().map_or("An agent", |w| w.1.as_str()).to_string();
+    Item {
+        id: format!("permission:{}", p.id),
+        kind: "permission",
+        urgency: 3,
+        title: text(&format!("{name} has questions for you"), MAX_TITLE),
+        reason: text("Answer them in the chat.", MAX_REASON),
+        text: text(&asked.join("\n"), MAX_TEXT),
+        agent: who,
+        task_id: None,
+        created_at: p.created_at.clone(),
+        links: vec![],
+        actions: vec![open_chat(&p.agent_id), action("deny", "Skip", "POST", format!("/api/permissions/{}", p.id), json!({ "decision": "deny" }))],
+        push: (format!("{name} has questions for you"), asked.first().cloned().unwrap_or_default()),
+        project,
+        pr: None,
+    }
+}
+
 pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     let e = |e: anyhow::Error| e.to_string();
     let agents: Vec<Agent> = state.db.list_agents().map_err(e)?;
@@ -214,6 +236,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
+        if p.tool_name == crate::agents::ASK_TOOL {
+            items.push(questions_item(&p, who, agent_project(&p.agent_id)));
+            continue;
+        }
         let mut actions = vec![
             action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" })),
             action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })),
@@ -959,6 +985,23 @@ mod tests {
         }
         assert!(r.contains("password=[redacted]") && r.contains("--api-key=[redacted]") && r.ends_with(" ok"), "{r}");
         assert_eq!(redact("Monthly pricing, 8 dollars? Yes."), "Monthly pricing, 8 dollars? Yes.");
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_on_the_chat_not_allowed() {
+        let st = state();
+        let dev = agent(&st, "Dev");
+        st.db.save_permission(&PermissionRequest {
+            id: "q1".into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: crate::agents::ASK_TOOL.into(),
+            input: json!({ "questions": [{ "question": "Which store?" }, { "question": "Which region?" }] }),
+            reason: String::new(), rule: crate::agents::ASK_TOOL.into(), status: "pending".into(), created_at: now(),
+        }).unwrap();
+        let items = collect(&st).unwrap();
+        let q = &items[0];
+        assert_eq!((q.title.as_str(), q.text.as_str()), ("Dev has questions for you", "Which store?\nWhich region?"));
+        let labels: Vec<&str> = q.actions.iter().filter_map(|a| a["label"].as_str()).collect();
+        assert_eq!(labels, ["Open chat", "Skip"], "no Allow: it would answer nothing");
+        assert_eq!(q.push.1, "Which store?");
     }
 
     #[tokio::test]

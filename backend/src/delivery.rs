@@ -1690,7 +1690,7 @@ pub async fn pause(state: &AppState, repo: &str, spec: i64) -> Result<String, St
     let (stopped, dropped) = drop_wakes(state, &d);
     for id in &stopped {
         for p in state.db.list_permissions(Some(id)).unwrap_or_default().into_iter().filter(|p| p.status == "pending") {
-            let _ = crate::agents::decide(state, &p.id, "deny", None, Some("Run stopped: the user paused its Delivery.".into()));
+            let _ = crate::agents::decide(state, &p.id, "deny", None, Some("Run stopped: the user paused its Delivery.".into()), None);
         }
         crate::agents::stop(state, id);
     }

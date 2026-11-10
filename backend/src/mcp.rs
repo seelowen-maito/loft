@@ -504,21 +504,23 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
             let tool = s("tool_name");
             let input = args["input"].clone();
             // Rules granted mid-run are honored immediately, without re-prompting.
-            let already = state
-                .db
-                .get_agent(agent_id)
-                .ok()
-                .flatten()
-                .map(|a| a.allowed_tools.iter().any(|r| rule_matches(r, &tool, &input)))
-                .unwrap_or(false);
+            // Questions always go to the user: an allow rule would only skip them, unanswered.
+            let already = tool != agents::ASK_TOOL
+                && state
+                    .db
+                    .get_agent(agent_id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.allowed_tools.iter().any(|r| rule_matches(r, &tool, &input)))
+                    .unwrap_or(false);
             let d = if already {
-                crate::state::Decision { allow: true, message: None }
+                crate::state::Decision { allow: true, message: None, input: None }
             } else {
                 let rule = suggest_rule(&tool, &input);
                 ask_permission(state, agent_id, "prompt", &tool, input.clone(), "", rule).await
             };
             let body = if d.allow {
-                json!({ "behavior": "allow", "updatedInput": input })
+                json!({ "behavior": "allow", "updatedInput": d.input.unwrap_or(input) })
             } else {
                 json!({ "behavior": "deny", "message": d.message.unwrap_or_else(|| "The user denied this action.".into()) })
             };
@@ -592,6 +594,58 @@ mod tests {
         assert_eq!(find_agent(&st, &team(&st, &me.id), "dev").unwrap().id, near.id);
         assert_eq!(find_agent(&st, &team(&st, &other.id), "Dev").unwrap().id, far.id);
         assert_eq!(find_agent(&st, &team(&st, &me.id), &far.id).unwrap().id, far.id, "an id is exact");
+    }
+
+    /// The answer the permission gate gives Claude Code once the user acts on the pending prompt.
+    async fn gate(st: &AppState, agent: &str, tool: &str, act: impl FnOnce(&crate::db::PermissionRequest)) -> Value {
+        let (st2, agent2, tool2) = (st.clone(), agent.to_string(), tool.to_string());
+        let input = json!({ "questions": [{ "question": "Which store?", "header": "Store", "multiSelect": false, "options": [{ "label": "S3", "description": "" }, { "label": "B2", "description": "" }] }] });
+        let call = tokio::spawn(async move { call_tool(&st2, &agent2, "approval_prompt", json!({ "tool_name": tool2, "input": input })).await });
+        let pending = || st.db.list_permissions(Some(agent)).unwrap().into_iter().find(|p| p.status == "pending");
+        until("the prompt", 5, || pending().is_some()).await;
+        act(&pending().unwrap());
+        let r = call.await.unwrap();
+        serde_json::from_str(said(&r).0).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_reach_the_agent_with_the_user_s_answers() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Dev");
+        // Even with the tool allowed, questions go to the user: a rule would only skip them unanswered.
+        a.allowed_tools.push(agents::ASK_TOOL.into());
+        st.db.save_agent(&a).unwrap();
+        let st2 = st.clone();
+        let r = gate(&st, &a.id, agents::ASK_TOOL, |p| {
+            agents::decide(&st2, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "B2" }))).unwrap();
+        })
+        .await;
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["answers"], json!({ "Which store?": "B2" }));
+        assert_eq!(r["updatedInput"]["questions"][0]["header"], "Store");
+        let saved = st.db.list_permissions(Some(&a.id)).unwrap().pop().unwrap();
+        assert_eq!(saved.input["answers"]["Which store?"], "B2", "the card shows what was answered");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_allowed_without_answers_tell_the_agent_to_ask_in_chat() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let st2 = st.clone();
+        // An older app's plain "Always allow": nothing is answered, and nothing is saved to the config.
+        let r = gate(&st, &a.id, agents::ASK_TOOL, |p| {
+            agents::decide(&st2, &p.id, "allow_always", None, None, None).unwrap();
+        })
+        .await;
+        assert_eq!(r["behavior"], "deny");
+        assert!(r["message"].as_str().unwrap().contains("Ask them in your reply"), "{r}");
+        assert!(!st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.iter().any(|t| t == agents::ASK_TOOL));
+        let st3 = st.clone();
+        let r = gate(&st, &a.id, agents::ASK_TOOL, |p| {
+            agents::decide(&st3, &p.id, "deny", None, None, None).unwrap();
+        })
+        .await;
+        assert_eq!(r["message"], "The user chose not to answer your questions.");
     }
 
     #[tokio::test]

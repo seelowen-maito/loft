@@ -862,7 +862,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(req.tool_name, CREATE_RULE);
-        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into())).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into()), None).unwrap();
         assert_eq!(call.await.unwrap().unwrap_err(), "The user declined. Their note: not now");
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Docs"));
     }
@@ -1028,7 +1028,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!((req.tool_name.as_str(), req.reason.as_str()), (SCHEDULE_RULE, "Agreed: every 6h"));
-        crate::agents::decide(&st, &req.id, "allow_once", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "allow_once", None, None, None).unwrap();
         assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), paused Mon–Fri 09:00–18:00.");
         let a = st.db.get_agent(&me.id).unwrap().unwrap();
         assert_eq!((a.interval_minutes, a.quiet_hours.len()), (360, 1));
