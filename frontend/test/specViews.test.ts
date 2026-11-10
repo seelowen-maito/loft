@@ -121,7 +121,9 @@ test("the Issues column holds the issues that are no spec and no spec's ticket, 
   const ds = [del({ spec: 9, tickets: [{ number: 11, title: "T", state: "open", skipped: "" }] })];
   const all = [standalone, newer, aSpec, child, named, inDelivery, done];
   const o = parseBoard(new URLSearchParams());
-  assert.deepEqual(boardIssues(all, ds, o, false).map((x) => x.id), ["b", "a"], "no specs, no spec tickets, no closed");
-  assert.deepEqual(boardIssues(all, ds, o, true).map((x) => x.id), ["b", "a", "f"], "closed ones last");
-  assert.deepEqual(boardIssues(all.map((x) => (x.id === "a" ? { ...x, status: "blocked" } : x)), ds, { ...o, needsMe: true }, false).map((x) => x.id), ["a"]);
+  assert.deepEqual(boardIssues(all, ds, true, o, false).map((x) => x.id), ["b", "a"], "no specs, no spec tickets, no closed");
+  assert.deepEqual(boardIssues(all, ds, true, o, true).map((x) => x.id), ["b", "a", "f"], "closed ones last");
+  assert.deepEqual(boardIssues(all.map((x) => (x.id === "a" ? { ...x, status: "blocked" } : x)), ds, true, { ...o, needsMe: true }, false).map((x) => x.id), ["a"]);
+  assert.deepEqual(boardIssues(all, ds, false, o, true), [], "nothing is decided before the Deliveries load, so no ticket flickers in");
+  assert.deepEqual(boardIssues(all, [], true, o, false).map((x) => x.id), ["b", "a", "e"], "loaded with no Deliveries: all stay");
 });
