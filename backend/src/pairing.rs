@@ -40,6 +40,8 @@ struct Pending {
     code: String,
     name: String,
     at: Instant,
+    /// When it asked, as Needs you shows it.
+    since: String,
     answer: Answer,
 }
 
@@ -87,7 +89,7 @@ impl Pairing {
             }
         };
         let secret = random_hex();
-        i.pending.insert(secret.clone(), Pending { code: code.clone(), name, at: Instant::now(), answer: Answer::Waiting });
+        i.pending.insert(secret.clone(), Pending { code: code.clone(), name, at: Instant::now(), since: crate::db::now(), answer: Answer::Waiting });
         Ok((secret, code))
     }
 
@@ -118,6 +120,14 @@ impl Pairing {
         }
     }
 
+    /// Pairings waiting for an answer: (code, name, when it asked). Needs you lists these for paired devices.
+    pub fn waiting_list(&self) -> Vec<(String, String, String)> {
+        let i = self.inner.lock().unwrap();
+        let mut v: Vec<_> = i.pending.values().filter(|p| matches!(p.answer, Answer::Waiting) && p.at.elapsed() < EXPIRES).map(|p| (p.code.clone(), p.name.clone(), p.since.clone())).collect();
+        v.sort_by(|a, b| a.2.cmp(&b.2));
+        v
+    }
+
     fn waiting(&self, code: &str) -> bool {
         let i = self.inner.lock().unwrap();
         i.pending.values().any(|p| p.code == code && matches!(p.answer, Answer::Waiting) && p.at.elapsed() < EXPIRES)
@@ -133,7 +143,7 @@ fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn count(state: &AppState) -> i64 {
+pub fn count(state: &AppState) -> i64 {
     state.db.paired_client_count()
 }
 
@@ -507,6 +517,44 @@ mod tests {
         assert_eq!(req("POST", &format!("{base}/api/pair/approve"), Some(&first), json!({ "code": code })).await.0, 200);
         let (_, v) = req("POST", &format!("{base}/api/pair/poll"), None, json!({ "secret": v["secret"] })).await;
         assert_eq!(v["status"], "allowed");
+    }
+
+    #[tokio::test]
+    async fn a_pending_pairing_is_a_needs_you_item_for_paired_devices_until_it_is_answered() {
+        let (base, st) = serve().await;
+        let items = || crate::needs_you::snapshot(&st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "pairing").cloned().collect::<Vec<_>>();
+        // With nobody paired, the Mac answers: no item.
+        req("POST", &format!("{base}/api/pair"), None, json!({ "name": "first" })).await;
+        assert!(items().is_empty());
+        let first = pair(&base, &st, "Mac browser").await;
+        let (_, a) = req("POST", &format!("{base}/api/pair"), None, json!({ "name": "iPhone" })).await;
+        let (_, b) = req("POST", &format!("{base}/api/pair"), None, json!({ "name": "iPad" })).await;
+        let list = items();
+        assert_eq!(list.len(), 3, "the unanswered first request shows now that a client is paired");
+        let it = list.iter().find(|i| i["id"] == format!("pairing:{}", a["code"].as_str().unwrap())).unwrap();
+        assert_eq!(it["title"], "A new device wants to pair");
+        assert!(it["text"].as_str().unwrap().contains(a["code"].as_str().unwrap()));
+        assert_eq!((it["actions"][0]["path"].clone(), it["actions"][1]["path"].clone()), (json!("/api/pair/approve"), json!("/api/pair/deny")));
+        // The push says the code and goes out as a permission.
+        let push = crate::needs_you::collect(&st).unwrap().iter().map(crate::needs_you::to_push).find(|p| p.id.starts_with("pairing:")).unwrap();
+        assert_eq!((push.kind, push.title.as_str()), ("permission", "A new device wants to pair"));
+        assert!(push.body.contains("Code "));
+        // Allow ends the item and hands out the token; deny ends it and the device is told.
+        assert_eq!(req("POST", &format!("{base}/api/pair/approve"), Some(&first), json!({ "code": a["code"] })).await.0, 200);
+        assert_eq!(req("POST", &format!("{base}/api/pair/deny"), Some(&first), json!({ "code": b["code"] })).await.0, 200);
+        assert_eq!(items().len(), 1);
+        assert_eq!(req("POST", &format!("{base}/api/pair/poll"), None, json!({ "secret": a["secret"] })).await.1["status"], "allowed");
+        assert_eq!(req("POST", &format!("{base}/api/pair/poll"), None, json!({ "secret": b["secret"] })).await.1["status"], "denied");
+        // A cancelled pairing, and an expired one, disappear too.
+        let (_, c) = req("POST", &format!("{base}/api/pair"), None, json!({})).await;
+        assert_eq!(items().len(), 2);
+        req("POST", &format!("{base}/api/pair/cancel"), None, json!({ "secret": c["secret"] })).await;
+        assert_eq!(items().len(), 1);
+        req("POST", &format!("{base}/api/pair"), None, json!({})).await;
+        for p in st.pairing.inner.lock().unwrap().pending.values_mut() {
+            p.at = Instant::now() - EXPIRES - Duration::from_secs(1);
+        }
+        assert!(items().is_empty());
     }
 
     #[tokio::test]

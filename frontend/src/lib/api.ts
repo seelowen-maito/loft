@@ -582,6 +582,12 @@ export const api = {
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
   needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
+  /** New devices asking to pair, from Needs you (the `pairing` items). */
+  pairRequests: () =>
+    req<{ items: { type: string; text: string; actions: { kind: string; path: string; body: { code: string } }[] }[] }>("GET", "/needs-you").then((r) =>
+      r.items.filter((i) => i.type === "pairing").map((i) => ({ code: i.actions[0].body.code, text: i.text })),
+    ),
+  answerPairing: (code: string, allow: boolean) => req<{ ok: boolean }>("POST", `/pair/${allow ? "approve" : "deny"}`, { code }),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
