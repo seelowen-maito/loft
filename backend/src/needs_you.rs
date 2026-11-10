@@ -197,13 +197,19 @@ fn permission_text(tool: &str, input: &Value) -> String {
         }
         "Edit" | "Write" | "MultiEdit" | "Read" => s("file_path"),
         "WebFetch" => s("url"),
+        crate::agents::ASK_TOOL => question_texts(input).join("\n"),
         _ => serde_json::to_string_pretty(input).unwrap_or_default(),
     }
 }
 
-/// An agent's multiple-choice questions (`AskUserQuestion`): answered on its chat, where the options show.
+/// What an `AskUserQuestion` call asks, one line per question.
+fn question_texts(input: &Value) -> Vec<String> {
+    input["questions"].as_array().into_iter().flatten().filter_map(|q| q["question"].as_str().map(String::from)).collect()
+}
+
+/// An agent's multiple-choice questions, once it may ask them: answered on its chat, where the options show.
 fn questions_item(p: &PermissionRequest, who: Option<(String, String)>, project: Option<String>) -> Item {
-    let asked: Vec<String> = p.input["questions"].as_array().into_iter().flatten().filter_map(|q| q["question"].as_str().map(String::from)).collect();
+    let asked = question_texts(&p.input);
     let name = who.as_ref().map_or("An agent", |w| w.1.as_str()).to_string();
     Item {
         id: format!("permission:{}", p.id),
@@ -236,7 +242,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
-        if p.tool_name == crate::agents::ASK_TOOL {
+        if p.source == crate::agents::QUESTIONS {
             items.push(questions_item(&p, who, agent_project(&p.agent_id)));
             continue;
         }
@@ -992,9 +998,9 @@ mod tests {
         let st = state();
         let dev = agent(&st, "Dev");
         st.db.save_permission(&PermissionRequest {
-            id: "q1".into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: crate::agents::ASK_TOOL.into(),
+            id: "q1".into(), agent_id: dev.id.clone(), source: crate::agents::QUESTIONS.into(), tool_name: crate::agents::ASK_TOOL.into(),
             input: json!({ "questions": [{ "question": "Which store?" }, { "question": "Which region?" }] }),
-            reason: String::new(), rule: crate::agents::ASK_TOOL.into(), status: "pending".into(), created_at: now(),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: now(),
         }).unwrap();
         let items = collect(&st).unwrap();
         let q = &items[0];
@@ -1002,6 +1008,13 @@ mod tests {
         let labels: Vec<&str> = q.actions.iter().filter_map(|a| a["label"].as_str()).collect();
         assert_eq!(labels, ["Open chat", "Skip"], "no Allow: it would answer nothing");
         assert_eq!(q.push.1, "Which store?");
+
+        // Before that, the permission to ask lists the questions too.
+        st.db.save_permission(&PermissionRequest { id: "q0".into(), source: "prompt".into(), rule: crate::agents::ASK_TOOL.into(), ..st.db.get_permission("q1").unwrap().unwrap() }).unwrap();
+        let items = collect(&st).unwrap();
+        let p = items.iter().find(|i| i.id == "permission:q0").unwrap();
+        assert_eq!((p.title.as_str(), p.text.as_str()), ("Dev wants to use AskUserQuestion", "Which store?\nWhich region?"));
+        assert_eq!(p.actions[0]["label"], "Allow once");
     }
 
     #[tokio::test]

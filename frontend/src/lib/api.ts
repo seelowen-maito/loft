@@ -304,7 +304,9 @@ export type Memory = { id: number; agent_id: string; title: string; content: str
 export type PermissionRequest = {
   id: string;
   agent_id: string;
-  source: "prompt" | "request";
+  /** prompt: a blocked tool call. request: the agent asked explicitly. questions: an allowed `AskUserQuestion`'s
+   *  questions, answered rather than allowed. */
+  source: "prompt" | "request" | "questions";
   tool_name: string;
   input: Record<string, any>;
   reason: string;

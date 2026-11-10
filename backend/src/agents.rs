@@ -251,7 +251,11 @@ pub fn rule_matches(rule: &str, tool: &str, input: &Value) -> bool {
 
 /// Claude Code's multiple-choice question tool. Headless, it reaches the user only through the permission prompt,
 /// whose `updatedInput` must carry the user's `answers`; a plain allow leaves them empty ("The user did not answer").
+/// So once it is allowed (a prompt, or a rule), Loft asks the questions themselves as a second request.
 pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// The source of that second request: the questions, answered rather than allowed.
+pub const QUESTIONS: &str = "questions";
 
 /// `input` with the user's answers, one per question text (choices joined by ", "), or why the user gave none.
 fn with_answers(input: &Value, answers: Option<Value>) -> Result<Value, String> {
@@ -349,7 +353,7 @@ pub async fn ask_permission_for(
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
-    let waiting = if tool_name == ASK_TOOL { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
+    let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
     set_status(state, agent_id, "waiting", &waiting);
 
     let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
@@ -377,7 +381,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     }
     let mut allow = decision != "deny";
     let (mut note, mut input) = (note, None);
-    let asks = req.source == "prompt" && req.tool_name == ASK_TOOL;
+    let asks = req.source == QUESTIONS;
     if asks && allow {
         match with_answers(&req.input, answers) {
             Ok(done) => {
@@ -390,7 +394,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
         note = Some(note.map_or_else(|| "The user chose not to answer your questions.".into(), |n| format!("The user chose not to answer your questions: {n}")));
     }
     // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
-    // is about those processes only: it is never saved, and nor is answering questions, which asks every time.
+    // is about those processes only: it is never saved, and nor are answers, which are for these questions only.
     let persist = req.tool_name != "Kill" && !asks && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",

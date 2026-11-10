@@ -6,6 +6,7 @@ import { ASK_TOOL, answersOf, questionsOf, toggle, typeOther, type Pick } from "
 
 function describeInput(p: PermissionRequest) {
   const i = p.input ?? {};
+  if (p.tool_name === ASK_TOOL) return questionsOf(i).map((q) => q.question).join("\n");
   if (typeof i.command === "string") return i.command;
   if (typeof i.file_path === "string") return i.file_path;
   if (typeof i.url === "string") return i.url;
@@ -21,11 +22,11 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
 };
 
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
-  if (req.source === "prompt" && req.tool_name === ASK_TOOL) return <QuestionsCard req={req} compact={compact} />;
+  if (req.source === "questions") return <QuestionsCard req={req} compact={compact} />;
   return <ToolCard req={req} compact={compact} />;
 }
 
-/** An agent's multiple-choice questions: answering them is the whole decision, so there's nothing to allow. */
+/** An agent's multiple-choice questions, once it may ask them: the picks go back as the tool's answers. */
 function QuestionsCard({ req, compact }: { req: PermissionRequest; compact: boolean }) {
   const qs = questionsOf(req.input);
   const [picks, setPicks] = useState<Record<number, Pick>>({});

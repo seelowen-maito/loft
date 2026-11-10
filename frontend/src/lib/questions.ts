@@ -1,5 +1,5 @@
-/** Claude Code's multiple-choice question tool. Loft shows its questions in place of a permission prompt and sends
- *  the picks back as the tool's `answers`, keyed by question text. */
+/** Claude Code's multiple-choice question tool. Once the user allows it, Loft asks its questions as a second request
+ *  (source `questions`) and sends the picks back as the tool's `answers`, keyed by question text. */
 export const ASK_TOOL = "AskUserQuestion";
 
 export type Question = {
