@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertCircle, Loader2, X } from "lucide-react";
+import { AlertCircle, Film, Loader2, X } from "lucide-react";
 import type { Attachment } from "../lib/useDraft";
 import { cx } from "../lib/format";
 
@@ -12,15 +12,29 @@ export function AttachmentTile({ a, onRemove, onMissing }: { a: Attachment; onRe
       className={cx("group relative size-24 overflow-hidden rounded-xl border bg-ink-950", a.error ? "border-bad/50" : "border-line")}
       title={a.error}
     >
-      <img
-        src={a.preview}
-        alt="Pasted image"
-        onLoad={() => setLoaded(true)}
-        onError={() => a.file && onMissing()}
-        className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
-      />
+      {a.video ? (
+        <video
+          src={a.preview}
+          muted
+          playsInline
+          preload="metadata"
+          aria-label="Attached video"
+          onLoadedData={() => setLoaded(true)}
+          onError={() => a.file && onMissing()}
+          className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
+        />
+      ) : (
+        <img
+          src={a.preview}
+          alt="Pasted image"
+          onLoad={() => setLoaded(true)}
+          onError={() => a.file && onMissing()}
+          className={cx("size-full object-contain transition duration-300", loaded ? "opacity-100" : "opacity-0", busy && "opacity-40 blur-[1px]")}
+        />
+      )}
+      {a.video && <Film className="absolute bottom-1 left-1 size-3.5 text-fg-2 drop-shadow" aria-hidden />}
       {busy && (
-        <div className="absolute inset-0 grid place-items-center" role="status" aria-label="Uploading image">
+        <div className="absolute inset-0 grid place-items-center" role="status" aria-label={a.video ? "Uploading video" : "Uploading image"}>
           <Loader2 className="size-5 animate-spin text-fg-2" />
         </div>
       )}
@@ -31,7 +45,7 @@ export function AttachmentTile({ a, onRemove, onMissing }: { a: Attachment; onRe
       )}
       <button
         onClick={onRemove}
-        aria-label="Remove image"
+        aria-label={a.video ? "Remove video" : "Remove image"}
         className="absolute right-1 top-1 grid size-5 place-items-center rounded-full bg-ink-950/80 text-fg-2 opacity-0 transition hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
       >
         <X className="size-3" />

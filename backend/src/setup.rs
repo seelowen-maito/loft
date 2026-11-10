@@ -947,7 +947,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#e5533d"/></svg>"##;
         crate::api::new_agent(&st, "a2".into(), &json!({ "name": "A", "avatar_brief": "a cat", "avatar": { "svg": svg } }), None).unwrap();
         crate::api::new_agent(&st, "a3".into(), &json!({ "name": "B" }), None).unwrap();
-        assert!(st.rt.lock().unwrap().queued.get("a2").is_none() && st.rt.lock().unwrap().queued.get("a3").is_none());
+        assert!(!st.rt.lock().unwrap().queued.contains_key("a2") && !st.rt.lock().unwrap().queued.contains_key("a3"));
     }
 
     #[tokio::test]
@@ -977,7 +977,7 @@ mod tests {
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
         assert_eq!(r.role, "code_reviewer");
-        assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
+        assert!(!st.rt.lock().unwrap().queued.contains_key(&r.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]

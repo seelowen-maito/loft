@@ -41,8 +41,9 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
   const res = RESOLVED[req.status];
   return (
     <div
+      id={`perm-${req.id}`}
       className={cx(
-        "rounded-2xl border p-4",
+        "scroll-mt-4 rounded-2xl border p-4",
         pending ? "border-warn/30 bg-warn/[0.05] shadow-[0_0_0_4px_rgb(242_196_109/0.04)]" : "border-line bg-ink-900/60",
       )}
     >

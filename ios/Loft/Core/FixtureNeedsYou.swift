@@ -403,4 +403,48 @@ enum FixtureNeedsYou {
  "version": 1
 }
 """#
+
+    /// `-fixture-backup-failed`: the Mac's backups failing for two days, as the server words it.
+    static let backupFailed = #"""
+{
+ "actions": [
+  { "body": {}, "kind": "retry", "label": "Back up now", "method": "POST", "path": "/api/backups" },
+  { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#backups" } },
+  { "body": {}, "kind": "dismiss", "label": "Dismiss", "method": "POST", "path": "/api/needs-you/backup%3A2026-11-07T03%3A00%3A00%2B00%3A00/dismiss" }
+ ],
+ "age_seconds": 0,
+ "agent": null,
+ "created_at": "2026-11-09T09:00:00+00:00",
+ "id": "backup:2026-11-07T03:00:00+00:00",
+ "links": [],
+ "reason": "The last good one is from Nov 7, 03:00. can't create /Volumes/Backup/Loft backups",
+ "task_id": null,
+ "text": "can't create /Volumes/Backup/Loft backups: No such file or directory\n\nBackups folder: /Volumes/Backup/Loft backups",
+ "title": "Loft's backups are failing",
+ "type": "backup_failed",
+ "urgency": 1
+}
+"""#
+
+    /// `-fixture-disk-low`: under 20 GB free, as the server words it.
+    static let diskLow = #"""
+{
+ "actions": [
+  { "body": {}, "kind": "retry", "label": "Clean now", "method": "POST", "path": "/api/workspaces/clean" },
+  { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#workspaces" } },
+  { "body": {}, "kind": "dismiss", "label": "Dismiss", "method": "POST", "path": "/api/needs-you/disk_low/dismiss" }
+ ],
+ "age_seconds": 0,
+ "agent": null,
+ "created_at": "2026-11-09T09:00:00+00:00",
+ "id": "disk_low",
+ "links": [],
+ "reason": "14.3 GB are free where agents' workspaces live.",
+ "task_id": null,
+ "text": "Clean now removes build output from idle workspaces. Settings shows each workspace's size; deleting an agent deletes its workspace by default.",
+ "title": "Disk almost full",
+ "type": "disk_low",
+ "urgency": 1
+}
+"""#
 }

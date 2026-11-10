@@ -2082,8 +2082,7 @@ pub(crate) mod tests {
 
     fn state_cursor(st: &AppState, repo: &str) -> Option<String> {
         let c = st.mirror.cursor(repo);
-        let since = c.try_lock().unwrap().since.clone();
-        since
+        c.try_lock().unwrap().since.clone()
     }
 
     #[tokio::test]

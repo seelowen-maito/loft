@@ -106,6 +106,8 @@ pub struct Runtime {
     pub running: HashMap<String, Arc<Notify>>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
+    /// agent id -> the agent messages (their ids in its chat) waiting in `queued` for the current run to end
+    pub queued_messages: HashMap<String, Vec<i64>>,
     /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
     /// for an Unread reply
     pub queued_for_user: std::collections::HashSet<String>,
@@ -140,6 +142,8 @@ pub struct Runtime {
     pub tcc: crate::mac_access::Requests,
     /// The backups folder, its newest backup and the last attempt's error (backup.rs)
     pub backup: crate::backup::Status,
+    /// The running or last clean of agents' build output: its log (sweep.rs)
+    pub clean: crate::sweep::Log,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
 }

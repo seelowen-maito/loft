@@ -34,10 +34,12 @@ struct Agent: Codable, Identifiable, Hashable {
     var waitingSince: Date? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     var sessionId: String? = nil
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always" (nil from older servers).
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always" (nil from older servers).
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
+    /// Loft's own agent, which can't be deleted (nil from older servers).
+    var builtin: Bool? = nil
     /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
     var group: String? = nil
     /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
@@ -101,6 +103,14 @@ struct ChatMessage: Codable, Identifiable, Hashable {
         return a.compactMap { $0["name"]?.stringValue }
     }
     var mentionsOnly: Bool { meta?["mentions_only"] == .bool(true) }
+    /// The specs, issues and pull requests your message tagged with `#` that Loft knows (`meta.tags`).
+    var tags: [MessageTag] {
+        guard case .array(let a)? = meta?["tags"] else { return [] }
+        return a.compactMap { t in
+            guard let tag = t["tag"]?.stringValue, let kind = t["kind"]?.stringValue, let title = t["title"]?.stringValue else { return nil }
+            return MessageTag(tag: tag, kind: kind, title: title, url: t["url"]?.stringValue, taskId: t["task_id"]?.stringValue)
+        }
+    }
     var clientId: String? { meta?["client_id"]?.stringValue }
     var taskId: String? { meta?["task_id"]?.stringValue }
     var toolName: String? { meta?["name"]?.stringValue }
@@ -173,6 +183,17 @@ struct PermissionRequest: Codable, Identifiable, Hashable {
         if let perm = input?["permission"]?.stringValue { return "Grant \(perm)" }
         return toolName
     }
+}
+
+/// A `#` tag on a chat message, as the backend resolved it: it opens the Loft issue, else the GitHub page.
+struct MessageTag: Hashable, Identifiable {
+    let tag: String
+    /// spec | issue | pr
+    let kind: String
+    let title: String
+    let url: String?
+    let taskId: String?
+    var id: String { tag }
 }
 
 struct HBTask: Codable, Identifiable, Hashable {
@@ -297,6 +318,10 @@ enum ServerFeature: String {
     case plans
     case needsYou = "needs_you"
     case push
+    case backups
+    case workspaces
+    /// Clean previews what it removes and logs it.
+    case cleanPreview = "clean_preview"
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

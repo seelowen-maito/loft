@@ -27,6 +27,10 @@ struct ComposerView: View {
     var onVoiceStop: (() -> Void)?
     /// Shows "Attach an issue" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
+    /// Shows the paperclip: a video picked or recorded is uploaded to this agent and kept here until sent (the
+    /// chat reads it when `send` is called).
+    var videoAgentId: String?
+    var video: Binding<VideoDraft?> = .constant(nil)
     /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
     let send: (String, Bool) -> Void
 
@@ -76,7 +80,9 @@ struct ComposerView: View {
     @AppStorage(Prefs.voiceBrief) private var offerBrief = true
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canSend: Bool { !trimmed.isEmpty && store.canWrite }
+    /// A video still reading or uploading, or one that failed, holds the message back until it's up or removed.
+    private var videoHolds: Bool { video.wrappedValue.map { $0.uploaded == nil } ?? false }
+    private var canSend: Bool { (!trimmed.isEmpty || video.wrappedValue?.uploaded != nil) && !videoHolds && store.canWrite }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 
     var body: some View {
@@ -107,9 +113,21 @@ struct ComposerView: View {
                     .foregroundStyle(Theme.attention)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let v = video.wrappedValue {
+                VideoChip(draft: v) {
+                    v.cancel()
+                    video.wrappedValue = nil
+                }
+            }
             if let q = MentionQuery.query(in: text) {
                 MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
                     text = MentionQuery.insert(a, into: text)
+                }
+            }
+            if let q = TagQuery.query(in: text) {
+                let project = store.agents.first { $0.name == recipient }?.project ?? ""
+                TagPicker(rows: TagQuery.matches(TagQuery.rows(tasks: store.tasks, prs: store.pullRequests, project: project), q)) { r in
+                    text = TagQuery.insert(r.tag, into: text)
                 }
             }
             HStack(alignment: .bottom, spacing: 8) {
@@ -128,6 +146,14 @@ struct ComposerView: View {
                     .accessibilityLabel("Attach an issue")
                     .accessibilityHint("The agent gets the issue with your message")
                     .accessibilityIdentifier("attachTaskButton")
+                }
+                if let agentId = videoAgentId {
+                    VideoAttachMenu { load in
+                        video.wrappedValue?.cancel()
+                        let draft = VideoDraft()
+                        draft.start(load: load) { file, progress in try await store.upload(file, to: agentId, progress: progress) }
+                        video.wrappedValue = draft
+                    }
                 }
                 TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)
                     .lineLimit(1...6)
@@ -165,6 +191,10 @@ struct ComposerView: View {
                 .accessibilityIdentifier("sendButton")
                 .sensoryFeedback(.impact(weight: .light), trigger: store.pending.count) { old, new in new > old }
             }
+            Text("@ agents and files · # specs, issues and PRs")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("composerHint")
         }
         .padding(.horizontal, Theme.gutter)
         .padding(.top, 8)
@@ -539,7 +569,7 @@ struct ComposerView: View {
         voiceSending = false
         dictated = false
         let t = trimmed
-        guard !t.isEmpty, store.canWrite else {
+        guard !t.isEmpty || video.wrappedValue?.uploaded != nil, !videoHolds, store.canWrite else {
             VoiceLog.shared.add("send blocked: \(t.isEmpty ? "empty" : "offline")")
             return
         }
@@ -700,6 +730,76 @@ struct MentionPicker: View {
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Mention an agent")
+        }
+    }
+}
+
+/// The specs, issues and pull requests to tag while "#…" is typed. Picking one puts its tag in the message.
+struct TagPicker: View {
+    let rows: [TagQuery.Row]
+    let pick: (TagQuery.Row) -> Void
+
+    private func symbol(_ k: TagQuery.Kind) -> String {
+        switch k { case .spec: "doc.text"; case .issue: "circle.dotted"; case .pr: "arrow.triangle.pull" }
+    }
+
+    var body: some View {
+        if rows.isEmpty {
+            Text("Nothing to tag by that name").font(.footnote).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { r in
+                        Button { pick(r) } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: symbol(r.kind)).foregroundStyle(r.open ? .secondary : .tertiary).frame(width: 22)
+                                Text(r.title).font(.subheadline).foregroundStyle(.primary).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(r.number.map { "#\($0)" } ?? r.kind.rawValue).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Tag \(r.kind.rawValue): \(r.title)")
+                        .accessibilityIdentifier("tag-\(r.title)")
+                    }
+                }
+            }
+            .frame(maxHeight: 44 * 5.5)
+            .fixedSize(horizontal: false, vertical: rows.count <= 6)
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(10)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Tag a spec, issue or pull request")
+            .accessibilityIdentifier("tagList")
+        }
+    }
+}
+
+/// A `#` tag on a sent message: kind and title, opening the Loft issue or the pull request on GitHub.
+struct TagChip: View {
+    let tag: MessageTag
+
+    var body: some View {
+        let label = HStack(spacing: 4) {
+            Text(tag.kind).foregroundStyle(.tertiary)
+            Text(tag.title).lineLimit(1)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .foregroundStyle(.secondary)
+        if let id = tag.taskId {
+            NavigationLink(value: TaskRoute(id: id)) { label }.buttonStyle(.plain)
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it")
+        } else if let url = tag.url.flatMap(URL.init(string:)) {
+            Link(destination: url) { label }
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it on GitHub")
+        } else {
+            label
         }
     }
 }

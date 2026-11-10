@@ -84,11 +84,10 @@ pub fn usage_week(usage: &Value) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
 /// Usage for the navbar. Failures come back as `error` (and are cached too) rather than retried each poll.
 pub async fn get(state: &AppState) -> Value {
     let mut cache = state.usage.0.lock().await;
-    if let Some((at, v)) = &*cache {
-        if at.elapsed() < TTL {
+    if let Some((at, v)) = &*cache
+        && at.elapsed() < TTL {
             return v.clone();
         }
-    }
     let v = fetch(state).await.unwrap_or_else(|e| json!({ "windows": [], "error": e.to_string() }));
     *cache = Some((Instant::now(), v.clone()));
     v

@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { loadDraft, saveDraft, type Draft } from "./draft";
+import { isVideo } from "./video";
 
-/** A pasted image: shown at once from `preview`, sendable once uploaded (`file`). */
-export type Attachment = { key: string; preview: string; file?: string; error?: string };
+/** A pasted image (or attached video): shown at once from `preview`, sendable once uploaded (`file`). */
+export type Attachment = { key: string; preview: string; file?: string; error?: string; video?: boolean };
 
-/** A Draft's images, already uploaded: they preview from the server. */
-export const draftImages = (agent: string, files: string[]): Attachment[] => files.map((file) => ({ key: file, preview: api.uploadUrl(agent, file), file }));
+/** A Draft's images and videos, already uploaded: they preview from the server. */
+export const draftImages = (agent: string, files: string[]): Attachment[] =>
+  files.map((file) => ({ key: file, preview: api.uploadUrl(agent, file), file, video: isVideo(file) }));
 
 /** The composer's state, kept as the shown agent's Draft: loaded when the agent is shown, saved on every change. */
 export function useDraft(agent: string) {

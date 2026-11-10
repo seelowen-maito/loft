@@ -32,6 +32,7 @@ test("the stage follows the Delivery and the issue", () => {
 test("ticket states read in words", () => {
   assert.deepEqual(ticketLabel("closed"), { text: "done", tone: "good" });
   assert.equal(ticketLabel("needs_human").tone, "warn");
+  assert.equal(ticketLabel("needs_human").text, "Waiting on you");
   assert.equal(ticketLabel("whatever").text, "open");
 });
 
@@ -40,7 +41,7 @@ const task = (o: Record<string, unknown>) => ({ labels: ["spec"], state: "open",
 test("a spec's tickets: its Delivery's, each with its own issue, else its sub-issues", () => {
   const s = task({ id: "s", github: { repo: "o/r", number: 9 } });
   const own = task({ id: "t10", labels: [], github: { repo: "o/r", number: 10 }, parent_id: "s" });
-  const d = del({ current: { number: 10, title: "A" }, tickets: [{ number: 10, title: "A", state: "review", skipped: "", verdicts: { qa: "pending" } }, { number: 11, title: "B", state: "open", skipped: "" }] });
+  const d = del({ current: { number: 10, title: "A" }, tickets: [{ number: 10, title: "A", state: "review", skipped: "", agent_id: "a1", verdicts: { qa: "pending" } }, { number: 11, title: "B", state: "open", skipped: "" }] });
   const ts = ticketsOf(s, d, [s, own]);
   assert.deepEqual(ts.map((t) => [t.number, t.taskId, t.current, t.verdicts]), [[10, "t10", true, { qa: "pending" }], [11, null, false, {}]]);
   const kid = task({ id: "k", labels: [], status: "in_progress", parent_id: "s", title: "Kid" });

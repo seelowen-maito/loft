@@ -172,6 +172,13 @@ fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
     }
 }
 
+/// Why a spec branch waits for Merge: "Built by A, B." only when the Delivery has builders.
+pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String {
+    let built = crate::delivery::builders(state, d);
+    let by = if built.is_empty() { String::new() } else { format!(" Built by {}.", built.join(", ")) };
+    format!("Its reviews passed: merge `{}` into `{}`.{by}", d.branch, d.base)
+}
+
 fn dismiss(id: &str) -> Value {
     action("dismiss", "Dismiss", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
 }
@@ -500,7 +507,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             agent: None,
             task_id: issue.map(|t| t.id.clone()),
             title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
-            reason: text(&crate::delivery::stalled_reason(&d), MAX_REASON),
+            reason: text(&crate::delivery::stalled_reason(state, &d), MAX_REASON),
             text: String::new(),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
             links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
@@ -571,7 +578,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             agent: name(&d.dev),
             task_id: spec_task.map(|t| t.id.clone()),
             title: text(&format!("Merge \"{}\"", d.title), MAX_TITLE),
-            reason: text(&format!("Its reviews passed: merge `{}` into `{}`.", d.branch, d.base), MAX_REASON),
+            reason: text(&merge_reason(state, &d), MAX_REASON),
             text: String::new(),
             created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
             links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
@@ -733,6 +740,36 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
             links: vec![],
             actions,
             push: ("Loft's backups are failing".to_string(), since),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
+    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low.
+    if let Some(free) = crate::sweep::free_bytes(&state.cfg.storage_dir)
+        && free < crate::sweep::LOW_DISK
+    {
+        let id = "disk_low".to_string();
+        let gb = free as f64 / 1e9;
+        // Nothing is removed blind: Settings previews what a clean removes.
+        let mut actions = vec![];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#workspaces", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "disk_low",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Disk almost full", MAX_TITLE),
+            reason: text(&format!("{gb:.1} GB are free where agents' workspaces live."), MAX_REASON),
+            text: text("Settings → Disk shows each workspace's size and cleans build output after a preview. Deleting an agent deletes its workspace by default.", MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions,
+            push: ("Disk almost full".to_string(), format!("{gb:.1} GB free")),
             project: None,
             pr: None,
             id,
