@@ -8,7 +8,9 @@
 //! checked again just before it goes.
 //!
 //! The sweep deletes rebuildable build output (`target/`, `node_modules/`, `.build/`, `ios/build/`,
-//! `DerivedData/`, `.cargo-build/`) whose newest file is 3 days old, so idle workspaces don't fill the disk. It
+//! `DerivedData/`, `.cargo-build/`) whose newest file is 3 days old, so idle workspaces don't fill the disk.
+//! An agent that works often never leaves its `.cargo-build/` that old, so there its `*/incremental` caches go
+//! once together they pass 2 GB, and `deps/` stays (rebuilding incremental takes seconds, deps about 30 s). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
 //! files kept, and skips running agents and agents with a live process (a dev server).
 //!
@@ -39,6 +41,20 @@ const SIZE_FOR: Duration = Duration::from_secs(60);
 /// The last run's log, in Loft's data folder next to its database: outside the agents' workspaces, not out of
 /// their reach (they run as the same Mac user; see ADR 0004's threat model).
 const LOG_FILE: &str = "clean-log.json";
+/// Past this, a young `.cargo-build/`'s `*/incremental` caches go.
+const INCREMENTAL_CAP: u64 = 2_000_000_000;
+
+#[cfg(test)]
+thread_local!(static FAKE_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+
+fn incremental_cap() -> u64 {
+    #[cfg(test)]
+    if let Some(c) = FAKE_CAP.with(|c| c.get()) {
+        return c;
+    }
+    INCREMENTAL_CAP
+}
+
 /// Under a main clone in Clean: what keeping it costs.
 const KEPT: &str = "Kept: this is the agent's working copy. Its own build stays (e.g. backend/target or node_modules/), usually 1–5 GB, and the agent reuses it on its next build.";
 
@@ -116,6 +132,9 @@ pub struct Line {
     pub error: Option<String>,
     #[serde(default)]
     pub command: String,
+    /// What was done to `rel` when it isn't a removal, like "Shut down Simulator device"; empty for a removal.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub done: String,
 }
 
 /// A run's log: each removal as it happens, what was skipped, and the totals.
@@ -277,7 +296,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
                     let bytes = size(&path);
                     let command = rm_command(&path);
                     let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&root, &path).err() };
-                    log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command });
+                    log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command, done: String::new() });
                 }
             }
             show(&st, &log);
@@ -358,6 +377,18 @@ pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str
     tracing::info!("sweep freed {} bytes in {} folders, {} failed", log.freed_bytes, log.removed, log.failed);
     *SIZES.lock().unwrap() = None;
     log
+}
+
+/// Saves `lines` as a run of its own (`what`, like "Simulator cleanup"), the log Settings shows, after any sweep or
+/// clean in progress.
+pub async fn record(state: &AppState, what: &'static str, lines: Vec<Line>) {
+    let _one = RUNNING.lock().await;
+    let mut log = Log { at: Some(Local::now()), what: what.into(), title: what.into(), ..Default::default() };
+    for l in lines {
+        log.push(l);
+    }
+    show(state, &log);
+    save(state, &log);
 }
 
 /// The day's sweep, the first right after Loft starts.
@@ -614,7 +645,7 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
         p.skipped.extend(links.iter().map(|l| skip(id, &rel(l), "symlink")));
     }
     if shared_dir {
-        builds.push(shared);
+        builds.push(shared.clone());
     }
     for b in builds {
         let (_, changed) = measure(&b);
@@ -623,6 +654,16 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
             continue;
         }
         p.skipped.push(skip(id, &rel(&b), "younger than 3 days"));
+        // An agent that works often keeps it young, so its incremental caches are capped instead.
+        if shared_dir && b == shared {
+            let caches: Vec<_> = subdirs(&b).map(|(_, profile)| profile.join("incremental")).filter(|d| d.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
+            if caches.iter().map(|d| size(d)).sum::<u64>() > incremental_cap() {
+                for d in caches {
+                    let (_, changed) = measure(&d);
+                    folder(root, id, &rel(&d), d, changed, p);
+                }
+            }
+        }
         // With the workspace's `.cargo-build/` holding the build, what a Cargo `target/` still has besides
         // binaries (`<profile>/deps`, `incremental` and `build`) is left over from before, and goes whatever its age.
         if shared_dir && b.file_name().is_some_and(|n| n == "target") {
@@ -667,7 +708,7 @@ fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &
     for f in folders {
         let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
         let bytes = if error.is_none() { f.bytes } else { 0 };
-        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command });
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done: String::new() });
     }
 }
 
@@ -1305,6 +1346,51 @@ mod tests {
         }
         assert_eq!(r.removed, 6);
         assert!(r.freed_bytes > 0);
+    }
+
+    /// `.cargo-build/` as Cargo leaves it: each profile's deps and incremental cache, freshly built.
+    fn cargo_build(ws: &Path) {
+        for f in ["debug/deps/libx.rlib", "debug/incremental/x-1/s-1/dep-graph.bin", "release/deps/liby.rlib", "release/incremental/y-1/query-cache.bin"] {
+            fs::create_dir_all(ws.join(".cargo-build").join(f).parent().unwrap()).unwrap();
+            fs::write(ws.join(".cargo-build").join(f), vec![0u8; 64 * 1024]).unwrap();
+        }
+    }
+
+    #[test]
+    fn over_the_cap_a_working_agent_s_incremental_caches_go_and_deps_stay() {
+        let storage = temp();
+        cargo_build(&storage.join("a"));
+        // 2 GB, scaled down: the two caches take about 128 KB on disk.
+        FAKE_CAP.with(|c| c.set(Some(100_000)));
+
+        let l = sweep(&storage, None, &|_| false, SystemTime::now(), IDLE);
+
+        let shared = storage.join("a/.cargo-build");
+        assert!(!shared.join("debug/incremental").exists() && !shared.join("release/incremental").exists());
+        assert!(shared.join("debug/deps/libx.rlib").exists() && shared.join("release/deps/liby.rlib").exists());
+        let mut rels: Vec<_> = l.lines.iter().map(|x| (x.rel.as_str(), x.error.is_none() && x.bytes > 0)).collect();
+        rels.sort();
+        assert_eq!(rels, [(".cargo-build/debug/incremental", true), (".cargo-build/release/incremental", true)], "the log shows them");
+        assert!(l.skipped.contains(&skip("a", ".cargo-build", "younger than 3 days")));
+        FAKE_CAP.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn under_the_cap_or_while_the_agent_runs_the_incremental_caches_stay() {
+        let storage = temp();
+        cargo_build(&storage.join("a"));
+        cargo_build(&storage.join("running"));
+        FAKE_CAP.with(|c| c.set(Some(100_000)));
+        let l = sweep(&storage, None, &|id| id == "running", SystemTime::now(), IDLE);
+        assert!(storage.join("running/.cargo-build/debug/incremental/x-1/s-1/dep-graph.bin").exists(), "removed during a run");
+        assert!(l.removed_paths().iter().all(|p| !p.starts_with(storage.join("running"))));
+
+        FAKE_CAP.with(|c| c.set(Some(10_000_000)));
+        cargo_build(&storage.join("b"));
+        let l = sweep(&storage, Some("b"), &|_| false, SystemTime::now(), IDLE);
+        assert_eq!(l.lines.len(), 0, "{:?}", l.lines);
+        assert!(storage.join("b/.cargo-build/debug/incremental/x-1/s-1/dep-graph.bin").exists());
+        FAKE_CAP.with(|c| c.set(None));
     }
 
     #[test]

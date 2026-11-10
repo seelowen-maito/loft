@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices"],
     }))
 }
 

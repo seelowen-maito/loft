@@ -1080,6 +1080,7 @@ final class LoftStore {
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { try await requireWrite().cleanFolders(agentId: agentId, rel: rel) }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { try await requireWrite().clean(agentId: agentId, paths: paths) }
     func cleanLog() async throws -> CleanLog { try await requireWrite().cleanLog() }
+    func agentDevices() async throws -> [AgentDevice] { try await requireWrite().agentDevices() }
 
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.

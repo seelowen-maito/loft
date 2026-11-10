@@ -125,6 +125,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/agents/{id}/find", get(api::find_files))
         .route("/agents/{id}/open-editor", post(api::open_editor))
         .route("/simulator", get(simulator::booted))
+        .route("/simulator/devices", get(simulator::agent_devices))
         .route("/simulator/screenshot", get(simulator::screenshot))
         .route("/simulator/stream", get(simulator::stream))
         .route("/simulator/input", post(simulator::input))
@@ -251,6 +252,8 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
+    tokio::spawn(simulator::tidier(state.clone()));
+    tokio::spawn(processes::idle_stopper(state.clone()));
     tokio::spawn(pairing::read_terminal(state.clone()));
 
     // Serve the built frontend when present (production mode).

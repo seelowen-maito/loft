@@ -94,6 +94,8 @@ protocol LoftAPI: Sendable {
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog
     /// The running or last clean's log, the daily sweep's included.
     func cleanLog() async throws -> CleanLog
+    /// Agents' Simulator devices, biggest first.
+    func agentDevices() async throws -> [AgentDevice]
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws
     func keepComment(taskId: String, commentId: Int64) async throws
@@ -398,6 +400,10 @@ struct LiveLoftAPI: LoftAPI {
         return try decode(CleanLog.self, try await send("POST", "/workspaces/clean", body: body, timeout: 600))
     }
     func cleanLog() async throws -> CleanLog { try await get("/workspaces/log") }
+    func agentDevices() async throws -> [AgentDevice] {
+        let l: AgentDevices = try await get("/simulator/devices")
+        return l.devices
+    }
 
     func backUpNow() async throws -> BackupStatus {
         // A backup of a big database takes a while; the server answers once it's done.
@@ -533,6 +539,7 @@ extension LoftAPI {
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
+    func agentDevices() async throws -> [AgentDevice] { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }
     func briefVoice(text: String) async throws -> VoiceBriefResponse { throw APIError.unsupported("Briefs") }

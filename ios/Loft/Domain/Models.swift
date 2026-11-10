@@ -322,6 +322,8 @@ enum ServerFeature: String {
     case workspaces
     /// Clean lists the workspace for the user to tick what goes, and logs it.
     case cleanPicker = "clean_picker"
+    /// Settings › Disk lists agents' Simulator devices.
+    case agentDevices = "agent_devices"
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.
