@@ -253,6 +253,49 @@ final class LoftUITests: XCTestCase {
         XCTAssertFalse(app.buttons["retrySend"].exists)
     }
 
+    /// #309: photos chosen in the composer show as thumbnails, one can be removed, and the rest go with the message,
+    /// shown in the chat and opening full screen. Photos is another process, so `-fixture-photos` stands in for it.
+    func testSendingPhotos() throws {
+        let paths = try [UIColor.systemTeal, .systemOrange, .systemPink].map { color in
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 1200, height: 900)).image { c in
+                color.setFill()
+                c.fill(CGRect(x: 0, y: 0, width: 1200, height: 900))
+                UIColor.white.setFill()
+                c.cgContext.fillEllipse(in: CGRect(x: 400, y: 250, width: 400, height: 400))
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("photo-\(UUID().uuidString).png")
+            try XCTUnwrap(image.pngData()).write(to: url)
+            return url.path
+        }
+        let app = launch(["-fixture-photos", paths.joined(separator: ",")])
+        openQAChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["choosePhotos"].tap()
+        let chips = app.descendants(matching: .any).matching(identifier: "photoChip")
+        XCTAssertTrue(chips.element(boundBy: 2).appears(timeout: 5), "a thumbnail for each photo")
+        XCTAssertTrue(app.descendants(matching: .any)["Photo, ready to send"].appears(timeout: 10))
+        app.buttons["removePhoto"].firstMatch.tap()
+        XCTAssertTrue(chips.element(boundBy: 2).disappears(timeout: 3), "one removed")
+        XCTAssertEqual(chips.count, 2)
+
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("Which one?")
+        let send = app.buttons["sendButton"]
+        XCTAssertTrue(send.wait(for: \.isEnabled, toEqual: true, timeout: 10), "sendable once both are up")
+        send.tap()
+        XCTAssertTrue(any("draftPhotos", app).disappears(timeout: 5), "they went with the message")
+        let sent = app.buttons.matching(identifier: "chatPhoto")
+        XCTAssertTrue(sent.element(boundBy: 1).appears(timeout: 5), "both photos in the chat")
+        XCTAssertTrue(app.staticTexts["Which one?"].exists)
+        sent.element(boundBy: 0).tap()
+        XCTAssertTrue(any("fullScreenPhoto", app).appears(timeout: 5), "full screen")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(any("fullScreenPhoto", app).disappears(timeout: 3))
+    }
+
     /// The agent screen shows the agent's group and its projects, main first.
     func testAgentDetailsShowGroupAndProjects() {
         let app = launch()

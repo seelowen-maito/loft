@@ -123,8 +123,11 @@ struct AgentDevice: Codable, Hashable, Identifiable {
     /// "Booted" or "Shutdown", as simctl says.
     var state: String
     var bytes: Int64
-    var agent: Owner
+    /// Nil for an orphan: a device of a deleted agent, which the tidy deletes.
+    var agent: Owner?
     var id: String { udid }
+    /// What Settings › Disk calls it.
+    var title: String { agent.map(\.name) ?? "Orphaned · \(name)" }
     var stateText: String { state == "Booted" ? "Booted" : "Shut down" }
 }
 
