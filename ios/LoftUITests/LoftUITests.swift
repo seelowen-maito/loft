@@ -208,6 +208,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
     }
 
+    /// A sent message that tagged a spec shows a chip, and tapping it opens that item in the app.
+    func testTagChipOpensTheTaggedItem() {
+        let app = launch()
+        openOrchestratorChat(app)
+        XCTAssertTrue(text(containing: "Is #42 still on track?", app).appears(timeout: 5))
+        let chip = app.buttons["spec: Implement settings functionality"].firstMatch
+        XCTAssertTrue(chip.appears(timeout: 5), "the message's tag shows as a chip")
+        chip.tap()
+        let owner = text(containing: "octo-dev", app)
+        for _ in 0..<4 where !owner.appears(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(owner.exists, "the chip opens the spec's detail")
+    }
+
     /// The agent screen shows the agent's group and its projects, main first.
     func testAgentDetailsShowGroupAndProjects() {
         let app = launch()
