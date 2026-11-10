@@ -132,7 +132,7 @@ pub struct Line {
     pub error: Option<String>,
     #[serde(default)]
     pub command: String,
-    /// What was done when it isn't a removal, like "Shut down" for a Simulator device; empty for a removal.
+    /// What was done to `rel` when it isn't a removal, like "Shut down Simulator device"; empty for a removal.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub done: String,
 }

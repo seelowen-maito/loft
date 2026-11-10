@@ -96,6 +96,6 @@ export function oneLine(s: string): string {
 
 /** Clean: a log line, past tense like its header: "Removed /path (2.2 GB)" or "failed /path: why". */
 export function cleanLineText(l: CleanLog["lines"][number]): string {
-  if (l.done) return l.error ? `failed: ${l.done} Simulator device ${l.rel}: ${l.error}` : `${l.done} Simulator device ${l.rel}${l.bytes ? ` (${fmtBytes(l.bytes)})` : ""}`;
+  if (l.done) return l.error ? `failed: ${l.done} ${l.rel}: ${l.error}` : `${l.done} ${l.rel}${l.bytes ? ` (${fmtBytes(l.bytes)})` : ""}`;
   return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;
 }

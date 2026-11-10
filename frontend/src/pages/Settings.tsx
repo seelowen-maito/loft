@@ -311,7 +311,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             </ul>
           </div>
         )}
-        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft shuts the agent's Simulator device down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
+        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops the processes the agent left running (like a dev server) and shuts its Simulator device down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
           <input
             className="input w-24"
             type="number"

@@ -251,6 +251,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));
+    tokio::spawn(processes::idle_stopper(state.clone()));
     tokio::spawn(pairing::read_terminal(state.clone()));
 
     // Serve the built frontend when present (production mode).

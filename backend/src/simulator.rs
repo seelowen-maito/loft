@@ -275,7 +275,7 @@ pub async fn tidy(state: &AppState) -> Vec<crate::sweep::Line> {
         if delete && error.is_none() {
             let _ = state.db.forget_agent_device(udid);
         }
-        let done = if delete { "Deleted" } else { "Shut down" };
+        let done = if delete { "Deleted Simulator device" } else { "Shut down Simulator device" };
         // An old-scheme device goes under the agent it is named for.
         let named = name.rsplit_once(' ').and_then(|(who, _)| agents.iter().find(|a| a.name == who)).map(|a| a.id.clone());
         let agent = kept.get(udid).cloned().or(named).unwrap_or_default();
@@ -662,8 +662,8 @@ esac
         let cmd_old = format!("xcrun simctl shutdown {old} && xcrun simctl delete {old}");
         let cmd_gone = format!("xcrun simctl delete {gone}");
         assert_eq!(done, [
-            ("Deleted Agent (Loft)", "Deleted", cmd_gone.as_str(), 1_000_000_000),
-            ("Loft Dev 93543007", "Deleted", cmd_old.as_str(), 2_000_000_000),
+            ("Deleted Agent (Loft)", "Deleted Simulator device", cmd_gone.as_str(), 1_000_000_000),
+            ("Loft Dev 93543007", "Deleted Simulator device", cmd_old.as_str(), 2_000_000_000),
         ]);
         assert!(lines.iter().all(|l| l.error.is_none() && l.path.ends_with(l.command.rsplit(' ').next().unwrap())), "{lines:?}");
         let left: Vec<String> = fake_devices(&st).into_iter().map(|d| d.0).collect();
@@ -707,7 +707,7 @@ esac
         st.settings.save(s).unwrap();
         let lines = tidy(&st).await;
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_eq!((lines[0].agent.as_str(), lines[0].done.as_str(), lines[0].bytes), (a.id.as_str(), "Shut down", 0));
+        assert_eq!((lines[0].agent.as_str(), lines[0].done.as_str(), lines[0].bytes), (a.id.as_str(), "Shut down Simulator device", 0));
         assert_eq!(lines[0].command, format!("xcrun simctl shutdown {udid}"));
         assert_eq!(state_of(&st, &udid).as_deref(), Some("Shutdown"), "shut down, not deleted");
         assert!(tidy(&st).await.is_empty(), "a shut-down device is left alone");
@@ -734,7 +734,7 @@ esac
         let lines = tidy(&st).await;
         crate::sweep::record(&st, "Simulator cleanup", lines).await;
         let axum::Json(log) = crate::sweep::log(State(st.clone())).await;
-        assert_eq!((log.what.as_str(), log.lines.len(), log.lines[0].done.as_str(), log.lines[0].rel.as_str()), ("Simulator cleanup", 1, "Shut down", "Builder (Loft)"));
+        assert_eq!((log.what.as_str(), log.lines.len(), log.lines[0].done.as_str(), log.lines[0].rel.as_str()), ("Simulator cleanup", 1, "Shut down Simulator device", "Builder (Loft)"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
