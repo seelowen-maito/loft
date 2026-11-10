@@ -27,6 +27,10 @@ struct ComposerView: View {
     var onVoiceStop: (() -> Void)?
     /// Shows "Attach an issue" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
+    /// Shows the paperclip: a video picked or recorded is uploaded to this agent and kept here until sent (the
+    /// chat reads it when `send` is called).
+    var videoAgentId: String?
+    var video: Binding<VideoDraft?> = .constant(nil)
     /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
     let send: (String, Bool) -> Void
 
@@ -76,7 +80,9 @@ struct ComposerView: View {
     @AppStorage(Prefs.voiceBrief) private var offerBrief = true
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canSend: Bool { !trimmed.isEmpty && store.canWrite }
+    /// A video still reading or uploading, or one that failed, holds the message back until it's up or removed.
+    private var videoHolds: Bool { video.wrappedValue.map { $0.uploaded == nil } ?? false }
+    private var canSend: Bool { (!trimmed.isEmpty || video.wrappedValue?.uploaded != nil) && !videoHolds && store.canWrite }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 
     var body: some View {
@@ -107,6 +113,12 @@ struct ComposerView: View {
                     .foregroundStyle(Theme.attention)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let v = video.wrappedValue {
+                VideoChip(draft: v) {
+                    v.cancel()
+                    video.wrappedValue = nil
+                }
+            }
             if let q = MentionQuery.query(in: text) {
                 MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
                     text = MentionQuery.insert(a, into: text)
@@ -128,6 +140,14 @@ struct ComposerView: View {
                     .accessibilityLabel("Attach an issue")
                     .accessibilityHint("The agent gets the issue with your message")
                     .accessibilityIdentifier("attachTaskButton")
+                }
+                if let agentId = videoAgentId {
+                    VideoAttachMenu { load in
+                        video.wrappedValue?.cancel()
+                        let draft = VideoDraft()
+                        draft.start(load: load) { file, progress in try await store.upload(file, to: agentId, progress: progress) }
+                        video.wrappedValue = draft
+                    }
                 }
                 TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)
                     .lineLimit(1...6)
@@ -539,7 +559,7 @@ struct ComposerView: View {
         voiceSending = false
         dictated = false
         let t = trimmed
-        guard !t.isEmpty, store.canWrite else {
+        guard !t.isEmpty || video.wrappedValue?.uploaded != nil, !videoHolds, store.canWrite else {
             VoiceLog.shared.add("send blocked: \(t.isEmpty ? "empty" : "offline")")
             return
         }

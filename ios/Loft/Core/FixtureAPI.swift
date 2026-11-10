@@ -434,11 +434,38 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse {
+        try await sendMessage(agentId: agentId, text: text, clientId: clientId, meta: meta, images: [])
+    }
+
+    /// Uploads, by name, kept where they were read from so a sent video plays.
+    private var uploads: [String: URL] = [:]
+
+    /// Goes up in quarters a fifth of a second apart, so the progress shows.
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try check()
+        if mode == .failSends { throw APIError.timeout }
+        for p in [0.25, 0.5, 0.75, 1] {
+            try await Task.sleep(for: .milliseconds(200))
+            progress(p)
+        }
+        let name = UUID().uuidString.lowercased() + "." + (file.pathExtension.isEmpty ? "mov" : file.pathExtension.lowercased())
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-" + name)
+        try FileManager.default.copyItem(at: file, to: kept)
+        locked { uploads[name] = kept }
+        return name
+    }
+
+    func uploadURL(agentId: String, file: String) -> URL {
+        locked { uploads[file] } ?? baseURL.appendingPathComponent("api/agents/\(agentId)/uploads/\(file)")
+    }
+
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         try check()
         if mode == .failSends { throw APIError.timeout }
         return try locked {
             nextId += 1
             var tags: [String: JSONValue] = ["client_id": .string(clientId)]
+            if !images.isEmpty { tags["images"] = .array(images.map(JSONValue.string)) }
             if let g = meta?["grill"] { tags["grill"] = g }
             // An attached task, as the backend stores it (#116): `task_id`, and first in `task_refs`.
             if let t = meta?["task_id"]?.stringValue {

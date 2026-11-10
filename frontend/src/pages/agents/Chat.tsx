@@ -29,6 +29,8 @@ import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { isVideo } from "../../lib/video";
+import { VideoMessage } from "../../components/VideoMessage";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
@@ -320,7 +322,7 @@ export function Chat({
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
-  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments));
+  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments, "message", true));
 
   const drop = useFileDrop(addImages);
   const uploading = attachments.some((a) => !a.file && !a.error);
@@ -401,7 +403,7 @@ export function Chat({
         <div className="pointer-events-none absolute inset-3 z-20 grid place-items-center rounded-2xl border-2 border-dashed border-accent/50 bg-ink-950/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-fg-2">
             <ImagePlus className="size-7 text-accent" />
-            <span className="text-[14px]">Drop images to attach</span>
+            <span className="text-[14px]">Drop images or videos to attach</span>
           </div>
         </div>
       )}
@@ -589,7 +591,7 @@ export function Chat({
               </div>
             )}
             <div className="flex items-end gap-2">
-              <button className="btn-ghost size-8 shrink-0 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images" title="Attach images">
+              <button className="btn-ghost size-8 shrink-0 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images or videos" title="Attach images or videos">
                 <Plus className="size-4" />
               </button>
               <button
@@ -604,7 +606,7 @@ export function Chat({
               <input
                 ref={picker}
                 type="file"
-                accept="image/png,image/jpeg,image/gif,image/webp"
+                accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
                 multiple
                 hidden
                 onChange={(e) => {
@@ -847,7 +849,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex flex-col items-end gap-1.5 pt-2">
         {images.length > 0 && (
           <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
-            {images.map((f) => (
+            {images.map((f) => isVideo(f) ? <VideoMessage key={f} src={api.uploadUrl(m.agent_id, f)} /> : (
               <a key={f} href={api.uploadUrl(m.agent_id, f)} target="_blank" rel="noopener noreferrer">
                 <img
                   src={api.uploadUrl(m.agent_id, f)}
