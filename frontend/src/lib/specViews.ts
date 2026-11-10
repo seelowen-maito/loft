@@ -69,17 +69,21 @@ export function ticketsOf(spec: Task, d: DeliverySummary | null, tasks: Task[]):
 /* ---------- the board's options, kept in the URL ---------- */
 
 export type SortKey = "activity" | "progress";
-export type BoardOptions = { stages: Stage[]; hideShipped: boolean; showDropped: boolean; byProject: boolean; sort: SortKey; dense: boolean; needsMe: boolean };
+/** Which columns show: the Issues column, the spec stages, or both. */
+export type BoardType = "all" | "issues" | "specs";
+export type BoardOptions = { type: BoardType; stages: Stage[]; hideShipped: boolean; showDropped: boolean; byProject: boolean; sort: SortKey; dense: boolean; needsMe: boolean };
 
 export function parseBoard(p: URLSearchParams): BoardOptions {
   const stages = (p.get("stage") ?? "").split(",").filter((s): s is Stage => STAGES.some((x) => x.key === s));
-  return { stages, hideShipped: p.get("shipped") === "0", showDropped: p.get("dropped") === "1", byProject: p.get("by") === "project", sort: p.get("sort") === "progress" ? "progress" : "activity", dense: p.get("dense") === "1", needsMe: p.get("needsme") === "1" };
+  const type = p.get("type");
+  return { type: type === "issues" || type === "specs" ? type : "all", stages, hideShipped: p.get("shipped") === "0", showDropped: p.get("dropped") === "1", byProject: p.get("by") === "project", sort: p.get("sort") === "progress" ? "progress" : "activity", dense: p.get("dense") === "1", needsMe: p.get("needsme") === "1" };
 }
 
 /** `p` with the changed options written (and the defaults removed); everything else in it is kept. */
 export function withBoard(p: URLSearchParams, change: Partial<BoardOptions>): URLSearchParams {
   const o = { ...parseBoard(p), ...change }, n = new URLSearchParams(p);
   const set = (k: string, v: string | null) => (v === null ? n.delete(k) : n.set(k, v));
+  set("type", o.type === "all" ? null : o.type);
   set("stage", o.stages.length ? o.stages.join(",") : null);
   set("shipped", o.hideShipped ? "0" : null);
   set("dropped", o.showDropped ? "1" : null);
@@ -117,4 +121,20 @@ export function arrange(specs: Task[], deliveries: DeliverySummary[], tasks: Tas
       return (!o.stages.length || o.stages.includes(stage)) && !(o.hideShipped && stage === "shipped") && (o.showDropped || stage !== "dropped") && (!o.needsMe || needsMe(stage, d));
     })
     .sort((a, b) => (o.sort === "progress" ? frac(b) - frac(a) : 0) || b.updated_at.localeCompare(a.updated_at));
+}
+
+/* ---------- the Issues column ---------- */
+
+const NEEDS_YOU = ["waiting_approval", "blocked", "failed"];
+
+/** A spec's ticket: it has a parent, names its spec in the template's `## Parent` section, or is in a Delivery's tickets. */
+export const isSpecTicket = (t: Task, deliveries: DeliverySummary[]) =>
+  !!t.parent_id || /^## Parent\s+#\d+/m.test(t.description) || deliveries.some((d) => d.tickets.some((x) => (x.id ? x.id === t.id : !!t.github && d.repo === t.github.repo && x.number === t.github.number)));
+
+/** The Issues column: the issues (of `tasks`, already through the shared filters) that are no spec and no spec's ticket. Closed ones only when asked for, open ones first, then the most recently updated. */
+export function boardIssues(tasks: Task[], deliveries: DeliverySummary[], o: BoardOptions, showClosed: boolean): Task[] {
+  const closed = (t: Task) => t.status === "done" || t.status === "cancelled";
+  return tasks
+    .filter((t) => !t.labels.some((l) => l.toLowerCase() === "spec") && !isSpecTicket(t, deliveries) && (showClosed || !closed(t)) && (!o.needsMe || NEEDS_YOU.includes(t.status)))
+    .sort((a, b) => Number(closed(a)) - Number(closed(b)) || b.updated_at.localeCompare(a.updated_at));
 }

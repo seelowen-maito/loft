@@ -7,7 +7,7 @@ import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { HerdrSetup } from "./HerdrSetup";
-import { canTick, cleanLineText, cx, fmtBytes, shownCommand, timeAgo } from "../lib/format";
+import { canTick, cleanLineText, cx, fmtBytes, oneLine, shownCommand, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -351,7 +351,7 @@ function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
 function CopyCommands({ items, name }: { items: { agent: string; command: string }[]; name: (id: string) => string }) {
   const [copied, setCopied] = useState(false);
   const text = byAgent(items)
-    .map(([agent, xs]) => [`# ${name(agent)}`, ...xs.map((x) => x.command)].join("\n"))
+    .map(([agent, xs]) => [`# ${oneLine(name(agent))}`, ...xs.map((x) => x.command)].join("\n"))
     .join("\n\n");
   return (
     <button

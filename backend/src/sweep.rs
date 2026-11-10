@@ -19,6 +19,7 @@
 //! stays readable (`GET /api/workspaces/log`).
 
 use std::collections::HashMap;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -37,8 +38,9 @@ const DEPTH: usize = 3;
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long a measured size is reused: Settings and the delete dialog reload often, and a walk is slow.
 const SIZE_FOR: Duration = Duration::from_secs(60);
-/// The last run's log, next to the workspaces (the sweep skips dotfiles there).
-const LOG_FILE: &str = ".clean-log.json";
+/// The last run's log, in Loft's data folder next to its database: outside the agents' workspaces, not out of
+/// their reach (they run as the same Mac user; see ADR 0004's threat model).
+const LOG_FILE: &str = "clean-log.json";
 /// Past this, a young `.cargo-build/`'s `*/incremental` caches go.
 const INCREMENTAL_CAP: u64 = 2_000_000_000;
 
@@ -154,7 +156,9 @@ pub struct Log {
 }
 
 impl Log {
-    fn push(&mut self, l: Line) {
+    /// Adds a removal, its path and `rel` on one line whatever the folder's name.
+    fn push(&mut self, mut l: Line) {
+        (l.path, l.rel) = (one_line(&l.path.to_string_lossy()).into(), one_line(&l.rel));
         if l.error.is_some() {
             self.failed += 1;
         } else {
@@ -285,13 +289,13 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
             match check(&root, &path, &mains) {
                 Err(reason) => {
                     let (agent, rel) = split(&root, &path);
-                    log.skipped.push(Skip { agent, rel, reason: reason.into() });
+                    log.skipped.push(skip(&agent, &rel, reason));
                 }
-                Ok((id, _)) if b.agent.as_ref().is_some_and(|a| *a != id) => log.skipped.push(Skip { agent: id, rel: String::new(), reason: "another agent's".into() }),
+                Ok((id, _)) if b.agent.as_ref().is_some_and(|a| *a != id) => log.skipped.push(skip(&id, "", "another agent's")),
                 Ok((id, rel)) => {
                     let bytes = size(&path);
                     let command = rm_command(&path);
-                    let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&path).err() };
+                    let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&root, &path).err() };
                     log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command, done: String::new() });
                 }
             }
@@ -300,7 +304,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
         log.running = false;
         log.title = done;
         show(&st, &log);
-        save(storage, &log);
+        save(&st, &log);
         log
     })
     .await
@@ -314,10 +318,12 @@ fn show(st: &AppState, log: &Log) {
     st.rt.lock().unwrap().clean = log.clone();
 }
 
-fn save(storage: &Path, log: &Log) {
-    if let Err(e) = serde_json::to_vec(log).map_err(std::io::Error::other).and_then(|b| std::fs::write(storage.join(LOG_FILE), b)) {
+fn save(st: &AppState, log: &Log) {
+    if let Err(e) = serde_json::to_vec(log).map_err(std::io::Error::other).and_then(|b| std::fs::write(st.settings.dir().join(LOG_FILE), b)) {
         tracing::warn!("sweep: can't save the log: {e}");
     }
+    // Where it was kept before, which agents can write.
+    let _ = std::fs::remove_file(st.cfg.storage_dir.join(".clean-log.json"));
 }
 
 /// `GET /api/workspaces/log`: the running or last run's log, kept across restarts.
@@ -326,7 +332,7 @@ pub async fn log(axum::extract::State(state): axum::extract::State<AppState>) ->
     if l.at.is_some() {
         return axum::Json(l);
     }
-    let file = state.cfg.storage_dir.join(LOG_FILE);
+    let file = state.settings.dir().join(LOG_FILE);
     let saved = tokio::fs::read(file).await.ok().and_then(|b| serde_json::from_slice(&b).ok());
     axum::Json(saved.unwrap_or_default())
 }
@@ -362,7 +368,7 @@ pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str
         log.title = what.into();
         show(&log);
         if !what.is_empty() {
-            save(storage, &log);
+            save(&st, &log);
         }
         log
     })
@@ -382,7 +388,7 @@ pub async fn record(state: &AppState, what: &'static str, lines: Vec<Line>) {
         log.push(l);
     }
     show(state, &log);
-    save(&state.cfg.storage_dir, &log);
+    save(state, &log);
 }
 
 /// The day's sweep, the first right after Loft starts.
@@ -400,8 +406,9 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
     let mut out = vec![];
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
-        // `.agent-files` and the like are Loft's; a symlinked workspace leads outside.
-        if id.starts_with('.') || only.is_some_and(|o| o != id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+        // `.agent-files` and the like are Loft's; a symlinked workspace leads outside; no agent's id has a
+        // control character, and one would break the `# <agent>` line of Copy commands.
+        if id.starts_with('.') || id.contains(char::is_control) || only.is_some_and(|o| o != id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let ws = root.join(&id);
@@ -535,7 +542,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
             _ => Err("not a plain path"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if parts.len() < 2 || parts[0].starts_with('.') {
+    if parts.len() < 2 || parts[0].starts_with('.') || parts[0].contains(char::is_control) {
         return Err("not in a workspace");
     }
     let mut p = root.to_path_buf();
@@ -576,10 +583,9 @@ fn split(root: &Path, path: &Path) -> (String, String) {
 }
 
 /// Removes a checked item: a folder and all in it (symlinks inside, not what they point at), or a file.
-fn remove_item(path: &Path) -> Result<(), String> {
+fn remove_item(root: &Path, path: &Path) -> Result<(), String> {
     match path.symlink_metadata() {
-        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path).map_err(|e| e.to_string()),
-        Ok(m) if m.is_file() => std::fs::remove_file(path).map_err(|e| e.to_string()),
+        Ok(m) if m.is_dir() || m.is_file() => remove_under(root, path),
         _ => Err("no longer there".into()),
     }
 }
@@ -591,8 +597,8 @@ pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now
     let Ok(root) = storage.canonicalize() else { return p };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
-        // `.agent-files` and the like are Loft's.
-        if id.starts_with('.') || only.is_some_and(|o| o != id) {
+        // `.agent-files` and the like are Loft's; no agent's id has a control character.
+        if id.starts_with('.') || id.contains(char::is_control) || only.is_some_and(|o| o != id) {
             continue;
         }
         let Ok(t) = e.file_type() else { continue };
@@ -609,7 +615,21 @@ pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now
 }
 
 fn skip(agent: &str, rel: &str, reason: &str) -> Skip {
-    Skip { agent: agent.into(), rel: rel.into(), reason: reason.into() }
+    Skip { agent: one_line(agent), rel: one_line(rel), reason: reason.into() }
+}
+
+/// `s` with its control characters (a newline in a folder name) written as escapes, so it stays on one line.
+fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' => "\\n".into(),
+            '\r' => "\\r".into(),
+            '\t' => "\\t".into(),
+            c if c.is_control() && (c as u32) < 0x80 => format!("\\x{:02x}", c as u32),
+            c if c.is_control() => format!("\\u{:04x}", c as u32),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, p: &mut Plan) {
@@ -670,11 +690,14 @@ fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, 
     p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command });
 }
 
-/// `rm -rf <path>`, quoted for the shell when it needs to be.
+/// `rm -rf <path>`, quoted for the shell when it needs to be, and on one line: control characters are written
+/// as escapes inside `$'…'`.
 fn rm_command(path: &Path) -> String {
     let p = path.to_string_lossy();
     if p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
         format!("rm -rf {p}")
+    } else if p.chars().any(char::is_control) {
+        format!("rm -rf $'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
     } else {
         format!("rm -rf '{}'", p.replace('\'', "'\\''"))
     }
@@ -752,8 +775,85 @@ fn remove(root: &Path, path: &Path) -> Result<(), String> {
     if !path.canonicalize().is_ok_and(|p| p.starts_with(root)) {
         return Err("outside agent-local-storage".into());
     }
-    // Removes symlinks inside, not what they point at.
-    std::fs::remove_dir_all(path).map_err(|e| e.to_string())
+    remove_under(root, path)
+}
+
+/// Removes `path`, a file or a folder and all in it, through folder handles opened from `root` down, none of
+/// them through a symlink: a folder on the way swapped for a symlink after the checks fails the removal instead
+/// of leading it outside `root`. Symlinks inside go, not what they point at.
+fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let rest = path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
+    let names = rest
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => CString::new(s.as_bytes()).map_err(|_| "not a plain path"),
+            _ => Err("not a plain path"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (last, parents) = names.split_last().ok_or("not in a workspace")?;
+    let root = CString::new(root.as_os_str().as_bytes()).map_err(|_| "not a plain path")?;
+    let mut dir = open_dir(libc::AT_FDCWD, &root)?;
+    for n in parents {
+        dir = open_dir(dir.as_raw_fd(), n)?;
+    }
+    remove_at(&dir, last)
+}
+
+/// The folder `name` in `dir`, opened without following a symlink.
+fn open_dir(dir: libc::c_int, name: &std::ffi::CStr) -> Result<OwnedFd, String> {
+    // SAFETY: a valid C string; the fd is owned from here on.
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Removes `name` in `dir`: a folder with all in it, or anything else as it is.
+fn remove_at(dir: &OwnedFd, name: &std::ffi::CStr) -> Result<(), String> {
+    let last = || Err(std::io::Error::last_os_error().to_string());
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: valid fd, C string and out pointer.
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return last();
+    }
+    if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        let sub = open_dir(dir.as_raw_fd(), name)?;
+        for n in entries(&sub)? {
+            remove_at(&sub, &n)?;
+        }
+    }
+    let flags = if st.st_mode & libc::S_IFMT == libc::S_IFDIR { libc::AT_REMOVEDIR } else { 0 };
+    // SAFETY: valid fd and C string.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), flags) } != 0 {
+        return last();
+    }
+    Ok(())
+}
+
+/// The names in an open folder, but `.` and `..`.
+fn entries(dir: &OwnedFd) -> Result<Vec<std::ffi::CString>, String> {
+    // SAFETY: `fdopendir` takes its own copy of the fd, closed by `closedir`.
+    let d = unsafe { libc::fdopendir(libc::dup(dir.as_raw_fd())) };
+    if d.is_null() {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: `d` is open until `closedir` below.
+        let e = unsafe { libc::readdir(d) };
+        if e.is_null() {
+            break;
+        }
+        let n = unsafe { std::ffi::CStr::from_ptr((*e).d_name.as_ptr()) };
+        if n.to_bytes() != b"." && n.to_bytes() != b".." {
+            out.push(n.to_owned());
+        }
+    }
+    unsafe { libc::closedir(d) };
+    Ok(out)
 }
 
 /// A measure of a path: when it was taken, how big, and the newest file's change.
@@ -1115,6 +1215,99 @@ mod tests {
         let axum::Json(saved) = log(axum::extract::State(st.clone())).await;
         assert_eq!((saved.what.as_str(), saved.removed, saved.freed_bytes), ("Daily sweep", 5, l.freed_bytes));
         assert_eq!(saved.lines.len(), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_log_is_kept_in_loft_s_data_folder_outside_the_agents_workspaces() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        // One left where it used to be, which an agent could have written.
+        fs::write(st.cfg.storage_dir.join(".clean-log.json"), r#"{"what":"forged","running":false,"lines":[],"skipped":[],"freed_bytes":0,"removed":0,"failed":0}"#).unwrap();
+        clean_paths(&st, Some(&a.id), vec![ws.join("scratch")]).await;
+        let saved = st.settings.dir().join(LOG_FILE);
+        assert!(saved.exists() && !saved.starts_with(&st.cfg.storage_dir));
+        assert!(!st.cfg.storage_dir.join(".clean-log.json").exists());
+        st.rt.lock().unwrap().clean = Log::default();
+        let axum::Json(l) = log(axum::extract::State(st.clone())).await;
+        assert_eq!((l.what.as_str(), l.removed), ("Clean", 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_with_a_newline_stays_on_one_line_in_the_log_and_in_copy_commands() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        let name = "x\nrm -rf ~\t\u{7}";
+        file(&ws.join(name).join("f"));
+        let escaped = format!("{}/x\\nrm -rf ~\\t\\x07", ws.display());
+
+        let items = preview_of(&st, Some(&a.id)).await;
+        let i = items.iter().find(|i| i.name == name).unwrap();
+        assert_eq!(i.command, format!("rm -rf $'{escaped}'"));
+
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join(name), ws.join("gone\nrm -rf ~")]).await;
+        assert_eq!(l.removed, 1, "{l:?}");
+        let line = &l.lines[0];
+        assert_eq!((line.rel.as_str(), line.path.to_string_lossy().as_ref(), line.command.as_str()), ("x\\nrm -rf ~\\t\\x07", escaped.as_str(), format!("rm -rf $'{escaped}'").as_str()));
+        assert_eq!((l.skipped[0].rel.as_str(), l.skipped[0].reason.as_str()), ("gone\\nrm -rf ~", "no longer there"));
+        assert!(l.lines.iter().map(|x| format!("{}{}{}", x.rel, x.path.display(), x.command)).chain(l.skipped.iter().map(|x| x.rel.clone())).all(|t| !t.contains('\n')));
+        assert_eq!(rm_command(Path::new("/w/it's\n\\x")), r"rm -rf $'/w/it\'s\n\\x'");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workspace_folder_with_a_newline_in_its_name_is_neither_listed_swept_nor_cleaned() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        let root = ws.parent().unwrap().to_path_buf();
+        let odd = root.join("\nrm -r ~");
+        clone(&odd.join("app"));
+        file(&odd.join("scratch/x"));
+        age(&odd);
+
+        let items = preview_of(&st, None).await;
+        assert!(items.iter().all(|i| i.agent == a.id), "{items:?}");
+        let p = plan(&root, None, &|_| false, later(), IDLE);
+        assert!(p.folders.iter().all(|f| f.agent == a.id) && p.skipped.iter().all(|s| !s.agent.contains('\n')), "{p:?}");
+        let l = clean_paths(&st, None, vec![odd.join("scratch"), odd.join("app/target")]).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        assert!(l.skipped.iter().all(|s| s.reason == "not in a workspace" && !s.agent.contains('\n')), "{l:?}");
+        assert!(odd.join("scratch/x").exists() && odd.join("app/target/debug/app").exists());
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_symlink_after_the_checks_leads_nowhere_outside() {
+        let root = temp();
+        let storage = root.join("agent-local-storage");
+        let outside = root.join("outside");
+        clone(&outside);
+        file(&outside.join("scratch/keep"));
+        let ws = storage.join("a");
+        clone(&ws.join("app"));
+        file(&ws.join("scratch/x"));
+        let p = plan(&storage, None, &|_| false, later(), IDLE);
+        assert!(p.folders.iter().any(|f| f.rel == "app/target"));
+
+        // Between the checks and the removal, the clone and `scratch` become symlinks to folders outside.
+        fs::rename(ws.join("app"), root.join("app-moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("app")).unwrap();
+        fs::remove_dir_all(ws.join("scratch")).unwrap();
+        std::os::unix::fs::symlink(outside.join("scratch"), ws.join("scratch")).unwrap();
+        let storage = storage.canonicalize().unwrap();
+        let mut lines = vec![];
+        for f in p.folders {
+            lines.push(remove_under(&storage, &f.path));
+        }
+        assert!(lines.iter().all(Result::is_err), "{lines:?}");
+        assert!(remove_item(&storage, &storage.join("a/scratch/keep")).is_err());
+        assert!(remove_under(&storage, &storage.join("a/scratch/keep")).is_err());
+        for kept in ["target/debug/app", "frontend/node_modules/vite/index.js", "ios/build/App.app/App", "scratch/keep"] {
+            assert!(outside.join(kept).exists(), "{kept} outside was removed");
+        }
+        // A real folder still goes, with the symlinks inside it but not what they point at.
+        std::os::unix::fs::symlink(&outside, ws.join("app-moved-link")).unwrap();
+        file(&storage.join("a/real/deep/er/f"));
+        std::os::unix::fs::symlink(&outside, storage.join("a/real/deep/out")).unwrap();
+        remove_under(&storage, &storage.join("a/real")).unwrap();
+        assert!(!storage.join("a/real").exists() && outside.join("scratch/keep").exists());
     }
 
     #[test]
