@@ -62,7 +62,10 @@ pub fn resolve(state: &AppState, agent: &Agent, text: &str) -> Vec<Value> {
     let prs = state.db.list_pull_requests(None).unwrap_or_default();
     let project = agent.project.trim();
     let mut out = vec![];
-    for (tag, target) in found.into_iter().take(MAX) {
+    for (tag, target) in found {
+        if out.len() >= MAX {
+            break;
+        }
         let task = match &target {
             Target::Loft(id) => tasks.iter().find(|t| t.id == *id),
             Target::Number(slug, n) => tasks.iter().find(|t| {
@@ -158,5 +161,38 @@ mod tests {
         let q = st.rt.lock().unwrap().queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default();
         assert!(q.contains("[Tagged by the user:\n- spec #199 “Tag things” (open) https://github.com/octo/loft/issues/199\n- pr #200 “Spec PR” (open) https://github.com/octo/loft/pull/200\n- issue octo/api#5 “Elsewhere (x)” (open) https://github.com/octo/api/issues/5\n"), "{q}");
         assert!(q.contains(&format!("- issue #{} “Only in Loft”", local.id)) && !q.contains("#999 “"), "{q}");
+    }
+
+    #[test]
+    fn the_cap_counts_known_tags_only() {
+        use crate::tasks::tests::{agent, state};
+        let st = state();
+        let mut a = agent(&st, "Worker");
+        a.project = "loft".into();
+        st.db.save_agent(&a).unwrap();
+        let (mut t, _) = crate::tasks::create(&st, &json!({ "title": "Known", "project": "loft" }), "user").unwrap();
+        t.github = Some(crate::db::GithubLink { repo: "octo/loft".into(), number: 500, url: "u".into(), state: "open".into(), ..Default::default() });
+        st.db.save_task(&t).unwrap();
+        let text = "#1 #2 #3 #4 #5 #6 #7 #8 #9 #500";
+        let got = resolve(&st, &a, text);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["tag"], "#500");
+    }
+
+    #[tokio::test]
+    async fn a_task_both_attached_and_tagged_is_described_once() {
+        use crate::tasks::tests::{agent, busy, state};
+        let st = state();
+        let mut a = agent(&st, "Worker");
+        a.project = "loft".into();
+        st.db.save_agent(&a).unwrap();
+        busy(&st, &a);
+        let (mut t, _) = crate::tasks::create(&st, &json!({ "title": "Both", "project": "loft" }), "user").unwrap();
+        t.github = Some(crate::db::GithubLink { repo: "octo/loft".into(), number: 7, url: "https://github.com/octo/loft/issues/7".into(), state: "open".into(), ..Default::default() });
+        st.db.save_task(&t).unwrap();
+        let tags = resolve(&st, &a, "#7");
+        crate::agents::enqueue_with(&st, &a.id, Some("#7".into()), json!({ "task_refs": [t.id], "tags": tags }), "user");
+        let q = st.rt.lock().unwrap().queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default();
+        assert!(q.contains("The user refers to task") && !q.contains("Tagged by the user"), "{q}");
     }
 }
