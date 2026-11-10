@@ -605,6 +605,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     func stopRun(agentId: String) async throws { try check() }
+    func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
+    func deleteAgent(id: String, purgeFiles: Bool) async throws {
+        try check()
+        locked { agentList.removeAll { $0.id == id } }
+    }
     /// The plan view the backend builds, from the fixture's tasks.
     func taskPlan(id: String) async throws -> TaskPlan {
         try check()

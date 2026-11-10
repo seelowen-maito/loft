@@ -39,6 +39,19 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
     state.cfg.storage_dir.join(agent_id)
 }
 
+/// Bytes of the files under `dir`, without following symlinks; 0 when it doesn't exist. Blocking.
+pub fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Where `@path` in this agent's chat starts: its project's folder when the project names one inside the
 /// projects folder (`work/notes`), else its workspace (no project, or a project that's just a tag).
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {

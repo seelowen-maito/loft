@@ -448,6 +448,14 @@ pub async fn reorder_agents(State(state): State<AppState>, Json(o): Json<Order>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// What deleting the agent with its workspace would free.
+pub async fn workspace_size(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let dir = workspace(&state, &id);
+    let bytes = tokio::task::spawn_blocking(move || agents::dir_size(&dir)).await.unwrap_or(0);
+    Ok(Json(json!({ "bytes": bytes })))
+}
+
 #[derive(Deserialize)]
 pub struct DeleteOpts {
     #[serde(default)]
@@ -1109,6 +1117,35 @@ pub(crate) mod tests {
         let card = &s["agents"][0];
         assert_eq!(card["days"], 14);
         assert_eq!(card["cost_usd"], 255.0, "the agent card still counts 14 days");
+    }
+
+    #[tokio::test]
+    async fn deleting_an_agent_with_purge_files_removes_its_workspace_and_without_it_keeps_it() {
+        use axum::extract::{Path, Query, State};
+        let st = crate::tasks::tests::state();
+        let outside = std::env::temp_dir().join(format!("loft-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("big"), vec![0u8; 5000]).unwrap();
+        let (a, b) = (crate::tasks::tests::agent(&st, "A"), crate::tasks::tests::agent(&st, "B"));
+        for id in [&a.id, &b.id] {
+            let ws = super::workspace(&st, id);
+            std::fs::create_dir_all(ws.join("clone/target")).unwrap();
+            std::fs::write(ws.join("notes.md"), "hello").unwrap();
+            std::fs::write(ws.join("clone/target/lib.rlib"), vec![0u8; 1000]).unwrap();
+            std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        }
+        let size = super::workspace_size(State(st.clone()), Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(size["bytes"], 1005, "symlinks aren't followed");
+
+        let del = |id: String, purge: &str| {
+            let uri: axum::http::Uri = format!("/?purge_files={purge}").parse().unwrap();
+            super::delete_agent(State(st.clone()), Path(id), Query::try_from_uri(&uri).unwrap())
+        };
+        let _ = del(a.id.clone(), "true").await.ok().unwrap();
+        assert!(!super::workspace(&st, &a.id).exists());
+        let _ = del(b.id.clone(), "false").await.ok().unwrap();
+        assert!(super::workspace(&st, &b.id).join("clone/target/lib.rlib").exists());
+        assert_eq!(std::fs::read(outside.join("big")).unwrap().len(), 5000, "a symlink's target is never touched");
     }
 
     #[tokio::test]

@@ -151,6 +151,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
+        .route("/agents/{id}/workspace-size", get(api::workspace_size))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/messages/{mid}/start-delivery", post(delivery::start_from_card))

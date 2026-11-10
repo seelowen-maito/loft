@@ -3,11 +3,15 @@ import SwiftUI
 struct AgentDetailView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(\.dismiss) private var dismiss
     let agentId: String
     @State private var confirmStop = false
     @State private var error: APIError?
     @State private var busy = false
     @State private var showAllActivity = false
+    @State private var confirmDelete = false
+    /// The workspace's size, fetched when Delete agent is tapped; nil when the server couldn't say.
+    @State private var workspaceBytes: Int64?
 
     var body: some View {
         if let agent = store.agent(agentId) {
@@ -142,6 +146,16 @@ struct AgentDetailView: View {
                 if let next = agent.nextRunAt, (agent.intervalMinutes ?? 0) > 0 { LabeledContent("Next wake-up", value: next.formatted(date: .omitted, time: .shortened)) }
                 if let last = agent.lastRunAt { LabeledContent("Last run", value: last.formatted(date: .abbreviated, time: .shortened)) }
             }
+
+            if agent.builtin != true {
+                Section {
+                    Button(role: .destructive) { askToDelete(agent) } label: {
+                        Label("Delete agent", systemImage: "trash").foregroundStyle(Theme.failure)
+                    }
+                    .disabled(!store.canWrite || busy)
+                    .accessibilityIdentifier("deleteAgent")
+                }
+            }
         }
         .navigationTitle(agent.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -155,7 +169,30 @@ struct AgentDetailView: View {
         } message: {
             Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
         }
+        .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
+            Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
+        } message: {
+            Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
+                 + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
+        }
         .errorAlert($error)
+    }
+
+    private func askToDelete(_ agent: Agent) {
+        busy = true
+        Task {
+            workspaceBytes = try? await store.workspaceSize(agent.id)
+            busy = false
+            confirmDelete = true
+        }
+    }
+
+    private func delete(_ agent: Agent, purgeFiles: Bool) {
+        act {
+            try await store.deleteAgent(agent.id, purgeFiles: purgeFiles)
+            dismiss()
+        }
     }
 
     @ViewBuilder private func actions(_ agent: Agent, state: AgentState) -> some View {
