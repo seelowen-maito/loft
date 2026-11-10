@@ -1029,12 +1029,8 @@ final class LoftStore {
     /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
     /// agents or a repo can reach, and says why.
     func saveBackupDir(_ dir: String) async throws {
-        let api = try requireWrite()
-        guard case .object(var o) = try await api.serverSettings() else { return }
-        o["backup_dir"] = .string(dir)
-        // Absent keeps the saved token; the empty one the server sends would clear it.
-        o["github_token"] = nil
-        _ = try await api.putServerSettings(.object(o))
+        // Only the folder: the server keeps every key left out, so a change made on the web meanwhile stays.
+        _ = try await requireWrite().putServerSettings(.object(["backup_dir": .string(dir)]))
     }
 
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {

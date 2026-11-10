@@ -2,6 +2,21 @@ import XCTest
 @testable import Loft
 
 final class BackupsTests: XCTestCase {
+    /// Choosing a folder sends only `backup_dir`, so a setting changed on the web since the last read isn't overwritten.
+    @MainActor
+    func testChoosingAFolderSendsOnlyTheFolder() async throws {
+        let api = FixtureAPI()
+        let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("bk-\(UUID()).json")))
+        store.activate()
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        try await store.saveBackupDir("/Volumes/Disk/Loft backups")
+        XCTAssertEqual(api.settingsPut.last, ["backup_dir": "/Volumes/Disk/Loft backups"])
+        let now = try await api.serverSettings()
+        XCTAssertEqual(now["backup_dir"], "/Volumes/Disk/Loft backups")
+        XCTAssertEqual(now["auto_update"], true, "the rest stays as saved")
+        store.deactivate()
+    }
+
     /// `GET /api/workspaces` and `POST /api/workspaces/clean` as the server answers them.
     func testDecodesWorkspaceSizesAndWhatCleanNowFreed() throws {
         let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000}],"free_bytes":14300000000,"low_disk_bytes":20000000000,"last_sweep":{"at":null,"removed":[],"freed_bytes":0}}"#
