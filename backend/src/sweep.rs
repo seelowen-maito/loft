@@ -36,7 +36,8 @@ const DEPTH: usize = 3;
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long a measured size is reused: Settings and the delete dialog reload often, and a walk is slow.
 const SIZE_FOR: Duration = Duration::from_secs(60);
-/// The last run's log, in Loft's data folder next to its database, out of the agents' reach.
+/// The last run's log, in Loft's data folder next to its database: outside the agents' workspaces, not out of
+/// their reach (they run as the same Mac user; see ADR 0004's threat model).
 const LOG_FILE: &str = "clean-log.json";
 /// Under a main clone in Clean: what keeping it costs.
 const KEPT: &str = "Kept: this is the agent's working copy. Its own build stays (e.g. backend/target or node_modules/), usually 1–5 GB, and the agent reuses it on its next build.";
@@ -1175,7 +1176,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_log_is_kept_in_loft_s_data_folder_out_of_the_agents_reach() {
+    async fn the_log_is_kept_in_loft_s_data_folder_outside_the_agents_workspaces() {
         let st = crate::tasks::tests::state();
         let (a, ws) = workspace_with_everything(&st, "Loft Tester");
         // One left where it used to be, which an agent could have written.
