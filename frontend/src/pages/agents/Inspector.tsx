@@ -325,7 +325,7 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
         {agent.builtin ? (
           <span className="self-center text-[12.5px] text-fg-3">{agent.name} comes with Loft and can't be deleted.</span>
         ) : !confirm ? (
-          <button className="btn border-bad/30 text-bad" onClick={() => setConfirm(true)}>
+          <button className="btn border-bad/30 text-bad" onClick={() => { setPurge(true); setConfirm(true); }}>
             <Trash2 className="size-3.5" /> Delete agent
           </button>
         ) : (

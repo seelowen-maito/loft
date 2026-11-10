@@ -45,7 +45,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
@@ -163,7 +162,7 @@ async fn serve() -> anyhow::Result<()> {
         .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/deliveries/resume", post(delivery::resume_route))
-        .route("/agents/{id}/uploads", post(uploads::upload).layer(DefaultBodyLimit::max(uploads::MAX_VIDEO_BYTES + 1)))
+        .route("/agents/{id}/uploads", post(uploads::upload))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
