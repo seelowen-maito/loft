@@ -816,6 +816,13 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("taskChips")
                     }
+                    if !message.tags.isEmpty {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { ForEach(message.tags) { TagChip(tag: $0) } }
+                            VStack(alignment: isUser ? .trailing : .leading, spacing: 4) { ForEach(message.tags) { TagChip(tag: $0) } }
+                        }
+                        .accessibilityIdentifier("tagChips")
+                    }
                     if message.videos.isEmpty || !message.displayContent.isEmpty {
                         CollapsibleText(text: message.displayContent)
                             .font(.body)

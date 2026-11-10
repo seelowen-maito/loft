@@ -186,6 +186,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   meta: ["mentions": .array([["id": "qa", "name": "QA Agent"]]), "mentions_only": true]),
                 m(11, "orch", "assistant", "text", "The iPhone 17 Pro on iOS 26.5. I can switch if you need another one.", 36,
                   meta: ["from_agent": ["id": "qa", "name": "QA Agent"], "mention_reply": true]),
+                m(21, "orch", "user", "text", "Is #42 still on track?", 35,
+                  meta: ["tags": .array([["tag": "#42", "kind": "spec", "title": "Implement settings functionality", "state": "open", "url": "https://github.com/octo/loft/issues/42", "task_id": "t1"]])]),
                 // A task handed to the orchestrator, and reports from the agents it delegated to (`meta.task_role`).
                 m(6, "orch", "user", "text", "[Task t6] Renew the domain\n\nThe loft.dev domain expires on Nov 3. Renew it for two years and turn on auto-renew.\n\n[Report progress on this task with update_task.]", 20,
                   meta: ["task_id": "t6", "task_role": "brief"]),

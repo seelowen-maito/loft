@@ -184,6 +184,17 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(composerValue(app), "@QA Agent ")
         XCTAssertFalse(qa.exists, "the list goes once one is picked")
 
+        // "#" lists specs, issues and PRs to tag; a pick puts its tag in the message, and the hint says both exist.
+        XCTAssertTrue(any("composerHint", app).exists)
+        field.tap()
+        field.typeText("see #")
+        let spec = app.buttons["tag-Implement settings functionality"]
+        XCTAssertTrue(spec.appears(timeout: 5), "the picker opens on #")
+        XCTAssertTrue(app.buttons["tag-Settings endpoints"].exists, "pull requests too")
+        spec.tap()
+        XCTAssertEqual(composerValue(app), "@QA Agent see #42 ", "same project: #N")
+        XCTAssertFalse(spec.exists, "the list goes once one is picked")
+
         app.buttons["Conversation options"].tap()
         // Once the menu is open, Grill me… would be in it: no waiting for something that shouldn't come.
         XCTAssertTrue(app.buttons["Agent details"].appears(timeout: 5))
@@ -195,6 +206,19 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(mic.appears(timeout: 5))
         mic.press(forDuration: 0.8)
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+    }
+
+    /// A sent message that tagged a spec shows a chip, and tapping it opens that item in the app.
+    func testTagChipOpensTheTaggedItem() {
+        let app = launch()
+        openOrchestratorChat(app)
+        XCTAssertTrue(text(containing: "Is #42 still on track?", app).appears(timeout: 5))
+        let chip = app.buttons["spec: Implement settings functionality"].firstMatch
+        XCTAssertTrue(chip.appears(timeout: 5), "the message's tag shows as a chip")
+        chip.tap()
+        let owner = text(containing: "octo-dev", app)
+        for _ in 0..<4 where !owner.appears(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(owner.exists, "the chip opens the spec's detail")
     }
 
     /// Spec #203: a video chosen in the composer uploads with progress, then goes with the message and plays inline

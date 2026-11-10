@@ -2,6 +2,8 @@
  * and the quick switcher's search. All kept per browser.
  * `storage` defaults to localStorage, read inside the try since it can throw when site data is blocked. */
 
+import type { PullRequest, Task } from "./api";
+
 type Store = Pick<Storage, "getItem" | "setItem">;
 type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">;
 
@@ -216,6 +218,43 @@ export function searchRows<T extends FoundRow>(rows: T[], query: string, limit =
     .map((x) => x.r)
     .slice(0, limit);
 }
+
+// ---- # tags in the chat ----
+/** The `#` token typed at the end of the text: `#18` or `#`. What's typed after the `#`, else undefined. */
+export const hashToken = (text: string) => /(?:^|[\s([{"'])#([^\s#]*)$/.exec(text)?.[1];
+
+export type TagRow = { kind: "spec" | "issue" | "pr"; title: string; tag: string; open: boolean; project: string; number: number | null };
+
+/** The tag to insert for a pick, as the backend reads it: `#N` in the agent's own project, `owner/repo#N` in another,
+ * the issue's id for a Loft-only issue. */
+export function tagRows(tasks: Task[], prs: PullRequest[], project: string): TagRow[] {
+  const mine = project.trim();
+  const fmt = (repo: string, number: number, name: string) => (mine && name === mine ? `#${number}` : `${repo}#${number}`);
+  const issues = tasks.map((t): TagRow => ({
+    kind: t.labels.some((l) => l.toLowerCase() === "spec") ? "spec" : "issue", title: t.title, project: t.project, number: t.github?.number ?? null, open: t.state === "open",
+    tag: t.github ? fmt(t.github.repo, t.github.number, t.project) : `#${t.id}`,
+  }));
+  // The same PR can be registered by more than one agent.
+  const unique = [...new Map(prs.map((p) => [p.url, p])).values()];
+  const pulls = unique.map((p): TagRow => {
+    const name = p.slug.split("/").pop() ?? p.slug;
+    return { kind: "pr", title: p.title, project: name, number: p.number, open: p.state === "open" || p.state === "", tag: fmt(p.slug, p.number, name) };
+  });
+  return [...issues, ...pulls];
+}
+
+/** The picker's rows for what's typed after `#`, in the ⌘K search's order: specs, issues, then pull requests.
+ * Nothing typed yet lists a few open ones of each. */
+export function tagMatches(rows: TagRow[], query: string): TagRow[] {
+  const per = query.trim() ? 4 : 3;
+  return (["spec", "issue", "pr"] as const).flatMap((k) => {
+    const of = rows.filter((r) => r.kind === k);
+    return query.trim() ? searchRows(of, query, per) : of.filter((r) => r.open).slice(0, per);
+  });
+}
+
+/** `text` with its trailing `#…` token replaced by the pick's tag and a space. */
+export const insertTag = (text: string, tag: string) => text.replace(/#[^\s#]*$/, `${tag} `);
 
 /** True while Settings records a combination, so no shortcut fires meanwhile. */
 export const recording = { on: false };
