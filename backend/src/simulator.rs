@@ -697,13 +697,13 @@ esac
         assert!(tidy(&st).await.is_empty(), "never during a run");
         // That run ended a minute ago.
         st.rt.lock().unwrap().running.remove(&a.id);
-        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(60));
+        st.db.update_agent(&a.id, |x| x.last_run_ended_at = ago(0)).unwrap();
         assert!(tidy(&st).await.is_empty(), "the timeout counts from the run's end");
         assert_eq!(state_of(&st, &udid).as_deref(), Some("Booted"));
         // The timeout is a setting.
         let mut s = st.settings.get();
         s.idle_timeout_hours = 1;
-        st.rt.lock().unwrap().ended.insert(a.id.clone(), std::time::SystemTime::now() - Duration::from_secs(2 * 3600));
+        st.db.update_agent(&a.id, |x| x.last_run_ended_at = ago(2)).unwrap();
         st.settings.save(s).unwrap();
         let lines = tidy(&st).await;
         assert_eq!(lines.len(), 1, "{lines:?}");

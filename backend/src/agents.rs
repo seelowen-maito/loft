@@ -58,8 +58,8 @@ pub fn idle(state: &AppState, a: &Agent, now: std::time::SystemTime) -> bool {
     if rt.running.contains_key(&a.id) {
         return false;
     }
-    let started = a.last_run_at.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(std::time::SystemTime::from);
-    let last = started.max(rt.ended.get(&a.id).copied());
+    let at = |t: &Option<String>| t.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(std::time::SystemTime::from);
+    let last = at(&a.last_run_at).max(at(&a.last_run_ended_at));
     last.is_none_or(|t| now.duration_since(t).unwrap_or_default() >= timeout)
 }
 
@@ -925,8 +925,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     }
                     (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
                     _ => {
+                        // Saved before the run stops counting as running, so a restart keeps the idle time.
+                        let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
                         rt.running.remove(&agent_id);
-                        rt.ended.insert(agent_id.clone(), std::time::SystemTime::now());
                         None
                     }
                 };
@@ -2121,6 +2122,19 @@ esac
         assert_eq!(std::fs::metadata(agent_file(&st, &a.id, "md")).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(system.contains("Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`)"), "agents may stop their own processes any way");
         assert!(!system.contains("never with `pkill -f`"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_end_is_saved_so_the_idle_time_survives_a_restart() {
+        let (st, a) = fake_claude_state();
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().last_run_ended_at.is_none());
+        run(&st, &a.id, "hello", 1).await;
+        let saved = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!(saved.last_run_ended_at.is_some());
+        // Started long ago, ended just now: not idle, even with nothing in memory.
+        st.db.update_agent(&a.id, |x| x.last_run_at = Some((chrono::Utc::now() - chrono::Duration::hours(9)).to_rfc3339())).unwrap();
+        let saved = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert!(!super::idle(&st, &saved, std::time::SystemTime::now()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
