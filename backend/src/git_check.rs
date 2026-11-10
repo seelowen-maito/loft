@@ -179,9 +179,16 @@ fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
     Ok(GitDirs { dir, common, configs })
 }
 
-/// A git file's text; None when it isn't there, an error past [`MAX_FILE`].
+/// A git file's text; None when it isn't there, an error past [`MAX_FILE`] or when it isn't a regular file
+/// (opening a FIFO would block).
 fn read_small(f: &Path) -> std::io::Result<Option<String>> {
     use std::io::Read;
+    match f.symlink_metadata() {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
     let file = match std::fs::File::open(f) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -317,7 +324,7 @@ mod tests {
     /// agent-local-storage with agent `a`: `origin.git` (bare, the remote) and `loft`, a clone of it with one
     /// pushed commit on main.
     fn setup() -> (PathBuf, PathBuf) {
-        let storage = std::env::temp_dir().join(format!("loft-gitcheck-{}", uuid::Uuid::new_v4()));
+        let storage = crate::testdir::for_this_test("gitcheck");
         let ws = storage.join("a");
         fs::create_dir_all(&ws).unwrap();
         let storage = storage.canonicalize().unwrap();
@@ -481,10 +488,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fifo_for_a_git_file_is_unknown_without_hanging() {
+        let (storage, loft) = setup();
+        assert!(Command::new("mkfifo").arg(loft.join(".git/packed-refs")).status().unwrap().success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo = loft.join(".git/packed-refs");
+        std::thread::spawn(move || tx.send(read_small(&fifo).is_err()));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "opening a FIFO blocks");
+        assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
+    }
+
+    #[tokio::test]
     async fn only_a_real_folder_at_the_top_of_the_agent_s_own_workspace_is_checked() {
         let (storage, loft) = setup();
-        let outside = storage.parent().unwrap().join(format!("loft-gitcheck-out-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&outside).unwrap();
+        let outside = crate::testdir::for_this_test("gitcheck-out").canonicalize().unwrap();
         std::os::unix::fs::symlink(&loft, storage.join("a/link")).unwrap();
         fs::create_dir_all(storage.join("a/plain")).unwrap();
         // A worktree whose `.git` points outside the workspace.
