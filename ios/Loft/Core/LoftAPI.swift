@@ -80,10 +80,17 @@ protocol LoftAPI: Sendable {
     func briefVoice(text: String) async throws -> VoiceBriefResponse
     /// Server-sent events; the caller handles reconnecting.
     func eventLines() async throws -> AsyncThrowingStream<String, Error>
+    /// Pairing (spec #164): ask to be paired, poll with the secret, or give the pending pairing up.
+    func startPairing(name: String) async throws -> PairingStart
+    func pollPairing(secret: String) async throws -> PairingPoll
+    func cancelPairing(secret: String) async throws
 }
 
 struct LiveLoftAPI: LoftAPI {
     let baseURL: URL
+    /// This app's pairing token for `baseURL`, from the Keychain; nil until paired (and always in the Simulator).
+    private let token: String?
+    var isPaired: Bool { token != nil }
     private let session: URLSession
     private let streamSession: URLSession
 
@@ -95,6 +102,7 @@ struct LiveLoftAPI: LoftAPI {
     init(baseURL: URL) {
         Self.madeLock.withLock { Self.made += 1 }
         self.baseURL = baseURL
+        token = ClientToken.load(for: baseURL)
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 15
         cfg.waitsForConnectivity = false
@@ -130,6 +138,7 @@ struct LiveLoftAPI: LoftAPI {
         if let timeout { req.timeoutInterval = timeout }
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONEncoder().encode(body)
@@ -145,6 +154,7 @@ struct LiveLoftAPI: LoftAPI {
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         Log.net.debug("\(method, privacy: .public) \(path, privacy: .public) → \(status) in \(Int(Date().timeIntervalSince(started) * 1000))ms")
         guard (200..<300).contains(status) else {
+            if status == 401 { Pairing.reportUnpaired() }
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
                 ?? HTTPURLResponse.localizedString(forStatusCode: status)
             throw APIError.server(status: status, message: message)
@@ -325,9 +335,20 @@ struct LiveLoftAPI: LoftAPI {
         try decode(VoiceBriefResponse.self, try await send("POST", "/voice/brief", body: ["text": .string(text)], timeout: LoftStore.briefTimeout))
     }
 
+    func startPairing(name: String) async throws -> PairingStart {
+        try decode(PairingStart.self, try await send("POST", "/pair", body: ["name": .string(name)]))
+    }
+
+    func pollPairing(secret: String) async throws -> PairingPoll {
+        try decode(PairingPoll.self, try await send("POST", "/pair/poll", body: ["secret": .string(secret)]))
+    }
+
+    func cancelPairing(secret: String) async throws { _ = try await send("POST", "/pair/cancel", body: ["secret": .string(secret)]) }
+
     func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         var req = URLRequest(url: url("/events"))
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let bytes: URLSession.AsyncBytes, resp: URLResponse
         do {
             (bytes, resp) = try await streamSession.bytes(for: req)
@@ -392,4 +413,7 @@ extension LoftAPI {
     func unregisterDevice(token: String) async throws { throw APIError.unsupported("Push") }
     func testPush(token: String) async throws { throw APIError.unsupported("Push") }
     func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { throw APIError.unsupported("Push") }
+    func startPairing(name: String) async throws -> PairingStart { throw APIError.unsupported("Pairing") }
+    func pollPairing(secret: String) async throws -> PairingPoll { throw APIError.unsupported("Pairing") }
+    func cancelPairing(secret: String) async throws {}
 }

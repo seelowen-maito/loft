@@ -40,8 +40,14 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let mode: Mode = args.contains("-fixture-offline") ? .offline
             : args.contains("-fixture-empty") ? .empty
             : args.contains("-fixture-fail-sends") ? .failSends : .normal
-        return FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
+        let api = FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
+        api.paired = !args.contains("-fixture-unpaired")
+        return api
     }
+
+    /// `-fixture-unpaired`: the server refuses this app until it pairs (code 4821, allowed on the second poll).
+    private var paired = true
+    private var pairPolls = 0
 
     /// What the sample issues are about (spec #144: the demo's issues open with a description).
     static let descriptions: [String: String] = [
@@ -742,7 +748,32 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Settings PUT so far, for tests to check what went to the server.
     private(set) var settingsPut: [JSONValue] = []
 
-    func serverSettings() async throws -> JSONValue { try check(); return locked { settings } }
+    func serverSettings() async throws -> JSONValue {
+        try check()
+        guard locked({ paired }) else {
+            Pairing.reportUnpaired()
+            throw APIError.server(status: 401, message: "pair this client with Loft first")
+        }
+        return locked { settings }
+    }
+
+    func startPairing(name: String) async throws -> PairingStart {
+        try check()
+        locked { pairPolls = 0 }
+        return PairingStart(secret: "fixture-secret", code: "4821", expiresIn: 120)
+    }
+
+    func pollPairing(secret: String) async throws -> PairingPoll {
+        try check()
+        return locked {
+            pairPolls += 1
+            guard pairPolls >= 2 else { return PairingPoll(status: "pending") }
+            paired = true
+            return PairingPoll(status: "allowed", token: "fixture-token")
+        }
+    }
+
+    func cancelPairing(secret: String) async throws {}
 
     func putServerSettings(_ s: JSONValue) async throws -> JSONValue {
         try check()

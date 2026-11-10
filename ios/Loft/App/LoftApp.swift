@@ -145,10 +145,13 @@ struct RootView: View {
     @Environment(Router.self) private var router
 
     var body: some View {
+        @Bindable var store = store
         VStack(spacing: 0) {
             if store.isDemo { DemoBanner() }
             main
         }
+        // Loft refused this app as unpaired (spec #164).
+        .sheet(isPresented: $store.showsPairing) { PairingView() }
     }
 
     @ViewBuilder private var main: some View {

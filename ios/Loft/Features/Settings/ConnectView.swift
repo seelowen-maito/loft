@@ -83,7 +83,7 @@ struct ConnectView: View {
                     .disabled(url == nil)
                     .accessibilityIdentifier("saveServer")
             } footer: {
-                Text("Loft has no login of its own: only devices on your tailnet can reach it. Keep it off the public internet.")
+                Text("Only devices on your tailnet can reach Loft, and only a paired iPhone or browser can change anything. Keep it off the public internet.")
             }
 
         }
