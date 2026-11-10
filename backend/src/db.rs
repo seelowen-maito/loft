@@ -637,6 +637,13 @@ CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
 );
+-- Clients the user paired with Loft (pairing.rs): the SHA-256 of each one's token, never the token.
+CREATE TABLE IF NOT EXISTS paired_clients (
+    hash TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
+);
 -- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it.
 CREATE TABLE IF NOT EXISTS agent_devices (
     agent_id TEXT PRIMARY KEY,
@@ -1250,6 +1257,40 @@ impl Db {
         let c = self.0.lock().unwrap();
         let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
+    }
+
+    pub fn add_paired_client(&self, hash: &str, name: &str) -> Result<()> {
+        let now = now();
+        self.0.lock().unwrap().execute("INSERT INTO paired_clients (hash, name, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)", params![hash, name, now])?;
+        Ok(())
+    }
+
+    pub fn paired_client_count(&self) -> i64 {
+        self.0.lock().unwrap().query_row("SELECT COUNT(*) FROM paired_clients", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// Whether a client with this token hash is paired; counts as its use.
+    pub fn use_paired_client(&self, hash: &str) -> bool {
+        let now = now();
+        self.0.lock().unwrap().execute("UPDATE paired_clients SET last_used_at = ?1 WHERE hash = ?2", params![now, hash]).is_ok_and(|n| n > 0)
+    }
+
+    /// Every paired client as (token hash, name, paired, last used), most recently used first.
+    pub fn paired_clients(&self) -> Result<Vec<(String, String, String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT hash, name, created_at, last_used_at FROM paired_clients ORDER BY last_used_at DESC")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Unpairs the client whose token hash starts with this id. False when none does.
+    pub fn forget_paired_client(&self, id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE substr(hash, 1, 16) = ?1", params![id])? > 0)
+    }
+
+    /// Unpairs every client but the one with this token hash; how many went.
+    pub fn unpair_all_but(&self, hash: &str) -> Result<usize> {
+        Ok(self.0.lock().unwrap().execute("DELETE FROM paired_clients WHERE hash != ?1", params![hash])?)
     }
 
     /// The database file, for backups (backup.rs), which read it through a connection of their own.

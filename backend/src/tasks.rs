@@ -1237,6 +1237,7 @@ pub(crate) mod tests {
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
             xcode: Arc::new(Default::default()),
+            pairing: Arc::new(Default::default()),
         }
     }
 

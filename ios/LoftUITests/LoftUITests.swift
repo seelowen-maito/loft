@@ -793,6 +793,68 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["testConnection"].isEnabled)
     }
 
+    /// Spec #164: the Simulator never pairs. A server that refuses this app brings up the pairing screen, which
+    /// only says why, and Settings says pairing is off here.
+    func testTheSimulatorRefusesToPair() {
+        let app = launch(["-fixture-unpaired"])
+        XCTAssertTrue(any("pairingRefusal", app).appears(timeout: 10), "an unpaired app is asked to pair")
+        XCTAssertTrue(text(containing: "never pairs the iOS Simulator", app).exists)
+        XCTAssertFalse(any("pairingCode", app).exists, "no code: it never asks Loft to pair")
+        app.buttons["pairingNotNow"].tap()
+        XCTAssertTrue(any("pairingRefusal", app).disappears(timeout: 5))
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Off in the Simulator", app).appears(timeout: 5))
+    }
+
+    /// Spec #164: on fixture data the pairing screen shows the code to compare, waits, and closes once allowed.
+    func testPairingShowsTheCodeAndClosesWhenAllowed() {
+        let app = launch(["-fixture-unpaired", "-fixture-pairing"])
+        let code = any("pairingCode", app)
+        XCTAssertTrue(code.appears(timeout: 10), "the code to compare")
+        XCTAssertEqual(code.label, "Code 4 8 2 1", "read digit by digit")
+        XCTAssertTrue(code.disappears(timeout: 10), "allowed: the screen closes")
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Paired", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["pairThisIPhone"].exists)
+    }
+
+    /// #170: Settings lists the paired devices and marks this one; Forget this device and Unpair all remove the
+    /// others, and forgetting this iPhone brings back the pairing screen.
+    func testPairedDevicesForgetAndUnpairAll() {
+        let app = launch(["-fixture-unpaired", "-fixture-pairing"])
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10))
+        XCTAssertTrue(any("pairingCode", app).disappears(timeout: 10))
+        app.buttons["settingsButton"].tap()
+        let link = app.buttons["pairedDevices"]
+        XCTAssertTrue(link.appears(timeout: 5))
+        link.tap()
+        XCTAssertTrue(any("pairedClient-c1", app).appears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).label.contains("This device"))
+        XCTAssertTrue(any("pairedClient-c2", app).exists && any("pairedClient-c3", app).exists)
+        app.buttons["forget-c3"].tap()
+        XCTAssertTrue(any("pairedClient-c3", app).disappears(timeout: 5))
+        app.buttons["unpairAll"].tap()
+        app.sheets.buttons["Unpair all"].firstMatch.tap()
+        XCTAssertTrue(any("pairedClient-c2", app).disappears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).exists, "this iPhone stays paired")
+        XCTAssertFalse(app.buttons["unpairAll"].isEnabled)
+        app.buttons["forget-c1"].tap()
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10), "forgot itself: the pairing screen is back")
+    }
+
+    /// Spec #164: the demo never pairs, and says so.
+    func testTheDemoRefusesToPair() {
+        let app = XCUIApplication()
+        app.launchArguments = Self.onboardingLaunchArguments
+        app.launch()
+        enterDemo(app)
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Off in the demo", app).appears(timeout: 5))
+        app.buttons["pairThisIPhone"].tap()
+        XCTAssertTrue(text(containing: "never pairs with a Mac", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["pairingOpenDemo"].exists, "already in the demo")
+    }
+
     /// Types the demo address on the connect screen (launched with `onboardingLaunchArguments`).
     private func enterDemo(_ app: XCUIApplication) {
         let field = app.textFields["serverAddressField"]
