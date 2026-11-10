@@ -61,6 +61,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             resume_to: String::new(),
             stall_reason: String::new(),
             stalled_at: String::new(),
+            stalled_on: vec![],
             done_at: String::new(),
             tech_debt: vec![],
             ready_retry: false,
@@ -213,14 +214,28 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
             continue;
         }
         if w.step.waiting(&d) {
-            stall(state, &d, if failed { "run_failed" } else { "no_call" });
+            let ticket = match &w.step {
+                Step::Build { ticket, .. } | Step::Review { ticket, .. } => Some(*ticket),
+                _ => None,
+            };
+            stall(state, &d, if failed { "run_failed" } else { "no_call" }, ticket.into_iter().collect());
         }
     }
 }
 
 /// Marks `d` stalled with `reason`, remembering the state to go back to. Only a Delivery whose step an
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`).
-fn stall(state: &AppState, d: &Delivery, reason: &str) -> Option<Delivery> {
+fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>) -> Option<Delivery> {
+    // Already stalled: another ticket's step joins the ones that stall it.
+    if d.state == "stalled" && !tickets.is_empty() {
+        return update(state, &d.repo, d.spec, |d| {
+            for n in &tickets {
+                if !d.stalled_on.contains(n) {
+                    d.stalled_on.push(*n);
+                }
+            }
+        });
+    }
     if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") {
         return None;
     }
@@ -228,6 +243,7 @@ fn stall(state: &AppState, d: &Delivery, reason: &str) -> Option<Delivery> {
     update(state, &d.repo, d.spec, |d| {
         d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
         (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
+        d.stalled_on = tickets;
     })
 }
 
@@ -252,7 +268,7 @@ pub fn stall_lost_runs(state: &AppState) {
                 _ => true,
             };
             if lost
-                && let Some(d) = stall(state, &d, "restart")
+                && let Some(d) = stall(state, &d, "restart", d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review")).map(|t| t.number).collect())
             {
                 state.rt.lock().unwrap().news_at_start.insert(stalled_item_id(&d));
             }
@@ -260,12 +276,13 @@ pub fn stall_lost_runs(state: &AppState) {
     }
 }
 
-/// The call a stalled Delivery waited on came after all (say the user nudged the agent): it carries on.
-fn unstalled(state: &AppState, d: Delivery) -> Delivery {
+/// The call a stalled Delivery waited on for ticket #n came after all (say the user nudged the agent): it
+/// carries on, unless another ticket still stalls it.
+fn unstalled(state: &AppState, d: Delivery, n: i64) -> Delivery {
     if d.state != "stalled" {
         return d;
     }
-    update(state, &d.repo.clone(), d.spec, Delivery::unstall).unwrap_or(d)
+    update(state, &d.repo.clone(), d.spec, |d| d.clear_stall(n)).unwrap_or(d)
 }
 
 /// Adds a published ticket to its spec's Delivery, after the tickets that block it. One already there is left as it is.
@@ -664,7 +681,7 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             return Err(format!("{name} is already with {}.", dev.name));
         }
         let d = update(state, &d.repo, d.spec, |d| {
-            d.unstall();
+            d.clear_stall(n);
             if d.current == Some(n) {
                 d.dev = dev.id.clone();
             }
@@ -968,7 +985,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     refuse_behind(state, &d).await?;
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
-    let d = unstalled(state, d);
+    let d = unstalled(state, d, n);
     let d = update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.state = "review".into();
@@ -1054,13 +1071,13 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             return Ok(format!("Posted your pass on {on}.{labelled} {name} waits for its other reviewers."));
         }
         // The last verdict: the review step is done, so a stalled Delivery carries on.
-        let d = unstalled(state, d);
+        let d = unstalled(state, d, n);
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Posted your pass on {on}.{labelled}{closed}"));
     }
 
     // Changes end the review step for every reviewer: the ticket goes back to the Dev (or the user).
-    let d = unstalled(state, d);
+    let d = unstalled(state, d, n);
     let rounds = t.rounds + 1;
     let stuck = rounds >= MAX_ROUNDS;
     update(state, &slug, d.spec, |d| {
@@ -2142,7 +2159,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
             .map_err(|e| format!("Couldn't post the verdict on #{pr}: {e}. Call review_ticket again."))?;
         format!("#{pr}")
     };
-    let d = unstalled(state, d);
+    let d = if d.state == "stalled" { update(state, &slug, d.spec, Delivery::unstall).unwrap_or(d) } else { d };
     let filed_line = match (filed.0.is_empty(), filed.1.is_empty()) {
         (true, true) => String::new(),
         _ => format!(" Tech debt: {}{}.", filed.0.join(", "), filed.1),

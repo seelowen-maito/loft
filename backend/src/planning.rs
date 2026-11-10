@@ -2833,6 +2833,47 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_stall_stays_while_a_ticket_that_caused_it_waits_whatever_happens_to_the_others() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-stall-per-ticket";
+        let (a, m) = planned(&st, &fake, "dl-stall-per-ticket", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-stall-per-ticket", "lead");
+        let first = busy(&st, "First", "dl-stall-per-ticket", "dev");
+        busy(&st, "Second", "dl-stall-per-ticket", "dev");
+        let third = busy(&st, "Third", "dl-stall-per-ticket", "dev");
+        busy(&st, "Tester", "dl-stall-per-ticket", "qa");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
+
+        // First's run ends without submitting #41: the Delivery stalls on it.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).stalled_on), ("stalled", vec![41]));
+
+        // Reassigning and submitting #42 leave it stalled on #41.
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Third", "reassign": true })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &third, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stalled_on.as_slice()), ("stalled", &[41][..]));
+
+        // Resuming wakes First on #41 again.
+        let before = woken(&st, &first).len();
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(woken(&st, &first).len() > before);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stalled_on.len()), ("running", 0));
+
+        // Moving #41 itself, the ticket that stalled it, clears the stall.
+        run_starts(&st, &first);
+        crate::delivery::run_ended(&st, &first.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "stalled");
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "running");
+    }
+
+    #[tokio::test]
     async fn a_lead_whose_main_project_is_another_one_assigns_the_specs_tickets() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-lead-multi", vec![ticket("Store", &[])]).await;
