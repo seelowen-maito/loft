@@ -2774,6 +2774,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_lead_reassigns_a_started_ticket_but_not_one_under_review() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-reassign";
+        let (a, m) = planned(&st, &fake, "dl-reassign", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-reassign", "lead");
+        let first = busy(&st, "First", "dl-reassign", "dev");
+        let second = busy(&st, "Second", "dl-reassign", "dev");
+        busy(&st, "Tester", "dl-reassign", "qa");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second" })).await.unwrap_err();
+        assert!(err.contains("already with a Dev") && err.contains("reassign"), "{err}");
+
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        assert!(woken(&st, &second).last().is_some_and(|p| p.contains("build ticket #41 \"Store\"")));
+        let shown = crate::delivery::delivery_json(&st, &delivery(&st, slug));
+        assert_eq!(shown["tickets"][0]["agent_name"].as_str(), Some("Second"));
+        assert!(tool(&st, &first, "submit_ticket", submit_41()).await.unwrap_err().contains("is with Second"));
+        tool(&st, &second, "submit_ticket", submit_41()).await.unwrap();
+
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First", "reassign": true })).await.unwrap_err();
+        assert!(err.contains("under review"), "{err}");
+    }
+
+    #[tokio::test]
     async fn a_lead_whose_main_project_is_another_one_assigns_the_specs_tickets() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-lead-multi", vec![ticket("Store", &[])]).await;

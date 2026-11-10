@@ -634,17 +634,48 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     if d.state != "running" {
         return Err(format!("{name} can't be assigned: its Delivery isn't running."));
     }
-    if t.state != "open" || !t.agent.is_empty() {
-        return Err(format!("{name} can't be assigned: it's {}.", if t.agent.is_empty() { "not open" } else { "already with a Dev" }));
+    let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
+    if !reassign && (t.state != "open" || !t.agent.is_empty()) {
+        return Err(format!("{name} can't be assigned: it's {}.", match (t.state.as_str(), t.agent.is_empty()) {
+            (_, true) => "not open".to_string(),
+            ("review", _) => "under review: reassign it once its round ends".to_string(),
+            ("started", _) => "already with a Dev (pass `reassign: true` to move it to another)".to_string(),
+            _ => "already with a Dev".to_string(),
+        }));
     }
     let open: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
-    if !open.is_empty() {
+    if !reassign && !open.is_empty() {
         return Err(format!("{name} is blocked by {}: assign it once they close.", open.join(", ")));
     }
     let key = args["dev"].as_str().unwrap_or("").trim();
     let agents = state.db.list_agents().map_err(|e| e.to_string())?;
     let dev = agents.iter().find(|a| a.id == key || a.name.eq_ignore_ascii_case(key)).filter(|a| is_team_dev(&d, a));
     let dev = dev.ok_or_else(|| format!("{key:?} isn't a Dev on your team."))?;
+    if reassign {
+        let old = t.agent.clone();
+        if old == dev.id {
+            return Err(format!("{name} is already with {}.", dev.name));
+        }
+        let d = update(state, &d.repo, d.spec, |d| {
+            if d.current == Some(n) {
+                d.dev = dev.id.clone();
+            }
+            if let Some(x) = d.ticket_mut(n) {
+                x.agent = dev.id.clone();
+            }
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
+        let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+        if d.local {
+            note(state, &t.id, &dev.id, &format!("Reassigned to {} by the Lead.", dev.name));
+        }
+        if let Some(old) = agents.iter().find(|a| a.id == old) {
+            crate::agents::fyi_from_agent(state, me, old, &format!("{name} is now with {}: the Lead moved it. Don't submit it; your commits stay on the spec branch.", dev.name));
+        }
+        let step = Step::Build { ticket: n, round: t.rounds };
+        crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, Some(n)), true, dev_brief(state, &d, t), wake_for(&d, step));
+        return Ok(format!("{name} moved to {}: Loft woke them with the ticket and told the previous Dev.", dev.name));
+    }
     begin(state, &d, n, dev).await?;
     Ok(format!("{name} is with {}: Loft woke them with the ticket.", dev.name))
 }
@@ -774,7 +805,8 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "As the Lead on a Delivery: hand a ready ticket to a Dev of the team. Loft sets the ticket's agent and wakes the Dev with its brief. Hand several ready tickets to different Devs at once; a ticket still blocked by an open ticket is refused.",
         "inputSchema": { "type": "object", "properties": {
             "ticket": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft." },
-            "dev": { "type": "string", "description": "The Dev's name." }
+            "dev": { "type": "string", "description": "The Dev's name." },
+            "reassign": { "type": "boolean", "description": "true to move a ticket that is already started (or back with its Dev for changes) to another Dev, keeping its commits and rounds. Refused while it's under review." }
         }, "required": ["ticket", "dev"] }
     }), json!({
         "name": "submit_ticket",
