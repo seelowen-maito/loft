@@ -579,10 +579,12 @@ final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
-    func send(_ text: String, to agentId: String, meta: JSONValue? = nil) async {
+    /// `images`: uploads to send with the text (a video); with them the text may be empty.
+    func send(_ text: String, to agentId: String, meta: JSONValue? = nil, images: [String] = []) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let p = PendingMessage(id: UUID().uuidString, agentId: agentId, text: text, createdAt: Date(), meta: meta)
+        guard !text.isEmpty || !images.isEmpty else { return }
+        let p = PendingMessage(id: UUID().uuidString, agentId: agentId, text: text, createdAt: Date(), meta: meta,
+                               images: images.isEmpty ? nil : images)
         pending.append(p)
         await deliverUncancelled(p)
     }
@@ -667,6 +669,16 @@ final class LoftStore {
         return (r.text, "cleaned \(VoiceLog.clip(text)) → \(VoiceLog.clip(r.text))")
     }
 
+    /// Uploads a file to the agent's chat uploads; the server's name for it, to send with a message.
+    func upload(_ file: URL, to agentId: String, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        guard canWrite else { throw APIError.offline }
+        guard let api else { throw APIError.notConfigured }
+        return try await api.upload(agentId: agentId, file: file, progress: progress)
+    }
+
+    /// Where an upload plays from.
+    func uploadURL(agentId: String, file: String) -> URL? { api?.uploadURL(agentId: agentId, file: file) }
+
     /// Retry a failed send. The same client id goes up, so the server drops it if the first try did land.
     func retry(_ p: PendingMessage) async {
         guard let i = pending.firstIndex(where: { $0.id == p.id }) else { return }
@@ -683,7 +695,7 @@ final class LoftStore {
         do {
             guard canWrite else { throw APIError.offline }
             guard let api else { throw APIError.notConfigured }
-            let r = try await api.sendMessage(agentId: p.agentId, text: p.text, clientId: p.id, meta: p.meta)
+            let r = try await api.sendMessage(agentId: p.agentId, text: p.text, clientId: p.id, meta: p.meta, images: p.images ?? [])
             if let m = r.message { insert(m) }
             pending.removeAll { $0.id == p.id }
         } catch {

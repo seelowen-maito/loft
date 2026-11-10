@@ -31,6 +31,23 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
                             meta: ["client_id": .string(clientId)], createdAt: .now)
         return SendMessageResponse(ok: true, queued: false, duplicate: false, message: m)
     }
+    /// Each send's uploads, in order.
+    var sentImages: [[String]] = []
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
+        sentImages.append(images)
+        return try await sendMessage(agentId: agentId, text: text, clientId: clientId)
+    }
+    /// What an upload reports before answering `uploadName`, or fails with `uploadError`.
+    var uploadSteps: [Double] = [0.5, 1]
+    var uploadName = "v1.mp4"
+    var uploadError: APIError?
+    private(set) var uploadsMade = 0
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        uploadsMade += 1
+        for p in uploadSteps { progress(p); try await Task.sleep(for: .milliseconds(30)) }
+        if let uploadError { throw uploadError }
+        return uploadName
+    }
     func runNow(agentId: String) async throws {}
     func stopRun(agentId: String) async throws {}
     func restartRun(agentId: String) async throws {}

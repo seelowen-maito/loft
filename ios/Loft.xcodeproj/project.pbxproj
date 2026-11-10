@@ -339,6 +339,7 @@
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loft;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Loft uses the camera to record a video you send to an agent.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loft uses the microphone to turn what you say into a message you can review before sending.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Loft turns your voice into text, on this iPhone where iOS supports your language. The text is sent only when you tap Send or say “send it”.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -373,6 +374,7 @@
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Loft;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Loft uses the camera to record a video you send to an agent.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Loft uses the microphone to turn what you say into a message you can review before sending.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Loft turns your voice into text, on this iPhone where iOS supports your language. The text is sent only when you tap Send or say “send it”.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

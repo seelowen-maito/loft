@@ -197,6 +197,33 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
     }
 
+    /// Spec #203: a video chosen in the composer uploads with progress, then goes with the message and plays inline
+    /// with its length. Photos is another process, so `-fixture-video` stands in for picking it there.
+    func testSendingAVideo() throws {
+        let video = try XCTUnwrap(Bundle(for: Self.self).path(forResource: "sample-video", ofType: "mp4"))
+        let app = launch(["-fixture-video", video])
+        openQAChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["chooseVideo"].tap()
+        XCTAssertTrue(any("videoChip", app).appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Video · 0:06"].appears(timeout: 5), "its length")
+        XCTAssertTrue(app.progressIndicators["Uploading"].appears(timeout: 3), "the upload's progress")
+        XCTAssertFalse(app.buttons["sendButton"].isEnabled, "the message waits for the upload")
+        XCTAssertTrue(app.staticTexts["Ready to send"].appears(timeout: 5))
+
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("What happens here?")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(any("videoChip", app).disappears(timeout: 5), "it went with the message")
+        XCTAssertTrue(any("chatVideo", app).appears(timeout: 5), "an inline player")
+        XCTAssertTrue(any("chatVideo", app).label.contains("0:06"), any("chatVideo", app).label)
+        XCTAssertTrue(app.staticTexts["What happens here?"].exists)
+        XCTAssertFalse(app.buttons["retrySend"].exists)
+    }
+
     /// The agent screen shows the agent's group and its projects, main first.
     func testAgentDetailsShowGroupAndProjects() {
         let app = launch()
