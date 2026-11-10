@@ -486,9 +486,9 @@ export type WorkspaceSizes = {
 /** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
 export type CleanSkip = { agent: string; rel: string; reason: string };
 /** What Clean (one agent) or Clean all would remove: build folders by agent, and what it skips. `path` is absolute;
- * `command` is the equivalent `rm -rf`, to read or copy (Loft removes by path). */
+ * `command` is the equivalent `rm -rf`, to read or copy (Loft removes by path); `note` says why it goes whatever its age. */
 export type CleanPlan = {
-  folders: { agent: string; path: string; rel: string; bytes: number; changed: string; command: string }[];
+  folders: { agent: string; path: string; rel: string; bytes: number; changed: string; command: string; note?: string }[];
   skipped: CleanSkip[];
   total_bytes: number;
 };

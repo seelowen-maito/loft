@@ -97,6 +97,7 @@ struct CleanSheet: View {
                     Toggle(isOn: Binding(get: { !unticked.contains(f.path) }, set: { on in tick([f.path], on) })) {
                         Text(f.rel).font(.footnote.monospaced()).lineLimit(1).truncationMode(.middle)
                         Text("\(bytes(f.bytes)) · changed \(f.changed.formatted(.relative(presentation: .named)))")
+                        if let note = f.note, !note.isEmpty { Text(note).foregroundStyle(Theme.attentionInk) }
                         Text(f.command).font(.caption2.monospaced()).textSelection(.enabled)
                     }
                 }

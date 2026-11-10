@@ -47,6 +47,8 @@ pub struct Folder {
     pub changed: DateTime<Local>,
     /// The shell command equivalent to its removal, for the user to read or copy; Loft removes by path.
     pub command: String,
+    /// Why it goes whatever its age, like "duplicate of .cargo-build"; empty for plain build output.
+    pub note: String,
 }
 
 /// What a clean leaves, and why.
@@ -280,6 +282,8 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
     let recent = if idle >= IDLE { "younger than 3 days" } else { "changed in the last hour" };
     let mut clones = vec![];
     find_clones(ws, DEPTH, &mut clones);
+    let shared = ws.join(".cargo-build");
+    let shared_dir = shared.symlink_metadata().is_ok_and(|m| m.is_dir());
     let mut all_idle = true;
     for clone in clones {
         let (mut builds, mut links) = (vec![], vec![]);
@@ -288,37 +292,53 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
         p.skipped.extend(links.iter().map(|l| skip(id, &rel(l), "symlink")));
         if now.duration_since(newest).unwrap_or_default() < idle {
             all_idle = false;
+            if shared_dir {
+                duplicates(root, id, &builds, &rel, p);
+            }
             if !builds.is_empty() {
                 p.skipped.push(skip(id, &rel(&clone), recent));
             }
             continue;
         }
         for b in builds {
-            folder(root, id, &rel(&b), b, newest, p);
+            folder(root, id, &rel(&b), b, newest, "", p);
         }
     }
     // Compiled dependencies all the workspace's clones share: kept while any of them is in use.
-    let shared = ws.join(".cargo-build");
-    if let Ok(m) = shared.symlink_metadata()
-        && m.is_dir()
-    {
+    if shared_dir {
         if all_idle {
-            folder(root, id, ".cargo-build", shared, m.modified().unwrap_or(now), p);
+            let changed = shared.metadata().and_then(|m| m.modified()).unwrap_or(now);
+            folder(root, id, ".cargo-build", shared, changed, "", p);
         } else {
             p.skipped.push(skip(id, ".cargo-build", recent));
         }
     }
 }
 
+/// With the workspace's `.cargo-build/` holding the build, what a Cargo `target/` still has besides binaries
+/// (`<profile>/deps`, `incremental` and `build`) is left over from before, and goes whatever its age.
+fn duplicates(root: &Path, id: &str, builds: &[PathBuf], rel: &dyn Fn(&Path) -> String, p: &mut Plan) {
+    for target in builds.iter().filter(|b| b.file_name().is_some_and(|n| n == "target")) {
+        for (_, profile) in subdirs(target) {
+            for (name, dir) in subdirs(&profile) {
+                if ["deps", "incremental", "build"].contains(&name.as_str()) {
+                    let changed = dir.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                    folder(root, id, &rel(&dir), dir, changed, "duplicate of .cargo-build", p);
+                }
+            }
+        }
+    }
+}
+
 /// Adds `path` to the plan when it is a real directory inside `root`.
-fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, p: &mut Plan) {
+fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, note: &str, p: &mut Plan) {
     if !path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
         p.skipped.push(skip(id, rel, "outside agent-local-storage"));
         return;
     }
     let bytes = size(&path);
     let command = rm_command(&path);
-    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command });
+    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command, note: note.into() });
 }
 
 /// `rm -rf <path>`, quoted for the shell when it needs to be.
@@ -771,6 +791,41 @@ mod tests {
         let line = r.lines.iter().find(|l| l.path.ends_with("loft/target")).unwrap();
         assert_eq!(line.bytes, before);
         assert!(before >= 4096, "a 1-byte file takes a block: {before}");
+    }
+
+    #[test]
+    fn with_cargo_build_a_fresh_clone_s_duplicate_cargo_output_goes_and_its_binary_stays() {
+        let storage = temp();
+        let ws = storage.join("a");
+        clone(&ws.join("loft"));
+        for f in ["target/debug/deps/x.rlib", "target/debug/incremental/x", "target/debug/build/x", "target/release/deps/y.rlib"] {
+            file(&ws.join("loft").join(f));
+        }
+        file(&ws.join(".cargo-build/debug/deps/x.rlib"));
+
+        // Changed just now: only the duplicates go, for Clean and the daily sweep alike.
+        for idle in [RECENT, IDLE] {
+            let p = plan(&storage, None, &|_| false, SystemTime::now(), idle);
+            let mut rels: Vec<_> = p.folders.iter().map(|f| (f.rel.as_str(), f.note.as_str())).collect();
+            rels.sort();
+            let dup = "duplicate of .cargo-build";
+            assert_eq!(rels, [("loft/target/debug/build", dup), ("loft/target/debug/deps", dup), ("loft/target/debug/incremental", dup), ("loft/target/release/deps", dup)]);
+        }
+        let r = sweep(&storage, None, &|_| false, SystemTime::now(), IDLE);
+        assert_eq!(r.removed, 4);
+        assert!(ws.join("loft/target/debug/app").exists(), "the binary stays");
+        assert!(!ws.join("loft/target/debug/deps").exists());
+        assert!(ws.join(".cargo-build/debug/deps/x.rlib").exists(), "the shared build stays while its clone is in use");
+        assert!(ws.join("loft/frontend/node_modules/vite/index.js").exists(), "fresh build output stays");
+    }
+
+    #[test]
+    fn without_cargo_build_a_fresh_clone_keeps_its_cargo_output() {
+        let storage = temp();
+        let ws = storage.join("a");
+        clone(&ws.join("loft"));
+        file(&ws.join("loft/target/debug/deps/x.rlib"));
+        assert!(plan(&storage, None, &|_| false, SystemTime::now(), IDLE).folders.is_empty());
     }
 
     #[test]

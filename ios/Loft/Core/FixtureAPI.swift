@@ -629,7 +629,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let folders: [CleanPlan.Folder] = [
             .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/backend/target"),
             .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed, command: "rm -rf \(ws)/a2/loft/frontend/node_modules"),
-            .init(agent: "a3", path: "\(ws)/a3/.cargo-build", rel: ".cargo-build", bytes: 300_000_000, changed: changed.addingTimeInterval(-86400), command: "rm -rf \(ws)/a3/.cargo-build"),
+            .init(agent: "a3", path: "\(ws)/a3/homebase/backend/target/debug/deps", rel: "homebase/backend/target/debug/deps", bytes: 2_100_000_000, changed: Date().addingTimeInterval(-1200),
+                  command: "rm -rf \(ws)/a3/homebase/backend/target/debug/deps", note: "duplicate of .cargo-build"),
         ].filter { agentId == nil || $0.agent == agentId }
         let skipped = agentId == nil ? [CleanSkip(agent: "a1", rel: "", reason: "agent is working"), CleanSkip(agent: "a3", rel: "homebase", reason: "changed in the last hour")] : []
         return CleanPlan(folders: folders, skipped: skipped, totalBytes: folders.reduce(0) { $0 + $1.bytes })

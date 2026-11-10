@@ -405,9 +405,11 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
                       <span className="min-w-0 flex-1">
                         <span className="flex gap-2">
                           <span className="min-w-0 flex-1 truncate font-mono text-fg-2">{f.rel}</span>
+                          {f.note && <span className="hidden shrink-0 text-warn sm:inline">{f.note}</span>}
                           <span className="hidden shrink-0 text-fg-3 sm:inline">{timeAgo(f.changed)}</span>
                           <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(f.bytes)}</span>
                         </span>
+                        {f.note && <span className="block text-[11.5px] text-warn sm:hidden">{f.note}</span>}
                         <span className="block break-all font-mono text-[11.5px] text-fg-3">{f.command}</span>
                       </span>
                     </label>

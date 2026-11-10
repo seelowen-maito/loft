@@ -39,6 +39,8 @@ struct CleanPlan: Codable, Hashable {
         var changed: Date
         /// The equivalent `rm -rf`, to read or copy; the Mac removes by path.
         var command: String
+        /// Why it goes whatever its age, like "duplicate of .cargo-build"; empty or nil for plain build output.
+        var note: String?
         var id: String { path }
     }
 
