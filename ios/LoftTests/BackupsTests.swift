@@ -81,7 +81,7 @@ final class BackupsTests: XCTestCase {
     func testDecodesAgentDevicesAndTheirLogLines() throws {
         let json = #"{"devices":[{"udid":"U1","name":"Loft Dev (Loft)","state":"Booted","bytes":2878722048,"agent":{"id":"a","name":"Loft Dev"}},{"udid":"U2","name":"Loft Lead (Loft)","state":"Shutdown","bytes":5,"agent":{"id":"b","name":"Loft Lead"}}]}"#
         let d = try JSONCoding.decoder.decode(AgentDevices.self, from: Data(json.utf8)).devices
-        XCTAssertEqual(d.map(\.agent.name), ["Loft Dev", "Loft Lead"])
+        XCTAssertEqual(d.map(\.agent?.name), ["Loft Dev", "Loft Lead"])
         XCTAssertEqual(d.map(\.stateText), ["Booted", "Shut down"])
         XCTAssertEqual(d.first?.bytes, 2_878_722_048)
 
