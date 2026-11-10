@@ -211,7 +211,7 @@ pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) 
 }
 
 /// Each agent's projects by id, main first.
-fn projects(state: &AppState) -> HashMap<String, Vec<String>> {
+pub(crate) fn projects(state: &AppState) -> HashMap<String, Vec<String>> {
     let agents = state.db.list_agents().unwrap_or_default();
     agents.into_iter().map(|a| (a.id, if a.projects.is_empty() { vec![a.project].into_iter().filter(|p| !p.is_empty()).collect() } else { a.projects })).collect()
 }
@@ -516,7 +516,7 @@ fn item(agent: &str, rel: String, path: PathBuf) -> Item {
 
 /// The main clone of each of `projects` in `ws`, as folder name → project: a clone whose `.git/config` (read as a
 /// file, no git run) names a remote of that project. Of several, the one named after the project.
-fn main_clones(ws: &Path, projects: &[String]) -> HashMap<String, String> {
+pub(crate) fn main_clones(ws: &Path, projects: &[String]) -> HashMap<String, String> {
     let last = |p: &str| p.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
     let mut found: Vec<(String, String)> = vec![];
     for (name, dir) in subdirs(ws) {

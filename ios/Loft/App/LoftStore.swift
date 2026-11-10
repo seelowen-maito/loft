@@ -1078,6 +1078,7 @@ final class LoftStore {
     func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
     func cleanPreview(agentId: String?) async throws -> [CleanItem] { try await requireWrite().cleanPreview(agentId: agentId) }
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { try await requireWrite().cleanFolders(agentId: agentId, rel: rel) }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { try await requireWrite().cleanCheck(agentId: agentId, rel: rel) }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { try await requireWrite().clean(agentId: agentId, paths: paths) }
     func cleanLog() async throws -> CleanLog { try await requireWrite().cleanLog() }
     func agentDevices() async throws -> [AgentDevice] { try await requireWrite().agentDevices() }

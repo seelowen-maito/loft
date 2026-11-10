@@ -59,6 +59,17 @@ struct CleanItem: Codable, Hashable, Identifiable {
     var canTick: Bool { blocked.isEmpty && !(opens && !label.isEmpty) }
     /// The `rm -rf` shown under it; none when it can't be removed.
     var shownCommand: String { canTick ? command : "" }
+    /// It gets a Check button: a clone or worktree (only top-level items are).
+    var canCheck: Bool { kind == "clone" || kind == "worktree" }
+}
+
+/// `POST /api/workspaces/clean/check`: whether a clone or worktree is safe to delete. `state` is "safe" (clean and
+/// pushed), "unsafe" (unpushed commits or uncommitted changes) or "unknown" (the Mac wouldn't run git there).
+struct GitCheck: Codable, Hashable {
+    var state: String
+    var lines: [String]
+    /// "✅ Clean, all pushed: safe to delete" or "⚠️ 2 commits not pushed (main) · …".
+    var text: String { "\(state == "safe" ? "✅" : state == "unsafe" ? "⚠️" : "❔") \(lines.joined(separator: " · "))" }
 }
 
 struct CleanListing: Codable, Hashable {

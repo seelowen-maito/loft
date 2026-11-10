@@ -662,6 +662,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 : cleanItem(agentId, "\(rel)/\(name)", "folder", bytes, hoursAgo: 0.3, ticked: false, opens: true)
         }
     }
+    /// Each state Check can show: the main clone clean and pushed, a clone with unpushed work, a worktree it won't check.
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck {
+        try check()
+        try? await Task.sleep(for: .milliseconds(400))
+        switch rel {
+        case "loft": return GitCheck(state: "safe", lines: ["Clean, all pushed: safe to delete", "the agent clones it again on its next ticket"])
+        case "loft-review": return GitCheck(state: "unsafe", lines: ["2 commits not pushed (fix/260-clean-handles)", "Uncommitted changes (3 files)"])
+        default: return GitCheck(state: "unknown", lines: ["Can't check: unusual git config"])
+        }
+    }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let items = try await cleanPreview(agentId: agentId) + cleanFolders(agentId: "a2", rel: "loft/backend") + cleanFolders(agentId: "a2", rel: "loft/frontend")
         let lines = items.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil, command: $0.command) }

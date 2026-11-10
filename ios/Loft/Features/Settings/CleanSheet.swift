@@ -29,6 +29,8 @@ struct CleanSheet: View {
     @State private var log: CleanLog?
     @State private var error: APIError?
     @State private var copied = false
+    /// Check results by path; nil while checking. Git runs only when the user taps, and nothing gets ticked.
+    @State private var checks: [String: GitCheck?] = [:]
 
     private var agentId: String? {
         if case .preview(let a) = start { return a }
@@ -103,8 +105,19 @@ struct CleanSheet: View {
                 .accessibilityIdentifier("cleanSummary")
         }
         ForEach(groupedByAgent(items, \.agent), id: \.agent) { group in
-            Section("\(name(group.agent)) · \(bytes(group.items.reduce(0) { $0 + $1.bytes }))") {
+            Section {
                 rows(group.items, depth: 0)
+            } header: {
+                HStack {
+                    Text("\(name(group.agent)) · \(bytes(group.items.reduce(0) { $0 + $1.bytes }))")
+                    Spacer()
+                    if group.items.contains(where: \.canCheck) {
+                        Button("Check all") { checkAll(group.items) }
+                            .font(.caption)
+                            .textCase(nil)
+                            .accessibilityIdentifier("checkAll-\(group.agent)")
+                    }
+                }
             }
         }
         commandsSection(chosen.map { ($0.agent, $0.command) })
@@ -157,13 +170,58 @@ struct CleanSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
                 if !i.label.isEmpty { Text(i.label).font(.caption).foregroundStyle(Theme.accent) }
                 if !i.blocked.isEmpty { Text(i.blocked).font(.caption).foregroundStyle(Theme.attentionInk) }
-                if on && !i.warning.isEmpty { Text(i.warning).font(.caption).foregroundStyle(Theme.attentionInk) }
+                if on && !i.warning.isEmpty && checks[i.path] == nil { Text(i.warning).font(.caption).foregroundStyle(Theme.attentionInk) }
+                if i.canCheck { checkLine(i) }
                 if !i.note.isEmpty { Text(i.note).font(.caption).foregroundStyle(.secondary) }
                 if !i.shownCommand.isEmpty { Text(i.shownCommand).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled) }
             }
         }
         .padding(.leading, CGFloat(depth) * 16)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("cleanItem-\(i.rel)")
+    }
+
+    @ViewBuilder
+    private func checkLine(_ i: CleanItem) -> some View {
+        switch checks[i.path] {
+        case .some(.none):
+            HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Checking git…") }.font(.caption).foregroundStyle(.secondary)
+        case .some(.some(let c)):
+            Text(c.text).font(.caption)
+                .foregroundStyle(c.state == "safe" ? Color.green : c.state == "unsafe" ? Theme.attentionInk : Color.secondary)
+                .accessibilityIdentifier("check-\(i.rel)")
+            checkButton("Check again", i)
+        case .none:
+            checkButton("Check", i)
+        }
+    }
+
+    /// A 44 pt tall tap target, whatever the caption's size.
+    private func checkButton(_ title: String, _ i: CleanItem) -> some View {
+        Button { check(i) } label: {
+            Text(title).font(.caption).frame(minWidth: 44, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("checkButton-\(i.rel)")
+    }
+
+    private func check(_ i: CleanItem) {
+        Task { await runCheck(i) }
+    }
+
+    private func runCheck(_ i: CleanItem) async {
+        checks[i.path] = .some(nil)
+        let c: GitCheck
+        do { c = try await store.cleanCheck(agentId: i.agent, rel: i.rel) } catch {
+            c = GitCheck(state: "unknown", lines: ["Can't check: \(APIError.from(error).localizedDescription)"])
+        }
+        checks[i.path] = .some(c)
+    }
+
+    private func checkAll(_ items: [CleanItem]) {
+        Task {
+            for i in items where i.canCheck { await runCheck(i) }
+        }
     }
 
     private func open(_ i: CleanItem) {
