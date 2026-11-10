@@ -11,7 +11,7 @@ import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx }
 /* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable).
  * The filters and options sit in a bar on top and live in the URL. */
 
-type View = Ctx & { specs: Task[]; issues: Task[]; o: BoardOptions; openSpec: (id: string) => void; openTicket: (id: string) => void };
+type View = Ctx & { specs: Task[]; issues: Task[]; loaded: boolean; o: BoardOptions; openSpec: (id: string) => void; openTicket: (id: string) => void };
 
 const CAP = 12;
 
@@ -52,12 +52,12 @@ function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: bool
 
 /** An issue as a card: opens in the modal. */
 function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
-  const a = t.agent_id ? agentById.get(t.agent_id) : undefined, closed = t.state !== "open";
+  const a = t.agent_id ? agentById.get(t.agent_id) : undefined, closed = t.state === "closed";
   return (
     <button onClick={() => open(t.id)} className={cx("panel block w-full text-left transition-colors hover:bg-white/[0.04]", dense ? "p-2" : "p-3")}>
       <div className="flex items-start gap-1.5">
         {closed ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-merged" aria-label="Closed" /> : <CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" aria-label="Open" />}
-        <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12.5px]" : "text-[13px]", closed && "text-fg-3")}>{t.title}</span>
+        <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12.5px]" : "text-[13px] [overflow-wrap:anywhere]", closed && "text-fg-3")}>{t.title}</span>
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10.5px] text-fg-3">
         <Origin github={!!t.github} />
@@ -104,7 +104,7 @@ function Cards(v: View) {
                 {sec.specs.map((t) => <IssueCard key={t.id} t={t} dense={v.o.dense} agentById={v.agentById} open={v.openTicket} />)}
               </div>
             ))}
-            {!v.issues.length && <Empty text="Nothing here" />}
+            {v.loaded && !v.issues.length && <Empty text="Nothing here" />}
           </div>
         </section>
       )}
@@ -184,8 +184,8 @@ function Options({ params, setParams }: { params: URLSearchParams; setParams: (n
 }
 
 /** The whole page of the board. `issues` are the Issues column (see `boardIssues`); `kept` are the specs the shared filters and the board's options let through (see `boardSpecs`). */
-export function BoardPage({ kept, issues, params, setParams, openSpec, openTicket, ...c }: Ctx & {
-  kept: Task[]; issues: Task[]; params: URLSearchParams; setParams: (n: URLSearchParams) => void; openSpec: (id: string) => void; openTicket: (id: string) => void;
+export function BoardPage({ kept, issues, loaded, params, setParams, openSpec, openTicket, ...c }: Ctx & {
+  kept: Task[]; issues: Task[]; loaded: boolean; params: URLSearchParams; setParams: (n: URLSearchParams) => void; openSpec: (id: string) => void; openTicket: (id: string) => void;
 }) {
   const o = parseBoard(params);
   const [all, setAll] = useState(false);
@@ -193,11 +193,11 @@ export function BoardPage({ kept, issues, params, setParams, openSpec, openTicke
   const shipped = kept.filter((s) => stageOf(s, deliveryOf(s, c.deliveries)) === "shipped");
   const hidden = all ? [] : shipped.slice(CAP);
   const shown = kept.filter((s) => !hidden.includes(s));
-  const v: View = { ...c, specs: shown, issues, o, openSpec, openTicket };
+  const v: View = { ...c, specs: shown, issues, loaded, o, openSpec, openTicket };
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <Options params={params} setParams={setParams} />
-      {!c.deliveries.length && <div className="px-4 pt-3 font-mono text-[11px] text-fg-3">Loading Deliveries…</div>}
+      {!loaded && <div className="px-4 pt-3 font-mono text-[11px] text-fg-3">Loading Deliveries…</div>}
       <div className="flex min-h-0 flex-1 flex-col pt-3">
         <Cards {...v} />
         {hidden.length > 0 && o.type !== "issues" && <button onClick={() => setAll(true)} className="mx-4 mb-3 mt-1 self-start rounded-full border border-line px-3 py-1 font-mono text-[11px] text-fg-3 hover:text-fg">Show {hidden.length} older shipped</button>}
