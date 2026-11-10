@@ -2,7 +2,7 @@
 //!
 //! Clean (one agent) and Clean all list each workspace's top-level items (`GET /api/workspaces/clean/preview`)
 //! and remove the ones the user ticks (`POST /api/workspaces/clean`). Each project's main clone, `notes/` and
-//! `uploads/` start unticked; everything else starts ticked. A main clone opens up to its own folders, one level
+//! `uploads/` start unticked, and so do all the clones of an agent with no project; everything else starts ticked. A main clone opens up to its own folders, one level
 //! at a time (`GET /api/workspaces/clean/folders`), so the user can remove just `backend/target`; its `.git`
 //! never goes, and neither does the clone itself. A working agent's items can't be removed, and each path is
 //! checked again just before it goes.
@@ -374,7 +374,8 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
             continue;
         }
         let ws = root.join(&id);
-        let mains = main_clones(&ws, &projects(&id));
+        let projects = projects(&id);
+        let mains = main_clones(&ws, &projects);
         let working = busy(&id);
         let mut items: Vec<Item> = std::fs::read_dir(&ws)
             .into_iter()
@@ -386,6 +387,9 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
                 let dir = i.kind == "folder";
                 if let Some(project) = mains.get(&name) {
                     (i.label, i.note, i.warning, i.ticked, i.opens) = (format!("main clone of {project}"), KEPT.into(), String::new(), false, true);
+                } else if projects.is_empty() && matches!(i.kind, "clone" | "worktree") {
+                    // Any of them may be its working copy.
+                    (i.label, i.ticked) = ("agent has no project: can't tell its main clone".into(), false);
                 } else if dir && name == "notes" {
                     (i.label, i.ticked) = ("reports and notes".into(), false);
                 } else if dir && name == "uploads" {
@@ -503,9 +507,6 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
     if parts.len() < 2 || parts[0].starts_with('.') {
         return Err("not in a workspace");
     }
-    if parts.contains(&".git") {
-        return Err("git history: never deleted");
-    }
     let mut p = root.to_path_buf();
     for (i, part) in parts.iter().enumerate() {
         p.push(part);
@@ -516,6 +517,14 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
         if i + 1 < parts.len() && !m.is_dir() {
             return Err("no longer there");
         }
+    }
+    // APFS finds a name whatever its case or Unicode form (`.GIT` is `.git`, `LOFT` is `loft`), so the names
+    // below are compared only once the path is spelled as it is on disk.
+    if p.canonicalize().ok().as_deref() != Some(p.as_path()) {
+        return Err("not the name on disk");
+    }
+    if parts.contains(&".git") {
+        return Err("git history: never deleted");
     }
     let main = mains(parts[0]).contains_key(parts[1]);
     match (parts.len(), main) {
@@ -864,6 +873,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_with_no_project_starts_with_all_its_clones_unticked() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dineout Security");
+        let a = st.db.update_agent(&a.id, |a| (a.project, a.projects) = (String::new(), vec![])).unwrap().unwrap();
+        let ws = crate::agents::workspace(&st, &a.id);
+        clone_of(&ws.join("api"), "git@github.com:dineout/api.git");
+        clone_of(&ws.join("api-old"), "git@github.com:dineout/api.git");
+        file(&ws.join("wt1895/src/x.cs"));
+        fs::write(ws.join("wt1895/.git"), "gitdir: ../api/.git/worktrees/wt1895\n").unwrap();
+        file(&ws.join("scratch/out.json"));
+        let ws = ws.canonicalize().unwrap();
+
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
+        for n in ["api", "api-old", "wt1895"] {
+            let i = by(n);
+            assert_eq!((i.label.as_str(), i.ticked, i.blocked.as_str(), i.opens), ("agent has no project: can't tell its main clone", false, "", false), "{i:?}");
+        }
+        assert!(by("scratch").ticked && by("scratch").label.is_empty());
+        // Still the user's to tick.
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join("api-old")]).await;
+        assert_eq!(l.removed, 1, "{l:?}");
+        assert!(!ws.join("api-old").exists() && ws.join("api/src/main.rs").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn only_ticked_items_go_and_kept_ones_stay() {
         let st = crate::tasks::tests::state();
         let (a, ws) = workspace_with_everything(&st, "Loft Tester");
@@ -941,6 +976,35 @@ mod tests {
         // Clean all takes any agent's.
         let l = clean_paths(&st, None, vec![other.join("scratch")]).await;
         assert_eq!((l.removed, l.lines[0].agent.as_str()), (1, b.id.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_path_spelled_unlike_the_disk_is_refused_whatever_its_case_or_unicode_form() {
+        let st = crate::tasks::tests::state();
+        let (a, ws) = workspace_with_everything(&st, "Loft Tester");
+        let nfc = "caf\u{e9}";
+        file(&ws.join(nfc).join("x"));
+        let root = ws.parent().unwrap().to_path_buf();
+        let upper = root.join(a.id.to_uppercase());
+        let paths = vec![ws.join("loft/.GIT"), ws.join("loft/.Git/objects"), ws.join("LOFT"), ws.join("Loft/frontend"), ws.join("cafe\u{301}"), upper.join("loft"), upper.join("scratch")];
+        // Clean on the agent, and Clean all while it runs: the uppercase id names it too on APFS.
+        let l = clean_paths(&st, Some(&a.id), paths.clone()).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        let l = clean_paths(&st, None, paths).await;
+        assert_eq!(l.removed, 0, "{l:?}");
+        st.rt.lock().unwrap().running.remove(&a.id);
+        for kept in ["loft/.git/HEAD", "loft/src/main.rs", "loft/frontend/node_modules/vite/index.js", "scratch/out.json", "loft-old/src/main.rs"] {
+            assert!(ws.join(kept).exists(), "{kept} removed");
+        }
+        assert!(ws.join(nfc).join("x").exists());
+        for rel in ["loft/.GIT", "LOFT", "Loft/frontend"] {
+            assert_eq!(folders_of(&st, &a.id, rel).await.err(), Some(axum::http::StatusCode::BAD_REQUEST), "{rel} opened");
+        }
+        assert_eq!(folders_of(&st, &a.id.to_uppercase(), "loft").await.err(), Some(axum::http::StatusCode::BAD_REQUEST));
+        // The on-disk spelling still goes.
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join(nfc)]).await;
+        assert_eq!(l.removed, 1, "{l:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
