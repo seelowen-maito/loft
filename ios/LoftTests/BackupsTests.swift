@@ -17,9 +17,9 @@ final class BackupsTests: XCTestCase {
         store.deactivate()
     }
 
-    /// `GET /api/workspaces` and `POST /api/workspaces/clean` as the server answers them.
-    func testDecodesWorkspaceSizesAndWhatCleanFreed() throws {
-        let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000,"busy":false},{"id":"b","name":"Lead","bytes":1,"busy":true}],"free_bytes":14300000000,"low_disk_bytes":20000000000,"last_sweep":{"at":null,"removed":[],"freed_bytes":0}}"#
+    /// `GET /api/workspaces`, the clean preview and the clean log as the server answers them.
+    func testDecodesWorkspaceSizesTheCleanPreviewAndItsLog() throws {
+        let json = #"{"agents":[{"id":"a","name":"Dev","bytes":5000,"busy":false},{"id":"b","name":"Lead","bytes":1,"busy":true}],"free_bytes":14300000000,"low_disk_bytes":20000000000}"#
         let s = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.utf8))
         XCTAssertEqual(s.agents.first?.bytes, 5000)
         XCTAssertEqual(s.agents.map(\.busy), [false, true])
@@ -30,8 +30,24 @@ final class BackupsTests: XCTestCase {
         XCTAssertNil(old.agents.first?.busy)
         let ok = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.replacingOccurrences(of: "14300000000", with: "50000000000").utf8))
         XCTAssertFalse(ok.isLow)
-        let r = try JSONCoding.decoder.decode(SweepReport.self, from: Data(#"{"at":"2026-11-10T12:00:00+01:00","removed":["/x"],"freed_bytes":777}"#.utf8))
-        XCTAssertEqual(r.freedBytes, 777)
+
+        let plan = try JSONCoding.decoder.decode(CleanPlan.self, from: Data(#"""
+        {"folders":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"changed":"2026-11-10T13:20:01.123456789+00:00"}],
+         "skipped":[{"agent":"b","rel":"","reason":"agent is working"}],"total_bytes":700}
+        """#.utf8))
+        XCTAssertEqual(plan.folders.map(\.rel), ["loft/target"])
+        XCTAssertEqual(plan.skipped.first?.reason, "agent is working")
+        XCTAssertEqual(plan.totalBytes, 700)
+
+        let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
+        {"at":"2026-11-10T13:21:00.5+00:00","what":"Clean all","running":false,
+         "lines":[{"agent":"a","path":"/s/a/loft/target","rel":"loft/target","bytes":700,"error":null},{"agent":"a","path":"/s/a/x/node_modules","rel":"x/node_modules","bytes":0,"error":"Permission denied"}],
+         "skipped":[{"agent":"a","rel":"loft/ios/build","reason":"unticked"}],"freed_bytes":700,"removed":1,"failed":1}
+        """#.utf8))
+        XCTAssertEqual(log.freedBytes, 700)
+        XCTAssertEqual(log.lines.last?.error, "Permission denied")
+        XCTAssertEqual((log.removed, log.failed), (1, 1))
+        XCTAssertEqual(groupedByAgent(log.lines, \.agent).map(\.items.count), [2])
     }
 
     /// `GET /api/backups` as the server answers it (chrono's local times, with an offset).

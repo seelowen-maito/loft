@@ -6,7 +6,10 @@
 //! files kept. It skips running agents and agents with a live process (a dev server), never follows a symlink,
 //! and never removes anything outside the agents' folder (`agent-local-storage/`), so Loft's own checkout stays.
 //!
-//! Settings' Clean (one agent) and Clean all run the same sweep with no age limit.
+//! Settings' Clean (one agent) and Clean all remove build output older than an hour. Nothing goes blind: they
+//! first preview the folders (`GET /api/workspaces/clean/preview`), then remove the ones the user kept ticked
+//! (`POST /api/workspaces/clean`). Each run writes a log of what it removed, skipped and why, and the last one
+//! stays readable (`GET /api/workspaces/log`), the daily sweep's included.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
@@ -15,25 +18,86 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
 
 /// A clone untouched this long loses its build output.
 pub const IDLE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+/// Clean and Clean all leave a clone changed this recently: it is probably mid-build.
+pub const RECENT: Duration = Duration::from_secs(60 * 60);
 /// How deep in a workspace clones are looked for (`<workspace>/a/b/<clone>`).
 const DEPTH: usize = 3;
 /// How often the day's sweep runs.
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long a measured size is reused: Settings and the delete dialog reload often, and a walk is slow.
 const SIZE_FOR: Duration = Duration::from_secs(60);
+/// The last run's log, next to the workspaces (the sweep skips dotfiles there).
+const LOG_FILE: &str = ".clean-log.json";
 
-/// What a sweep removed and how much it freed.
+/// A build folder a clean would remove.
+#[derive(Clone, Debug, Serialize)]
+pub struct Folder {
+    pub agent: String,
+    pub path: PathBuf,
+    /// Inside the agent's workspace, like `loft/backend/target`.
+    pub rel: String,
+    pub bytes: u64,
+    /// The newest change to its clone, what the age rule goes by.
+    pub changed: DateTime<Local>,
+}
+
+/// What a clean leaves, and why.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Skip {
+    pub agent: String,
+    /// Inside the agent's workspace; empty for the whole workspace.
+    pub rel: String,
+    pub reason: String,
+}
+
+/// `GET /api/workspaces/clean/preview`: what a clean would remove and what it would skip.
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct Report {
+pub struct Plan {
+    pub folders: Vec<Folder>,
+    pub skipped: Vec<Skip>,
+    pub total_bytes: u64,
+}
+
+/// One removal: the folder and what it freed, or why it failed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Line {
+    pub agent: String,
+    pub path: PathBuf,
+    pub rel: String,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
+/// A run's log: each removal as it happens, what was skipped, and the totals.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Log {
     pub at: Option<DateTime<Local>>,
-    pub removed: Vec<PathBuf>,
+    /// "Clean", "Clean all", "Daily sweep" or "Sweep before update".
+    pub what: String,
+    pub running: bool,
+    pub lines: Vec<Line>,
+    pub skipped: Vec<Skip>,
     pub freed_bytes: u64,
+    pub removed: usize,
+    pub failed: usize,
+}
+
+impl Log {
+    fn push(&mut self, l: Line) {
+        if l.error.is_some() {
+            self.failed += 1;
+        } else {
+            self.removed += 1;
+            self.freed_bytes += l.bytes;
+        }
+        self.lines.push(l);
+    }
 }
 
 /// Under this much free disk, Needs you says the disk is almost full.
@@ -55,7 +119,7 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 }
 
 /// `GET /api/workspaces`: every agent's workspace size and whether it is busy (running or with a live process,
-/// so Clean skips it), the disk's free space and what the last sweep freed.
+/// so Clean skips it), and the disk's free space.
 pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) -> crate::api::ApiResult<serde_json::Value> {
     let agents = state.db.list_agents()?;
     let storage = state.cfg.storage_dir.clone();
@@ -74,47 +138,99 @@ pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) 
     })
     .await
     .unwrap_or_default();
-    let last = state.rt.lock().unwrap().sweep.clone();
-    Ok(axum::Json(serde_json::json!({ "agents": rows, "free_bytes": free, "low_disk_bytes": LOW_DISK, "last_sweep": last })))
+    Ok(axum::Json(serde_json::json!({ "agents": rows, "free_bytes": free, "low_disk_bytes": LOW_DISK })))
 }
 
-#[derive(serde::Deserialize)]
-pub struct CleanOpts {
+#[derive(Deserialize)]
+pub struct PreviewOpts {
     agent: Option<String>,
 }
 
-/// `POST /api/workspaces/clean[?agent=<id>]`: Clean all, or Clean on one agent. Removes build output of any age
-/// from every idle agent's workspace (or just that agent's) and answers what it freed.
-pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<CleanOpts>) -> axum::Json<Report> {
-    axum::Json(run(&state, q.agent.as_deref(), Duration::ZERO).await)
+/// `GET /api/workspaces/clean/preview[?agent=<id>]`: what Clean on that agent, or Clean all, would remove.
+pub async fn preview(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<PreviewOpts>) -> axum::Json<Plan> {
+    let p = tokio::task::spawn_blocking(move || {
+        let storage = &state.cfg.storage_dir;
+        let live = crate::processes::with_live_processes(storage);
+        let busy = |id: &str| live.contains(id) || state.rt.lock().unwrap().running.contains_key(id);
+        plan(storage, q.agent.as_deref(), &busy, SystemTime::now(), RECENT)
+    })
+    .await
+    .unwrap_or_default();
+    axum::Json(p)
+}
+
+#[derive(Deserialize)]
+pub struct CleanBody {
+    agent: Option<String>,
+    /// The previewed folders the user kept ticked.
+    paths: Vec<PathBuf>,
+}
+
+/// `POST /api/workspaces/clean`: removes the folders the user kept ticked in the preview of Clean (`agent`) or
+/// Clean all, those still on a fresh preview, and answers the log.
+pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, axum::Json(b): axum::Json<CleanBody>) -> axum::Json<Log> {
+    let what = if b.agent.is_some() { "Clean" } else { "Clean all" };
+    axum::Json(run(&state, Some(what), b.agent.as_deref(), RECENT, Some(b.paths)).await)
+}
+
+/// `GET /api/workspaces/log`: the running or last run's log, kept across restarts.
+pub async fn log(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<Log> {
+    let l = state.rt.lock().unwrap().clean.clone();
+    if l.at.is_some() {
+        return axum::Json(l);
+    }
+    let file = state.cfg.storage_dir.join(LOG_FILE);
+    let saved = tokio::fs::read(file).await.ok().and_then(|b| serde_json::from_slice(&b).ok());
+    axum::Json(saved.unwrap_or_default())
 }
 
 /// One sweep at a time.
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Sweeps every workspace but those of running agents and agents with a live process, or just `only`'s, removing
-/// the build output of clones untouched for `idle`. Returns what it removed, and records it as the last sweep
-/// when it swept every workspace.
-pub async fn run(state: &AppState, only: Option<&str>, idle: Duration) -> Report {
+/// Removes the build output of clones untouched for `idle` from every workspace but those of running agents and
+/// agents with a live process, or just from `only`'s; with `chosen`, only those of the folders. With `what`, the
+/// run's log is the one Settings shows, live and saved; without, it is only returned.
+pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str>, idle: Duration, chosen: Option<Vec<PathBuf>>) -> Log {
     let _one = RUNNING.lock().await;
-    let (st, all) = (state.clone(), only.is_none());
-    let only = only.map(str::to_string);
-    let r = tokio::task::spawn_blocking(move || {
+    let (st, only) = (state.clone(), only.map(str::to_string));
+    let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
         let live = crate::processes::with_live_processes(storage);
-        // Asked again for each clone, so a run that starts mid-sweep keeps its build output.
+        // Asked again before each removal, so a run that starts mid-sweep keeps its build output.
         let busy = |id: &str| live.contains(id) || st.rt.lock().unwrap().running.contains_key(id);
-        sweep(storage, only.as_deref(), &busy, SystemTime::now(), idle)
+        let mut p = plan(storage, only.as_deref(), &busy, SystemTime::now(), idle);
+        let mut log = Log { at: Some(Local::now()), what: what.unwrap_or_default().into(), running: true, ..Default::default() };
+        if let Some(chosen) = chosen {
+            let (keep, unticked): (Vec<_>, Vec<_>) = p.folders.into_iter().partition(|f| chosen.contains(&f.path));
+            log.skipped.extend(unticked.into_iter().map(|f| Skip { agent: f.agent, rel: f.rel, reason: "unticked".into() }));
+            p.folders = keep;
+        }
+        log.skipped.extend(p.skipped);
+        let show = |log: &Log| {
+            if what.is_some() {
+                st.rt.lock().unwrap().clean = log.clone();
+            }
+        };
+        show(&log);
+        let root = storage.canonicalize().unwrap_or_default();
+        apply(&root, p.folders, &busy, &mut |l| {
+            log.push(l);
+            show(&log);
+        });
+        log.running = false;
+        show(&log);
+        if what.is_some()
+            && let Err(e) = serde_json::to_vec(&log).map_err(std::io::Error::other).and_then(|b| std::fs::write(storage.join(LOG_FILE), b))
+        {
+            tracing::warn!("sweep: can't save the log: {e}");
+        }
+        log
     })
     .await
     .unwrap_or_default();
-    tracing::info!("sweep freed {} bytes in {} folders: {:?}", r.freed_bytes, r.removed.len(), r.removed);
+    tracing::info!("sweep freed {} bytes in {} folders, {} failed", log.freed_bytes, log.removed, log.failed);
     *SIZES.lock().unwrap() = None;
-    // One deleted agent's sweep isn't what Settings shows as the last one.
-    if all {
-        state.rt.lock().unwrap().sweep = r.clone();
-    }
-    r
+    log
 }
 
 /// The day's sweep, the first right after Loft starts.
@@ -122,46 +238,90 @@ pub async fn scheduler(state: AppState) {
     let mut tick = tokio::time::interval(EVERY);
     loop {
         tick.tick().await;
-        run(&state, None, IDLE).await;
+        run(&state, Some("Daily sweep"), None, IDLE, None).await;
     }
 }
 
-/// Sweeps the clones untouched for `idle` in the workspaces in `storage` (or only `only`'s) as of `now`, skipping
-/// the agents `busy` names.
-pub fn sweep(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Report {
-    let mut r = Report { at: Some(Local::now()), ..Default::default() };
-    let Ok(root) = storage.canonicalize() else { return r };
+/// What a clean of the workspaces in `storage` (or only `only`'s) would remove as of `now`: the build output of
+/// clones untouched for `idle`, in workspaces of agents `busy` doesn't name.
+pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Plan {
+    let mut p = Plan::default();
+    let Ok(root) = storage.canonicalize() else { return p };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
-        // `.agent-files` and the like are Loft's; a symlinked workspace leads outside.
-        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-        if id.starts_with('.') || !is_dir || only.is_some_and(|o| o != id) || busy(&id) {
+        // `.agent-files` and the like are Loft's.
+        if id.starts_with('.') || only.is_some_and(|o| o != id) {
             continue;
         }
-        workspace(&root, &e.path(), now, idle, &|| busy(&id), &mut r);
+        let Ok(t) = e.file_type() else { continue };
+        if t.is_symlink() {
+            // It leads outside.
+            p.skipped.push(skip(&id, "", "symlink"));
+        } else if t.is_dir() && busy(&id) {
+            p.skipped.push(skip(&id, "", "agent is working"));
+        } else if t.is_dir() {
+            workspace(&root, &id, &e.path(), now, idle, &mut p);
+        }
     }
-    r
+    p.total_bytes = p.folders.iter().map(|f| f.bytes).sum();
+    p
 }
 
-fn workspace(root: &Path, ws: &Path, now: SystemTime, idle: Duration, busy: &dyn Fn() -> bool, r: &mut Report) {
+fn skip(agent: &str, rel: &str, reason: &str) -> Skip {
+    Skip { agent: agent.into(), rel: rel.into(), reason: reason.into() }
+}
+
+fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, p: &mut Plan) {
+    let rel = |path: &Path| path.strip_prefix(ws).unwrap_or(path).to_string_lossy().to_string();
+    let recent = if idle >= IDLE { "younger than 3 days" } else { "changed in the last hour" };
     let mut clones = vec![];
     find_clones(ws, DEPTH, &mut clones);
     let mut all_idle = true;
     for clone in clones {
-        let mut builds = vec![];
+        let (mut builds, mut links) = (vec![], vec![]);
         let mut newest = git_time(&clone);
-        walk(&clone, &mut builds, &mut newest);
-        if now.duration_since(newest).unwrap_or_default() < idle || busy() {
+        walk(&clone, &mut builds, &mut links, &mut newest);
+        p.skipped.extend(links.iter().map(|l| skip(id, &rel(l), "symlink")));
+        if now.duration_since(newest).unwrap_or_default() < idle {
             all_idle = false;
+            if !builds.is_empty() {
+                p.skipped.push(skip(id, &rel(&clone), recent));
+            }
             continue;
         }
         for b in builds {
-            remove(root, &b, r);
+            folder(root, id, &rel(&b), b, newest, p);
         }
     }
     // Compiled dependencies all the workspace's clones share: kept while any of them is in use.
-    if all_idle && !busy() {
-        remove(root, &ws.join(".cargo-build"), r);
+    let shared = ws.join(".cargo-build");
+    if let Ok(m) = shared.symlink_metadata()
+        && m.is_dir()
+    {
+        if all_idle {
+            folder(root, id, ".cargo-build", shared, m.modified().unwrap_or(now), p);
+        } else {
+            p.skipped.push(skip(id, ".cargo-build", recent));
+        }
+    }
+}
+
+/// Adds `path` to the plan when it is a real directory inside `root`.
+fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, p: &mut Plan) {
+    if !path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+        p.skipped.push(skip(id, rel, "outside agent-local-storage"));
+        return;
+    }
+    let bytes = size(&path);
+    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into() });
+}
+
+/// Removes the folders, reporting each as it goes; an agent that started working keeps its.
+fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &mut dyn FnMut(Line)) {
+    for f in folders {
+        let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
+        let bytes = if error.is_none() { f.bytes } else { 0 };
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error });
     }
 }
 
@@ -197,22 +357,26 @@ fn is_build(parent: &Path, name: &str) -> bool {
         _ => false,
     }
 }
-
-/// Collects the clone's build folders and the newest change to anything else in it, stopping at nested clones.
-fn walk(dir: &Path, builds: &mut Vec<PathBuf>, newest: &mut SystemTime) {
+/// Collects the clone's build folders, the symlinked ones it leaves, and the newest change to anything else in
+/// it, stopping at nested clones.
+fn walk(dir: &Path, builds: &mut Vec<PathBuf>, links: &mut Vec<PathBuf>, newest: &mut SystemTime) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         // Not followed: a symlink's own metadata.
         let Ok(meta) = e.metadata() else { continue };
         *newest = (*newest).max(meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+        let build = name == ".build" || name == ".cargo-build" || is_build(dir, &name);
+        if meta.is_symlink() && build {
+            links.push(e.path());
+        }
         if !meta.is_dir() || name == ".git" {
             continue;
         }
         let path = e.path();
-        if name == ".build" || name == ".cargo-build" || is_build(dir, &name) {
+        if build {
             builds.push(path);
         } else if path.join(".git").symlink_metadata().is_err() {
-            walk(&path, builds, newest);
+            walk(&path, builds, links, newest);
         }
     }
 }
@@ -232,20 +396,16 @@ fn git_time(clone: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// Removes `path` when it is a real directory inside `root`, adding it and its size to the report.
-fn remove(root: &Path, path: &Path, r: &mut Report) {
-    if !path.symlink_metadata().is_ok_and(|m| m.is_dir()) || !path.canonicalize().is_ok_and(|p| p.starts_with(root)) {
-        return;
+/// Removes `path` when it is still a real directory inside `root`.
+fn remove(root: &Path, path: &Path) -> Result<(), String> {
+    if !path.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+        return Err("no longer a folder".into());
     }
-    let size = du(path);
+    if !path.canonicalize().is_ok_and(|p| p.starts_with(root)) {
+        return Err("outside agent-local-storage".into());
+    }
     // Removes symlinks inside, not what they point at.
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => {
-            r.removed.push(path.to_path_buf());
-            r.freed_bytes += size;
-        }
-        Err(e) => tracing::warn!("sweep: can't remove {}: {e}", path.display()),
-    }
+    std::fs::remove_dir_all(path).map_err(|e| e.to_string())
 }
 
 /// Measured sizes, by path: when and how big.
@@ -306,8 +466,31 @@ mod tests {
         SystemTime::now() + Duration::from_secs(4 * 24 * 60 * 60)
     }
 
-    fn query(q: &str) -> axum::extract::Query<CleanOpts> {
-        axum::extract::Query::try_from_uri(&format!("/{q}").parse().unwrap()).unwrap()
+    /// Plans and removes everything, as the daily sweep does.
+    fn sweep(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Log {
+        let p = plan(storage, only, busy, now, idle);
+        let mut log = Log { skipped: p.skipped, ..Default::default() };
+        apply(&storage.canonicalize().unwrap(), p.folders, busy, &mut |l| log.push(l));
+        log
+    }
+
+    impl Log {
+        fn removed_paths(&self) -> Vec<PathBuf> {
+            self.lines.iter().filter(|l| l.error.is_none()).map(|l| l.path.clone()).collect()
+        }
+    }
+
+    async fn preview_of(st: &AppState, agent: Option<&str>) -> Plan {
+        let q = agent.map(|a| format!("/?agent={a}")).unwrap_or("/".into());
+        let axum::Json(p) = preview(axum::extract::State(st.clone()), axum::extract::Query::try_from_uri(&q.parse().unwrap()).unwrap()).await;
+        p
+    }
+
+    /// Previews Clean (or Clean all) and confirms every folder it shows.
+    async fn clean_all_shown(st: &AppState, agent: Option<&str>) -> Log {
+        let paths = preview_of(st, agent).await.folders.into_iter().map(|f| f.path).collect();
+        let axum::Json(l) = clean(axum::extract::State(st.clone()), axum::Json(CleanBody { agent: agent.map(Into::into), paths })).await;
+        l
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -319,35 +502,98 @@ mod tests {
         fs::write(ws.join("big.bin"), vec![0u8; 5000]).unwrap();
         clone(&ws.join("loft"));
         file(&ws.join("notes/plan.md"));
+        // Built two hours ago: well under the daily sweep's 3 days.
+        age_by(&ws, Duration::from_secs(2 * 60 * 60));
         let other = crate::agents::workspace(&st, &b.id);
         clone(&other.join("loft"));
+        age_by(&other, Duration::from_secs(2 * 60 * 60));
         let axum::Json(v) = sizes(axum::extract::State(st.clone())).await.unwrap();
         let row = |v: &serde_json::Value| v["agents"].as_array().unwrap().iter().find(|r| r["id"] == a.id.as_str()).unwrap().clone();
         let before = row(&v)["bytes"].as_u64().unwrap();
         assert!(before >= 5000, "{}", row(&v));
         assert_eq!(row(&v)["busy"], false);
         assert!(v["free_bytes"].as_u64().unwrap() > 0);
-        // Clean on one agent: a clone built just now loses its build output; source, git and notes stay, and
-        // the other agent's workspace isn't touched.
-        let axum::Json(r) = clean(axum::extract::State(st.clone()), query(&format!("?agent={}", a.id))).await;
+        // Clean on one agent: its build output goes; source, git and notes stay, and the other agent's
+        // workspace isn't touched.
+        let r = clean_all_shown(&st, Some(&a.id)).await;
         assert!(r.freed_bytes > 0);
-        assert_eq!(r.removed.len(), 5, "{:?}", r.removed);
+        assert_eq!((r.removed, r.failed, r.running), (5, 0, false), "{:?}", r.lines);
+        assert_eq!(r.what, "Clean");
         assert!(!ws.join("loft/target").exists());
         for kept in ["loft/.git/HEAD", "loft/.git/index", "loft/src/main.rs", "loft/Cargo.toml", "notes/plan.md", "big.bin"] {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         assert!(other.join("loft/target").exists(), "another agent's build output was removed");
-        // The sizes refresh right away, and one agent's Clean isn't the last sweep.
+        // The sizes refresh right away.
         let axum::Json(v) = sizes(axum::extract::State(st.clone())).await.unwrap();
         assert_eq!(row(&v)["bytes"].as_u64().unwrap(), before - r.freed_bytes, "sizes weren't refreshed");
-        assert!(v["last_sweep"]["at"].is_null());
-        // Clean all: every agent, recorded as the last sweep.
-        let axum::Json(r) = clean(axum::extract::State(st.clone()), query("")).await;
+        // Clean all: every agent.
+        let r = clean_all_shown(&st, None).await;
         let other_real = other.canonicalize().unwrap();
-        assert!(r.removed.iter().all(|p| p.starts_with(&other_real)) && !r.removed.is_empty(), "{:?}", r.removed);
+        assert!(r.removed_paths().iter().all(|p| p.starts_with(&other_real)) && r.removed > 0, "{:?}", r.lines);
+        assert_eq!(r.what, "Clean all");
         assert!(!other.join("loft/target").exists());
-        let axum::Json(v) = sizes(axum::extract::State(st)).await.unwrap();
-        assert!(v["last_sweep"]["at"].is_string());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_preview_lists_folders_and_skips_and_a_clean_removes_only_the_ticked_ones() {
+        let st = crate::tasks::tests::state();
+        let (a, busy, fresh) = (crate::tasks::tests::agent(&st, "Idle"), crate::tasks::tests::agent(&st, "Busy"), crate::tasks::tests::agent(&st, "Fresh"));
+        let ws = crate::agents::workspace(&st, &a.id);
+        clone(&ws.join("loft"));
+        age_by(&ws, Duration::from_secs(2 * 60 * 60));
+        clone(&crate::agents::workspace(&st, &busy.id).join("loft"));
+        st.rt.lock().unwrap().running.insert(busy.id.clone(), Default::default());
+        // Built just now.
+        clone(&crate::agents::workspace(&st, &fresh.id).join("loft"));
+
+        let p = preview_of(&st, None).await;
+        let rels: Vec<_> = p.folders.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels.len(), 5, "{rels:?}");
+        for r in ["loft/target", "loft/frontend/node_modules", "loft/ios/build", "loft/ios/DerivedData", "loft/Pkg/.build"] {
+            assert!(rels.contains(&r), "{r} not previewed: {rels:?}");
+        }
+        assert!(p.folders.iter().all(|f| f.agent == a.id && f.bytes > 0));
+        assert_eq!(p.total_bytes, p.folders.iter().map(|f| f.bytes).sum::<u64>());
+        assert!(p.skipped.contains(&Skip { agent: busy.id.clone(), rel: "".into(), reason: "agent is working".into() }), "{:?}", p.skipped);
+        assert!(p.skipped.contains(&Skip { agent: fresh.id.clone(), rel: "loft".into(), reason: "changed in the last hour".into() }), "{:?}", p.skipped);
+        // The preview removes nothing.
+        assert!(ws.join("loft/target").exists());
+
+        // The user unticks target/; a path that wasn't previewed is ignored.
+        let mut paths: Vec<_> = p.folders.iter().filter(|f| f.rel != "loft/target").map(|f| f.path.clone()).collect();
+        paths.push(ws.join("loft/src"));
+        let axum::Json(l) = clean(axum::extract::State(st.clone()), axum::Json(CleanBody { agent: None, paths })).await;
+        assert!(ws.join("loft/target").exists(), "an unticked folder was removed");
+        assert!(ws.join("loft/src/main.rs").exists(), "a folder outside the preview was removed");
+        assert!(!ws.join("loft/frontend/node_modules").exists());
+        assert_eq!((l.removed, l.failed), (4, 0));
+        let freed: u64 = p.folders.iter().filter(|f| f.rel != "loft/target").map(|f| f.bytes).sum();
+        assert_eq!(l.freed_bytes, freed);
+        assert!(l.skipped.contains(&Skip { agent: a.id.clone(), rel: "loft/target".into(), reason: "unticked".into() }), "{:?}", l.skipped);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_last_run_s_log_stays_readable_after_a_restart_the_daily_sweep_s_too() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Idle");
+        let ws = crate::agents::workspace(&st, &a.id);
+        clone(&ws.join("loft"));
+        age(&ws);
+        let axum::Json(empty) = log(axum::extract::State(st.clone())).await;
+        assert!(empty.at.is_none());
+
+        run(&st, Some("Daily sweep"), None, IDLE, None).await;
+        let axum::Json(l) = log(axum::extract::State(st.clone())).await;
+        assert_eq!((l.what.as_str(), l.removed, l.running), ("Daily sweep", 5, false));
+        let target = ws.canonicalize().unwrap().join("loft/target");
+        assert!(l.lines.iter().any(|x| x.path == target && x.bytes > 0 && x.error.is_none()), "{:?}", l.lines);
+
+        // A restart forgets the in-memory log; the saved one is read back.
+        st.rt.lock().unwrap().clean = Log::default();
+        let axum::Json(saved) = log(axum::extract::State(st.clone())).await;
+        assert_eq!((saved.what.as_str(), saved.removed, saved.freed_bytes), ("Daily sweep", 5, l.freed_bytes));
+        assert_eq!(saved.lines.len(), 5);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -355,7 +601,9 @@ mod tests {
         let st = crate::tasks::tests::state();
         let (running, idle) = (crate::tasks::tests::agent(&st, "Running"), crate::tasks::tests::agent(&st, "Idle"));
         for a in [&running, &idle] {
-            clone(&crate::agents::workspace(&st, &a.id).join("loft"));
+            let ws = crate::agents::workspace(&st, &a.id);
+            clone(&ws.join("loft"));
+            age(&ws);
         }
         st.rt.lock().unwrap().running.insert(running.id.clone(), Default::default());
 
@@ -364,9 +612,11 @@ mod tests {
         assert_eq!(busy(&running.id), true);
         assert_eq!(busy(&idle.id), false);
 
-        let _ = clean(axum::extract::State(st.clone()), query("")).await;
-        let axum::Json(one) = clean(axum::extract::State(st.clone()), query(&format!("?agent={}", running.id))).await;
-        assert!(one.removed.is_empty());
+        let _ = clean_all_shown(&st, None).await;
+        // Even a confirm naming its folders leaves them.
+        let theirs = crate::agents::workspace(&st, &running.id).canonicalize().unwrap().join("loft/target");
+        let axum::Json(one) = clean(axum::extract::State(st.clone()), axum::Json(CleanBody { agent: Some(running.id.clone()), paths: vec![theirs] })).await;
+        assert_eq!(one.removed, 0);
         assert!(crate::agents::workspace(&st, &running.id).join("loft/target").exists(), "a running agent's build output was removed");
         assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
     }
@@ -400,21 +650,25 @@ mod tests {
 
         for gone in ["loft/target", "loft/frontend/node_modules", "loft/ios/build", "loft/ios/DerivedData", "loft/Pkg/.build", ".cargo-build"] {
             assert!(!ws.join(gone).exists(), "{gone} stays");
-            assert!(r.removed.contains(&ws.join(gone)), "{gone} not reported");
+            assert!(r.removed_paths().contains(&ws.join(gone)), "{gone} not reported");
         }
         for kept in ["loft/.git/HEAD", "loft/Cargo.toml", "loft/src/main.rs", "loft/ios/App/App.swift", "loft/docs/target/keep.md", "notes/plan.md", "scratch/node_modules/keep.js"] {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
-        assert_eq!(r.removed.len(), 6);
+        assert_eq!(r.removed, 6);
         assert!(r.freed_bytes > 0);
     }
 
     /// Dates everything in `dir` 4 days back.
     fn age(dir: &Path) {
-        let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
+        age_by(dir, Duration::from_secs(4 * 24 * 60 * 60));
+    }
+
+    fn age_by(dir: &Path, by: Duration) {
+        let then = SystemTime::now() - by;
         for e in fs::read_dir(dir).unwrap().flatten() {
             if e.file_type().unwrap().is_dir() {
-                age(&e.path());
+                age_by(&e.path(), by);
             }
             fs::File::open(e.path()).unwrap().set_modified(then).unwrap();
         }
@@ -435,7 +689,7 @@ mod tests {
         assert!(!storage.join("idle/old/target").exists(), "an idle clone keeps its build output");
         assert!(storage.join("idle/fresh/target").exists(), "a fresh clone lost its build output");
         assert!(storage.join("running/loft/target").exists(), "a running agent's build output was removed");
-        assert!(r.removed.iter().all(|p| p.starts_with(storage.join("idle/old"))), "{:?}", r.removed);
+        assert!(r.removed_paths().iter().all(|p| p.starts_with(storage.join("idle/old"))), "{:?}", r.lines);
     }
 
     #[test]
@@ -450,7 +704,7 @@ mod tests {
             asked.get() > 1
         };
         let r = sweep(&storage, None, &busy, later(), IDLE);
-        assert!(r.removed.is_empty(), "{:?}", r.removed);
+        assert_eq!(r.removed, 0, "{:?}", r.lines);
         assert!(storage.join("a/loft/target").exists());
     }
 
@@ -471,7 +725,7 @@ mod tests {
         let mut dev = cmd.spawn().unwrap();
         crate::processes::record(&st.cfg.storage_dir, &server.id, dev.id()).unwrap();
 
-        run(&st, None, IDLE).await;
+        run(&st, None, None, IDLE, None).await;
         let _ = dev.kill();
         let _ = dev.wait();
 
@@ -480,28 +734,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn one_agent_s_sweep_leaves_the_last_sweep_report_alone() {
+    async fn one_agent_s_sweep_leaves_the_last_log_alone() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Gone");
         let ws = crate::agents::workspace(&st, &a.id);
         clone(&ws.join("loft"));
         age(&ws);
-        let one = run(&st, Some(&a.id), IDLE).await;
-        assert!(!one.removed.is_empty());
-        assert!(st.rt.lock().unwrap().sweep.at.is_none(), "the last sweep is one agent's");
-        run(&st, None, IDLE).await;
-        assert!(st.rt.lock().unwrap().sweep.at.is_some());
+        let one = run(&st, None, Some(&a.id), IDLE, None).await;
+        assert!(one.removed > 0);
+        assert!(st.rt.lock().unwrap().clean.at.is_none(), "the last log is a deleted agent's");
+        run(&st, Some("Daily sweep"), None, IDLE, None).await;
+        assert!(st.rt.lock().unwrap().clean.at.is_some());
     }
 
     #[test]
     fn sizes_are_disk_blocks_like_the_freed_bytes() {
         let storage = temp();
         clone(&storage.join("a/loft"));
-        let target = storage.join("a/loft/target");
-        let before = size(&target);
-        let mut r = Report::default();
-        remove(&storage, &target, &mut r);
-        assert_eq!(r.freed_bytes, before);
+        let before = du(&storage.join("a/loft/target"));
+        let r = sweep(&storage, None, &|_| false, later(), IDLE);
+        let line = r.lines.iter().find(|l| l.path.ends_with("loft/target")).unwrap();
+        assert_eq!(line.bytes, before);
         assert!(before >= 4096, "a 1-byte file takes a block: {before}");
     }
 
@@ -542,7 +795,9 @@ mod tests {
             assert!(loft.join(kept).exists(), "Loft's checkout lost {kept}");
         }
         assert!(outside.join("lib/index.js").exists(), "a symlink target was removed");
-        assert!(r.removed.iter().all(|p| p.starts_with(&storage)), "{:?}", r.removed);
+        assert!(r.removed_paths().iter().all(|p| p.starts_with(&storage)), "{:?}", r.lines);
+        assert!(r.skipped.contains(&skip("a", "app/web/node_modules", "symlink")), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&skip("b", "", "symlink")), "{:?}", r.skipped);
     }
 
     #[test]

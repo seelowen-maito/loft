@@ -476,15 +476,32 @@ export type BackupStatus = {
   icloud: string | null;
 };
 
-/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), the disk's
- * free space and what the last sweep freed. */
+/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), and the disk's
+ * free space. */
 export type WorkspaceSizes = {
   agents: { id: string; name: string; bytes: number; busy: boolean }[];
   free_bytes: number | null;
   low_disk_bytes: number;
-  last_sweep: SweepReport;
 };
-export type SweepReport = { at: string | null; removed: string[]; freed_bytes: number };
+/** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
+export type CleanSkip = { agent: string; rel: string; reason: string };
+/** What Clean (one agent) or Clean all would remove: build folders by agent, and what it skips. */
+export type CleanPlan = {
+  folders: { agent: string; path: string; rel: string; bytes: number; changed: string }[];
+  skipped: CleanSkip[];
+  total_bytes: number;
+};
+/** A clean's log, live while `running`: each removal (or its error), what was skipped, and the totals. */
+export type CleanLog = {
+  at: string | null;
+  what: string;
+  running: boolean;
+  lines: { agent: string; path: string; rel: string; bytes: number; error: string | null }[];
+  skipped: CleanSkip[];
+  freed_bytes: number;
+  removed: number;
+  failed: number;
+};
 
 export type ApprovalMode = "ask" | "own" | "all";
 
@@ -585,8 +602,12 @@ export const api = {
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   backups: () => req<BackupStatus>("GET", "/backups"),
   workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
-  /** Removes build output of any age from one agent's workspace, or from every idle agent's. */
-  cleanWorkspaces: (agent?: string) => req<SweepReport>("POST", agent ? `/workspaces/clean?agent=${encodeURIComponent(agent)}` : "/workspaces/clean"),
+  /** What Clean on one agent, or Clean all, would remove. */
+  cleanPreview: (agent?: string) => req<CleanPlan>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
+  /** Removes the previewed folders the user kept ticked. */
+  clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
+  /** The running or last clean's log, the daily sweep's included. */
+  cleanLog: () => req<CleanLog>("GET", "/workspaces/log"),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),

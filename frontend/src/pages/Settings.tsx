@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanPlan, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
@@ -187,50 +187,71 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   );
 }
 
-/** Disk: each agent's workspace size and the free space; Clean removes an agent's build output of any age, Clean
- * all every idle agent's. */
+/** Disk: each agent's workspace size and the free space. Clean (one agent) and Clean all first preview the build
+ * folders they'd remove, then log each removal; the last clean's log, the daily sweep's included, stays here. */
 function Workspaces() {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
-  // What is being cleaned: an agent's id, or "all".
-  const [cleaning, setCleaning] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // The open preview: whose (an agent's id, or "all"), and the folders the user unticked.
+  const [preview, setPreview] = useState<{ who: string; plan: CleanPlan; unticked: Set<string> } | null>(null);
+  // The log on screen: live while cleaning, then the summary.
+  const [shown, setShown] = useState<CleanLog | null>(null);
+  const [last, setLast] = useState<CleanLog | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [freed, setFreed] = useState<{ who: string; bytes: number } | null>(null);
   const card = useRef<HTMLDivElement>(null);
-  const load = () => api.workspaces().then(setS);
+  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast)]);
   useEffect(() => {
     load().then(() => {
       // Needs you links here when the disk is almost full.
       if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
     }).catch((e) => setErr((e as Error).message));
   }, []);
-  const clean = async (who: string) => {
-    setConfirming(false);
-    setCleaning(who);
+  const name = (id: string) => s?.agents.find((a) => a.id === id)?.name ?? `Deleted agent ${id.slice(0, 8)}`;
+  const open = async (who: string) => {
+    setLoading(who);
     setErr(null);
     try {
-      const r = await api.cleanWorkspaces(who === "all" ? undefined : who);
-      setFreed({ who, bytes: r.freed_bytes });
-      await load();
+      setPreview({ who, plan: await api.cleanPreview(who === "all" ? undefined : who), unticked: new Set() });
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setCleaning(null);
+      setLoading(null);
+    }
+  };
+  const confirm = async () => {
+    if (!preview) return;
+    const paths = preview.plan.folders.filter((f) => !preview.unticked.has(f.path)).map((f) => f.path);
+    setPreview(null);
+    setShown({ at: null, what: "", running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
+    // The log fills in as Loft removes each folder.
+    let done = false;
+    const poll = setInterval(() => api.cleanLog().then((l) => l.running && !done && setShown(l)).catch(() => {}), 500);
+    try {
+      const l = await api.clean(preview.who === "all" ? undefined : preview.who, paths);
+      done = true;
+      setShown(l);
+      setLast(l);
+      await load();
+    } catch (e) {
+      done = true;
+      setShown(null);
+      setErr((e as Error).message);
+    } finally {
+      clearInterval(poll);
     }
   };
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
   const rows = [...(s?.agents ?? [])].sort((a, b) => b.bytes - a.bytes);
-  const idle = rows.filter((r) => !r.busy).length;
+  const busy = loading !== null || shown?.running === true;
   return (
     <div ref={card} id="workspaces">
       <Section title="Disk">
         <div className="flex flex-wrap items-center gap-3">
           <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
-            {freed?.who === "all" && ` · freed ${fmtBytes(freed.bytes)}`}
           </p>
-          <button type="button" className="btn shrink-0" disabled={cleaning !== null || idle === 0} onClick={() => setConfirming(true)}>
-            {cleaning === "all" ? "Cleaning…" : "Clean all"}
+          <button type="button" className="btn shrink-0" disabled={busy || rows.every((r) => r.busy)} onClick={() => open("all")}>
+            {loading === "all" ? "Checking…" : "Clean all"}
           </button>
         </div>
         {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
@@ -238,38 +259,170 @@ function Workspaces() {
           {rows.map((r) => (
             <li key={r.id} className="flex items-center gap-3">
               <span className="min-w-0 flex-1 truncate text-fg-2">{r.name}</span>
-              {freed?.who === r.id && <span className="shrink-0 text-[12px] text-fg-3">freed {fmtBytes(freed.bytes)}</span>}
               <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
-              <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || cleaning !== null} onClick={() => clean(r.id)}>
-                {r.busy ? "Working" : cleaning === r.id ? "Cleaning…" : "Clean"}
+              <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || busy} onClick={() => open(r.id)}>
+                {r.busy ? "Working" : loading === r.id ? "Checking…" : "Clean"}
               </button>
             </li>
           ))}
         </ul>
+        {last?.at && (
+          <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
+            <span>
+              Last: {last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} folder{last.removed === 1 ? "" : "s"}
+              {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
+            </span>
+            <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
+              View log
+            </button>
+          </p>
+        )}
         <p className="text-[12px] text-fg-3">
-          Clean removes an agent's build output (target, node_modules, …) now; its next build starts from scratch. Source, notes and git stay. Loft also cleans workspaces untouched for 3 days, daily.
+          Clean removes an agent's build output (target, node_modules, …) after showing what goes; its next build starts from scratch. Source, notes and git stay. Loft also cleans workspaces untouched for 3 days, daily.
         </p>
       </Section>
-      {confirming && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setConfirming(false)}>
-          <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-medium">Clean all?</h3>
-            <p className="text-[13px] text-fg-2">
-              Removes build output from {idle} agent{idle === 1 ? "" : "s"}; their next build starts from scratch.
-              {rows.length > idle && <span className="mt-2 block text-fg-3">{rows.length - idle} working agent{rows.length - idle === 1 ? " is" : "s are"} skipped.</span>}
-            </p>
-            <div className="flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </button>
-              <button className="btn-primary" onClick={() => clean("all")}>
-                Clean all
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {preview && <CleanPreview preview={preview} name={name} onChange={setPreview} onCancel={() => setPreview(null)} onConfirm={confirm} />}
+      {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
     </div>
+  );
+}
+
+function Modal({ onClose, children }: { onClose?: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="panel flex max-h-[85vh] w-full max-w-2xl flex-col gap-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Groups items by agent, in the order they come. */
+function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
+  const m = new Map<string, T[]>();
+  for (const i of items) m.set(i.agent, [...(m.get(i.agent) ?? []), i]);
+  return [...m];
+}
+
+function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) => string }) {
+  if (skipped.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <p className="eyebrow">Skipped</p>
+      <ul className="space-y-0.5 text-[12.5px] text-fg-3">
+        {skipped.map((k, i) => (
+          <li key={i} className="flex gap-2">
+            <span className="min-w-0 flex-1 truncate">
+              {name(k.agent)}
+              {k.rel && <span className="font-mono"> / {k.rel}</span>}
+            </span>
+            <span className="shrink-0">{k.reason}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Every folder Clean would remove, by agent, with its size and last change; untick any to keep it. */
+function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
+  preview: { who: string; plan: CleanPlan; unticked: Set<string> };
+  name: (id: string) => string;
+  onChange: (p: { who: string; plan: CleanPlan; unticked: Set<string> }) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { plan, unticked } = preview;
+  const kept = plan.folders.filter((f) => !unticked.has(f.path));
+  const total = kept.reduce((n, f) => n + f.bytes, 0);
+  const toggle = (paths: string[], on: boolean) => {
+    const u = new Set(unticked);
+    for (const p of paths) on ? u.delete(p) : u.add(p);
+    onChange({ ...preview, unticked: u });
+  };
+  const agents = new Set(kept.map((f) => f.agent)).size;
+  return (
+    <Modal onClose={onCancel}>
+      <div>
+        <h3 className="text-[15px] font-medium">{preview.who === "all" ? "Clean all?" : `Clean ${name(preview.who)}?`}</h3>
+        <p className="mt-1 text-[13px] text-fg-2">
+          {plan.folders.length === 0
+            ? "Nothing to remove."
+            : `Removes ${kept.length} folder${kept.length === 1 ? "" : "s"} (${fmtBytes(total)}) from ${agents} agent${agents === 1 ? "" : "s"}; their next build starts from scratch.`}
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+        {byAgent(plan.folders).map(([agent, folders]) => {
+          const all = folders.every((f) => !unticked.has(f.path));
+          return (
+            <div key={agent} className="space-y-1">
+              <label className="flex items-center gap-2 text-[13px] font-medium">
+                <input type="checkbox" checked={all} onChange={(e) => toggle(folders.map((f) => f.path), e.target.checked)} />
+                <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
+                <span className="shrink-0 tabular-nums">{fmtBytes(folders.reduce((n, f) => n + f.bytes, 0))}</span>
+              </label>
+              <ul className="space-y-0.5 pl-6 text-[12.5px]">
+                {folders.map((f) => (
+                  <li key={f.path}>
+                    <label className="flex items-center gap-2" title={f.path}>
+                      <input type="checkbox" checked={!unticked.has(f.path)} onChange={(e) => toggle([f.path], e.target.checked)} />
+                      <span className="min-w-0 flex-1 truncate font-mono text-fg-2">{f.rel}</span>
+                      <span className="hidden shrink-0 text-fg-3 sm:inline">{timeAgo(f.changed)}</span>
+                      <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(f.bytes)}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+        <Skipped skipped={plan.skipped} name={name} />
+      </div>
+      <div className="flex justify-end gap-2">
+        <button className="btn-ghost" onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="btn-primary" disabled={kept.length === 0} onClick={onConfirm}>
+          Remove {fmtBytes(total)}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** A clean's log: each removal (or its error) as it happens, with the running total, then the summary. */
+function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string) => string; onClose: () => void }) {
+  return (
+    <Modal onClose={log.running ? undefined : onClose}>
+      <div>
+        <h3 className="text-[15px] font-medium">{log.running ? "Cleaning…" : `${log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <p className="mt-1 text-[13px] text-fg-2">
+          Freed {fmtBytes(log.freed_bytes)} · {log.removed} removed · {log.skipped.length} skipped
+          {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+        {byAgent(log.lines).map(([agent, lines]) => (
+          <div key={agent} className="space-y-0.5">
+            <p className="text-[13px] font-medium">{name(agent)}</p>
+            <ul className="space-y-0.5 font-mono text-[12px]">
+              {lines.map((l) => (
+                <li key={l.path} title={l.path} className={cx("break-all", l.error ? "text-bad" : "text-fg-2")}>
+                  {l.error ? `failed ${l.rel}: ${l.error}` : `remove <workspace>/${l.rel} (${fmtBytes(l.bytes)})`}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+        {!log.running && log.lines.length === 0 && <p className="text-[13px] text-fg-3">Nothing was removed.</p>}
+        <Skipped skipped={log.skipped} name={name} />
+      </div>
+      <div className="flex justify-end">
+        <button className="btn-primary" disabled={log.running} onClick={onClose}>
+          {log.running ? "Cleaning…" : "Done"}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

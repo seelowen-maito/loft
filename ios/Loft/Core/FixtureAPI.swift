@@ -9,6 +9,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private let mode: Mode
     private let lock = NSLock()
     private var agentList: [Agent]
+    private var lastClean: CleanLog?
     private var taskList: [HBTask]
     private var deliveryList: [DeliverySummary] = []
     private var msgs: [String: [ChatMessage]]
@@ -407,7 +408,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_preview"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -613,7 +614,33 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                        .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
                               freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
     }
-    func cleanWorkspaces(agentId: String?) async throws -> SweepReport { try check(); return SweepReport(freedBytes: agentId == nil ? 21_700_000_000 : 8_600_000_000) }
+    func cleanPreview(agentId: String?) async throws -> CleanPlan {
+        try check()
+        let ws = "/Users/me/loft/agent-local-storage"
+        let changed = Date().addingTimeInterval(-26 * 3600)
+        let folders: [CleanPlan.Folder] = [
+            .init(agent: "a2", path: "\(ws)/a2/loft/backend/target", rel: "loft/backend/target", bytes: 6_900_000_000, changed: changed),
+            .init(agent: "a2", path: "\(ws)/a2/loft/frontend/node_modules", rel: "loft/frontend/node_modules", bytes: 1_700_000_000, changed: changed),
+            .init(agent: "a3", path: "\(ws)/a3/.cargo-build", rel: ".cargo-build", bytes: 300_000_000, changed: changed.addingTimeInterval(-86400)),
+        ].filter { agentId == nil || $0.agent == agentId }
+        let skipped = agentId == nil ? [CleanSkip(agent: "a1", rel: "", reason: "agent is working"), CleanSkip(agent: "a3", rel: "homebase", reason: "changed in the last hour")] : []
+        return CleanPlan(folders: folders, skipped: skipped, totalBytes: folders.reduce(0) { $0 + $1.bytes })
+    }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
+        let plan = try await cleanPreview(agentId: agentId)
+        let lines = plan.folders.filter { paths.contains($0.path) }.map { CleanLog.Line(agent: $0.agent, path: $0.path, rel: $0.rel, bytes: $0.bytes, error: nil) }
+        let unticked = plan.folders.filter { !paths.contains($0.path) }.map { CleanSkip(agent: $0.agent, rel: $0.rel, reason: "unticked") }
+        let log = CleanLog(at: Date(), what: agentId == nil ? "Clean all" : "Clean", running: false, lines: lines, skipped: unticked + plan.skipped,
+                           freedBytes: lines.reduce(0) { $0 + $1.bytes }, removed: lines.count, failed: 0)
+        locked { lastClean = log }
+        return log
+    }
+    func cleanLog() async throws -> CleanLog {
+        try check()
+        return locked { lastClean } ?? CleanLog(at: Date().addingTimeInterval(-5 * 3600), what: "Daily sweep", running: false,
+                                                 lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil)],
+                                                 skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
+    }
     func deleteAgent(id: String, purgeFiles: Bool) async throws {
         try check()
         locked { agentList.removeAll { $0.id == id } }
