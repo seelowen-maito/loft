@@ -99,6 +99,13 @@ async fn install(root: &Path) -> Result<()> {
     let frontend = root.join("frontend");
     run(&frontend, "npm", &["install", "--no-audit", "--no-fund"]).await?;
     run(&frontend, "npm", &["run", "build"]).await?;
+    // The Herdr UI client, once it was set up: rebuilt so new chat tabs run the new version.
+    let herdr = root.join("herdr");
+    if herdr.join("target").join("release").join("loft-herdr").is_file()
+        && let Err(e) = run(&herdr, "cargo", &["build", "--release", "--quiet"]).await
+    {
+        tracing::warn!("herdr ui client: {e}");
+    }
     Ok(())
 }
 
