@@ -472,6 +472,8 @@ export type BackupStatus = {
   dir: string;
   last: { at: string; bytes: number; path: string } | null;
   error: { message: string; at: string } | null;
+  /** iCloud Drive → Loft backups, the one-click choice; null when iCloud Drive is off on the Mac. */
+  icloud: string | null;
 };
 
 export type ApprovalMode = "ask" | "own" | "all";

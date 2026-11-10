@@ -996,6 +996,27 @@ final class LoftStore {
         _ = try await api.putServerSettings(s.applied(to: try await api.serverSettings()))
     }
 
+    /// Settings › Backups: the Mac's backups and where they go (`backup_dir`, "" for the Mac's default folder).
+    func backups() async throws -> (status: BackupStatus, backupDir: String) {
+        let api = try requireWrite()
+        async let status = api.backups()
+        async let settings = api.serverSettings()
+        return (try await status, try await settings["backup_dir"]?.stringValue ?? "")
+    }
+
+    func backUpNow() async throws -> BackupStatus { try await requireWrite().backUpNow() }
+
+    /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
+    /// agents or a repo can reach, and says why.
+    func saveBackupDir(_ dir: String) async throws {
+        let api = try requireWrite()
+        guard case .object(var o) = try await api.serverSettings() else { return }
+        o["backup_dir"] = .string(dir)
+        // Absent keeps the saved token; the empty one the server sends would clear it.
+        o["github_token"] = nil
+        _ = try await api.putServerSettings(.object(o))
+    }
+
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {
         try await requireTasks().approveComment(taskId: c.taskId, commentId: c.id, text: text)
     }

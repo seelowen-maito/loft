@@ -120,6 +120,8 @@ function GithubUsage() {
   );
 }
 
+const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 text-accent");
+
 /** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
 function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
   const [s, setS] = useState<BackupStatus | null>(null);
@@ -165,6 +167,15 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
         {(s?.error || err) && (
           <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">
             {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className={chip(folder === "")} aria-pressed={folder === ""} onClick={() => onFolder("")}>This Mac</button>
+          {s?.icloud && <button type="button" className={chip(folder === s.icloud)} aria-pressed={folder === s.icloud} onClick={() => onFolder(s.icloud!)}>iCloud Drive</button>}
+        </div>
+        {s?.icloud && folder === s.icloud && (
+          <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+            Backups in iCloud Drive leave this Mac: all your chats and your GitHub token are then stored by Apple. Save to use it.
           </p>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
