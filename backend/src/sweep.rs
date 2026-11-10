@@ -7,8 +7,8 @@
 //! never goes, and neither does the clone itself. A working agent's items can't be removed, and each path is
 //! checked again just before it goes.
 //!
-//! The sweep deletes rebuildable build output (`target/`, `node_modules/`, `.build/`, `ios/build/`,
-//! `DerivedData/`, `.cargo-build/`) whose newest file is 3 days old, so idle workspaces don't fill the disk.
+//! The sweep deletes rebuildable build output (the table of `RULES`: Rust, Node, .NET, Gradle, Pods, Flutter,
+//! Python and the like, each only beside its marker file) whose newest file is 3 days old, so idle workspaces don't fill the disk.
 //! An agent that works often never leaves its `.cargo-build/` that old, so there its `*/incremental` caches go
 //! once together they pass 2 GB, and `deps/` stays (rebuilding incremental takes seconds, deps about 30 s). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
@@ -728,21 +728,84 @@ fn find_clones(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth == 0 {
         return;
     }
-    for (name, path) in subdirs(dir) {
-        if !is_build(dir, &name) {
+    for (_, path) in subdirs(dir) {
+        if !is_build(&path) {
             find_clones(&path, depth - 1, out);
         }
     }
 }
 
-/// Whether `parent/name` is build output.
-fn is_build(parent: &Path, name: &str) -> bool {
-    match name {
-        "node_modules" | "DerivedData" => true,
-        "target" => parent.join("Cargo.toml").exists(),
-        "build" => parent.file_name().is_some_and(|n| n == "ios"),
-        _ => false,
+/// One kind of build output: a `folder` (a name, or a path like `ios/build`) and the `markers` that must sit
+/// beside it, in the folder's parent (`*.csproj` matches any file with that ending). A folder is build output
+/// only when one marker is there, so a `build/` or `bin/` that is somebody's real files stays. No markers means
+/// the name never holds anything but rebuildable files.
+struct Rule {
+    folder: &'static str,
+    markers: &'static [&'static str],
+}
+
+const fn rule(folder: &'static str, markers: &'static [&'static str]) -> Rule {
+    Rule { folder, markers }
+}
+
+const GRADLE: &[&str] = &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"];
+const DOTNET: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
+
+/// Everything the sweep and Clean's preview count as build output. To teach them a new stack, add a row here and
+/// a case to `every_rule_is_swept_beside_its_marker_and_kept_without_it`; see docs/sweep-rules.md.
+const RULES: &[Rule] = &[
+    // Rust
+    rule("target", &["Cargo.toml"]),
+    rule(".cargo-build", &[]),
+    // Node, Next.js, Nuxt, Expo
+    rule("node_modules", &[]),
+    rule(".next", &["package.json"]),
+    rule(".nuxt", &["package.json"]),
+    rule(".expo", &["app.json", "package.json"]),
+    // .NET
+    rule("bin", DOTNET),
+    rule("obj", DOTNET),
+    // Java (Maven)
+    rule("target", &["pom.xml"]),
+    // Gradle: Java, Kotlin, Android (also React Native's and Flutter's android/)
+    rule("build", GRADLE),
+    rule(".gradle", GRADLE),
+    rule(".cxx", GRADLE),
+    // iOS: CocoaPods, Carthage, Xcode, Swift
+    rule("Pods", &["Podfile"]),
+    rule("Carthage/Build", &["Cartfile"]),
+    rule("DerivedData", &[]),
+    rule("ios/build", &[]),
+    rule(".build", &[]),
+    // Flutter
+    rule("build", &["pubspec.yaml"]),
+    rule(".dart_tool", &["pubspec.yaml"]),
+    // Python
+    rule(".venv", &[]),
+    rule("__pycache__", &[]),
+    rule(".pytest_cache", &[]),
+    rule(".mypy_cache", &[]),
+    rule(".ruff_cache", &[]),
+];
+
+impl Rule {
+    /// Whether `path` is the folder this rule names, with a marker beside it.
+    fn matches(&self, path: &Path) -> bool {
+        let Some(base) = path.ancestors().nth(self.folder.split('/').count()) else { return false };
+        path.ends_with(self.folder) && (self.markers.is_empty() || self.markers.iter().any(|m| has_marker(base, m)))
     }
+}
+
+fn has_marker(dir: &Path, marker: &str) -> bool {
+    match marker.strip_prefix('*') {
+        Some(ending) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().ends_with(ending)),
+        None => dir.join(marker).exists(),
+    }
+}
+
+/// Whether `path` is build output.
+fn is_build(path: &Path) -> bool {
+    RULES.iter().any(|r| r.matches(path))
 }
 
 /// Collects the clone's build folders and the symlinked ones it leaves, stopping at nested clones.
@@ -751,14 +814,14 @@ fn walk(dir: &Path, builds: &mut Vec<PathBuf>, links: &mut Vec<PathBuf>) {
         let name = e.file_name().to_string_lossy().to_string();
         // Not followed: a symlink's own metadata.
         let Ok(meta) = e.metadata() else { continue };
-        let build = name == ".build" || name == ".cargo-build" || is_build(dir, &name);
+        let path = e.path();
+        let build = is_build(&path);
         if meta.is_symlink() && build {
-            links.push(e.path());
+            links.push(path.clone());
         }
         if !meta.is_dir() || name == ".git" {
             continue;
         }
-        let path = e.path();
         if build {
             builds.push(path);
         } else if path.join(".git").symlink_metadata().is_err() {
@@ -943,6 +1006,97 @@ mod tests {
         fn removed_paths(&self) -> Vec<PathBuf> {
             self.lines.iter().filter(|l| l.error.is_none()).map(|l| l.path.clone()).collect()
         }
+    }
+
+    /// One case per rule and marker: (folder, marker beside it, `None` for a rule with no marker). To teach the
+    /// sweep a new stack, add its row to `RULES` and a case here (docs/sweep-rules.md).
+    const CASES: &[(&str, Option<&str>)] = &[
+        ("target", Some("Cargo.toml")),
+        (".cargo-build", None),
+        ("node_modules", None),
+        (".next", Some("package.json")),
+        (".nuxt", Some("package.json")),
+        (".expo", Some("app.json")),
+        (".expo", Some("package.json")),
+        ("bin", Some("App.csproj")),
+        ("bin", Some("App.fsproj")),
+        ("bin", Some("App.vbproj")),
+        ("obj", Some("App.csproj")),
+        ("target", Some("pom.xml")),
+        ("build", Some("build.gradle")),
+        ("build", Some("build.gradle.kts")),
+        ("build", Some("settings.gradle")),
+        ("build", Some("settings.gradle.kts")),
+        (".gradle", Some("build.gradle")),
+        (".cxx", Some("build.gradle")),
+        ("Pods", Some("Podfile")),
+        ("Carthage/Build", Some("Cartfile")),
+        ("DerivedData", None),
+        ("ios/build", None),
+        (".build", None),
+        ("build", Some("pubspec.yaml")),
+        (".dart_tool", Some("pubspec.yaml")),
+        (".venv", None),
+        ("__pycache__", None),
+        (".pytest_cache", None),
+        (".mypy_cache", None),
+        (".ruff_cache", None),
+    ];
+
+    /// A clone holding `folder` (with a file in it) and, beside it, `marker`; whether a sweep removes the folder.
+    fn swept(folder: &str, marker: Option<&str>) -> bool {
+        let storage = temp();
+        let clone = storage.join("agent/app");
+        file(&clone.join(".git/HEAD"));
+        file(&clone.join("src/Program.cs"));
+        file(&clone.join(folder).join("out.bin"));
+        if let Some(m) = marker {
+            let base = clone.join(folder).ancestors().nth(folder.split('/').count()).unwrap().to_path_buf();
+            file(&base.join(m));
+        }
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(clone.join("src/Program.cs").exists(), "source files stay");
+        log.removed_paths().contains(&clone.join(folder))
+    }
+
+    #[test]
+    fn every_rule_is_swept_beside_its_marker_and_kept_without_it() {
+        for rule in RULES {
+            assert!(CASES.iter().any(|(f, _)| *f == rule.folder), "{} has no case in CASES", rule.folder);
+        }
+        for (folder, marker) in CASES {
+            assert!(swept(folder, *marker), "{folder} beside {marker:?} should be swept");
+            if marker.is_some() {
+                assert!(!swept(folder, None), "{folder} with no marker should stay");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_build_dist_or_bin_with_no_marker_is_never_swept() {
+        for folder in ["build", "dist", "bin", "obj", "out", "target"] {
+            assert!(!swept(folder, None), "{folder}");
+        }
+        // The wrong stack's marker doesn't count.
+        assert!(!swept("bin", Some("Cargo.toml")));
+        assert!(!swept("build", Some("package.json")));
+    }
+
+    #[test]
+    fn a_dotnet_projects_stale_bin_and_obj_are_planned_and_go_with_the_sweep() {
+        let storage = temp();
+        let ws = storage.join("agent");
+        for f in ["Api/Api.csproj", "Api/Program.cs", "Api/bin/Debug/Api.dll", "Api/obj/project.assets.json"] {
+            file(&ws.join("app").join(f));
+        }
+        file(&ws.join("app/.git/HEAD"));
+        let planned = plan(&storage, None, &|_| false, later(), IDLE);
+        let rels: Vec<&str> = planned.folders.iter().map(|f| f.rel.as_str()).collect();
+        assert!(rels.contains(&"app/Api/bin") && rels.contains(&"app/Api/obj"), "{rels:?}");
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(!ws.join("app/Api/bin").exists() && !ws.join("app/Api/obj").exists());
+        assert!(ws.join("app/Api/Program.cs").exists() && ws.join("app/Api/Api.csproj").exists());
+        assert!(log.removed_paths().len() >= 2);
     }
 
     async fn preview_of(st: &AppState, agent: Option<&str>) -> Vec<Item> {
