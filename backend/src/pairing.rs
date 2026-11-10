@@ -172,7 +172,7 @@ fn needs_token(method: &Method, path: &str) -> bool {
     }
     match *method {
         Method::GET | Method::HEAD | Method::OPTIONS => {
-            matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients" | "/workspaces/clean/preview" | "/workspaces/clean/folders" | "/workspaces/log")
+            matches!(path, "/devices" | "/push" | "/settings" | "/paired-clients" | "/workspaces/clean/preview" | "/workspaces/clean/folders" | "/workspaces/log" | "/workspaces/processes")
         }
         _ => true,
     }
@@ -404,6 +404,8 @@ mod tests {
         ("GET", "/workspaces/clean/preview"),
         ("GET", "/workspaces/clean/folders"),
         ("GET", "/workspaces/log"),
+        ("GET", "/workspaces/processes"),
+        ("POST", "/workspaces/abc/stop-processes"),
         ("POST", "/issues"),
         ("POST", "/agents/abc/run"),
         ("POST", "/agents/abc/memories"),

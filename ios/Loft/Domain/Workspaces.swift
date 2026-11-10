@@ -6,8 +6,10 @@ struct WorkspaceSizes: Codable, Hashable {
         var id: String
         var name: String
         var bytes: Int64
-        /// Running or with a live dev server, so Clean skips it. Nil from a Mac without per-agent Clean.
+        /// In a run, so Clean skips it. Nil from a Mac without per-agent Clean.
         var busy: Bool?
+        /// How many processes an idle agent left running. Nil from a Mac that doesn't say.
+        var processes: Int?
     }
 
     var agents: [Row]
@@ -19,6 +21,17 @@ struct WorkspaceSizes: Codable, Hashable {
     var isLow: Bool { freeBytes.map { $0 < lowDiskBytes } ?? false }
     /// How many agents Clean all cleans: those not busy.
     var idleCount: Int { agents.filter { $0.busy != true }.count }
+}
+
+/// `GET /api/workspaces/processes`: a process an idle agent left running, and how long ago it started.
+struct LeftProcess: Codable, Hashable, Identifiable {
+    var pid: Int
+    var command: String
+    var ageSecs: Int
+    var id: Int { pid }
+    var ageText: String {
+        ageSecs < 3600 ? "\(max(1, ageSecs / 60)) min" : ageSecs < 86400 ? "\(ageSecs / 3600) h" : "\(ageSecs / 86400) d"
+    }
 }
 
 /// What a clean leaves, and why. `rel` is inside the agent's workspace, empty for all of it.

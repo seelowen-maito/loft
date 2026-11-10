@@ -70,6 +70,9 @@ struct SettingsView: View {
     @State private var lastClean: CleanLog?
     /// Agents' Simulator devices, nil on a Mac that doesn't list them.
     @State private var devices: [AgentDevice]?
+    /// What idle agents left running, by agent id, and the agent whose Stop them is working.
+    @State private var left: [String: [LeftProcess]] = [:]
+    @State private var stoppingId: String?
     /// Agents whose sizes are measured again after a clean.
     @State private var remeasuring: Set<String> = []
     @State private var measuringDisk = true
@@ -413,6 +416,7 @@ struct SettingsView: View {
         disk = try? await store.workspaceSizes()
         if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
         if store.info?.supports(.agentDevices) == true { devices = try? await store.agentDevices() }
+        if store.info?.supports(.leftProcesses) == true { left = (try? await store.leftRunning()) ?? [:] }
     }
 
     /// Saves the stepper's value once it stops changing, so tapping + five times sends one save; goes back to the
@@ -432,6 +436,37 @@ struct SettingsView: View {
 
     /// A Mac whose Clean lists the workspace to tick what goes; an older one's Clean works another way, so it gets none.
     private var canClean: Bool { store.info?.supports(.cleanPicker) == true }
+
+    /// What an idle agent left running, and a button to stop it.
+    private func leftRunning(_ r: WorkspaceSizes.Row, _ ps: [LeftProcess]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("\(ps.count) process\(ps.count == 1 ? "" : "es") still running").font(.subheadline)
+                Spacer()
+                Button(stoppingId == r.id ? "Stopping…" : "Stop them") {
+                    stoppingId = r.id
+                    Task {
+                        try? await store.stopLeftRunning(agentId: r.id)
+                        await loadDisk()
+                        stoppingId = nil
+                    }
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(stoppingId != nil || !store.canWrite)
+                .accessibilityIdentifier("stop-\(r.id)")
+            }
+            ForEach(ps) { p in
+                HStack(alignment: .firstTextBaseline) {
+                    Text(p.command).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Text(p.ageText).font(.caption).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("left-\(r.id)")
+    }
 
     private func diskSection(_ d: WorkspaceSizes) -> some View {
         Section {
@@ -458,6 +493,7 @@ struct SettingsView: View {
                 } label: {
                     Text(r.name)
                 }
+                if r.busy != true, let ps = left[r.id], !ps.isEmpty { leftRunning(r, ps) }
             }
             ForEach(devices ?? []) { d in
                 LabeledContent {

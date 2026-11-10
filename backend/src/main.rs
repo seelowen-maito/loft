@@ -102,6 +102,8 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/workspaces/clean/folders", get(sweep::folders))
         .route("/workspaces/clean/check", post(git_check::check))
         .route("/workspaces/log", get(sweep::log))
+        .route("/workspaces/processes", get(processes::left_running))
+        .route("/workspaces/{id}/stop-processes", post(processes::stop_left_running))
         .route("/agents/{id}/messages", get(api::list_messages).post(api::send_message).delete(api::clear_messages))
         .route("/agents/{id}/messages/{mid}/team-setup", post(planning::send_team_setup))
         .route("/agents/{id}/messages/{mid}/start-delivery", post(delivery::start_from_card))

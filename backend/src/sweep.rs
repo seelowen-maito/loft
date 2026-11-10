@@ -12,7 +12,7 @@
 //! An agent that works often never leaves its `.cargo-build/` that old, so there its `*/incremental` caches go
 //! once together they pass 2 GB, and `deps/` stays (rebuilding incremental takes seconds, deps about 30 s). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
-//! files kept, and skips running agents and agents with a live process (a dev server).
+//! files kept, and skips running agents.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
 //! so Loft's own checkout stays. Each run writes a log of what it removed, skipped and why, and the last one
@@ -187,20 +187,21 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
 }
 
-/// `GET /api/workspaces`: every agent's workspace size and whether it is busy (running or with a live process,
-/// so Clean can't remove its items), and the disk's free space.
+/// `GET /api/workspaces`: every agent's workspace size, whether it is busy (in a run, so Clean can't remove its
+/// items) and how many processes it left running, and the disk's free space.
 pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) -> crate::api::ApiResult<serde_json::Value> {
     let agents = state.db.list_agents()?;
     let storage = state.cfg.storage_dir.clone();
     let running: Vec<String> = state.rt.lock().unwrap().running.keys().cloned().collect();
     let dirs: Vec<(String, String, PathBuf)> = agents.iter().map(|a| (a.id.clone(), a.name.clone(), crate::agents::workspace(&state, &a.id))).collect();
     let (rows, free) = tokio::task::spawn_blocking(move || {
-        let live = crate::processes::with_live_processes(&storage);
+        let live = crate::processes::live_processes(&storage);
         let rows: Vec<_> = dirs
             .into_iter()
             .map(|(id, name, d)| {
-                let busy = live.contains(&id) || running.contains(&id);
-                serde_json::json!({ "id": id, "name": name, "bytes": size(&d), "busy": busy })
+                let busy = running.contains(&id);
+                let left = if busy { 0 } else { live.get(&id).map_or(0, Vec::len) };
+                serde_json::json!({ "id": id, "name": name, "bytes": size(&d), "busy": busy, "processes": left })
             })
             .collect();
         (rows, free_bytes(&storage))
@@ -216,10 +217,10 @@ pub(crate) fn projects(state: &AppState) -> HashMap<String, Vec<String>> {
     agents.into_iter().map(|a| (a.id, if a.projects.is_empty() { vec![a.project].into_iter().filter(|p| !p.is_empty()).collect() } else { a.projects })).collect()
 }
 
-/// Whether an agent is running or has a live process. Asked again before each removal.
+/// Whether an agent is in a run. Asked again before each removal. What an idle agent left running doesn't lock
+/// it: Clean lists those processes and the user can stop them.
 fn busy_check(state: &AppState) -> impl Fn(&str) -> bool + '_ {
-    let live = crate::processes::with_live_processes(&state.cfg.storage_dir);
-    move |id: &str| live.contains(id) || state.rt.lock().unwrap().running.contains_key(id)
+    move |id: &str| state.rt.lock().unwrap().running.contains_key(id)
 }
 
 #[derive(Deserialize)]
@@ -1623,7 +1624,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_agent_with_a_live_process_is_skipped() {
+    async fn an_agent_in_a_run_is_skipped_but_one_with_only_a_leftover_process_is_not() {
         use std::os::unix::process::CommandExt;
         let st = crate::tasks::tests::state();
         let (server, idle) = (crate::tasks::tests::agent(&st, "Server"), crate::tasks::tests::agent(&st, "Idle"));
@@ -1639,12 +1640,18 @@ mod tests {
         let mut dev = cmd.spawn().unwrap();
         crate::processes::record(&st.cfg.storage_dir, &server.id, dev.id()).unwrap();
 
+        // In a run, its dev server is its own.
+        st.rt.lock().unwrap().running.insert(server.id.clone(), Default::default());
+        run(&st, None, None, IDLE).await;
+        assert!(crate::agents::workspace(&st, &server.id).join("loft/target").exists(), "an agent in a run lost its build output");
+        assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
+
+        // Out of the run, a leftover server doesn't lock it.
+        st.rt.lock().unwrap().running.remove(&server.id);
         run(&st, None, None, IDLE).await;
         let _ = dev.kill();
         let _ = dev.wait();
-
-        assert!(crate::agents::workspace(&st, &server.id).join("loft/target").exists(), "a dev server's agent lost its build output");
-        assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
+        assert!(!crate::agents::workspace(&st, &server.id).join("loft/target").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
