@@ -3128,6 +3128,33 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_branch_behind_its_base_is_refused_and_one_up_to_date_or_ahead_is_taken() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-behind";
+        let (dev, _team) = building(&st, &fake, "rv-behind", &["qa"]).await;
+        let mut pr = st.db.list_pull_requests(None).unwrap().into_iter().find(|p| p.slug == slug && p.number == 500).expect("the spec PR is tracked");
+        pr.base_ref = "main".into();
+        st.db.save_pull_request(&pr).unwrap();
+        fake.in_turn("GET", &format!("/repos/{slug}/compare/main...spec/40-rounds"), vec![
+            (200, json!({ "status": "diverged", "ahead_by": 2, "behind_by": 3 })),
+            (200, json!({ "status": "ahead", "ahead_by": 3, "behind_by": 0 })),
+        ]);
+
+        let err = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err();
+        assert!(err.starts_with("`spec/40-rounds` is 3 commits behind origin/main") && err.contains("`git merge origin/main`"), "{err}");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.tickets[0].state, "started", "nothing taken in");
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["behind"], json!({ "count": 3, "base": "main" }), "the Delivery card shows it");
+
+        // Merged the base: only ahead now, so it goes to review and the card no longer shows it.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41"), "{out}");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["behind"], Value::Null);
+        assert!(fake.seen(&format!("/repos/{slug}/compare/")).iter().all(|s| s.method == "GET"), "a read on GitHub, no git in the Dev's clone");
+    }
+
+    #[tokio::test]
     async fn a_missing_role_is_skipped_and_a_team_without_reviewers_passes_on_submit() {
         let (fake, st) = (fake_github(), state());
         let (dev, team) = building(&st, &fake, "rv-qa-only", &["qa"]).await;
@@ -3611,7 +3638,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500 }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
