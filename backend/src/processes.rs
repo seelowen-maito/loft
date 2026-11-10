@@ -188,15 +188,19 @@ pub async fn pruner(storage: PathBuf) {
 
 /// Stops every process the agent owns, when it is deleted (see [`stop`]). Its session records go now.
 pub async fn stop_all(storage: &Path, agent_id: &str) {
-    stop(storage, agent_id).await;
+    stop(storage, agent_id, || true).await;
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
 /// Stops every process the agent owns: SIGTERM, then SIGKILL for any still there after a grace period. Returns
-/// each one's PID and command.
-async fn stop(storage: &Path, agent_id: &str) -> Vec<(i32, String)> {
+/// each one's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
+/// when it says no.
+async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static) -> Vec<(i32, String)> {
     let (storage, id) = (storage.to_path_buf(), agent_id.to_string());
     let targets = tokio::task::spawn_blocking(move || {
+        if !proceed() {
+            return vec![];
+        }
         let mine = sessions(&storage, &id);
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, String)> = table()
@@ -239,7 +243,10 @@ pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
         if !crate::agents::idle(state, &a, std::time::SystemTime::now()) {
             continue;
         }
-        for (pid, command) in stop(&state.cfg.storage_dir, &a.id).await {
+        // Asked again right before the signals, so a run that just started keeps its processes.
+        let (st, agent) = (state.clone(), a.clone());
+        let still_idle = move || st.db.get_agent(&agent.id).ok().flatten().is_some_and(|a| crate::agents::idle(&st, &a, std::time::SystemTime::now()));
+        for (pid, command) in stop(&state.cfg.storage_dir, &a.id, still_idle).await {
             let (path, rel) = (PathBuf::from(format!("pid {pid}")), clip(&command, 200));
             lines.push(crate::sweep::Line { agent: a.id.clone(), path, rel, bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() });
         }
@@ -752,6 +759,18 @@ mod tests {
         crate::sweep::record(&st, "Idle processes", lines).await;
         let Json(log) = crate::sweep::log(State(st.clone())).await;
         assert_eq!((log.what.as_str(), log.removed, log.lines[0].done.as_str()), ("Idle processes", 1, "Stopped process"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_leaves_the_processes_when_the_agent_is_no_longer_idle_by_then() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let server = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
+        assert!(stop(&st.cfg.storage_dir, &a.id, || false).await.is_empty());
+        assert!(server.alive());
+        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true).await.len(), 1);
+        until("the server stops", 5, || !server.alive()).await;
     }
 
     /// A kill from a command in one of the agent's sessions, as `loft kill-as` sends it.
