@@ -66,6 +66,11 @@ pub fn dir(s: &crate::settings::Settings) -> PathBuf {
     }
 }
 
+/// The iCloud Drive choice for this Mac's user.
+fn icloud() -> Option<PathBuf> {
+    dirs::home_dir().and_then(|h| icloud_in(&h))
+}
+
 /// iCloud Drive's "Loft backups" folder under `home`, when iCloud Drive is on there. The folder itself is made
 /// by the first backup; iCloud Drive's is never made, or backups would sit in a folder that doesn't sync.
 fn icloud_in(home: &Path) -> Option<PathBuf> {
@@ -287,7 +292,7 @@ pub async fn get(State(state): State<AppState>) -> Json<Status> {
     let mut s = state.rt.lock().unwrap().backup.clone();
     // Before the first tick, or right after Settings moved the folder.
     s.dir = dir(&state.settings.get());
-    s.icloud = dirs::home_dir().and_then(|h| icloud_in(&h));
+    s.icloud = icloud();
     Json(s)
 }
 
@@ -295,7 +300,7 @@ pub async fn get(State(state): State<AppState>) -> Json<Status> {
 /// `GET` then shows too).
 pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
     let mut s = run(&state).await;
-    s.icloud = dirs::home_dir().and_then(|h| icloud_in(&h));
+    s.icloud = icloud();
     match s.error {
         Some(e) => Err(crate::api::ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.message)),
         None => Ok(Json(s)),
@@ -571,5 +576,13 @@ mod tests {
         // A client that doesn't know the field keeps it.
         let _ = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "projects_dir": st.settings.get().projects_dir }))).await.unwrap();
         assert_eq!(st.settings.get().backup_dir, "/Volumes/Disk/Loft backups");
+        // The iPhone sends only the folder: everything else stays as saved, even when changed on the web since.
+        let mut web = st.settings.get();
+        web.ssh_host = "mac.example".into();
+        st.settings.save(web).unwrap();
+        let before = st.settings.get();
+        assert!(put("/Volumes/Other".into()).await.is_ok());
+        let _ = crate::api::put_settings(State(st.clone()), Json(serde_json::json!({ "backup_dir": "/Volumes/Disk/Loft backups" }))).await.unwrap();
+        assert_eq!(st.settings.get(), before, "only the folder changed, and back");
     }
 }

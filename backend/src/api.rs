@@ -102,21 +102,17 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// Replace the settings. `github_token`: absent or null keeps the saved one, "" clears it.
-pub async fn put_settings(State(state): State<AppState>, Json(mut body): Json<Value>) -> ApiResult<Value> {
-    let token = body.as_object_mut().and_then(|o| o.remove("github_token"));
-    // Push is set on its own endpoint (`PUT /api/push`); clients that don't send it keep it.
-    let keep_push = body.get("push").is_none();
-    let keep_backup_dir = body.get("backup_dir").is_none();
-    let mut s: crate::settings::Settings = serde_json::from_value(body).map_err(|e| bad(e.to_string()))?;
-    if keep_push {
-        s.push = state.settings.get().push;
-    } else {
-        // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
-        s.push.relay_url = state.settings.get().push.relay_url;
+pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult<Value> {
+    let Value::Object(mut body) = body else { return Err(bad("settings must be an object")) };
+    let token = body.remove("github_token");
+    // Keys a client leaves out keep their saved value, so a client can send only what it changed.
+    let mut merged = serde_json::to_value(state.settings.get()).map_err(|e| bad(e.to_string()))?;
+    if let Some(o) = merged.as_object_mut() {
+        o.extend(body);
     }
-    if keep_backup_dir {
-        s.backup_dir = state.settings.get().backup_dir;
-    }
+    let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
+    // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
+    s.push.relay_url = state.settings.get().push.relay_url;
     // Older clients don't know the global auto-publish switch: they keep it.
     if s.auto_publish_all.is_none() {
         s.auto_publish_all = state.settings.get().auto_publish_all;

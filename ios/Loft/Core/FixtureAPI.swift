@@ -887,9 +887,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         try check()
         return locked {
             settingsPut.append(s)
-            guard case .object(var o) = s else { return settings }
-            // As the server: no `github_token` keeps the saved one.
-            if o["github_token"] == nil { o["github_token"] = settings["github_token"] }
+            // As the server: keys left out (`github_token` too) keep their saved value.
+            guard case .object(let sent) = s, case .object(var o) = settings else { return settings }
+            o.merge(sent) { _, new in new }
             settings = .object(o)
             return settings
         }
