@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, Loader2, RotateCw } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { HerdrSetup } from "./HerdrSetup";
-import { canTick, cleanLineText, cx, fmtBytes, oneLine, shownCommand, timeAgo } from "../lib/format";
+import { canCheck, canTick, cleanLineText, cx, fmtBytes, gitCheckText, oneLine, shownCommand, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -403,6 +403,8 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
   // Folders listed inside opened items, by path; null while loading.
   const [inside, setInside] = useState<Map<string, CleanItem[] | null>>(new Map());
   const [err, setErr] = useState<string | null>(null);
+  // Check results by path; null while checking. Git runs only when the user clicks, and nothing gets ticked.
+  const [checks, setChecks] = useState<Map<string, GitCheck | null>>(new Map());
   const { items, ticked } = preview;
   const known = [...items, ...[...inside.values()].flatMap((xs) => xs ?? [])];
   const chosen = known.filter((i) => ticked.has(i.path));
@@ -429,8 +431,22 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
       setErr((e as Error).message);
     }
   };
+  const check = async (i: CleanItem) => {
+    setChecks((cur) => new Map(cur).set(i.path, null));
+    let c: GitCheck;
+    try {
+      c = await api.cleanCheck(i.agent, i.rel);
+    } catch (e) {
+      c = { state: "unknown", lines: [`Can't check: ${(e as Error).message}`] };
+    }
+    setChecks((cur) => new Map(cur).set(i.path, c));
+  };
+  const checkAll = async (xs: CleanItem[]) => {
+    for (const i of xs.filter((i) => canCheck(i, 0))) await check(i);
+  };
   const row = (i: CleanItem, depth: number): React.ReactNode => {
     const sub = inside.get(i.path);
+    const checked = checks.get(i.path);
     const on = ticked.has(i.path);
     return (
       <li key={i.path}>
@@ -449,11 +465,22 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
               <span className="text-[11.5px] text-fg-3">{i.kind === "clone" ? "git clone" : i.kind}</span>
               {i.label && <span className="text-[11.5px] text-accent">{i.label}</span>}
               {i.blocked && <span className="text-[11.5px] text-warn">{i.blocked}</span>}
-              {on && i.warning && <span className="text-[11.5px] text-warn">{i.warning}</span>}
+              {on && i.warning && !checked && <span className="text-[11.5px] text-warn">{i.warning}</span>}
+              {canCheck(i, depth) && checked !== null && (
+                <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => check(i)}>
+                  {checked ? "Check again" : "Check"}
+                </button>
+              )}
               <span className="flex-1" />
               <span className="shrink-0 text-[11.5px] text-fg-3">{timeAgo(i.changed)}</span>
               <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(i.bytes)}</span>
             </span>
+            {checked === null && (
+              <span className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+                <Loader2 className="size-3 animate-spin" /> Checking git…
+              </span>
+            )}
+            {checked && <span className={cx("block text-[11.5px]", checked.state === "safe" ? "text-good" : checked.state === "unsafe" ? "text-warn" : "text-fg-3")}>{gitCheckText(checked)}</span>}
             {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
             {shownCommand(i, depth) && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
           </span>
@@ -487,6 +514,11 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
           <div key={agent} className="space-y-1.5">
             <p className="flex items-center gap-2 text-[13px] font-medium">
               <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
+              {xs.some((i) => canCheck(i, 0)) && (
+                <button type="button" className="shrink-0 text-[11.5px] font-normal text-accent hover:underline" onClick={() => checkAll(xs)}>
+                  Check all
+                </button>
+              )}
               <span className="shrink-0 tabular-nums">{fmtBytes(xs.reduce((n, i) => n + i.bytes, 0))}</span>
             </p>
             <ul className="space-y-1.5 text-[12.5px]">{xs.map((i) => row(i, 0))}</ul>

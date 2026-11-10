@@ -400,6 +400,7 @@ mod tests {
         ("POST", "/agents/abc/messages"),
         ("POST", "/agents/abc/uploads"),
         ("POST", "/workspaces/clean"),
+        ("POST", "/workspaces/clean/check"),
         ("GET", "/workspaces/clean/preview"),
         ("GET", "/workspaces/clean/folders"),
         ("GET", "/workspaces/log"),

@@ -91,6 +91,8 @@ protocol LoftAPI: Sendable {
     func cleanPreview(agentId: String?) async throws -> [CleanItem]
     /// The folders in `rel` inside one of the agent's main clones.
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem]
+    /// Clean's read-only git check of one of the agent's clones or worktrees; only on the user's tap.
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog
     /// The running or last clean's log, the daily sweep's included.
     func cleanLog() async throws -> CleanLog
@@ -395,6 +397,9 @@ struct LiveLoftAPI: LoftAPI {
         let l: CleanListing = try await get("/workspaces/clean/folders", query: [URLQueryItem(name: "agent", value: agentId), URLQueryItem(name: "rel", value: rel)])
         return l.items
     }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck {
+        try decode(GitCheck.self, try await send("POST", "/workspaces/clean/check", body: .object(["agent": .string(agentId), "rel": .string(rel)]), timeout: 60))
+    }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog {
         let body: JSONValue = .object(["agent": agentId.map { .string($0) } ?? .null, "paths": .array(paths.map { .string($0) })])
         return try decode(CleanLog.self, try await send("POST", "/workspaces/clean", body: body, timeout: 600))
@@ -537,6 +542,7 @@ extension LoftAPI {
     func workspaceSizes() async throws -> WorkspaceSizes { throw APIError.unsupported("Disk usage") }
     func cleanPreview(agentId: String?) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
     func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { throw APIError.unsupported("Disk usage") }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { throw APIError.unsupported("Disk usage") }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func agentDevices() async throws -> [AgentDevice] { throw APIError.unsupported("Disk usage") }

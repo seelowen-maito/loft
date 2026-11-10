@@ -525,6 +525,9 @@ export type CleanItem = {
   blocked: string;
   opens: boolean;
 };
+/** Clean's Check of a clone or worktree: "safe" (clean and pushed), "unsafe" (unpushed commits or uncommitted
+ * changes) or "unknown" (Loft wouldn't run git there), and what to say. */
+export type GitCheck = { state: "safe" | "unsafe" | "unknown"; lines: string[] };
 /** A clean's log, live while `running`: each removal (or its error), what was skipped, and the totals. */
 export type CleanLog = {
   at: string | null;
@@ -654,6 +657,8 @@ export const api = {
   cleanPreview: (agent?: string) => req<{ items: CleanItem[] }>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
   /** The folders in `rel` inside one of the agent's main clones. */
   cleanFolders: (agent: string, rel: string) => req<{ items: CleanItem[] }>("GET", `/workspaces/clean/folders?agent=${encodeURIComponent(agent)}&rel=${encodeURIComponent(rel)}`),
+  /** Runs Clean's read-only git check in one of the agent's clones or worktrees; only on the user's click. */
+  cleanCheck: (agent: string, rel: string) => req<GitCheck>("POST", "/workspaces/clean/check", { agent, rel }),
   /** Removes the previewed folders the user kept ticked. */
   clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
   /** The running or last clean's log, the daily sweep's included. */

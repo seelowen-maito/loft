@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanLineText, oneLine, shownCommand } from "../src/lib/format.ts";
+import { canCheck, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -32,4 +32,17 @@ test("only items that can be removed show their command", () => {
 test("a name keeps to its one line in Copy commands", () => {
   assert.equal(oneLine("Deleted agent \nrm -r ~\r\t\u0085x"), "Deleted agent rm -r ~x");
   assert.equal(oneLine("Loft Dev"), "Loft Dev");
+});
+
+test("only a clone or worktree at the top of a workspace gets Check", () => {
+  assert.equal(canCheck(item(), 0), true);
+  assert.equal(canCheck({ ...item(), kind: "worktree" }, 0), true);
+  assert.equal(canCheck({ ...item(), kind: "folder" }, 0), false);
+  assert.equal(canCheck(item(), 1), false);
+});
+
+test("a check reads as its sign and lines", () => {
+  assert.equal(gitCheckText({ state: "safe", lines: ["Clean, all pushed: safe to delete", "the agent clones it again on its next ticket"] }), "✅ Clean, all pushed: safe to delete · the agent clones it again on its next ticket");
+  assert.equal(gitCheckText({ state: "unsafe", lines: ["2 commits not pushed (main)", "Uncommitted changes (1 file)"] }), "⚠️ 2 commits not pushed (main) · Uncommitted changes (1 file)");
+  assert.equal(gitCheckText({ state: "unknown", lines: ["Can't check: unusual git config"] }), "❔ Can't check: unusual git config");
 });
