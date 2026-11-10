@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useLocation } from "react-router";
+import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
@@ -31,6 +31,7 @@ import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
+import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
 import { QUEUED_MARK, sendState } from "../../lib/agentMessage";
@@ -189,6 +190,8 @@ export function Chat({
   // Any agent, its own group's first: the backend prefers them too when two share a name.
   const mentionable = agents.filter((a) => a.id !== agent.id).sort((a, b) => Number(teamOf(a) !== teamOf(agent)) - Number(teamOf(b) !== teamOf(agent)));
   const mention = useMention(agent.id, text, setText, mentionable);
+  // "#18": specs, issues and pull requests to tag; the backend adds what each is to the agent's prompt.
+  const tagMenu = useTagMenu(agent.project, text, setText);
   const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
@@ -557,6 +560,7 @@ export function Chat({
             />
           )}
           {mention.menu && <div className="mb-2">{mention.menu}</div>}
+          {tagMenu.menu && <div className="mb-2">{tagMenu.menu}</div>}
           {matches.length > 0 && (
             <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
               {matches.map((c, i) => (
@@ -640,7 +644,7 @@ export function Chat({
                     if (files.length > 0) addImages(files);
                   }}
                   onKeyDown={(e) => {
-                    if (mention.onKeyDown(e)) return;
+                    if (mention.onKeyDown(e) || tagMenu.onKeyDown(e)) return;
                     if (matches.length > 0) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -676,7 +680,7 @@ export function Chat({
                     watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                     : running ? `${agent.name} is working. Your message will be delivered next.`
                     : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
-                    : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
+                    : `Message ${agent.name}… (/ for commands, @ to mention, # to tag)`
                   }
                   className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
@@ -694,6 +698,7 @@ export function Chat({
           </div>
           {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
+          <div className="mt-2 font-mono text-[10.5px] text-fg-3">@ agents and files · # specs, issues and PRs</div>
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
             {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
             <span className="max-md:hidden">
@@ -726,6 +731,30 @@ function MessageTasks({ m }: { m: Message }) {
   return (
     <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
       {ids.map((id) => <TaskChip key={id} id={id} />)}
+    </div>
+  );
+}
+
+/** Chips for the specs, issues and pull requests a message tags with `#`: kind and title, opening the item. */
+function MessageTags({ m }: { m: Message }) {
+  const tags: { tag: string; kind: "spec" | "issue" | "pr"; title: string; url?: string | null; task_id?: string }[] = m.meta?.tags ?? [];
+  if (!tags.length) return null;
+  const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
+  return (
+    <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
+      {tags.map((t) => {
+        const inner = (
+          <>
+            <span className="font-mono text-fg-3">{t.kind}</span>
+            <span className="truncate">{t.title}</span>
+          </>
+        );
+        return t.task_id ? (
+          <Link key={t.tag} to={`/issues/${t.task_id}`} title={t.tag} className={cls}>{inner}</Link>
+        ) : (
+          <a key={t.tag} href={t.url ?? undefined} target="_blank" rel="noopener noreferrer" title={t.tag} className={cls}>{inner}</a>
+        );
+      })}
     </div>
   );
 }
@@ -863,6 +892,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           <div className="max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
+        <MessageTags m={m} />
         {m.meta?.mentions?.length > 0 && (
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}

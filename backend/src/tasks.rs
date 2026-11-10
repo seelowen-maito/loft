@@ -567,7 +567,7 @@ pub fn reference_header(state: &AppState, ids: &[String]) -> String {
 
 /// Text from an issue (a GitHub title, say) made safe inside the header: it can't close the quote or the
 /// bracket, or start a line of its own.
-fn inert(s: &str) -> String {
+pub(crate) fn inert(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '“' | '”' => '"',

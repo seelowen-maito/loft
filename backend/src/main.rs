@@ -34,6 +34,7 @@ mod simulator;
 mod state;
 mod system;
 mod tailnet;
+mod tags;
 mod tasks;
 mod updater;
 mod uploads;
