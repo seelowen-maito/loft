@@ -484,6 +484,8 @@ export type Settings = {
   comment_approval_default: ApprovalMode;
   /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
   backup_dir: string;
+  /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
+  idle_timeout_hours: number;
 };
 
 /** The backups folder, its newest backup and the last attempt's error (a good backup clears it). */
@@ -533,7 +535,8 @@ export type CleanLog = {
   /** "Cleaning Loft Tester…" while running, then "Cleaned Loft Tester"; empty in an older log. */
   title?: string;
   running: boolean;
-  lines: { agent: string; path: string; rel: string; bytes: number; error: string | null; command: string }[];
+  /** `done` is what was done when it isn't a removal, like "Shut down" a Simulator device (`rel` is its name). */
+  lines: { agent: string; path: string; rel: string; bytes: number; error: string | null; command: string; done?: string }[];
   skipped: CleanSkip[];
   freed_bytes: number;
   removed: number;
@@ -620,6 +623,8 @@ export function grillError(e: unknown) {
 
 /** A booted simulator; `agent` is the agent whose device it is, null for one the user booted. */
 export type Simulator = { udid: string; name: string; runtime: string; agent: { id: string; name: string } | null };
+/** An agent's Simulator device, for Settings → Disk: its size on disk and whether it is booted. */
+export type AgentDevice = { udid: string; name: string; state: string; bytes: number; agent: { id: string; name: string } };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =
   | { action: "tap"; x: number; y: number }
@@ -630,6 +635,8 @@ export type SimulatorInput =
 
 export const api = {
   simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
+  /** Agents' Simulator devices, biggest first; none without Xcode. */
+  agentDevices: () => req<{ devices: AgentDevice[] }>("GET", "/simulator/devices"),
   simulatorInput: (udid: string, input: SimulatorInput) => req<{ ok: boolean }>("POST", "/simulator/input", { udid, ...input }),
   info: () => req<Info>("GET", "/info"),
   update: () => req<UpdateStatus>("GET", "/update"),

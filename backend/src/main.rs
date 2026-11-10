@@ -40,6 +40,8 @@ mod system;
 mod tailnet;
 mod tags;
 mod tasks;
+#[cfg(test)]
+mod testdir;
 mod updater;
 mod uploads;
 mod voice;
@@ -125,6 +127,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/agents/{id}/find", get(api::find_files))
         .route("/agents/{id}/open-editor", post(api::open_editor))
         .route("/simulator", get(simulator::booted))
+        .route("/simulator/devices", get(simulator::agent_devices))
         .route("/simulator/screenshot", get(simulator::screenshot))
         .route("/simulator/stream", get(simulator::stream))
         .route("/simulator/input", post(simulator::input))
@@ -251,6 +254,8 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
+    tokio::spawn(simulator::tidier(state.clone()));
+    tokio::spawn(processes::idle_stopper(state.clone()));
     tokio::spawn(pairing::read_terminal(state.clone()));
 
     // Serve the built frontend when present (production mode).
@@ -290,7 +295,7 @@ mod tests {
         for i in 0..40 {
             tasks::create(&st, &json!({ "title": format!("Issue number {i}"), "body": "Some words that repeat. ".repeat(20) }), "user").unwrap();
         }
-        let dist = std::env::temp_dir().join(format!("loft-dist-{}", uuid::Uuid::new_v4()));
+        let dist = crate::testdir::for_this_test("dist");
         std::fs::create_dir_all(&dist).unwrap();
         for f in ["app.js", "app.css", "pic.png", "clip.mp4"] {
             std::fs::write(dist.join(f), "x".repeat(4096)).unwrap();

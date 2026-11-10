@@ -14,6 +14,14 @@ test("log lines read past tense, like their header", () => {
   assert.equal(cleanLineText({ ...line, error: "Permission denied" }), "failed /s/a/old: Permission denied");
 });
 
+test("Simulator device and process lines say what was done to which one", () => {
+  const line = { agent: "a", path: "/sim/U", rel: "Loft Dev 93543007", bytes: 2_000_000_000, error: null, command: "xcrun simctl delete U", done: "Deleted Simulator device" };
+  assert.equal(cleanLineText(line), "Deleted Simulator device Loft Dev 93543007 (2.0 GB)");
+  assert.equal(cleanLineText({ ...line, rel: "Loft Dev (Loft)", bytes: 0, done: "Shut down Simulator device" }), "Shut down Simulator device Loft Dev (Loft)");
+  assert.equal(cleanLineText({ ...line, bytes: 0, error: "busy" }), "failed: Deleted Simulator device Loft Dev 93543007: busy");
+  assert.equal(cleanLineText({ ...line, path: "pid 42", rel: "node vite --port 20070", bytes: 0, command: "kill 42", done: "Stopped process" }), "Stopped process node vite --port 20070");
+});
+
 test("only items that can be removed show their command", () => {
   assert.equal(shownCommand(item(), 0), "rm -rf /s/a/loft");
   assert.equal(shownCommand(item({ label: "main clone of loft", opens: true }), 0), "", "a main clone");

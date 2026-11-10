@@ -68,6 +68,8 @@ struct SettingsView: View {
     /// Settings › Disk: workspace sizes and free space, nil until loaded; the last clean's log; the open clean.
     @State private var disk: WorkspaceSizes?
     @State private var lastClean: CleanLog?
+    /// Agents' Simulator devices, nil on a Mac that doesn't list them.
+    @State private var devices: [AgentDevice]?
     /// Agents whose sizes are measured again after a clean.
     @State private var remeasuring: Set<String> = []
     @State private var measuringDisk = true
@@ -396,6 +398,7 @@ struct SettingsView: View {
         defer { measuringDisk = false }
         disk = try? await store.workspaceSizes()
         if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
+        if store.info?.supports(.agentDevices) == true { devices = try? await store.agentDevices() }
     }
 
     /// A Mac whose Clean lists the workspace to tick what goes; an older one's Clean works another way, so it gets none.
@@ -427,6 +430,18 @@ struct SettingsView: View {
                     Text(r.name)
                 }
             }
+            ForEach(devices ?? []) { d in
+                LabeledContent {
+                    HStack(spacing: 10) {
+                        Text(d.stateText).foregroundStyle(.secondary)
+                        Text(bytesText(d.bytes))
+                    }
+                } label: {
+                    Label(d.agent.name, systemImage: "iphone")
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("device-\(d.udid)")
+            }
             if canClean {
                 Button("Clean all") { cleanSheet = .preview(agentId: nil) }
                     .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
@@ -448,7 +463,7 @@ struct SettingsView: View {
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily.")
+            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an idle agent.")
         }
     }
 

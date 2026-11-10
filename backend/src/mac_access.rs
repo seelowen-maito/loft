@@ -199,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_folder_reads_as_allowed_blocked_waiting_or_missing_and_a_prompt_never_hangs_the_check() {
-        let home = std::env::temp_dir().join(format!("loft-mac-{}", uuid::Uuid::new_v4()));
+        let home = crate::testdir::for_this_test("mac");
         for d in ["Desktop", "Documents", "Downloads", "Library/Application Support/com.apple.TCC"] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
@@ -285,7 +285,7 @@ mod tests {
         // Still waiting, then Check again finds Downloads allowed: gone too.
         feed(&[ctx("437.90", "kTCCServiceSystemPolicyDownloadsFolder", "no"), attribution("437.90", EXE)], 11);
         assert_eq!(items().len(), 1);
-        let home = std::env::temp_dir().join(format!("loft-mac-{}", uuid::Uuid::new_v4()));
+        let home = crate::testdir::for_this_test("mac");
         std::fs::create_dir_all(home.join("Downloads")).unwrap();
         let check = run(&home, "/bin/ls").await;
         st.rt.lock().unwrap().tcc.clear_allowed(&check);

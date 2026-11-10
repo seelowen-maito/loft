@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn temp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("loft-backup-{}", uuid::Uuid::new_v4()));
+        let d = crate::testdir::for_this_test("backup");
         std::fs::create_dir_all(&d).unwrap();
         d
     }

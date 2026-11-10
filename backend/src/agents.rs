@@ -50,6 +50,19 @@ pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
     }
 }
 
+/// Whether the agent has had no run for the idle timeout (Settings): not running, and its last run started, and
+/// ended, at least that long before `now`. An agent that never ran is idle.
+pub fn idle(state: &AppState, a: &Agent, now: std::time::SystemTime) -> bool {
+    let timeout = Duration::from_secs(u64::from(state.settings.get().idle_timeout_hours) * 3600);
+    let rt = state.rt.lock().unwrap();
+    if rt.running.contains_key(&a.id) {
+        return false;
+    }
+    let started = a.last_run_at.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(std::time::SystemTime::from);
+    let last = started.max(rt.ended.get(&a.id).copied());
+    last.is_none_or(|t| now.duration_since(t).unwrap_or_default() >= timeout)
+}
+
 pub fn emit_agent(state: &AppState, a: &Agent) {
     let mut v = client_json(a);
     run_fields(state, &a.id, &mut v);
@@ -913,6 +926,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
                     _ => {
                         rt.running.remove(&agent_id);
+                        rt.ended.insert(agent_id.clone(), std::time::SystemTime::now());
                         None
                     }
                 };
@@ -2270,7 +2284,7 @@ esac
 
     #[test]
     fn the_old_agent_files_folder_is_deleted() {
-        let dir = std::env::temp_dir().join(format!("loft-old-files-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("old-files");
         std::fs::create_dir_all(dir.join(OLD_AGENT_FILES)).unwrap();
         std::fs::write(dir.join(OLD_AGENT_FILES).join("a.mcp.json"), "{\"token\":\"x\"}").unwrap();
         std::fs::create_dir_all(dir.join(AGENT_FILES)).unwrap();
