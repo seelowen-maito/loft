@@ -90,7 +90,8 @@ fn session_owners(storage: &Path) -> HashMap<i32, String> {
     owners
 }
 
-/// Who owns a process: the agent whose session it runs in, else the agent whose workspace holds its working folder.
+/// Who owns a process: the agent whose session it runs in, else the agent of the nearest process it runs under that
+/// is in an agent's session, else the agent whose workspace holds its working folder.
 struct Owners {
     sessions: HashMap<i32, String>,
     /// Each agent's workspace, resolved (a process's working folder comes resolved), and its id.
@@ -105,11 +106,13 @@ impl Owners {
         Owners { sessions: session_owners(storage), workspaces, uid: unsafe { libc::getuid() } }
     }
 
-    /// The agent `p` is: the one of its session, else, for a process of the user's with no terminal that runs under
-    /// neither Loft nor a GUI app, the one whose workspace holds its working folder.
+    /// The agent `p` is: the one of its session, else the one of the nearest session above it before Loft or a GUI
+    /// app (a child that left its parent's session, like node's `detached` or Python's `start_new_session`, while
+    /// that parent runs), else, for a process of the user's with no terminal that runs under neither Loft nor a GUI
+    /// app, the one whose workspace holds its working folder.
     fn of(&self, p: &Proc) -> Option<&String> {
         let sid = session_of(p.pid)?;
-        if let Some(id) = self.sessions.get(&sid) {
+        if let Some(id) = std::iter::once(&sid).chain(&p.sessions_above).find_map(|s| self.sessions.get(s)) {
             return Some(id);
         }
         if self.workspaces.is_empty() || p.uid != self.uid || p.tty || p.under_app {
@@ -405,6 +408,8 @@ struct Proc {
     tty: bool,
     /// It, or a process it runs under, is Loft or a GUI app: never an agent's by its working folder.
     under_app: bool,
+    /// The sessions of the processes it runs under, nearest first, up to Loft or a GUI app (or launchd).
+    sessions_above: Vec<i32>,
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
@@ -444,28 +449,38 @@ fn table() -> Vec<Proc> {
             let (tty, command) = field(rest);
             let pid: i32 = pid.parse().ok()?;
             let tty = !matches!(tty, "??" | "?" | "-");
-            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false })
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
         })
         .collect();
-    mark_under_app(&mut procs, &apps);
+    mark_under_app(&mut procs, &apps, session_of);
     procs
 }
 
 /// Whether `comm`, a process's executable path, is a GUI app's (the app's own or a helper app's, like VS Code's
-/// `Code Helper (Plugin)`), installed in /Applications. Postgres.app's `postgres` isn't: it's in `bin`, not `MacOS`.
+/// `Code Helper (Plugin)`), installed in /Applications or ~/Applications (where JetBrains Toolbox puts its IDEs).
+/// Postgres.app's `postgres` isn't: it's in `bin`, not `MacOS`.
 fn is_gui_app(comm: &str) -> bool {
-    comm.starts_with("/Applications/") && comm.contains(".app/Contents/MacOS/")
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(|h| format!("{}/Applications/", h.trim_end_matches('/')));
+    (comm.starts_with("/Applications/") || home.is_some_and(|h| comm.starts_with(&h))) && comm.contains(".app/Contents/MacOS/")
 }
 
-/// Marks the processes that are, or run under, one of `apps` (Loft and the GUI apps).
-fn mark_under_app(procs: &mut [Proc], apps: &HashSet<i32>) {
+/// Marks the processes that are, or run under, one of `apps` (Loft and the GUI apps), and lists the sessions
+/// (`sid_of`) of the processes each one runs under, up to the first app.
+fn mark_under_app(procs: &mut [Proc], apps: &HashSet<i32>, sid_of: impl Fn(i32) -> Option<i32>) {
     let parents: HashMap<i32, i32> = procs.iter().map(|p| (p.pid, p.ppid)).collect();
+    let mut sids: HashMap<i32, Option<i32>> = HashMap::new();
     for p in procs.iter_mut() {
         let (mut pid, mut seen) = (p.pid, HashSet::new());
         while pid > 1 && seen.insert(pid) {
             if apps.contains(&pid) {
                 p.under_app = true;
                 break;
+            }
+            if pid != p.pid {
+                let sid = *sids.entry(pid).or_insert_with(|| sid_of(pid));
+                if let Some(sid) = sid.filter(|s| p.sessions_above.last() != Some(s)) {
+                    p.sessions_above.push(sid);
+                }
             }
             pid = parents.get(&pid).copied().unwrap_or(0);
         }
@@ -1061,14 +1076,43 @@ mod tests {
         assert!(is_gui_app(code) && is_gui_app(plugin) && is_gui_app("/Applications/Cursor.app/Contents/MacOS/Cursor"));
         assert!(!is_gui_app("/Applications/Postgres.app/Contents/Versions/16/bin/postgres"), "a daemon from an app bundle");
         assert!(!is_gui_app("/usr/local/bin/node") && !is_gui_app("/opt/homebrew/bin/redis-server"));
+        let home = std::env::var("HOME").unwrap();
+        assert!(is_gui_app(&format!("{home}/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea")), "a JetBrains Toolbox IDE");
+        assert!(is_gui_app(&format!("{home}/Applications/RustRover.app/Contents/MacOS/fsnotifier")));
+        assert!(!is_gui_app(&format!("{home}/Documents/Applications/Fake.app/Contents/MacOS/x")), "only ~/Applications itself");
 
-        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false };
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
         // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
         // daemon 300 runs under launchd and has a child 301.
         let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
-        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]));
+        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]), |pid| Some(pid));
         let under: Vec<i32> = procs.iter().filter(|p| p.under_app).map(|p| p.pid).collect();
         assert_eq!(under, vec![100, 101, 200, 201, 202]);
+    }
+
+    #[test]
+    fn a_child_that_left_an_agent_s_session_is_the_agent_s() {
+        use super::mark_under_app;
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        // Loft 100 runs claude 110, whose Bash shell 120 (session 120, recorded) runs a dev server 121; the dev server
+        // starts a worker 130 in a session of its own (node `detached`), and the worker runs 131. Loft's git 101 is
+        // in Loft's session.
+        let mut procs = vec![p(100, 1), p(101, 100), p(110, 100), p(120, 110), p(121, 120), p(130, 121), p(131, 130)];
+        let sid = |pid| Some(match pid { 120 | 121 => 120, 130 | 131 => 130, _ => 100 });
+        mark_under_app(&mut procs, &HashSet::from([100]), sid);
+        let above = |pid| procs.iter().find(|p| p.pid == pid).unwrap().sessions_above.clone();
+        assert_eq!(above(131), vec![130, 120, 100], "nearest first, up to Loft");
+        assert_eq!(above(130), vec![120, 100]);
+        assert_eq!(above(101), Vec::<i32>::new());
+        assert!(procs.iter().all(|p| p.under_app), "all of them run under Loft");
+
+        // The live process (this test) stands in for the worker: its own session isn't recorded, one above is.
+        let me = std::process::id() as i32;
+        let owners = Owners { sessions: HashMap::from([(120, "a".to_string())]), workspaces: vec![], uid: unsafe { libc::getuid() } };
+        let worker = Proc { pid: me, under_app: true, sessions_above: above(130), ..p(me, 1) };
+        assert_eq!(owners.of(&worker), Some(&"a".to_string()), "the agent's, though it runs under Loft");
+        let git = Proc { pid: me, under_app: true, sessions_above: above(101), ..p(me, 1) };
+        assert_eq!(owners.of(&git), None, "Loft's own child is no one's");
     }
 
     #[tokio::test(flavor = "multi_thread")]
