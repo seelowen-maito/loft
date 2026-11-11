@@ -4,9 +4,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-for bin in cargo npm git; do
+for bin in cargo node git; do
   command -v "$bin" >/dev/null || { echo "Missing '$bin'. See README.md for requirements." >&2; exit 1; }
 done
 
-(cd frontend && ([ -d node_modules ] || npm install) && npm run build)
+. scripts/frontend-pm.sh
+(cd frontend && ([ -d node_modules ] || fe_install) && fe run build)
 cd backend && exec cargo run --release

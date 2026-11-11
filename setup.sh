@@ -148,9 +148,10 @@ else
 fi
 
 section "Build"
-build_frontend() { cd frontend && { [ -d node_modules ] || npm install --no-audit --no-fund; } && npm run build; }
+. scripts/frontend-pm.sh
+build_frontend() { cd frontend && { [ -d node_modules ] || fe_install; } && fe run build; }
 if spin "Building the web app" build_frontend; then ok "web app"
-else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}frontend && npm install && npm run build"; exit 1; fi
+else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}frontend && ${FE_PM/corepack/corepack pnpm} install && ${FE_PM/corepack/corepack pnpm} run build"; exit 1; fi
 [ -x "$BIN" ] && label="Building loft" || label="Building loft ${D}(the first build takes a few minutes)${N}"
 if spin "$label" bash -c 'cd backend && cargo build --release'; then ok "loft"
 else fail "loft build failed"; show_log; tip "To see everything: cd ${HERE}backend && cargo build --release"; exit 1; fi

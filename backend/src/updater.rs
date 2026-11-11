@@ -62,7 +62,7 @@ fn running_agents(state: &AppState) -> usize {
 }
 
 async fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(program).args(args).current_dir(dir).output().await?;
+    let out = Command::new(program).args(args).current_dir(dir).env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0").output().await?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let lines: Vec<&str> = err.lines().collect();
@@ -88,6 +88,23 @@ async fn check(root: &Path, running: &str) -> Result<Option<String>> {
     Ok(Some(upstream))
 }
 
+/// pnpm (pinned by `packageManager` in frontend/package.json), else pnpm through corepack, else npm: the clone may
+/// have none of them set up. Keep in step with scripts/frontend-pm.sh.
+async fn package_manager(dir: &Path) -> (&'static str, &'static [&'static str]) {
+    for (program, pre) in [("pnpm", &[][..]), ("corepack", &["pnpm"][..])] {
+        if run(dir, program, &[pre, &["--version"]].concat()).await.is_ok() {
+            return (program, pre);
+        }
+    }
+    ("npm", &[])
+}
+
+/// node_modules made by the other package manager: pnpm leaves a `.modules.yaml` there, npm doesn't. pnpm won't reuse
+/// npm's without a terminal, and the updater has none, so it starts over.
+fn stale_modules(has_modules_yaml: bool, pm: &str) -> bool {
+    has_modules_yaml == (pm == "npm")
+}
+
 async fn install(root: &Path) -> Result<()> {
     run(root, "git", &["pull", "--ff-only", "--quiet"]).await?;
     // Backend first: if it fails, the live frontend bundle stays in step with the running binary.
@@ -97,8 +114,14 @@ async fn install(root: &Path) -> Result<()> {
     }
     run(&root.join("backend"), "cargo", &cargo).await?;
     let frontend = root.join("frontend");
-    run(&frontend, "npm", &["install", "--no-audit", "--no-fund"]).await?;
-    run(&frontend, "npm", &["run", "build"]).await?;
+    let (pm, pre) = package_manager(&frontend).await;
+    let modules = frontend.join("node_modules");
+    if modules.is_dir() && stale_modules(modules.join(".modules.yaml").is_file(), pm) {
+        std::fs::remove_dir_all(&modules)?;
+    }
+    let install: &[&str] = if pm == "npm" { &["install", "--no-audit", "--no-fund"] } else { &["install", "--frozen-lockfile"] };
+    run(&frontend, pm, &[pre, install].concat()).await?;
+    run(&frontend, pm, &[pre, &["run", "build"]].concat()).await?;
     // The Herdr UI client, once it was set up: rebuilt so new chat tabs run the new version.
     let herdr = root.join("herdr");
     if herdr.join("target").join("release").join("loft-herdr").is_file()
@@ -210,6 +233,15 @@ pub fn restart() -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn node_modules_from_the_other_package_manager_is_stale() {
+        assert!(super::stale_modules(false, "pnpm"), "npm's node_modules under pnpm");
+        assert!(super::stale_modules(false, "corepack"));
+        assert!(super::stale_modules(true, "npm"), "pnpm's node_modules under npm");
+        assert!(!super::stale_modules(true, "pnpm"));
+        assert!(!super::stale_modules(false, "npm"));
+    }
+
     use std::time::{Duration, SystemTime};
 
     #[tokio::test(flavor = "multi_thread")]
