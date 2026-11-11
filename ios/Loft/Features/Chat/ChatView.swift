@@ -236,7 +236,7 @@ struct ChatView: View {
                     }, done: { talkText = nil })
                     .id(t)
                 }
-                ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
+                ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },

@@ -170,7 +170,7 @@ struct VoiceStatusView: View {
         VStack(spacing: 10) {
             switch status {
             case .sending:
-                AutoSendBar(recipient: store.agent(agentId)?.name ?? "Agent", undo: undo, sendNow: {
+                AutoSendBar(recipient: store.agent(agentId)?.name ?? "Agent", deadline: voice.autoSendAt ?? Date(), undo: undo, sendNow: {
                     Task { await voice.send(voice.cleaned ?? voice.raw) }
                 })
             case .thinking:

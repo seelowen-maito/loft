@@ -308,6 +308,7 @@ final class LoftStore {
     func activate() {
         isActive = true
         if api != nil && connectionTask == nil { startConnection() }
+        sendOverdueVoiceSend()
     }
 
     /// The app went to the background: drop the stream (iOS would suspend it anyway) and save.
@@ -625,6 +626,55 @@ final class LoftStore {
         let page = try await api.messages(agentId: agentId, limit: 100, before: first.id)
         messages[agentId] = page + (messages[agentId] ?? [])
         historyHasMore[agentId] = page.count >= 100
+    }
+
+    /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
+    /// composer, so it still goes when you leave the chat during the window.
+    struct VoiceAutoSend: Identifiable {
+        let id = UUID()
+        let agentId: String
+        let text: String
+        let deadline: Date
+        let send: () -> Void
+    }
+
+    private(set) var voiceAutoSend: VoiceAutoSend?
+    @ObservationIgnored private var voiceAutoSendTimer: Task<Void, Never>?
+
+    /// Sends `text` to the agent (by calling `send`) once `window` is over, unless it's cancelled first.
+    /// Replaces a pending one for the same agent (a composer coming back takes it over, with the time that's left);
+    /// one for another agent goes now, so it isn't lost.
+    func scheduleVoiceSend(_ text: String, to agentId: String, in window: TimeInterval, send: @escaping () -> Void) {
+        if let other = voiceAutoSend, other.agentId != agentId { sendVoiceNow(other.id) }
+        voiceAutoSendTimer?.cancel()
+        let pending = VoiceAutoSend(agentId: agentId, text: text, deadline: Date().addingTimeInterval(window), send: send)
+        voiceAutoSend = pending
+        voiceAutoSendTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(window))
+            guard !Task.isCancelled else { return }
+            self?.sendVoiceNow(pending.id)
+        }
+    }
+
+    /// Sends the pending one now (Send now, or its window ended). It goes once: whatever fires second finds nothing.
+    func sendVoiceNow(_ id: UUID? = nil) {
+        guard let pending = voiceAutoSend, id == nil || pending.id == id else { return }
+        voiceAutoSend = nil
+        // Not cancelled: this may be running in that very timer, and its send would then fail as "Cancelled".
+        voiceAutoSendTimer = nil
+        VoiceLog.shared.add("sent \(VoiceLog.clip(pending.text)) after the Undo window")
+        pending.send()
+    }
+
+    /// Back from the background: one whose window ended meanwhile goes now.
+    func sendOverdueVoiceSend(now: Date = Date()) {
+        if let pending = voiceAutoSend, pending.deadline <= now { sendVoiceNow(pending.id) }
+    }
+
+    func cancelVoiceSend() {
+        voiceAutoSendTimer?.cancel()
+        voiceAutoSendTimer = nil
+        voiceAutoSend = nil
     }
 
     /// `images`: uploads to send with the text (a video); with them the text may be empty.
