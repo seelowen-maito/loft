@@ -10,8 +10,6 @@ use serde_json::{Value, json};
 pub struct Loft {
     pub base: String,
     http: ureq::Agent,
-    /// The paired client's token (ADR 0004): every write needs it.
-    token: Option<String>,
 }
 
 /// What the event thread hands the app.
@@ -28,14 +26,11 @@ impl Loft {
             .timeout(Duration::from_secs(60))
             .user_agent("loft-herdr")
             .build();
-        Self { base: base.to_string(), http, token: crate::config::token_for(base) }
+        Self { base: base.to_string(), http }
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut req = self.http.request(method, &format!("{}/api{path}", self.base));
-        if let Some(t) = &self.token {
-            req = req.set("authorization", &format!("Bearer {t}"));
-        }
+        let req = self.http.request(method, &format!("{}/api{path}", self.base));
         let res = match body {
             Some(b) => req.send_json(b),
             None if method == "GET" || method == "DELETE" => req.call(),

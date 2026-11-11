@@ -5,7 +5,6 @@ import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type Back
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
-import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
@@ -646,7 +645,6 @@ export default function SettingsPage() {
           <ShortcutSettings />
         </Section>
 
-        <PairedClients />
         <HerdrSetup />
 
         <PushSettings />

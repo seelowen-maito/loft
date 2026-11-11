@@ -179,8 +179,6 @@ pub struct AppState {
     pub listings: Arc<crate::file_search::Listings>,
     /// The Xcode `simctl` last found to run with.
     pub xcode: Arc<crate::simulator::XcodeCache>,
-    /// Clients waiting to be paired (pairing.rs).
-    pub pairing: Arc<crate::pairing::Pairing>,
 }
 
 impl AppState {

@@ -1,6 +1,6 @@
 # Only a paired client can change things through the API
 
-Status: accepted. The backend half is built (`pairing.rs`); the web and iPhone screens follow.
+Status: withdrawn. Pairing was built, then removed before it reached `main`: the user chose not to require it. The API is open again to anything that can reach it, agents' `curl` included; the threat model below describes what that leaves open.
 
 ## Context
 An agent runs as the same Mac user and can `curl` Loft's API on localhost:7420. Loft can't tell that from the web app, the iOS app or a script, so today an agent could change the push keys and the relay address (`PUT /api/push`), approve its own permission requests (`POST /api/permissions/{id}`), approve comments, merge PRs, or delete agents. Agents don't need the REST API at all: everything they do goes through `/mcp/{agent_id}`.
