@@ -12,6 +12,7 @@ struct LoftApp: App {
     init() {
         if TestMode.noAnimations { UIView.setAnimationsEnabled(false) }
         Prefs.registerDefaults()
+        OldPairing.clear()
         let store = LoftStore(api: Self.makeAPI())
         _store = State(initialValue: store)
         _voice = State(initialValue: VoiceSession(store: store))

@@ -174,7 +174,9 @@ pub async fn file(State(state): State<AppState>, UrlPath(name): UrlPath<String>)
 }
 
 /// `GET /api/herdr/bin/{platform}`: the built client, for a machine with this one's OS and CPU.
-pub async fn binary(State(state): State<AppState>, UrlPath(wanted): UrlPath<String>) -> Result<Response, ApiError> {
+pub async fn binary(State(state): State<AppState>, headers: axum::http::HeaderMap, UrlPath(wanted): UrlPath<String>) -> Result<Response, ApiError> {
+    // It builds when there is no binary yet: not for a page on another site.
+    crate::guard::same_site_read(&headers)?;
     if wanted != platform() {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("this Loft has a {} build only", platform())));
     }
