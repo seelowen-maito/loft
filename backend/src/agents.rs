@@ -367,7 +367,8 @@ pub async fn ask_permission_for(
 pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>) -> Result<PermissionRequest> {
     let mut req = state.db.get_permission(id)?.ok_or_else(|| anyhow::anyhow!("no such request"))?;
     anyhow::ensure!(req.status == "pending", "request already {}", req.status);
-    if let Some(r) = rule.filter(|r| !r.trim().is_empty()) {
+    // A kill's rule is the one Loft made from the processes, not one posted with the answer.
+    if let Some(r) = rule.filter(|r| !r.trim().is_empty() && req.tool_name != "Kill") {
         req.rule = r.trim().to_string();
     }
     let allow = decision != "deny";

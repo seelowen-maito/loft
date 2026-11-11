@@ -363,9 +363,9 @@ function ToolList({ title, hint, items, onChange, presets, tone }: {
       <div className="flex flex-wrap gap-1.5">
         {items.length === 0 && <span className="text-[12px] text-fg-3">None</span>}
         {items.map((t) => (
-          <span key={t} className={cx("chip gap-1.5 bg-ink-850 py-1 pr-1", tone === "good" ? "border-good/20" : "border-bad/25")}>
-            <span className={tone === "good" ? "text-fg" : "text-bad"}>{t}</span>
-            <button className="rounded-full p-0.5 text-fg-3 hover:bg-white/10 hover:text-fg" onClick={() => onChange(items.filter((x) => x !== t))} aria-label={`Remove ${t}`}>
+          <span key={t} title={t} className={cx("chip max-w-full gap-1.5 bg-ink-850 py-1 pr-1", tone === "good" ? "border-good/20" : "border-bad/25")}>
+            <span className={cx("truncate", tone === "good" ? "text-fg" : "text-bad")}>{t}</span>
+            <button className="shrink-0 rounded-full p-0.5 text-fg-3 hover:bg-white/10 hover:text-fg" onClick={() => onChange(items.filter((x) => x !== t))} aria-label={`Remove ${t}`}>
               <X className="size-3" />
             </button>
           </span>

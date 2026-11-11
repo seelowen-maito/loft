@@ -506,10 +506,13 @@ fn exe_of(_pid: i32) -> Option<String> {
     None
 }
 
-/// A folder Xcode names `<Name>-<hash>` (DerivedData, xcode-data): 20 or more lowercase letters or digits after the dash.
+/// A folder Xcode names `<Name>-<hash>` in DerivedData: 28 lowercase letters after the dash.
 fn is_build_folder(part: &str) -> bool {
-    part.rsplit_once('-').is_some_and(|(name, hash)| !name.is_empty() && hash.len() >= 20 && hash.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+    part.rsplit_once('-').is_some_and(|(name, hash)| !name.is_empty() && hash.len() == 28 && hash.bytes().all(|b| b.is_ascii_lowercase()))
 }
+
+/// Programs that run whatever script they are given: a rule for one would allow stopping anything they run.
+const INTERPRETERS: &[&str] = &["node", "python", "ruby", "perl", "php", "bash", "sh", "zsh", "fish", "deno", "bun", "java", "osascript"];
 
 /// The `Kill(...)` rule for stopping the program at `exe`: its path, with each per-build folder as `*` so a rebuild
 /// still matches. `None` for a path that can't make a rule that names one program.
@@ -521,10 +524,15 @@ fn kill_rule(exe: &str) -> Option<String> {
     kill_spec_ok(&spec).then(|| format!("Kill({spec})"))
 }
 
-/// A path pattern names a program only if it ends in a literal file name, so `*` and `*/` never match everything.
+fn is_interpreter(file: &str) -> bool {
+    INTERPRETERS.contains(&file.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
+/// A path pattern names a program only if it ends in a literal file name that isn't an interpreter (`python3.12` and
+/// `node22` count), so `*` and `*/` never match everything.
 fn kill_spec_ok(spec: &str) -> bool {
     let file = spec.rsplit('/').next().unwrap_or_default();
-    !file.is_empty() && !file.contains('*') && !spec.contains(')')
+    spec.starts_with('/') && !file.is_empty() && !file.contains('*') && !spec.contains(')') && !is_interpreter(file)
 }
 
 /// The pattern inside a saved `Kill(...)` rule. A bare `Kill` or a rule that would match every program has none.
@@ -533,13 +541,14 @@ pub fn kill_spec(rule: &str) -> Option<&str> {
     kill_spec_ok(spec).then_some(spec)
 }
 
-/// `*` matches any run of characters.
+/// `*` matches any run of characters inside one path folder or file name, never a `/`.
 fn glob(pat: &str, s: &str) -> bool {
     match pat.split_once('*') {
         None => pat == s,
         Some((head, rest)) => {
             let Some(s) = s.strip_prefix(head) else { return false };
-            (0..=s.len()).filter(|&i| s.is_char_boundary(i)).any(|i| glob(rest, &s[i..]))
+            let reach = s.find('/').unwrap_or(s.len());
+            (0..=reach).filter(|&i| s.is_char_boundary(i)).any(|i| glob(rest, &s[i..]))
         }
     }
 }
@@ -1173,6 +1182,9 @@ mod tests {
         // It offers no Always: saving the rule wouldn't stop the question.
         assert_eq!(req.rule, "");
         assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None).is_err());
+        // A rule posted with the answer doesn't give it one.
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None).is_err());
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools == vec!["Kill(/bin/sleep)".to_string()], "nothing was added");
         crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
     }
@@ -1187,8 +1199,27 @@ mod tests {
         assert!(rule_allows(&rules, &exe.replace("bfxjtqwnvmpyeoaksvduhzgrlcnk", "zzzzzzzzzzzzzzzzzzzzzzzzzzzz")));
         assert!(rule_allows(&rules, exe));
         assert!(!rule_allows(&rules, &exe.replace("Debug", "Release")));
+        // `*` is one folder: it doesn't reach across `/`.
+        assert!(!rule_allows(&rules, &exe.replace("Loft-bfxjtqwnvmpyeoaksvduhzgrlcnk", "x/y")));
+        assert!(rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/c") && !rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/b/c"));
         assert!(!rule_allows(&rules, "/Applications/Loft.app/Contents/MacOS/Loft"));
         assert_eq!(kill_rule("/bin/sleep").unwrap(), "Kill(/bin/sleep)");
+        // No rule for an interpreter, which runs whatever it is given.
+        assert_eq!(kill_rule(&exe.replace("MacOS/Loft", "MacOS/node")), None);
+        assert_eq!(kill_rule("/usr/local/bin/node"), None);
+        assert!(!rule_allows(&["Kill(/a/*/node)".to_string()], "/a/b/node"));
+        for v in ["python3.12", "node22", "ruby3.3", "python3"] {
+            assert_eq!(kill_rule(&format!("/usr/bin/{v}")), None, "{v}");
+        }
+        assert!(kill_rule("/usr/bin/nodemon").is_some());
+        // A folder is a build folder with exactly 28 lowercase letters after the dash.
+        let l28 = "abcdefghijklmnopqrstuvwxyz".to_string() + "ab";
+        assert_eq!(l28.len(), 28);
+        assert_eq!(kill_rule(&format!("/d/Loft-{l28}/x")).unwrap(), "Kill(/d/*/x)");
+        for hash in [&l28[..27], &(l28.clone() + "a"), &(l28[..27].to_string() + "1")] {
+            let p = format!("/d/Loft-{hash}/x");
+            assert_eq!(kill_rule(&p).unwrap(), format!("Kill({p})"), "{hash}");
+        }
         // No rule from a path that isn't absolute or holds rule syntax.
         for bad in ["", "sleep", "/tmp/a*b", "/tmp/a)b", "/tmp/"] {
             assert_eq!(kill_rule(bad), None, "{bad}");

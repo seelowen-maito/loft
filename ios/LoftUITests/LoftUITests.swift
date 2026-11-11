@@ -1191,6 +1191,17 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Deny"].firstMatch.exists, "approving and denying stay your taps")
     }
 
+    func testAKillWithNoRuleOffersNoAlwaysAllow() {
+        let app = launch(["-fixture-kill-permission"])
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("Backend Agent", app)
+        app.buttons["chatWithAgent"].tap()
+        let cards = app.otherElements.matching(identifier: "approvalCard")
+        XCTAssertTrue(cards.firstMatch.appears(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "More options").count, 1, "only the kill that has a rule offers Always allow")
+        XCTAssertEqual(app.buttons.matching(identifier: "Deny").count, 2)
+    }
+
     func testNeedsYouGroupsPullRequestsByProject() {
         let app = launch(["-fixture-needs-you-projects"])
         XCTAssertTrue(app.staticTexts["Needs you · 13"].firstMatch.appears(timeout: 5), "10 items, with the one PR swapped for four")
