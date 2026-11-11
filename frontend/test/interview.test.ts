@@ -6,7 +6,7 @@ import type { GrillQuestion, GrillSession } from "../src/lib/api.ts";
 
 const session = (over: Partial<GrillSession>): GrillSession => ({
   session_id: "s", agent_id: "a", state: "active", end_reason: null, topic: "t", round: 2, total: 3, answered: 1,
-  waiting: false, questions: [], started_at: "", updated_at: "", ...over,
+  waiting: false, questions: [{ id: "q", state: "open" } as GrillQuestion], started_at: "", updated_at: "", ...over,
 });
 
 test("the full-screen interview has its own URL under the agent", () => {
@@ -18,6 +18,7 @@ test("it shows the open round, paused or not, and waits while the agent prepares
   assert.equal(interviewShows(session({ state: "paused" })), "round", "a paused round can still be answered");
   assert.equal(interviewShows(session({ waiting: true })), "waiting", "sent: the next round is coming");
   assert.equal(interviewShows(session({ state: "preparing", round: null })), "waiting", "the first round is coming");
+  assert.equal(interviewShows(session({ questions: null })), "waiting", "a round whose questions haven't loaded isn't a blank page");
 });
 
 test("with no interview, or an ended one, it shows none", () => {
