@@ -58,7 +58,7 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
 | `backup_failed` | 1 | The last backup of Loft's database failed and the last good one is more than 2 days old (or there is none). One item until a good backup; not pushed | retry (Back up now: `POST /api/backups`), open (Settings → Backups, when the Mac has a tailnet name), dismiss |
-| `push_off` | 1 | A phone is registered but push is off (no APNs key, no relay key): every alert is dropped. One item while it stays off | open (Settings → Push, when the Mac has a tailnet name; `links` has the `/settings#push` path), dismiss |
+| `push_off` | 1 | A phone is registered but push is off (no APNs key, no relay key): every alert is dropped. One item per off period, aged from when it began: a Dismiss lasts until push is back on and off again (or Loft restarts) | open (Settings → Push, when the Mac has a tailnet name; `links` has the `/settings#push` path), dismiss |
 | `task_done` | 0 | An issue **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
 
 ### Action

@@ -809,10 +809,14 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     let _ = state.db.add_pending_fyi(&to.id, &prompt);
 }
 
+/// The sender id of an FYI from Loft itself: no agent has it (agents get UUIDs, and the guide agent is `setup::LOFT_ID`,
+/// "loft"), so the chat names it "Loft" instead of finding an agent.
+pub const LOFT_SENDER: &str = "loft-delivery";
+
 /// An FYI from Loft itself (a Delivery that stalled), shown as from "Loft": delivered like an agent's FYI, with
 /// the agent's next run.
 pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
-    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": "loft", "name": "Loft" }, "fyi": true }));
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": LOFT_SENDER, "name": "Loft" }, "fyi": true }));
     let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
 }
 

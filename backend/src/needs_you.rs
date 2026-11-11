@@ -761,8 +761,17 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
 
     // Phones are paired but push is off (no APNs key, no relay key): every alert is dropped, so the web says so.
     let phones = state.db.list_devices().map_err(e)?.len();
-    if phones > 0 && crate::apns::route(state) == crate::apns::Route::Off {
-        let id = "push_off".to_string();
+    let off_since = {
+        let mut rt = state.rt.lock().unwrap();
+        if phones > 0 && crate::apns::route(state) == crate::apns::Route::Off {
+            Some(rt.push_off_since.get_or_insert_with(|| Utc::now().to_rfc3339()).clone())
+        } else {
+            rt.push_off_since = None;
+            None
+        }
+    };
+    if let Some(since) = off_since {
+        let id = format!("push_off:{since}");
         let mut actions = vec![];
         if let Some(h) = crate::tailnet::host() {
             actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#push", state.cfg.port) } }));
@@ -777,7 +786,7 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
             title: text("Push is off", MAX_TITLE),
             reason: text(&format!("No APNs key and no relay key: Loft drops every alert for {phones}."), MAX_REASON),
             text: text("Settings → Push notifications: Sign in for push (the Loft relay, no Apple developer account needed), or add your own APNs key.", MAX_TEXT),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: since,
             links: vec![json!({ "label": "Settings → Push notifications", "path": "/settings#push" })],
             actions,
             push: ("Push is off".to_string(), String::new()),

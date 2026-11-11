@@ -3078,6 +3078,10 @@ pub(crate) mod tests {
         assert!(fyis[0].1.contains("[Loft Delivery: spec #40] The Delivery stalled at #41: the run Loft woke for its step ended without its call. First ended its run asking: \"Should the API keep the old route or drop it?\""), "{}", fyis[0].1);
         let shown = st.db.list_messages(&lead.id, 5, None).unwrap().pop().unwrap();
         assert_eq!((shown.meta["from_agent"]["name"].as_str(), shown.meta["fyi"].as_bool()), (Some("Loft"), Some(true)));
+        // Not the guide agent's id ("loft"), nor any agent's: the chat would name that agent as the sender.
+        crate::setup::ensure_loft(&st);
+        let from = shown.meta["from_agent"]["id"].as_str().unwrap();
+        assert!(st.db.get_agent(crate::setup::LOFT_ID).unwrap().is_some() && st.db.get_agent(from).unwrap().is_none(), "{from}");
         assert!(!woken(&st, &lead).iter().any(|w| w.contains("stalled")), "an FYI wakes nobody");
 
         // Its call comes after all (the user replied): the question goes with the stall.

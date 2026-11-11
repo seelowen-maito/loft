@@ -130,6 +130,9 @@ pub struct Runtime {
     /// Needs you item ids that became news at this start-up (Deliveries stalled by the restart): the pusher's
     /// first look pushes them, unlike the items already waiting
     pub news_at_start: std::collections::HashSet<String>,
+    /// When push was found off with a phone registered (RFC 3339), until it's back on: the `push_off` item's id
+    /// and age, so a Dismiss lasts for that off period only
+    pub push_off_since: Option<String>,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)

@@ -393,6 +393,10 @@ mod tests {
         let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "push_off").unwrap().clone();
         assert_eq!((&item["reason"], &item["links"][0]["path"]), (&json!("No APNs key and no relay key: Loft drops every alert for your phone."), &json!("/settings#push")));
         assert_eq!(item["actions"].as_array().unwrap().last().unwrap()["kind"], "dismiss");
+        // One id and age for the whole time it's off.
+        let again = crate::needs_you::snapshot(&st).unwrap()["items"].as_array().unwrap().iter().find(|i| i["type"] == "push_off").unwrap().clone();
+        assert!(item["id"].as_str().unwrap().starts_with("push_off:"));
+        assert_eq!((&again["id"], &again["created_at"]), (&item["id"], &item["created_at"]));
 
         // The pusher says once that it drops alerts, and again only after push was back on.
         let dev = agent(&st, "Dev");
@@ -405,6 +409,17 @@ mod tests {
         permission(&st, "off2", &dev.id);
         tick(&st, &mut p).await;
         assert!(!p.off_logged);
+
+        // A Dismiss hides it for that off period only: off again later, it's back with a new id.
+        crate::apns::remove_relay_key().unwrap();
+        let id = collect(&st).unwrap().into_iter().find(|i| i.kind == "push_off").map(|i| to_push(&i).id).unwrap();
+        crate::needs_you::dismiss_item(axum::extract::State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        assert_eq!(off(&st), 0, "dismissed");
+        crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
+        assert_eq!(off(&st), 0);
+        crate::apns::remove_relay_key().unwrap();
+        let back = collect(&st).unwrap().into_iter().find(|i| i.kind == "push_off").map(|i| to_push(&i).id);
+        assert!(back.is_some_and(|b| b != id), "a new off period is a new item");
     }
 
     /// A state with no key of its own but the test relay key: its pushes go through the (fake) relay.
