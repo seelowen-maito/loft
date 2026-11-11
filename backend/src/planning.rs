@@ -3678,6 +3678,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_verdict_from_a_run_woken_for_an_earlier_round_is_refused() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-stale";
+        let (dev, team) = building(&st, &fake, "ci-stale", &["qa"]).await;
+        let qa = &team[0];
+        ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("panicked"));
+        let take = |st: &AppState| crate::agents::take_delivery_queue(&mut st.rt.lock().unwrap(), &qa.id);
+
+        // QA's run takes its round-0 wake, and the CI goes red while it reviews.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        take(&st);
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "started");
+        // The Dev fixes and resubmits: QA's round-1 wake waits behind its running run.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let verdicts = || st.db.get_delivery(slug, 40).unwrap().unwrap().ticket(41).unwrap().verdicts.get("qa").cloned();
+        assert_eq!(verdicts().as_deref(), Some("pending"));
+
+        // The round-0 run's verdicts, pass or changes, aren't on the fixes.
+        let comments = posts(&fake, slug, "issues/500/comments").len();
+        for (verdict, notes) in [("pass", "ok"), ("changes", "Off by one.")] {
+            let err = tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": verdict, "notes": notes })).await.unwrap_err();
+            assert_eq!(err, "That verdict is on round 0's commits of #41, but it was sent back and resubmitted since (now `abc1234`, `fed4321`): nothing was posted. Loft wakes you for round 1's.");
+        }
+        assert_eq!(posts(&fake, slug, "issues/500/comments").len(), comments, "nothing posted");
+        assert_eq!(verdicts().as_deref(), Some("pending"));
+        assert_eq!(standing(&st, slug, 41).0, "review");
+
+        // That run ends and the next one takes the round-1 wake: its verdict counts.
+        crate::delivery::run_ended(&st, &qa.id, false).await;
+        take(&st);
+        let out = tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.starts_with("Posted your pass on #500."), "{out}");
+    }
+
+    #[tokio::test]
     async fn a_repo_without_ci_closes_on_its_reviewers_and_one_with_workflows_waits_for_their_checks() {
         // No workflow and no check: the reviewers' passes close it.
         let (fake, st) = (fake_github(), state());

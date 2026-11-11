@@ -1212,6 +1212,23 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         Some(_) => return Err(format!("You already passed {name} in this round: nothing was posted.")),
         None => return Err(format!("{name} isn't waiting for a {} review: QA and Security review tickets.", crate::planning::role_label(role))),
     }
+    // A run woken for an earlier round reviewed that round's commits: a red CI or another reviewer may have
+    // sent the ticket back since, and its verdict isn't on the fixes. A run with no Delivery wake (a user's
+    // nudge) may still give one.
+    let rounds: Vec<u32> = {
+        let rt = state.rt.lock().unwrap();
+        rt.delivery_running.get(&me.id).into_iter().flatten().filter_map(|w| match &w.step {
+            Step::Review { ticket, role: r, round } if w.repo == d.repo && w.spec == d.spec && *ticket == n && r == role => Some(*round),
+            _ => None,
+        }).collect()
+    };
+    if let Some(&old) = rounds.iter().max().filter(|_| !rounds.contains(&t.rounds)) {
+        let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "That verdict is on round {old}'s commits of {name}, but it was sent back and resubmitted since (now {commits}): nothing was posted. Loft wakes you for round {}'s.",
+            t.rounds
+        ));
+    }
     let label = crate::planning::role_label(role);
     let sha = t.commits.last().map(|c| short(c).to_string()).unwrap_or_default();
     let (head, label_tag) = match (verdict, role) {
