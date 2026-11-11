@@ -51,8 +51,9 @@ pub fn in_quiet(q: &QuietHours, utc_minute: u32) -> bool {
 }
 
 impl Pusher {
-    /// Called with the current list every few seconds by the "needs you" watcher.
-    pub async fn tick(&mut self, state: &AppState, items: &[PushItem]) {
+    /// Called with the current list every few seconds by the "needs you" watcher. `badge` is how many items the user
+    /// hasn't seen on any client: the app icon shows that, like the counter on the web.
+    pub async fn tick(&mut self, state: &AppState, items: &[PushItem], badge: u64) {
         if self.pruned_at.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
             self.pruned_at = Some(Instant::now());
             let _ = state.db.prune_push_seen();
@@ -102,14 +103,14 @@ impl Pusher {
                     skipped += 1;
                     continue;
                 }
-                self.send(state, d, item_push(i, items.len())).await;
+                self.send(state, d, item_push(i, badge)).await;
             }
             if skipped > 0 && self.summary_at.get(&d.token).is_none_or(|t| t.elapsed() > WINDOW) {
                 self.summary_at.insert(d.token.clone(), Instant::now());
                 let p = Push {
                     title: "Loft".into(),
                     body: format!("{skipped} more {} need you", if skipped == 1 { "thing" } else { "things" }),
-                    badge: Some(items.len() as u64),
+                    badge: Some(badge),
                     thread_id: Some("loft-summary".into()),
                     time_sensitive: false,
                     collapse_id: Some("loft-summary".into()),
@@ -141,13 +142,13 @@ impl Pusher {
     }
 }
 
-/// The notification for one item: its push title and body (names and titles only), the count as badge,
+/// The notification for one item: its push title and body (names and titles only), the unseen count as badge,
 /// a thread per agent, Time Sensitive for urgency 3, and where tapping it goes.
-pub fn item_push(i: &PushItem, count: usize) -> Push {
+pub fn item_push(i: &PushItem, badge: u64) -> Push {
     Push {
         title: i.title.clone(),
         body: i.body.clone(),
-        badge: Some(count as u64),
+        badge: Some(badge),
         thread_id: Some(i.agent_id.clone().unwrap_or_else(|| "loft".into())),
         time_sensitive: i.urgency >= 3,
         collapse_id: Some(i.id.clone()),
@@ -201,7 +202,8 @@ mod tests {
 
     async fn tick(st: &AppState, p: &mut Pusher) {
         let items: Vec<_> = collect(st).unwrap().iter().map(to_push).collect();
-        p.tick(st, &items).await;
+        let badge = crate::needs_you::snapshot(st).unwrap()["new"].as_u64().unwrap();
+        p.tick(st, &items, badge).await;
     }
 
     #[tokio::test]
@@ -226,6 +228,8 @@ mod tests {
         let mut p = Pusher::default();
         tick(&st, &mut p).await;
         assert!(got(&seen, &all).is_empty());
+        // The user opened Needs you somewhere: the badge counts only what they haven't seen.
+        st.db.mark_needs_you_seen(&["permission:old".to_string()]).unwrap();
 
         // A new permission prompt: pushed once, to the device that wants permissions.
         permission(&st, "new", &dev.id);
@@ -236,7 +240,7 @@ mod tests {
         let (h, b) = &pushes[0];
         assert_eq!((b["aps"]["alert"]["title"].clone(), b["aps"]["alert"]["body"].clone()), (serde_json::json!("Web Dev needs your approval"), serde_json::json!("Wants to use Bash")));
         assert!(!b.to_string().contains("git push") && !b.to_string().contains("ghp_"), "no tool input in a push: {b}");
-        assert_eq!((b["aps"]["interruption-level"].clone(), b["aps"]["badge"].clone(), b["aps"]["thread-id"].clone()), (serde_json::json!("time-sensitive"), serde_json::json!(2), serde_json::json!(dev.id)));
+        assert_eq!((b["aps"]["interruption-level"].clone(), b["aps"]["badge"].clone(), b["aps"]["thread-id"].clone()), (serde_json::json!("time-sensitive"), serde_json::json!(1), serde_json::json!(dev.id)), "the badge leaves out the seen one");
         assert_eq!((b["needs_you_id"].clone(), b["type"].clone(), b["target"]["screen"].clone()), (serde_json::json!("permission:new"), serde_json::json!("permission"), serde_json::json!("chat")));
         assert_eq!((h["apns-priority"].clone(), h["apns-collapse-id"].clone()), (serde_json::json!("10"), serde_json::json!("permission:new")));
         assert!(got(&seen, &only_questions).is_empty(), "it only wants questions");

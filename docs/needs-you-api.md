@@ -38,7 +38,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 | `actions` | `[Action]` | What the user can do, in display order |
 | `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the issue's or agent's project |
 | `repo` | string \| null | PR items: the GitHub slug (`acme/shop`), the same as `pr.repo` |
-| `seen` | bool | The user has seen it, on any client (`POST /api/needs-you/seen`). Seen items stay listed, less prominent; a changed item has a new id, so it's unseen again |
+| `seen` | bool | The user has seen it, on any client (`POST /api/needs-you/seen`). Seen items stay listed, less prominent; a changed item has a new id, so it's unseen again, and an item that leaves the list and comes back (an issue blocked again) is unseen again too |
 | `pr` | object \| null | PR items only: `{repo: "owner/name", project, number, title, url, author, draft: false, checks: "passing"\|"none", checks_green: true, review_requested}` |
 
 **All text is plain text.** Never render it as HTML. Anything that looks like a credential (known token
@@ -121,7 +121,8 @@ the event is also sent when items are marked seen.
 
 The web app's Needs you page (`/needs-you`) and its top-bar counter work this way: the page lists the items with their
 actions, marks the ones it shows seen, and reloads on a change; the counter follows `new`, amber when `new_urgent` > 0,
-and is hidden at 0. The iPhone's Needs you list marks what it shows the same way, and the app icon's badge is `new`.
+and is hidden at 0. It marks items seen only while its tab is visible and its window has focus. The iPhone's Needs you
+list marks what it shows the same way, and the app icon's badge is `new`, in pushes too.
 
 ## Safety
 

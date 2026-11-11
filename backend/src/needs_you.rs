@@ -892,10 +892,39 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     }
 }
 
+/// What Needs you last listed and last told clients: every read goes through it, so seen marks follow the list and a
+/// change is emitted once.
+#[derive(Default)]
+pub struct Watch(std::sync::Mutex<Last>);
+
+#[derive(Default)]
+struct Last {
+    /// The ids last listed.
+    ids: HashSet<String>,
+    /// The fingerprint last emitted.
+    sent: String,
+}
+
 /// The whole list, as `GET /api/needs-you` returns it.
 pub fn snapshot(state: &AppState) -> Result<Value, String> {
-    let items = collect(state)?;
-    Ok(snapshot_of(&items, &seen(state)?))
+    look(state, &collect(state)?)
+}
+
+/// The snapshot of these items. An item keeps its id while it lasts (`task:{id}:blocked`, `disk_low`), so the seen
+/// marks of items that left the list since the last look are forgotten first: one that comes back (an issue blocked
+/// again with a new question) is new again. Only what left while Loft watched: at startup nothing has left, and lists
+/// filled later (the GitHub inbox) don't lose their marks.
+fn look(state: &AppState, items: &[Item]) -> Result<Value, String> {
+    let ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
+    {
+        let mut last = state.needs_you.0.lock().unwrap();
+        let gone: Vec<String> = last.ids.difference(&ids).cloned().collect();
+        if !gone.is_empty() {
+            state.db.forget_needs_you_seen(&gone).map_err(|e| e.to_string())?;
+        }
+        last.ids = ids;
+    }
+    Ok(snapshot_of(items, &seen(state)?))
 }
 
 /// The items the user has seen, on any client.
@@ -943,12 +972,15 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     if id.starts_with("permission:") || id.starts_with("grill:") || id.starts_with("pairing:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
-    let known = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?.iter().any(|i| i.id == id);
-    if !known {
+    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !items.iter().any(|i| i.id == id) {
         return Err(not_found());
     }
     state.db.dismiss_needs_you(&id)?;
-    emit_now(&state);
+    items.retain(|i| i.id != id);
+    if let Ok(v) = look(&state, &items) {
+        emit_if_changed(&state, &v);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -959,8 +991,8 @@ pub async fn mark_seen(State(state): State<AppState>, Json(body): Json<Value>) -
     let items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let shown: Vec<String> = items.iter().filter(|i| ids.contains(i.id.as_str())).map(|i| i.id.clone()).collect();
     state.db.mark_needs_you_seen(&shown)?;
-    let v = snapshot_of(&items, &seen(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?);
-    emit(&state, &v);
+    let v = look(&state, &items).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    emit_if_changed(&state, &v);
     Ok(Json(json!({ "ok": true, "new": v["new"], "new_urgent": v["new_urgent"] })))
 }
 
@@ -983,34 +1015,34 @@ fn emit(state: &AppState, v: &Value) {
     });
 }
 
-fn emit_now(state: &AppState) {
-    if let Ok(v) = snapshot(state) {
-        emit(state, &v);
+/// Emits this snapshot unless clients already have it: a seen mark or a Done emits at once, and the next tick doesn't
+/// send it again.
+fn emit_if_changed(state: &AppState, v: &Value) {
+    let fp = fingerprint(v);
+    let mut last = state.needs_you.0.lock().unwrap();
+    if last.sent != fp {
+        last.sent = fp;
+        emit(state, v);
     }
 }
 
 /// One tick's push items and snapshot, from a single read of everything.
 fn tick_lists(state: &AppState) -> Result<(Vec<PushItem>, Value), String> {
     let items = collect(state)?;
-    Ok((items.iter().map(to_push).collect(), snapshot_of(&items, &seen(state)?)))
+    Ok((items.iter().map(to_push).collect(), look(state, &items)?))
 }
 
 /// Tells clients when the list changes (`needs_you` event with the count and ids). Checks every few
 /// seconds instead of on every event: messages stream fast, and the list rarely changes. The list is
 /// built once per tick; push and the event both come from it.
 pub async fn watcher(state: AppState) {
-    let mut last = String::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let mut pusher = crate::push::Pusher::default();
     loop {
         tick.tick().await;
         let Ok((push, v)) = tick_lists(&state) else { continue };
-        pusher.tick(&state, &push).await;
-        let fp = fingerprint(&v);
-        if fp != last {
-            emit(&state, &v);
-            last = fp;
-        }
+        pusher.tick(&state, &push, v["new"].as_u64().unwrap_or(0)).await;
+        emit_if_changed(&state, &v);
     }
 }
 
@@ -1091,6 +1123,56 @@ mod tests {
         let v = snapshot(&st).unwrap();
         assert!(!ids(&v).contains(&blocked_id));
         assert_eq!(v["count"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn an_item_that_leaves_and_comes_back_with_the_same_id_is_new_again() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let mut t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": "Pick a name", "status": "blocked",
+            "created_by": "user", "agent_id": qa.id, "error": "Which name?", "created_at": now(), "updated_at": now() })).unwrap();
+        st.db.save_task(&t).unwrap();
+        let id = format!("task:{}:blocked", t.id);
+        snapshot(&st).unwrap();
+        mark_seen(State(st.clone()), Json(json!({ "ids": [id] }))).await.unwrap();
+        assert_eq!(snapshot(&st).unwrap()["new"], json!(0));
+
+        // Answered: it runs again and leaves the list (the watcher's next look)...
+        t.status = "in_progress".into();
+        st.db.save_task(&t).unwrap();
+        tick_lists(&st).unwrap();
+        // ...then blocks again with a new question, under the same id: it counts again, everywhere.
+        t.status = "blocked".into();
+        t.error = "And the icon?".into();
+        st.db.save_task(&t).unwrap();
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["new"].clone(), v["new_urgent"].clone()), (json!(1), json!(1)), "blocked again: new and urgent");
+        assert_eq!(item(&v, "task_blocked")["seen"], false);
+
+        // Lists filled after startup keep their marks: a mark is only forgotten for an item seen leaving.
+        let fresh = state();
+        fresh.db.mark_needs_you_seen(&["review:o/r#7".to_string()]).unwrap();
+        snapshot(&fresh).unwrap();
+        assert!(fresh.db.seen_needs_you().unwrap().contains(&"review:o/r#7".to_string()), "nothing left at the first look");
+    }
+
+    #[tokio::test]
+    async fn a_seen_mark_is_emitted_once() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": "x", "status": "failed",
+            "created_by": "user", "agent_id": qa.id, "created_at": now(), "updated_at": now() })).unwrap();
+        st.db.save_task(&t).unwrap();
+        let mut rx = st.events.subscribe();
+        let (_, v) = tick_lists(&st).unwrap();
+        emit_if_changed(&st, &v);
+        let mut events = || std::iter::from_fn(|| rx.try_recv().ok()).filter(|e| matches!(e, Event::NeedsYou { .. })).count();
+        assert_eq!(events(), 1, "the watcher tells clients about the new item");
+
+        mark_seen(State(st.clone()), Json(json!({ "ids": [format!("task:{}:failed", t.id)] }))).await.unwrap();
+        let (_, v) = tick_lists(&st).unwrap();
+        emit_if_changed(&st, &v);
+        assert_eq!(events(), 1, "the mark emits at once, and the next tick doesn't send it again");
     }
 
     #[tokio::test]

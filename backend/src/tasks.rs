@@ -1241,6 +1241,7 @@ pub(crate) mod tests {
             listings: Arc::new(Default::default()),
             xcode: Arc::new(Default::default()),
             pairing: Arc::new(Default::default()),
+            needs_you: Arc::new(Default::default()),
         }
     }
 

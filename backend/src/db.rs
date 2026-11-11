@@ -1442,6 +1442,15 @@ impl Db {
         Ok(())
     }
 
+    /// Forgets that these items were seen: they left the list, so if one comes back with the same id it is new again.
+    pub fn forget_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        for id in item_ids {
+            c.execute("DELETE FROM needs_you_seen WHERE item_id = ?1", [id])?;
+        }
+        Ok(())
+    }
+
     /// A comment previously posted with this client id, so a retried post isn't added twice.
     pub fn find_task_comment_by_client(&self, task_id: &str, client_id: &str) -> Result<Option<i64>> {
         let c = self.0.lock().unwrap();

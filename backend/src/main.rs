@@ -231,6 +231,7 @@ async fn serve() -> anyhow::Result<()> {
         listings: Arc::new(Default::default()),
         xcode: Arc::new(Default::default()),
         pairing: Arc::new(pairing::Pairing::with_prompts()),
+        needs_you: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     {

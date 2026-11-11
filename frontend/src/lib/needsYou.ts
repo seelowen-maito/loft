@@ -138,6 +138,12 @@ export function unseenIds(items: Pick<NeedsYouItem, "id" | "seen">[]): string[] 
   return items.filter((i) => !i.seen).map((i) => i.id);
 }
 
+/** Whether the user can be looking at the page: its tab is visible and its window has focus (a visible tab in a window
+ * behind another app, or on another screen, isn't being read). */
+export function beingLookedAt(d: { visibilityState: string; hasFocus(): boolean }): boolean {
+  return d.visibilityState === "visible" && d.hasFocus();
+}
+
 /** The items shown as new during this visit: those unseen when they appeared here stay new until the page closes, even
  * once marked seen; ids that left the list drop out. */
 export function freshAfter(fresh: Set<string>, items: Pick<NeedsYouItem, "id" | "seen">[]): Set<string> {

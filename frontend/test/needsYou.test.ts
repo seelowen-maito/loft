@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerBody, badgeText, badgeTitle, badgeTone, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
+import { answerBody, badgeText, beingLookedAt, badgeTitle, badgeTone, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
 
 const HOST = "mac.tail1234.ts.net";
 
@@ -116,6 +116,14 @@ test("opening the list marks what it shows unseen as seen, and keeps it new for 
   // Reloaded after they were marked: still new here; a new item joins; one that left the list drops out.
   fresh = freshAfter(fresh, [item({ id: "a", seen: true }), item({ id: "b", seen: true }), item({ id: "d", seen: false })]);
   assert.deepEqual([...fresh].sort(), ["b", "d"]);
+});
+
+test("items are marked seen only while the tab is visible and its window has focus", () => {
+  const doc = (visibilityState: string, focus: boolean) => ({ visibilityState, hasFocus: () => focus });
+  assert.equal(beingLookedAt(doc("visible", true)), true);
+  assert.equal(beingLookedAt(doc("visible", false)), false, "a visible tab in a window behind another app");
+  assert.equal(beingLookedAt(doc("hidden", true)), false);
+  assert.equal(beingLookedAt(doc("hidden", false)), false);
 });
 
 test("the header says how many are new and how many in all", () => {

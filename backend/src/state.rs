@@ -185,6 +185,8 @@ pub struct AppState {
     pub xcode: Arc<crate::simulator::XcodeCache>,
     /// Clients waiting to be paired (pairing.rs).
     pub pairing: Arc<crate::pairing::Pairing>,
+    /// What Needs you last listed and last told clients (needs_you.rs).
+    pub needs_you: Arc<crate::needs_you::Watch>,
 }
 
 impl AppState {

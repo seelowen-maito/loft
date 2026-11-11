@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { isTyping } from "../lib/shortcuts";
-import { answerBody, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { answerBody, beingLookedAt, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
 
@@ -157,9 +157,9 @@ export default function NeedsYouPage() {
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const shown = useRef<string[]>([]);
   const toMark = useRef<string[]>([]);
-  // What's on screen counts as seen everywhere, but not while the tab is in the background.
+  // What's on screen counts as seen everywhere, but not while the tab is in the background or its window lacks focus.
   const markSeen = useCallback(() => {
-    if (document.visibilityState !== "visible" || toMark.current.length === 0) return;
+    if (!beingLookedAt(document) || toMark.current.length === 0) return;
     const ids = toMark.current;
     toMark.current = [];
     api.needsYouSeen(ids).catch(() => (toMark.current = [...ids, ...toMark.current]));
@@ -179,7 +179,11 @@ export default function NeedsYouPage() {
   }, [markSeen]);
   useEffect(() => {
     document.addEventListener("visibilitychange", markSeen);
-    return () => document.removeEventListener("visibilitychange", markSeen);
+    window.addEventListener("focus", markSeen);
+    return () => {
+      document.removeEventListener("visibilitychange", markSeen);
+      window.removeEventListener("focus", markSeen);
+    };
   }, [markSeen]);
   // Events sent while offline are lost: reload on each (re)connect.
   useEffect(() => {
