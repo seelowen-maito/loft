@@ -128,8 +128,8 @@ struct CleanSheet: View {
     private func leftRunning(_ agent: String, _ ps: [LeftProcess]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("\(name(agent)): \(ps.count) process\(ps.count == 1 ? "" : "es") still running").font(.subheadline)
-                Spacer()
+                Text("\(name(agent)): \(ps.count) process\(ps.count == 1 ? "" : "es") still running").font(.subheadline).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
                 Button(stoppingId == agent ? "Stopping…" : "Stop them") {
                     stoppingId = agent
                     Task {
