@@ -90,7 +90,13 @@ const HELPERS: [&str; 4] = ["DTServiceHub", "DTDeviceKit", "XCBBuildService", "S
 
 fn is_helper(command: &str) -> bool {
     let exe = command.split_whitespace().next().unwrap_or_default();
-    HELPERS.contains(&exe.rsplit('/').next().unwrap_or_default())
+    if HELPERS.contains(&exe.rsplit('/').next().unwrap_or_default()) {
+        return true;
+    }
+    // A path with a space in an app bundle (`/Applications/Xcode beta.app/…/DTServiceHub -x`).
+    command.starts_with('/')
+        && command.split_once(".app/").is_some_and(|(_, rest)| rest.split('/').any(|seg| HELPERS.contains(&seg.split_whitespace().next().unwrap_or_default())))
+        && command.split(".app/").next().is_some_and(|app| app.rsplit('/').next().is_some_and(|n| n.contains(' ')))
 }
 
 /// A process an agent left alive, for Clean to list.
@@ -752,6 +758,15 @@ fn run(bin: &str, args: &[String], cwd: Option<&Path>) -> Output {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_helper_is_known_by_its_name_even_under_an_app_with_a_space() {
+        use super::is_helper;
+        assert!(is_helper("/usr/bin/DTServiceHub --x"));
+        assert!(is_helper("/Applications/Xcode beta.app/Contents/Developer/DTServiceHub --x /y"));
+        assert!(!is_helper("node /x/DTServiceHub"));
+        assert!(!is_helper("/usr/bin/node /srv/app.app/DTServiceHub"));
+    }
+
     use super::*;
     use crate::agents::tests::{fake_claude_state, until};
     use crate::agents::{enqueue, is_running, workspace};
