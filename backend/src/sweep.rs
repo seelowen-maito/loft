@@ -15,7 +15,8 @@
 //! once together they pass 2 GB, and once it passes 8 GB the `*/deps` files no build wrote for a day go, oldest
 //! first, until it's under (cargo keeps every old build's set there, and rebuilds what it still needs). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
-//! files kept, and skips running agents.
+//! files kept, and skips agents in a run. A process an idle agent left running (a dev server) doesn't keep its
+//! build output: the idle timeout (4 h by default) stops such processes long before output is 3 days old.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
 //! so Loft's own checkout stays. Each run writes a log of what it removed, skipped and why, and the last one
@@ -180,8 +181,9 @@ impl Log {
             self.failed += 1;
         } else {
             self.removed += 1;
-            self.freed_bytes += l.bytes;
         }
+        // A trim that stopped partway freed what it removed before (a failed removal says 0).
+        self.freed_bytes += l.bytes;
         self.lines.push(l);
     }
 }
@@ -402,8 +404,8 @@ pub async fn log(axum::extract::State(state): axum::extract::State<AppState>) ->
 /// One sweep or clean at a time.
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Removes the build output untouched for `idle` from every workspace but those of running agents and agents
-/// with a live process, or just from `only`'s. With `what`, the run's log is the one Settings shows, live and
+/// Removes the build output untouched for `idle` from every workspace but those of agents in a run, or just
+/// from `only`'s. With `what`, the run's log is the one Settings shows, live and
 /// saved; without, it is only returned.
 pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str>, idle: Duration) -> Log {
     let _one = RUNNING.lock().await;
@@ -778,35 +780,35 @@ fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, 
 /// `total` it measures is under the cap: one folder per `deps/`, only those files in it.
 fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTime, p: &mut Plan, rel: &dyn Fn(&Path) -> String) {
     let mut old = vec![];
-    for (_, profile) in subdirs(shared) {
-        let deps = profile.join("deps");
+    for (_, deps) in subdirs(shared).flat_map(|(_, profile)| subdirs(&profile).collect::<Vec<_>>()).filter(|(name, _)| name == "deps") {
         for e in std::fs::read_dir(&deps).into_iter().flatten().flatten() {
             let Ok(m) = e.path().symlink_metadata() else { continue };
             let Ok(t) = m.modified() else { continue };
-            if m.is_file() && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
-                // A file with another link frees nothing (cargo links each binary into its profile too).
-                let bytes = if m.nlink() == 1 { m.blocks() * 512 } else { 0 };
-                old.push((t, deps.clone(), e.path(), bytes));
+            // A file with another link frees nothing (cargo links each binary into its profile too), so it stays.
+            if m.is_file() && m.nlink() == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
+                old.push((t, deps.clone(), e.path(), m.blocks() * 512));
             }
         }
     }
     old.sort_by_key(|o| o.0);
     let mut by_dir: Vec<Folder> = vec![];
+    let mut last = None;
     for (t, deps, file, bytes) in old {
-        if total <= deps_cap() {
+        // Files as old as the last one taken go too, so the logged `find ! -newer` removes exactly these.
+        if total <= deps_cap() && last != Some(t) {
             break;
         }
-        total = total.saturating_sub(bytes);
+        (total, last) = (total.saturating_sub(bytes), Some(t));
         let f = match by_dir.iter_mut().find(|f| f.path == deps) {
             Some(f) => f,
             None => {
-                let command = format!("{} -type f -mtime +0 -delete", rm_command(&deps).replacen("rm -rf", "find", 1));
-                by_dir.push(Folder { agent: id.into(), rel: rel(&deps), path: deps, bytes: 0, changed: t.into(), command, files: vec![] });
+                by_dir.push(Folder { agent: id.into(), rel: rel(&deps), path: deps, bytes: 0, changed: t.into(), command: String::new(), files: vec![] });
                 by_dir.last_mut().unwrap()
             }
         };
         f.bytes += bytes;
         f.changed = t.into();
+        f.command = format!("find {} -maxdepth 1 -type f -links 1 ! -newer {} -delete", quoted(&f.path), quoted(&file));
         f.files.push((file, bytes));
     }
     for f in by_dir {
@@ -821,13 +823,18 @@ fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTi
 /// `rm -rf <path>`, quoted for the shell when it needs to be, and on one line: control characters are written
 /// as escapes inside `$'…'`.
 fn rm_command(path: &Path) -> String {
+    format!("rm -rf {}", quoted(path))
+}
+
+/// `path` quoted for the shell when it needs to be, on one line.
+fn quoted(path: &Path) -> String {
     let p = path.to_string_lossy();
     if p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
-        format!("rm -rf {p}")
+        p.into()
     } else if p.chars().any(char::is_control) {
-        format!("rm -rf $'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
+        format!("$'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
     } else {
-        format!("rm -rf '{}'", p.replace('\'', "'\\''"))
+        format!("'{}'", p.replace('\'', "'\\''"))
     }
 }
 
@@ -835,19 +842,35 @@ fn rm_command(path: &Path) -> String {
 /// keeps its.
 fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &mut dyn FnMut(Line)) {
     for f in folders {
-        let trim = !f.files.is_empty();
-        let error = if busy(&f.agent) {
-            Some("agent started working".into())
-        } else if trim {
-            // Each file goes on its own; the first that fails says why.
-            f.files.iter().filter_map(|(file, _)| remove_under(root, file).err()).reduce(|first, _| first)
+        let (error, bytes, done) = if !f.files.is_empty() {
+            let (e, b) = trim(root, &f, busy);
+            (e, b, "Trimmed old build files in".into())
+        } else if busy(&f.agent) {
+            (Some("agent started working".into()), 0, String::new())
         } else {
-            remove(root, &f.path).err()
+            let e = remove(root, &f.path).err();
+            let b = if e.is_none() { f.bytes } else { 0 };
+            (e, b, String::new())
         };
-        let bytes = if error.is_none() { f.bytes } else { 0 };
-        let done = if trim { "Trimmed old build files in".into() } else { String::new() };
         line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done });
     }
+}
+
+/// Removes a trim's files one by one, asking `busy` before each, and skips one already gone. Stops when the
+/// agent starts a run or a removal fails, and says why; answers what it freed either way.
+fn trim(root: &Path, f: &Folder, busy: &dyn Fn(&str) -> bool) -> (Option<String>, u64) {
+    let mut freed = 0;
+    for (file, bytes) in &f.files {
+        if busy(&f.agent) {
+            return (Some("agent started working".into()), freed);
+        }
+        match remove_under(root, file) {
+            Ok(()) => freed += bytes,
+            Err(_) if file.symlink_metadata().is_err() => {}
+            Err(e) => return (Some(e), freed),
+        }
+    }
+    (None, freed)
 }
 
 /// Real (not symlinked) directories, never a dotfile one.
@@ -1776,6 +1799,70 @@ mod tests {
         let [line] = &l.lines[..] else { panic!("{:?}", l.lines) };
         assert_eq!((line.rel.as_str(), line.done.as_str(), line.error.as_deref()), (".cargo-build/debug/deps", "Trimmed old build files in", None));
         assert!(line.bytes >= 2 * 64 * 1024, "the log shows what it freed: {}", line.bytes);
+    }
+
+    /// The trim `plan` makes for `a`'s `.cargo-build`, with a cap two files under its size.
+    fn deps_plan(storage: &Path) -> Plan {
+        *SIZES.lock().unwrap() = None;
+        let (total, _) = du(&storage.join("a/.cargo-build"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(total - 100_000)));
+        let p = plan(storage, Some("a"), &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+        p
+    }
+
+    #[test]
+    fn the_logged_command_removes_exactly_the_planned_files() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        let [f] = &p.folders[..] else { panic!("{:?}", p.folders) };
+        let out = std::process::Command::new("sh").args(["-c", &f.command]).output().unwrap();
+        assert!(out.status.success(), "{}: {}", f.command, String::from_utf8_lossy(&out.stderr));
+        let left: Vec<bool> = ["a.o", "b.o", "c.o", "d.o"].iter().map(|n| deps.join(n).exists()).collect();
+        assert_eq!(left, [false, false, true, true], "{}", f.command);
+    }
+
+    #[test]
+    fn a_deps_file_with_another_link_or_a_symlinked_deps_stays() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        // The binary cargo links into its profile: removing it from deps frees nothing.
+        fs::hard_link(deps.join("a.o"), storage.join("a/.cargo-build/debug/loft")).unwrap();
+        // A `deps` that leads elsewhere.
+        let elsewhere = deps_by_age(&storage.join("elsewhere"));
+        std::os::unix::fs::symlink(&elsewhere, storage.join("a/.cargo-build/release")).unwrap();
+        fs::create_dir_all(storage.join("a/.cargo-build/test")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, storage.join("a/.cargo-build/test/deps")).unwrap();
+
+        let p = deps_plan(&storage);
+        let planned: Vec<_> = p.folders.iter().flat_map(|f| f.files.iter().map(|(p, _)| p.clone())).collect();
+        assert_eq!(planned, [deps.join("b.o"), deps.join("c.o")], "linked a.o is passed over");
+    }
+
+    #[test]
+    fn a_trim_asks_before_each_file_skips_one_already_gone_and_counts_what_went() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        fs::remove_file(deps.join("a.o")).unwrap();
+        let mut log = Log::default();
+        apply(&storage.canonicalize().unwrap(), p.folders.clone(), &|_| false, &mut |l| log.push(l));
+        assert_eq!((log.removed, log.failed, log.lines[0].bytes > 0), (1, 0, true), "{:?}", log.lines);
+
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        // The agent starts a run after the first file.
+        let asked = std::cell::Cell::new(0);
+        let busy = |_: &str| {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+        let mut log = Log::default();
+        apply(&storage.canonicalize().unwrap(), p.folders, &busy, &mut |l| log.push(l));
+        assert!(!deps.join("a.o").exists() && deps.join("b.o").exists());
+        assert_eq!(log.lines[0].error.as_deref(), Some("agent started working"));
+        assert_eq!(log.freed_bytes, fs::metadata(deps.join("b.o")).unwrap().blocks() * 512, "the first file's freed bytes count");
     }
 
     #[test]
