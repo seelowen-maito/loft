@@ -1414,9 +1414,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
             }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
-        if let Some(pr) = d.pr {
-            let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{}/issues/{pr}/labels/changes-requested", d.repo), None).await;
-        }
+        unlabel_changes(state, &d, n).await;
         let after = crate::planning::after_tickets(state, &d).await.unwrap_or_else(|e| Some(format!("\nBut {e}: Loft tries again on its next poll.")));
         let pr = d.pr.map(|pr| format!(" PR #{pr}")).unwrap_or_default();
         return Ok(format!("\n#{n} passed its reviews. It stays open until its{pr} merges.{}", after.unwrap_or_default()));
@@ -1436,12 +1434,18 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
         }
         Err(e) => return Ok(format!("\n#{n} passed, but {e}")),
     };
-    if let Some(pr) = d.pr {
-        // A pass after a changes round: the PR no longer waits for changes on this ticket.
-        let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{}/issues/{pr}/labels/changes-requested", d.repo), None).await;
-    }
+    unlabel_changes(state, d, n).await;
     let next = advance(state, &d.repo, d.spec).await;
     Ok(format!("\n{closed}{next}"))
+}
+
+/// Ticket #n passed: the PR no longer waits for changes on it, so `changes-requested` comes off, unless another
+/// ticket still owes changes (back with its Dev, or being fixed after a round).
+async fn unlabel_changes(state: &AppState, d: &Delivery, n: i64) {
+    let owed = d.tickets.iter().any(|t| t.number != n && (t.state == "changes" || t.state == "started" && t.rounds > 0));
+    if let Some(pr) = d.pr.filter(|_| !owed) {
+        let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{}/issues/{pr}/labels/changes-requested", d.repo), None).await;
+    }
 }
 
 /// How often Loft reads the CI of the tickets waiting for it.

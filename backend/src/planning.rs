@@ -3620,6 +3620,47 @@ pub(crate) mod tests {
         assert_eq!(standing(&st, slug, 41).0, "closed");
     }
 
+    /// With two tickets in flight, one passing doesn't take `changes-requested` off while the other still owes
+    /// changes: only the last pass does.
+    #[tokio::test]
+    async fn a_pass_keeps_changes_requested_while_another_ticket_owes_changes() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/rv-two-changes";
+        let (a, m) = planned(&st, &fake, "rv-two-changes", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "rv-two-changes", "lead");
+        let first = busy(&st, "First", "rv-two-changes", "dev");
+        let second = busy(&st, "Second", "rv-two-changes", "dev");
+        let qa = busy(&st, "Tester", "rv-two-changes", "qa");
+        for p in ["issues/500/comments", "issues/500/labels", "labels"] {
+            fake.route("POST", &format!("/repos/{slug}/{p}"), 201, json!({}));
+        }
+        for n in [41, 42] {
+            fake.route("POST", &format!("/repos/{slug}/issues/{n}/comments"), 201, json!({}));
+            fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "open", "## What to build\n\nX."));
+            fake.route("PATCH", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "closed", "## What to build\n\nX."));
+        }
+        fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/changes-requested"), 200, json!([]));
+        ci_on(&fake, slug, "spec/40-rounds", json!([]));
+        let deletes = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap();
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &second, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+
+        // #42 goes back to Second; #41 passes and closes, and the PR still waits for #42's changes.
+        tool(&st, &qa, "review_ticket", json!({ "number": 42, "verdict": "changes", "notes": "Off by one." })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Good." })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.ticket(41).unwrap().state.as_str(), d.ticket(42).unwrap().state.as_str()), ("closed", "started"));
+        assert_eq!(deletes(), 0, "#42 still owes changes");
+
+        // #42's fix passes: nothing is owed any more.
+        tool(&st, &second, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        tool(&st, &qa, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(deletes(), 1);
+    }
+
     fn run(status: &str, conclusion: Option<&str>) -> Value {
         json!({ "id": 77, "name": "test", "status": status, "conclusion": conclusion, "app": { "slug": "github-actions" }, "details_url": "https://github.com/octo/ci/actions/runs/1/job/77", "output": { "title": "1 test failed" } })
     }
