@@ -127,7 +127,7 @@ export type CleanSort = { by: "size" | "agent" | "changed"; desc: boolean };
 
 /** Clean's table order: by size, agent name or last change; ties go biggest first, then by name. */
 export function sortClean(items: CleanItem[], sort: CleanSort, agentName: (id: string) => string): CleanItem[] {
-  const key = (i: CleanItem) => (sort.by === "size" ? i.bytes : sort.by === "changed" ? new Date(i.changed).getTime() : agentName(i.agent).toLowerCase());
+  const key = (i: CleanItem) => (sort.by === "size" ? i.bytes : sort.by === "changed" ? new Date(i.changed).getTime() || 0 : agentName(i.agent).toLowerCase());
   const dir = sort.desc ? -1 : 1;
   return [...items].sort((a, b) => {
     const ka = key(a);

@@ -70,3 +70,12 @@ test("the table sorts by size, agent or last change, either way", async () => {
   assert.equal(names("agent", false), "yzx");
   assert.equal(names("changed", true), "zxy");
 });
+
+test("an empty or invalid last change sorts as the oldest, not as NaN", async () => {
+  const { sortClean } = await import("../src/lib/format.ts");
+  const at = (name: string, changed: string) => ({ ...item(), name, bytes: 1, changed });
+  const rows = [at("a", "2026-01-02T00:00:00Z"), at("b", ""), at("c", "not a date"), at("d", "2026-01-01T00:00:00Z")];
+  const names = (desc: boolean) => sortClean(rows, { by: "changed", desc }, (id) => id).map((i) => i.name).join("");
+  assert.equal(names(false), "bcda");
+  assert.equal(names(true), "adbc");
+});
