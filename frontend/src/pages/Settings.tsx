@@ -455,7 +455,7 @@ function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onCon
     return (
       <Fragment key={i.path}>
         <tr className="border-t border-line align-top">
-          <td className="px-2 py-1.5 text-fg-2">{depth === 0 ? name(i.agent) : ""}</td>
+          <td className="hidden px-2 py-1.5 text-fg-2 min-[400px]:table-cell">{depth === 0 ? name(i.agent) : ""}</td>
           <td className="px-2 py-1.5">
             <div className="flex items-start gap-2" style={{ paddingLeft: depth * 18 }}>
               <input type="checkbox" className="mt-1 shrink-0" aria-label={`Select ${name(i.agent)} ${i.rel}`} checked={on} disabled={status.locked || busy} onChange={(e) => toggle(i.path, e.target.checked)} />
@@ -481,12 +481,13 @@ function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onCon
                   </button>
                 )}
                 {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
+                <span className="block text-[11.5px] text-fg-3 sm:hidden">{depth === 0 && <span className="min-[400px]:hidden">{name(i.agent)} · </span>}{cleanType(i)} · {timeAgo(i.changed)}</span>
               </span>
             </div>
           </td>
-          <td className="whitespace-nowrap px-2 py-1.5 text-fg-3">{cleanType(i)}</td>
+          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{cleanType(i)}</td>
           <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{fmtBytes(i.bytes)}</td>
-          <td className="whitespace-nowrap px-2 py-1.5 text-fg-3">{timeAgo(i.changed)}</td>
+          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{timeAgo(i.changed)}</td>
           <td className={cx("px-2 py-1.5", status.locked ? "text-warn" : "text-good")}>
             {status.text}
             {!status.locked && i.label && <span className="block text-[11.5px] text-fg-3">{i.label}</span>}
@@ -541,14 +542,14 @@ function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onCon
         <p className="text-[13px] text-fg-3">Nothing in any workspace.</p>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-line">
-          <table className="w-full min-w-[600px] text-left text-[12.5px]">
+          <table className="w-full text-left sm:min-w-[600px] text-[12.5px]">
             <thead className="text-[11.5px] uppercase tracking-wide text-fg-3">
               <tr>
-                {head("agent", "Agent")}
+                {head("agent", "Agent", "hidden min-[400px]:table-cell")}
                 <th className="px-2 py-1.5 font-medium">Item</th>
-                <th className="px-2 py-1.5 font-medium">Type</th>
+                <th className="hidden px-2 py-1.5 font-medium sm:table-cell">Type</th>
                 {head("size", "Size", "text-right")}
-                {head("changed", "Last change")}
+                {head("changed", "Last change", "hidden sm:table-cell")}
                 <th className="px-2 py-1.5 font-medium">Status</th>
               </tr>
             </thead>
