@@ -506,13 +506,18 @@ fn exe_of(_pid: i32) -> Option<String> {
     None
 }
 
-/// A folder Xcode names `<Name>-<hash>` (DerivedData, xcode-data): 20 or more lowercase letters or digits after the dash.
+/// A folder Xcode names `<Name>-<hash>` in DerivedData: 28 lowercase letters after the dash.
 fn is_build_folder(part: &str) -> bool {
-    part.rsplit_once('-').is_some_and(|(name, hash)| !name.is_empty() && hash.len() >= 20 && hash.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+    part.rsplit_once('-').is_some_and(|(name, hash)| !name.is_empty() && hash.len() == 28 && hash.bytes().all(|b| b.is_ascii_lowercase()))
 }
 
+/// Programs that run whatever script they are given: a rule for one would allow stopping anything they run.
+const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "php", "bash", "sh", "zsh", "fish", "deno", "bun", "java", "osascript"];
+
 /// The `Kill(...)` rule for stopping the program at `exe`: its path, with each per-build folder as `*` so a rebuild
-/// still matches. `None` for a path that can't make a rule that names one program.
+/// still matches. `None` for a path that can't make a rule that names one program: one with no build folder (any
+/// user-owned program can be put at a path in a folder the user can write, so only a build folder is a name), or an
+/// interpreter.
 fn kill_rule(exe: &str) -> Option<String> {
     if !exe.starts_with('/') || exe.contains(['*', '(', ')', '\n']) {
         return None;
@@ -521,10 +526,11 @@ fn kill_rule(exe: &str) -> Option<String> {
     kill_spec_ok(&spec).then(|| format!("Kill({spec})"))
 }
 
-/// A path pattern names a program only if it ends in a literal file name, so `*` and `*/` never match everything.
+/// A path pattern names a program only if it has a build folder (a `*` folder) and ends in a literal file name that
+/// isn't an interpreter, so `*` and `*/` never match everything.
 fn kill_spec_ok(spec: &str) -> bool {
     let file = spec.rsplit('/').next().unwrap_or_default();
-    !file.is_empty() && !file.contains('*') && !spec.contains(')')
+    spec.starts_with('/') && spec.contains("/*/") && !file.is_empty() && !file.contains('*') && !spec.contains(')') && !INTERPRETERS.contains(&file)
 }
 
 /// The pattern inside a saved `Kill(...)` rule. A bare `Kill` or a rule that would match every program has none.
@@ -533,13 +539,14 @@ pub fn kill_spec(rule: &str) -> Option<&str> {
     kill_spec_ok(spec).then_some(spec)
 }
 
-/// `*` matches any run of characters.
+/// `*` matches any run of characters inside one path folder or file name, never a `/`.
 fn glob(pat: &str, s: &str) -> bool {
     match pat.split_once('*') {
         None => pat == s,
         Some((head, rest)) => {
             let Some(s) = s.strip_prefix(head) else { return false };
-            (0..=s.len()).filter(|&i| s.is_char_boundary(i)).any(|i| glob(rest, &s[i..]))
+            let reach = s.find('/').unwrap_or(s.len());
+            (0..=reach).filter(|&i| s.is_char_boundary(i)).any(|i| glob(rest, &s[i..]))
         }
     }
 }
@@ -871,6 +878,20 @@ mod tests {
         }
     }
 
+    /// A sleep program in a folder named like an Xcode build folder, so a Kill rule can name it: a copy of
+    /// /bin/sleep won't run (its signature), so a tiny one is compiled. Returns its path and the folder above the build folder.
+    fn built_sleep() -> (PathBuf, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!("loft-kill-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        let dir = root.join("Build-bfxjtqwnvmpyeoaksvduhzgrlcnk");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = root.join("sleep.c");
+        std::fs::write(&src, "#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n").unwrap();
+        let exe = dir.join("sleep");
+        assert!(std::process::Command::new("cc").arg(&src).arg("-o").arg(&exe).status().unwrap().success());
+        (exe.canonicalize().unwrap(), root.canonicalize().unwrap())
+    }
+
     impl Drop for Sleeper {
         fn drop(&mut self) {
             self.stop();
@@ -1115,7 +1136,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_of_a_process_the_agent_does_not_own_runs_once_the_user_approves() {
         let (st, a) = fake_claude_state();
-        let other = Sleeper::start(false);
+        let (exe, root) = built_sleep();
+        let rule = format!("Kill({}/*/sleep)", root.display());
+        let other = Sleeper::start_as(&exe, false);
         let pid = other.pid().to_string();
         let asking = tokio::spawn({
             let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
@@ -1125,18 +1148,18 @@ mod tests {
         let req = pending(&st, &a.id).remove(0);
         assert_eq!(req.tool_name, "Kill");
         assert_eq!(req.input["command"], format!("kill {pid}"));
-        assert!(req.reason.contains(&format!("{pid} (not an agent's: /bin/sleep 60)")), "{}", req.reason);
+        assert!(req.reason.contains(&format!("{pid} (not an agent's: {}", &exe.display().to_string()[..40])), "{}", req.reason);
         assert!(other.alive(), "it was stopped before the user answered");
         // "Always allow" saves the program, not these processes.
-        assert_eq!(req.rule, "Kill(/bin/sleep)");
+        assert_eq!(req.rule, rule);
         crate::agents::decide(&st, &req.id, "allow_always", None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 0, "{v}");
         until("the process to stop", 5, || !other.alive()).await;
         assert_eq!(st.db.get_permission(&req.id).unwrap().unwrap().status, "allowed_always");
-        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, vec!["Kill(/bin/sleep)".to_string()]);
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, vec![rule.clone()]);
         // The same program, a new process: no question.
-        let again = Sleeper::start(false);
+        let again = Sleeper::start_as(&exe, false);
         let v = ask(&st, &a.id, "kill", &[&again.pid().to_string()]).await;
         assert_eq!(v["code"], 0, "{v}");
         until("the second process to stop", 5, || !again.alive()).await;
@@ -1160,8 +1183,10 @@ mod tests {
         crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
         // A process another agent runs right now asks even when the rule matches it.
-        st.db.update_agent(&a.id, |a| a.allowed_tools = vec!["Kill(/bin/sleep)".into()]).unwrap();
-        let theirs = Sleeper::start(true);
+        let (exe, root) = built_sleep();
+        let rule = format!("Kill({}/*/sleep)", root.display());
+        st.db.update_agent(&a.id, |a| a.allowed_tools = vec![rule.clone()]).unwrap();
+        let theirs = Sleeper::start_as(&exe, true);
         record(&st.cfg.storage_dir, &b.id, theirs.pid() as u32).unwrap();
         let asking = tokio::spawn({
             let (st, id, pid) = (st.clone(), a.id.clone(), theirs.pid().to_string());
@@ -1173,6 +1198,9 @@ mod tests {
         // It offers no Always: saving the rule wouldn't stop the question.
         assert_eq!(req.rule, "");
         assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None).is_err());
+        // A rule posted with the answer doesn't give it one.
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None).is_err());
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools == vec![rule], "nothing was added");
         crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
     }
@@ -1187,14 +1215,23 @@ mod tests {
         assert!(rule_allows(&rules, &exe.replace("bfxjtqwnvmpyeoaksvduhzgrlcnk", "zzzzzzzzzzzzzzzzzzzzzzzzzzzz")));
         assert!(rule_allows(&rules, exe));
         assert!(!rule_allows(&rules, &exe.replace("Debug", "Release")));
+        // `*` is one folder: it doesn't reach across `/`.
+        assert!(!rule_allows(&rules, &exe.replace("Loft-bfxjtqwnvmpyeoaksvduhzgrlcnk", "x/y")));
+        assert!(rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/c") && !rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/b/c"));
         assert!(!rule_allows(&rules, "/Applications/Loft.app/Contents/MacOS/Loft"));
-        assert_eq!(kill_rule("/bin/sleep").unwrap(), "Kill(/bin/sleep)");
+        // Only a build folder names a program: any user-owned program can be put at another path. Nor an interpreter.
+        assert_eq!(kill_rule("/bin/sleep"), None);
+        assert_eq!(kill_rule(&exe.replace("MacOS/Loft", "MacOS/node")), None);
+        assert!(!rule_allows(&["Kill(/bin/sleep)".to_string(), "Kill(/a/*/node)".to_string()], "/bin/sleep") && !rule_allows(&["Kill(/a/*/node)".to_string()], "/a/b/node"));
+        // A folder is a build folder with exactly 28 lowercase letters after the dash.
+        assert_eq!(kill_rule("/d/Loft-abcdefghijklmnopqrstuvwxyz/x"), None);
+        assert_eq!(kill_rule("/d/Loft-abcdefghijklmnopqrstuvwxyz12/x"), None);
         // No rule from a path that isn't absolute or holds rule syntax.
         for bad in ["", "sleep", "/tmp/a*b", "/tmp/a)b", "/tmp/"] {
             assert_eq!(kill_rule(bad), None, "{bad}");
         }
         // Rules that would match every program match none.
-        for bad in ["Kill", "Kill()", "Kill(*)", "Kill(*/*)", "Kill(/bin/*)", "Bash(/bin/sleep)"] {
+        for bad in ["Kill", "Kill()", "Kill(*)", "Kill(*/*)", "Kill(/bin/*)", "Kill(/*/sleep)x", "Bash(/bin/sleep)"] {
             assert!(!rule_allows(&[bad.to_string()], "/bin/sleep"), "{bad}");
         }
     }

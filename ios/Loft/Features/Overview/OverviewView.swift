@@ -517,7 +517,7 @@ struct ApprovalCard: View {
                 Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
                     .buttonStyle(.accent)
                 // A kill with no program to name has no rule to save.
-                if request.toolName != "Kill" || !(request.rule ?? "").isEmpty {
+                if request.canAlwaysAllow {
                     Menu {
                         Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
                     } label: {

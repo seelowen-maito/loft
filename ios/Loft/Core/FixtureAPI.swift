@@ -226,6 +226,13 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             perms.append(PermissionRequest(id: "p2", agentId: "be", source: "prompt", toolName: "Bash", input: ["command": "git push origin main"],
                                            reason: "Ship the settings endpoints", rule: "Bash(git push *)", status: "pending", createdAt: ago(2)))
         }
+        if args.contains("-fixture-kill-permission") {
+            // A kill with a program to name (Always allow offered), and one with none (Allow once and Deny only).
+            perms.append(PermissionRequest(id: "k1", agentId: "be", source: "prompt", toolName: "Kill", input: ["command": "pkill -x Loft"],
+                                           reason: "Stops 1 process Backend Agent didn't start: 4242 (not an agent's: Loft.app)", rule: "Kill(/Users/me/Library/Developer/Xcode/DerivedData/*/Build/Products/Debug/Loft.app/Contents/MacOS/Loft)", status: "pending", createdAt: ago(2)))
+            perms.append(PermissionRequest(id: "k2", agentId: "be", source: "prompt", toolName: "Kill", input: ["command": "pkill -x worker"],
+                                           reason: "Stops 1 process Reviewer is running: 4243", rule: "", status: "pending", createdAt: ago(1)))
+        }
         if args.contains("-fixture-agent-asks") {
             // The Orchestrator's last word is a question: suggested replies show under it.
             msgs["orch"]?.append(m(20, "orch", "assistant", "text", "Tests are green on the settings PR. Should I merge it now or wait for QA?", 1))
