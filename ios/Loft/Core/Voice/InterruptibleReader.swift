@@ -32,6 +32,7 @@ final class InterruptibleReader {
     /// Silence played after the speech, so a command said right after it ("more") is still heard.
     private var tail: TimeInterval = 0
     private var lastFormat: AVAudioFormat?
+    private var lease: UUID?
 
     /// Whether listening can work here: permissions already given (never prompted mid-reply) and a recognizer
     /// that respects "On-device only".
@@ -46,10 +47,7 @@ final class InterruptibleReader {
     /// caller can read it the plain way instead.
     func play(_ utterance: AVSpeechUtterance, locale: Locale, listenAfter: TimeInterval = 0) async throws {
         tail = listenAfter
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true)
-        guard session.isInputAvailable else { throw VoiceError("No microphone is available.") }
+        lease = try await AudioSessionOwner.shared.acquire(.readingWhileListening, by: "listening reader") { [weak self] _ in self?.stop() }
         let engine = AVAudioEngine()
         self.engine = engine
         try engine.inputNode.setVoiceProcessingEnabled(true)
@@ -80,10 +78,11 @@ final class InterruptibleReader {
         request?.endAudio()
         request = nil
         if let engine {
-            if engine.isRunning { engine.stop() }
-            engine.inputNode.removeTap(onBus: 0)
+            Microphone.stop(engine)
         }
         engine = nil
+        if let lease { AudioSessionOwner.shared.release(lease) }
+        lease = nil
         finished?.resume()
         finished = nil
     }
@@ -114,7 +113,6 @@ final class InterruptibleReader {
                 engine.prepare()
                 try engine.start()
             } catch {
-                Log.speech.info("read-aloud engine didn't start: \(error.localizedDescription, privacy: .public)")
                 failure = "engine didn't start: \(error.localizedDescription)"
                 stop()
                 return
@@ -155,21 +153,13 @@ final class InterruptibleReader {
 
     private func startRecognition(locale: Locale, engine: AVAudioEngine) throws {
         guard let recognizer = SFSpeechRecognizer(locale: locale) else { return }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        // installTap raises an Objective-C exception (which Swift can't catch, so the app aborts) when the mic
-        // has no usable format: no microphone, or another engine still holding it. Read plainly instead.
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            throw VoiceError("The microphone isn't available (\(format.channelCount) channels at \(Int(format.sampleRate)) Hz).")
-        }
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         req.taskHint = .confirmation
         request = req
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            req.append(buffer)
-        }
+        // Throws instead of crashing when the route has no usable microphone: the caller reads plainly instead.
+        try Microphone.installTap(engine, bufferSize: 1024) { buffer, _ in req.append(buffer) }
         task = recognizer.recognitionTask(with: req) { [weak self] result, _ in
             guard let result else { return }
             let words = result.bestTranscription.segments.map {

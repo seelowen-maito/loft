@@ -98,9 +98,9 @@ struct EndCard: Codable, Hashable {
         var title: String
         var url: URL
 
-        /// A plan kept in Loft links its issues as `/tasks/<id>`: the Loft issue to open in the app. Nil for a GitHub link.
+        /// A plan kept in Loft links its issues as `/issues/<id>` (or the old `/tasks/<id>`): the Loft issue to open in the app. Nil for a GitHub link.
         var loftTaskId: String? {
-            guard url.host == nil, url.pathComponents.count == 3, url.pathComponents[1] == "tasks" else { return nil }
+            guard url.host == nil, url.pathComponents.count == 3, ["issues", "tasks"].contains(url.pathComponents[1]) else { return nil }
             return url.pathComponents[2]
         }
     }

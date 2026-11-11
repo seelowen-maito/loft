@@ -31,8 +31,27 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
                             meta: ["client_id": .string(clientId)], createdAt: .now)
         return SendMessageResponse(ok: true, queued: false, duplicate: false, message: m)
     }
+    /// Each send's uploads, in order.
+    var sentImages: [[String]] = []
+    func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
+        sentImages.append(images)
+        return try await sendMessage(agentId: agentId, text: text, clientId: clientId)
+    }
+    /// What an upload reports before answering `uploadName`, or fails with `uploadError`.
+    var uploadSteps: [Double] = [0.5, 1]
+    var uploadName = "v1.mp4"
+    var uploadError: APIError?
+    private(set) var uploadsMade = 0
+    func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        uploadsMade += 1
+        for p in uploadSteps { progress(p); try await Task.sleep(for: .milliseconds(30)) }
+        if let uploadError { throw uploadError }
+        return uploadName
+    }
     func runNow(agentId: String) async throws {}
     func stopRun(agentId: String) async throws {}
+    var deleted: [(String, Bool)] = []
+    func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
     func restartRun(agentId: String) async throws {}
     func resetSession(agentId: String) async throws {}
     func compact(agentId: String) async throws {}
@@ -41,7 +60,29 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
     func decidePermission(id: String, decision: String) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
-    func tasks() async throws -> [HBTask] { try check(); return [] }
+    /// Every spec's Delivery, and how many times the app fetched them.
+    var deliveryList: [DeliverySummary] = []
+    var summaryLoads = 0
+    func deliverySummaries() async throws -> [DeliverySummary] { summaryLoads += 1; return deliveryList }
+    var taskList: [HBTask] = []
+    func tasks() async throws -> [HBTask] { try check(); return taskList }
+    /// Each issue's Delivery, and how many times the app fetched one.
+    var deliveryOf: [String: IssueDelivery] = [:]
+    var deliveryLoads = 0
+    /// How long each next load takes to answer, in order: it answers with the Delivery as it was when it started.
+    var deliveryDelays: [Duration] = []
+    func issueDelivery(taskId: String) async throws -> IssueDelivery? {
+        deliveryLoads += 1
+        let d = deliveryOf[taskId]
+        if !deliveryDelays.isEmpty { try await Task.sleep(for: deliveryDelays.removeFirst()) }
+        return d
+    }
+    /// What a Delivery action answers.
+    var deliveryReply: IssueDeliveryReply?
+    func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply {
+        guard let r = deliveryReply else { throw APIError.unsupported("Delivery") }
+        return r
+    }
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
         HBTask(id: fields["id"]?.stringValue ?? "x", title: fields["title"]?.stringValue ?? "", description: "", kind: "todo", status: "inbox",
                priority: "normal", project: "", agentId: nil, parentId: nil, dependsOn: [], dueAt: nil, createdBy: "user", note: "",
@@ -85,8 +126,25 @@ final class StoreTests: XCTestCase {
         return store
     }
 
+    /// The Lead's status says "running" all along (its update was missed), but its run started and ended after the
+    /// message: the reply is picked up and read, not waited on forever.
+    func testAReplyIsPickedUpWhenTheRunEndedButTheStatusStillSaysRunning() async throws {
+        let store = LoftStore(api: FixtureAPI(scripted: true), cache: SnapshotStore(url: cacheURL))
+        store.activate()
+        defer { store.deactivate() }
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        let lead = try XCTUnwrap(store.orchestrator)
+        XCTAssertTrue(lead.running == true || lead.status == "running", "the fixture's Lead never stops working")
+        try await store.loadConversation(lead.id)
+        let before = store.conversation(lead.id).last?.id ?? 0
+        await store.send("What's the status?", to: lead.id)
+        let started = Date()
+        let reply = await store.waitForReply(agentId: lead.id, after: before) { Date().timeIntervalSince(started) < 15 }
+        XCTAssertTrue(reply?.contains("3 of 4 endpoints") == true, reply ?? "never read: waited on the stale status")
+    }
+
     /// A reply that arrives without a live event (missed in a reconnect) is still picked up and read: the wait
-    /// refetches history and counts the reply once nothing new has come for 2 s. (Was a 40 s UI test.)
+    /// refetches history and counts the reply once it has settled (`Speaker.settle`). (Was a 40 s UI test.)
     func testAReplyWithoutAnEventIsStillPickedUp() async throws {
         let store = LoftStore(api: FixtureAPI(replies: true), cache: SnapshotStore(url: cacheURL))
         store.activate()
@@ -186,7 +244,7 @@ final class StoreTests: XCTestCase {
         api.features = []
         let store = try await connectedStore(api)
         XCTAssertFalse(store.supportsTasks)
-        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Tasks")) }
+        do { try await store.createTask(["title": "x"]); XCTFail() } catch let e as APIError { XCTAssertEqual(e, .unsupported("Issues")) }
         store.deactivate()
     }
 
@@ -212,5 +270,51 @@ final class StoreTests: XCTestCase {
         store.apply(.agentDeleted("a1"))
         XCTAssertTrue(store.agents.isEmpty)
         store.deactivate()
+    }
+
+    /// #214: deleting an agent passes the workspace choice on and drops it from the list at once.
+    func testDeleteAgentPassesPurgeFilesAndRemovesIt() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        try await store.deleteAgent("a1", purgeFiles: true)
+        XCTAssertEqual(api.deleted.map(\.0), ["a1"])
+        XCTAssertEqual(api.deleted.map(\.1), [true])
+        XCTAssertTrue(store.agents.isEmpty)
+    }
+
+    /// #174: the store keeps the Deliveries by spec.
+    func testDeliveriesAreKeptBySpec() async throws {
+        let api = MockAPI()
+        api.deliveryList = [DeliverySummary(state: "running", repo: "o/r", spec: 7, local: false, tickets: [])]
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        store.loadDeliveries()
+        for _ in 0..<100 where store.deliverySummaries.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(store.deliverySummaries["o/r#7"]?.state, "running")
+    }
+
+    /// #175: a review verdict comes as a pull request change, a Delivery ready or needing you as a needs-you one, the rest
+    /// as a Delivery event; an open Specs view reloads the Deliveries on each, and nothing reloads them when none is open.
+    func testPullRequestAndNeedsYouChangesReloadWatchedDeliveries() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let pr = PullRequest(id: "p", agentId: "a1", slug: "o/r", number: 9, url: "u", title: "Spec", state: "open")
+        let before = api.summaryLoads
+        store.apply(.pullRequest(pr))
+        try await Task.sleep(for: .seconds(2))
+        XCTAssertEqual(api.summaryLoads, before, "no Specs view open")
+
+        store.deliveryWatchers = 1
+        store.apply(.pullRequest(pr))
+        for _ in 0..<150 where api.summaryLoads == before { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 1, "a verdict on a pull request")
+        store.apply(.needsYou(count: 1, ids: []))
+        for _ in 0..<150 where api.summaryLoads == before + 1 { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 2, "a Delivery ready or needing you")
+        store.apply(.delivery(repo: "o/r", spec: 7))
+        for _ in 0..<150 where api.summaryLoads == before + 2 { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(api.summaryLoads, before + 3, "a Delivery event")
     }
 }

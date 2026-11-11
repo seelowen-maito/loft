@@ -76,9 +76,9 @@ pub struct Report {
     pub closed_tickets: Vec<(i64, String)>,
 }
 
-/// The projects the agents belong to, A–Z (case-insensitive), each once.
+/// Every project of every agent, A–Z (case-insensitive), each once.
 pub(crate) fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
-    let mut ps: Vec<String> = state.db.list_agents()?.iter().map(|a| a.project.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    let mut ps: Vec<String> = state.db.list_agents()?.iter().flat_map(|a| a.projects.iter().chain([&a.project])).map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
     ps.sort();
     ps.dedup();
     ps.sort_by_key(|p| p.to_lowercase());
@@ -1265,6 +1265,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_sync_reads_every_project_of_an_agent() {
+        let st = state();
+        let fake = own_fake(&st);
+        for p in ["grp-api", "grp-b2b", "grp-b2c"] {
+            project(&st, p, Some(&format!("https://github.com/octo/{p}")));
+            fake.route("GET", &format!("/repos/octo/{p}/issues"), 200, json!([gh(&format!("octo/{p}"), 1, &format!("{p} issue"), "open", "2026-10-02T00:00:00Z")]));
+        }
+        // One agent in all three, instead of one agent each.
+        for a in st.db.list_agents().unwrap() {
+            st.db.delete_agent(&a.id).unwrap();
+        }
+        let mut web = crate::tasks::tests::agent(&st, "Web");
+        (web.group, web.project, web.projects) = ("Grp".into(), "grp-b2c".into(), vec!["grp-b2c".into(), "grp-api".into(), "grp-b2b".into()]);
+        st.db.save_agent(&web).unwrap();
+
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        let synced: Vec<&str> = v["projects"].as_array().unwrap().iter().map(|r| r["project"].as_str().unwrap()).collect();
+        assert_eq!(synced, ["grp-api", "grp-b2b", "grp-b2c"]);
+        for p in ["grp-api", "grp-b2b", "grp-b2c"] {
+            assert_eq!(mirrored(&st, &format!("octo/{p}")).len(), 1, "{p}");
+        }
+    }
+
+    #[tokio::test]
     async fn projects_without_a_repo_or_a_token_are_left_alone() {
         let st = state();
         let fake = own_fake(&st);
@@ -2058,8 +2082,7 @@ pub(crate) mod tests {
 
     fn state_cursor(st: &AppState, repo: &str) -> Option<String> {
         let c = st.mirror.cursor(repo);
-        let since = c.try_lock().unwrap().since.clone();
-        since
+        c.try_lock().unwrap().since.clone()
     }
 
     #[tokio::test]

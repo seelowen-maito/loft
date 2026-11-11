@@ -474,9 +474,10 @@ pub fn mcp_tools() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "template": { "type": "string", "description": "A template key from list_agent_templates, e.g. \"reviewer\". Fills in anything you leave out." },
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
-                "name": { "type": "string", "description": "Short name, unique within the project. Defaults to the template's." },
+                "group": { "type": "string", "description": "Its group, the label that makes its team, e.g. \"Loft\". Leave it out and it has no group, so no team and no part in a Delivery." },
+                "name": { "type": "string", "description": "Short name, unique within its main project. Defaults to the template's." },
                 "title": { "type": "string" },
-                "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per project: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
+                "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per group: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
                 "personality": { "type": "string" },
@@ -624,7 +625,11 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     if all.len() >= MAX_AGENTS {
         return Err(format!("Loft already has {} agents. Ask the user to delete some before creating more.", all.len()));
     }
-    // The project's folder, for the instructions; a project that isn't a folder is just a tag.
+    // Refused before the user is asked to approve an agent that can't be saved anyway.
+    if !project.is_empty() && let Some(why) = crate::repos::project_problem(state, &project) {
+        return Err(why);
+    }
+    // The project's folder, for the instructions.
     let path = if project.is_empty() { String::new() } else { state.settings.boot().projects_dir.join(&project).display().to_string() };
 
     let custom = s("prompt");
@@ -657,6 +662,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         "name": name,
         "title": Some(s("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.title.to_string())),
         "project": project,
+        "group": s("group"),
         "personality": Some(s("personality")).filter(|p| !p.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.personality.to_string())),
         "prompt": prompt,
         "model": model,
@@ -677,8 +683,8 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
 
     let (a, moved) = crate::api::new_agent(state, uuid::Uuid::new_v4().to_string(), &patch, Some(me.id.clone())).map_err(|e| e.1)?;
     let lead = match (a.role == "lead", moved) {
-        (true, Some(o)) => format!(" It is the project's Lead now (moved from {}).", o.name),
-        (true, None) => " It is the project's Lead.".into(),
+        (true, Some(o)) => format!(" It is the group's Lead now (moved from {}).", o.name),
+        (true, None) => " It is the group's Lead.".into(),
         _ => String::new(),
     };
     let schedule = if a.interval_minutes > 0 {
@@ -795,6 +801,7 @@ mod tests {
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
         st.db.save_agent(&me).unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("work/api")).unwrap();
         let out = create_agent(&st, &me, &json!({
             "template": "security", "project": "work/api", "prompt": "An Axum API behind Cloudflare.",
             // Not fields an agent can set: ignored.
@@ -810,6 +817,12 @@ mod tests {
         assert_eq!(a.created_by.as_deref(), Some(me.id.as_str()));
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
+
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
+        // A project that isn't one: refused before anyone is asked.
+        let err = create_agent(&st, &agent(&st, "Dev"), &json!({ "template": "docs", "project": "nowhere" })).await.unwrap_err();
+        assert_eq!(err, "There's no folder nowhere in the projects folder");
+        assert!(st.db.list_permissions(None).unwrap().is_empty(), "no permission card");
 
         // Same name in the same project: refused. In another project: fine.
         assert!(create_agent(&st, &me, &json!({ "template": "security", "project": "work/api" })).await.is_err());
@@ -838,6 +851,7 @@ mod tests {
     async fn other_agents_need_the_users_approval() {
         let st = state();
         let me = agent(&st, "Dev");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         let st2 = st.clone();
         let call = tokio::spawn(async move { create_agent(&st2, &me, &json!({ "template": "docs", "project": "site" })).await });
         // A permission card waits for the user; deny it.
@@ -933,7 +947,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#e5533d"/></svg>"##;
         crate::api::new_agent(&st, "a2".into(), &json!({ "name": "A", "avatar_brief": "a cat", "avatar": { "svg": svg } }), None).unwrap();
         crate::api::new_agent(&st, "a3".into(), &json!({ "name": "B" }), None).unwrap();
-        assert!(st.rt.lock().unwrap().queued.get("a2").is_none() && st.rt.lock().unwrap().queued.get("a3").is_none());
+        assert!(!st.rt.lock().unwrap().queued.contains_key("a2") && !st.rt.lock().unwrap().queued.contains_key("a3"));
     }
 
     #[tokio::test]
@@ -948,6 +962,7 @@ mod tests {
         st.settings.save(set).unwrap();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
         let out = create_agent(&st, &me, &json!({ "template": "dev", "project": "homebase", "avatar_brief": "A wrench with goggles." })).await.unwrap();
         assert!(out.contains("runs only when messaged") && out.contains("opening an interview"), "{out}");
         let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap();
@@ -962,7 +977,7 @@ mod tests {
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "homebase" })).await.unwrap();
         let r = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Reviewer").unwrap();
         assert_eq!(r.role, "code_reviewer");
-        assert!(st.rt.lock().unwrap().queued.get(&r.id).is_none());
+        assert!(!st.rt.lock().unwrap().queued.contains_key(&r.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1021,7 +1036,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
 
     #[test]
     fn features_look_one_folder_down() {
-        let dir = std::env::temp_dir().join(format!("loft-features-{}", uuid::Uuid::new_v4()));
+        let dir = crate::testdir::for_this_test("features");
         std::fs::create_dir_all(dir.join("backend")).unwrap();
         std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
         std::fs::write(dir.join("backend/Cargo.toml"), "").unwrap();
@@ -1047,20 +1062,21 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
     }
 
     #[tokio::test]
-    async fn the_lead_template_creates_its_project_s_lead() {
+    async fn the_lead_template_creates_its_group_s_lead() {
         let st = state();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
-        let out = create_agent(&st, &me, &json!({ "template": "lead", "project": "homebase" })).await.unwrap();
-        assert!(out.contains("It is the project's Lead."), "{out}");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
+        let out = create_agent(&st, &me, &json!({ "template": "lead", "project": "homebase", "group": "Homebase" })).await.unwrap();
+        assert!(out.contains("It is the group's Lead."), "{out}");
         let first = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Lead").unwrap();
         assert!(first.role == "lead" && first.interval_minutes == 0);
         // A second one in the same project takes the role, and the first becomes Custom; without a project it can't be created.
-        let out = create_agent(&st, &me, &json!({ "template": "lead", "name": "Captain", "project": "homebase" })).await.unwrap();
-        assert!(out.contains("It is the project's Lead now (moved from Lead)."), "{out}");
+        let out = create_agent(&st, &me, &json!({ "template": "lead", "name": "Captain", "project": "homebase", "group": "Homebase" })).await.unwrap();
+        assert!(out.contains("It is the group's Lead now (moved from Lead)."), "{out}");
         assert_eq!(st.db.get_agent(&first.id).unwrap().unwrap().role, "custom");
         let err = create_agent(&st, &me, &json!({ "template": "lead", "name": "Loner" })).await.unwrap_err();
-        assert!(err.starts_with("Only an agent with a project can be Lead"), "{err}");
+        assert!(err.starts_with("Only an agent with a group can be Lead"), "{err}");
     }
 
     #[tokio::test]
@@ -1069,16 +1085,18 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
         let role = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap().role;
-        let out = create_agent(&st, &me, &json!({ "template": "dev", "name": "Boss", "project": "homebase", "role": "lead" })).await.unwrap();
-        assert!(out.contains("It is the project's Lead."), "{out}");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
+        let out = create_agent(&st, &me, &json!({ "template": "dev", "name": "Boss", "project": "homebase", "group": "Homebase", "role": "lead" })).await.unwrap();
+        assert!(out.contains("It is the group's Lead."), "{out}");
         assert_eq!(role("Boss"), "lead");
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("garden")).unwrap();
         create_agent(&st, &me, &json!({ "template": "lead", "name": "Helper", "project": "garden", "role": "qa" })).await.unwrap();
         assert_eq!(role("Helper"), "qa");
         // Without `role`, the template's, and Custom without a template.
         create_agent(&st, &me, &json!({ "template": "reviewer", "project": "garden" })).await.unwrap();
         create_agent(&st, &me, &json!({ "name": "Notes", "prompt": "Tidy my notes.", "project": "garden" })).await.unwrap();
         assert_eq!((role("Reviewer"), role("Notes")), ("code_reviewer".into(), "custom".into()));
-        create_agent(&st, &me, &json!({ "template": "lead", "project": "garden" })).await.unwrap();
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "garden", "group": "Garden" })).await.unwrap();
         assert_eq!(role("Lead"), "lead");
         let err = create_agent(&st, &me, &json!({ "name": "Odd", "prompt": "x", "role": "reviewer" })).await.unwrap_err();
         assert!(err.starts_with("role must be one of"), "{err}");
@@ -1089,7 +1107,8 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let st = crate::planning::tests::state();
         let mut me = agent(&st, "loft");
         me.allowed_tools.push(CREATE_RULE.into());
-        create_agent(&st, &me, &json!({ "template": "lead", "project": "lead-std" })).await.unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("lead-std")).unwrap();
+        create_agent(&st, &me, &json!({ "template": "lead", "project": "lead-std", "group": "Std" })).await.unwrap();
         let lead = st.db.list_agents().unwrap().into_iter().find(|a| a.project == "lead-std").unwrap();
         let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
         assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");

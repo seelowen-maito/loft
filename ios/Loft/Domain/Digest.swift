@@ -39,8 +39,8 @@ struct Digest: Equatable {
             switch a.type {
             case "agent.failed": add(a.agentId, 0, "Run failed\(detail.isEmpty ? "" : ": \(Self.afterColon(detail))")")
             case "approval.required": add(a.agentId, 1, "Waiting for your approval")
-            case "task.failed": add(a.agentId, 0, "Task failed: \(Self.quoted(detail))")
-            case "task.blocked": add(a.agentId, 1, "Task blocked: \(Self.quoted(detail))")
+            case "task.failed": add(a.agentId, 0, "Issue failed: \(Self.quoted(detail))")
+            case "task.blocked": add(a.agentId, 1, "Issue blocked: \(Self.quoted(detail))")
             case "task.completed": add(a.agentId, 3, "Finished \(Self.quoted(detail))")
             default: break // started, finished, messages, created: noise for a digest
             }

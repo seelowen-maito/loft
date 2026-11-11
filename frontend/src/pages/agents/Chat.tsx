@@ -1,6 +1,8 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Link, useLocation } from "react-router";
+import { permCard } from "../../lib/pending";
 import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
@@ -23,13 +25,20 @@ import { StatusPill, runWatch } from "./Status";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
+import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { isVideo } from "../../lib/video";
+import { VideoMessage } from "../../components/VideoMessage";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useMention } from "../../components/MentionMenu";
+import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
+import { QUEUED_MARK, sendState } from "../../lib/agentMessage";
+import { teamBadge, teamOf } from "../../lib/team";
+import { HoverTip } from "../../components/HoverTip";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -180,9 +189,11 @@ export function Chat({
   const pickCommand = (name: string) => (alone || !typing ? runCommand(name) : replaceWord(typing, name));
   // "@ho" at the end of the text: suggest agents to mention (the message also goes to them), and the
   // entries of the folder typed so far, like a shell from the agent's project folder ("@../imole/pro").
-  // Only agents in the same project: the backend doesn't deliver to others.
-  const mentionable = agents.filter((a) => a.id !== agent.id && a.project.trim() === agent.project.trim());
+  // Any agent, its own group's first: the backend prefers them too when two share a name.
+  const mentionable = agents.filter((a) => a.id !== agent.id).sort((a, b) => Number(teamOf(a) !== teamOf(agent)) - Number(teamOf(b) !== teamOf(agent)));
   const mention = useMention(agent.id, text, setText, mentionable);
+  // "#18": specs, issues and pull requests to tag; the backend adds what each is to the agent's prompt.
+  const tagMenu = useTagMenu(agent.project, text, setText);
   const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
@@ -200,8 +211,21 @@ export function Chat({
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [items.length, agent.status_text, agent.running, prs.length]);
 
+  // `#perm-<id>` (the top bar's pending badge): that permission card in view, once per visit of the link.
+  const location = useLocation();
+  const shownFor = useRef("");
+  useLayoutEffect(() => {
+    if (!location.hash.startsWith("#perm-") || shownFor.current === location.key) return;
+    const card = permCard(scroller.current, location.hash);
+    if (!card) return;
+    shownFor.current = location.key;
+    stick.current = false;
+    card.scrollIntoView({ block: "center" });
+  }, [location, items.length, perms]);
+
   useEffect(() => {
-    stick.current = true;
+    // Not when the permission card a link points at is already in view (it can be, from cached messages).
+    if (shownFor.current !== location.key) stick.current = true;
     setShowEarlier(false);
     drop.reset();
     setCmdError(null);
@@ -301,7 +325,7 @@ export function Chat({
     setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
   };
 
-  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments));
+  const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments, "message", true));
 
   const drop = useFileDrop(addImages);
   const uploading = attachments.some((a) => !a.file && !a.error);
@@ -382,7 +406,7 @@ export function Chat({
         <div className="pointer-events-none absolute inset-3 z-20 grid place-items-center rounded-2xl border-2 border-dashed border-accent/50 bg-ink-950/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-fg-2">
             <ImagePlus className="size-7 text-accent" />
-            <span className="text-[14px]">Drop images to attach</span>
+            <span className="text-[14px]">Drop images or videos to attach</span>
           </div>
         </div>
       )}
@@ -391,9 +415,18 @@ export function Chat({
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={52} className="max-md:!size-9" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h2 className="truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
+            <h2 className="min-w-[7ch] truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
             {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
-            {agent.project && <span className="shrink-0 rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3">{agent.project}</span>}
+            {teamOf(agent) && (
+              <HoverTip
+                left
+                className={cx("shrink-0 whitespace-nowrap rounded-full border border-line px-2 py-0.5 font-mono text-[10.5px] text-fg-3", !teamBadge(agent).compact && "max-sm:hidden")}
+                tip={teamBadge(agent).all.map((p, i) => <span key={p} className="text-fg-2">{p}{i === 0 && <span className="text-accent"> · main</span>}</span>)}
+              >
+                <span className="max-sm:hidden">{teamBadge(agent).text}</span>
+                <span className="sm:hidden">{teamBadge(agent).compact}</span>
+              </HoverTip>
+            )}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
             <StatusPill agent={agent} elapsed />
@@ -410,12 +443,12 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <button className="btn" onClick={() => api.stop(agent.id)}>
-              <Square className="size-3 fill-current" /> Stop
+            <button className="btn" title="Stop" onClick={() => api.stop(agent.id)}>
+              <Square className="size-3 fill-current" /> <span className="max-sm:hidden">Stop</span>
             </button>
           ) : (
-            <button className="btn" onClick={() => api.run(agent.id)} title="Run an autonomous check-in now">
-              <Play className="size-3 fill-current" /> Wake
+            <button className="btn" onClick={() => api.run(agent.id)} title="Wake: run an autonomous check-in now">
+              <Play className="size-3 fill-current" /> <span className="max-sm:hidden">Wake</span>
             </button>
           )}
           <button
@@ -508,7 +541,7 @@ export function Chat({
                   {watch.kind === "waiting" && <span className="text-fg-3"> · {watch.minutes} min</span>}
                 </div>
                 <div className="truncate font-mono text-[11px] text-fg-3">
-                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the task." : "It may be stuck. Restart keeps queued messages."}
+                  {watch.kind === "waiting" ? "Already replied. Sending a message stops the run." : "It may be stuck. Restart keeps queued messages."}
                 </div>
               </div>
               <button className="btn shrink-0" onClick={restart} disabled={restarting} title="Stops this run. Queued messages are kept and run next.">
@@ -529,6 +562,7 @@ export function Chat({
             />
           )}
           {mention.menu && <div className="mb-2">{mention.menu}</div>}
+          {tagMenu.menu && <div className="mb-2">{tagMenu.menu}</div>}
           {matches.length > 0 && (
             <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
               {matches.map((c, i) => (
@@ -561,7 +595,7 @@ export function Chat({
               </div>
             )}
             <div className="flex items-end gap-2">
-              <button className="btn-ghost size-8 shrink-0 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images" title="Attach images">
+              <button className="btn-ghost size-8 shrink-0 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images or videos" title="Attach images or videos">
                 <Plus className="size-4" />
               </button>
               <button
@@ -576,7 +610,7 @@ export function Chat({
               <input
                 ref={picker}
                 type="file"
-                accept="image/png,image/jpeg,image/gif,image/webp"
+                accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
                 multiple
                 hidden
                 onChange={(e) => {
@@ -599,6 +633,7 @@ export function Chat({
                 )}
                 <textarea
                   ref={composer}
+                  data-chat-input
                   value={text}
                   onChange={(e) => {
                     setText(e.target.value);
@@ -611,7 +646,7 @@ export function Chat({
                     if (files.length > 0) addImages(files);
                   }}
                   onKeyDown={(e) => {
-                    if (mention.onKeyDown(e)) return;
+                    if (mention.onKeyDown(e) || tagMenu.onKeyDown(e)) return;
                     if (matches.length > 0) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -647,7 +682,7 @@ export function Chat({
                     watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                     : running ? `${agent.name} is working. Your message will be delivered next.`
                     : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
-                    : `Message ${agent.name}… (/ for commands, @ to mention an agent or a file)`
+                    : `Message ${agent.name}… (/ for commands, @ to mention, # to tag)`
                   }
                   className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
@@ -665,8 +700,14 @@ export function Chat({
           </div>
           {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
           {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
+          <div className="mt-2 font-mono text-[10.5px] text-fg-3">@ agents and files · # specs, issues and PRs</div>
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
-            <span className="max-md:hidden">↵ send · ⇧↵ newline · / commands</span>
+            {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
+            <span className="max-md:hidden">
+              ↵ send · ⇧↵ newline · / commands ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("switcher")}>{formatCombo(loadCombo("switcher"))} search</button> ·{" "}
+              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("sheet")}>? shortcuts</button>
+            </span>
             <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
           </div>
         </div>
@@ -692,6 +733,30 @@ function MessageTasks({ m }: { m: Message }) {
   return (
     <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
       {ids.map((id) => <TaskChip key={id} id={id} />)}
+    </div>
+  );
+}
+
+/** Chips for the specs, issues and pull requests a message tags with `#`: kind and title, opening the item. */
+function MessageTags({ m }: { m: Message }) {
+  const tags: { tag: string; kind: "spec" | "issue" | "pr"; title: string; url?: string | null; task_id?: string }[] = m.meta?.tags ?? [];
+  if (!tags.length) return null;
+  const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
+  return (
+    <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
+      {tags.map((t) => {
+        const inner = (
+          <>
+            <span className="font-mono text-fg-3">{t.kind}</span>
+            <span className="truncate">{t.title}</span>
+          </>
+        );
+        return t.task_id ? (
+          <Link key={t.tag} to={`/issues/${t.task_id}`} title={t.tag} className={cls}>{inner}</Link>
+        ) : (
+          <a key={t.tag} href={t.url ?? undefined} target="_blank" rel="noopener noreferrer" title={t.tag} className={cls}>{inner}</a>
+        );
+      })}
     </div>
   );
 }
@@ -794,6 +859,11 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
           <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          {agent.queued_messages?.includes(m.id) && (
+            <div className="mt-1 flex items-center gap-1 font-mono text-[10.5px] text-warn">
+              <Hourglass className="size-3" /> {QUEUED_MARK}
+            </div>
+          )}
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
@@ -808,7 +878,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex flex-col items-end gap-1.5 pt-2">
         {images.length > 0 && (
           <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
-            {images.map((f) => (
+            {images.map((f) => isVideo(f) ? <VideoMessage key={f} src={api.uploadUrl(m.agent_id, f)} /> : (
               <a key={f} href={api.uploadUrl(m.agent_id, f)} target="_blank" rel="noopener noreferrer">
                 <img
                   src={api.uploadUrl(m.agent_id, f)}
@@ -824,6 +894,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           <div className="max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
+        <MessageTags m={m} />
         {m.meta?.mentions?.length > 0 && (
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
@@ -856,6 +927,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
 
 function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Message; agent: Agent; agents: Agent[] }) {
   const to = findAgent(agents, use.meta?.input?.agent);
+  const state = sendState(result?.content, agents);
   return (
     <div className="flex gap-3 pt-1">
       <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={26} className="mt-5" />
@@ -864,6 +936,11 @@ function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Me
           {agent.name} → {to && <Sticker avatar={to.avatar} lead={to.role === "lead"} size={16} />} {to?.name ?? use.meta?.input?.agent}
         </div>
         <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tl-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{use.meta?.input?.text}</div>
+        {state && (
+          <div className={cx("mt-1 flex items-center gap-1 font-mono text-[10.5px]", state === "Delivered" ? "text-fg-3" : "text-warn")}>
+            {state !== "Delivered" && <Hourglass className="size-3" />} {state}
+          </div>
+        )}
       </div>
     </div>
   );

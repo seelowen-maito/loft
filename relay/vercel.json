@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/*.js": { "maxDuration": 15 }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/api/portal" },
+    { "source": "/auth/start", "destination": "/api/auth-start" },
+    { "source": "/auth/callback", "destination": "/api/auth-callback" },
+    { "source": "/keys", "destination": "/api/keys" },
+    { "source": "/connect", "destination": "/api/connect" },
+    { "source": "/keys/revoke", "destination": "/api/revoke" },
+    { "source": "/account/delete", "destination": "/api/account-delete" },
+    { "source": "/signout", "destination": "/api/signout" }
+  ]
+}

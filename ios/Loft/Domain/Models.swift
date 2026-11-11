@@ -34,13 +34,28 @@ struct Agent: Codable, Identifiable, Hashable {
     var waitingSince: Date? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     var sessionId: String? = nil
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always" (nil from older servers).
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always" (nil from older servers).
     var freshContext: String? = nil
     /// Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev).
     var freshContextApplies: Bool? = nil
+    /// Loft's own agent, which can't be deleted (nil from older servers).
+    var builtin: Bool? = nil
+    /// Free-text name of its team ("Acme"); empty when it has no team (older servers don't send it).
+    var group: String? = nil
+    /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
+    var projects: [String]? = nil
 
-    /// Leads its project's team; it wears a captain hat.
+    /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
+
+    /// Its team: the group; empty when it has none (backend `Agent::team`).
+    var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
+
+    /// The projects it works in, main first: `projects`, else the one `project` from an older server.
+    var allProjects: [String] {
+        if let projects, !projects.isEmpty { return projects }
+        return (project ?? "").isEmpty ? [] : [project!]
+    }
 }
 
 /// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
@@ -88,6 +103,14 @@ struct ChatMessage: Codable, Identifiable, Hashable {
         return a.compactMap { $0["name"]?.stringValue }
     }
     var mentionsOnly: Bool { meta?["mentions_only"] == .bool(true) }
+    /// The specs, issues and pull requests your message tagged with `#` that Loft knows (`meta.tags`).
+    var tags: [MessageTag] {
+        guard case .array(let a)? = meta?["tags"] else { return [] }
+        return a.compactMap { t in
+            guard let tag = t["tag"]?.stringValue, let kind = t["kind"]?.stringValue, let title = t["title"]?.stringValue else { return nil }
+            return MessageTag(tag: tag, kind: kind, title: title, url: t["url"]?.stringValue, taskId: t["task_id"]?.stringValue)
+        }
+    }
     var clientId: String? { meta?["client_id"]?.stringValue }
     var taskId: String? { meta?["task_id"]?.stringValue }
     var toolName: String? { meta?["name"]?.stringValue }
@@ -160,6 +183,17 @@ struct PermissionRequest: Codable, Identifiable, Hashable {
         if let perm = input?["permission"]?.stringValue { return "Grant \(perm)" }
         return toolName
     }
+}
+
+/// A `#` tag on a chat message, as the backend resolved it: it opens the Loft issue, else the GitHub page.
+struct MessageTag: Hashable, Identifiable {
+    let tag: String
+    /// spec | issue | pr
+    let kind: String
+    let title: String
+    let url: String?
+    let taskId: String?
+    var id: String { tag }
 }
 
 struct HBTask: Codable, Identifiable, Hashable {
@@ -261,6 +295,8 @@ struct PullRequest: Codable, Identifiable, Hashable {
     var state: String
     var draft: Bool?
     var createdAt: Date?
+    /// Label names; the verdicts are tests:green, qa:passed, security:passed and their failures.
+    var labels: [String]?
 }
 
 struct ServerInfo: Codable, Hashable {
@@ -282,6 +318,14 @@ enum ServerFeature: String {
     case plans
     case needsYou = "needs_you"
     case push
+    case backups
+    case workspaces
+    /// Clean lists the workspace for the user to tick what goes, and logs it.
+    case cleanPicker = "clean_picker"
+    /// Settings › Disk lists agents' Simulator devices.
+    case agentDevices = "agent_devices"
+    /// Settings › Disk lists what an idle agent left running, with Stop them; an agent is busy only in a run.
+    case leftProcesses = "left_processes"
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.
@@ -397,6 +441,8 @@ enum ServerEvent {
     case grill(GrillSession)
     /// The "Needs you" list changed: refetch when `ids` differ from what's shown.
     case needsYou(count: Int, ids: [String])
+    /// The Delivery of spec (or standalone ticket) `repo#spec` changed: a card showing it reloads.
+    case delivery(repo: String, spec: Int)
     case other(String)
 
     private struct Envelope: Decodable { let type: String }
@@ -410,6 +456,7 @@ enum ServerEvent {
     private struct SystemBody: Decodable { let system: SystemReading }
     private struct GrillBody: Decodable { let session: GrillSession }
     private struct NeedsYouBody: Decodable { let count: Int; let ids: [String] }
+    private struct DeliveryBody: Decodable { let repo: String; let spec: Int }
 
     static func decode(_ data: Data) throws -> ServerEvent {
         let d = JSONCoding.decoder
@@ -427,6 +474,9 @@ enum ServerEvent {
         case "needs_you":
             let b = try d.decode(NeedsYouBody.self, from: data)
             return .needsYou(count: b.count, ids: b.ids)
+        case "delivery":
+            let b = try d.decode(DeliveryBody.self, from: data)
+            return .delivery(repo: b.repo, spec: b.spec)
         default: return .other(type)
         }
     }

@@ -57,7 +57,7 @@ struct DigestCard: View {
                     } else {
                         Button {
                             reading = true
-                            Task { _ = await speaker.speak(spoken(d)); reading = false }
+                            Task { _ = await speaker.speak(spoken(d), replace: true); reading = false }
                         } label: { Label("Read aloud", systemImage: "speaker.wave.2") }
                             .accessibilityIdentifier("digestReadAloud")
                     }

@@ -62,6 +62,8 @@ struct PendingMessage: Codable, Identifiable, Hashable {
     var failure: String?
     /// Sent with the message (a grill answer's tag); nil for plain messages.
     var meta: JSONValue?
+    /// Uploads sent with it (a video), by the server's names.
+    var images: [String]? = nil
 
     var isFailed: Bool { failure != nil }
 }
@@ -79,6 +81,9 @@ enum TestMode {
     /// `-hold-reading`: reading aloud plays no audio and holds its state (the Skip/Stop bar) until Skip or Stop,
     /// so a UI test sees it however soon the Simulator's voice would end, or fail to start.
     static let holdReading = flag("-hold-reading")
+    /// `-fixture-pairing`: the pairing screen runs on fixture data in the Simulator, where it otherwise refuses.
+    /// Nothing is stored: the Keychain is never touched in the Simulator.
+    static let fixturePairing = flag("-fixture-pairing")
 
     private static func flag(_ name: String) -> Bool {
         #if DEBUG

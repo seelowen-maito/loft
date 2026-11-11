@@ -26,6 +26,20 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertEqual(approve.body(text: nil, clientId: "c2"), approve.body)
     }
 
+    /// An issue reply names the picked agent when nobody is on the issue (#145); other answers never carry one.
+    func testAnIssueReplyCarriesThePickedAgent() throws {
+        let l = try fixture()
+        let failed = try XCTUnwrap(l.items.first { $0.type == "task_failed" })
+        XCTAssertNil(failed.agent)
+        XCTAssertFalse(failed.actions.contains { $0.kind == "retry" }, "replying runs a failed issue again")
+        let reply = try XCTUnwrap(failed.answerAction)
+        guard case .object(let o)? = reply.body(text: "Go", clientId: "c1", agentId: "qa") else { return XCTFail() }
+        XCTAssertEqual(o["agent_id"], .string("qa"))
+        let q = try XCTUnwrap(l.items.first { $0.type == "question" }?.answerAction)
+        guard case .object(let m)? = q.body(text: "Go", clientId: "c1", agentId: "qa") else { return XCTFail() }
+        XCTAssertNil(m["agent_id"])
+    }
+
     /// Closed on GitHub while an agent works on it (#177): Cancel or Keep working, which reopens the GitHub issue.
     func testClosedOnGitHubAsksCancelOrKeepWorking() throws {
         let item = try XCTUnwrap(try fixture().items.first { $0.type == "closed_on_github" })
@@ -37,7 +51,7 @@ final class NeedsYouTests: XCTestCase {
     /// A comment waiting for GitHub (spec #65): Approve, "Edit and approve" starting from the comment's text, Keep in Loft.
     func testACommentApprovalEditsTheCommentItself() throws {
         let item = try XCTUnwrap(try fixture().items.first { $0.type == "comment_approval" })
-        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open task"])
+        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open issue"])
         let edit = try XCTUnwrap(item.answerAction)
         XCTAssertEqual(edit.draft, item.text, "editing starts from the comment, not an empty box")
         guard case .object(let o)? = edit.body(text: "Edited", clientId: "c1") else { return XCTFail() }

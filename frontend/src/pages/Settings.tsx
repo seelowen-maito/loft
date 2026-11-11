@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import { RotateCw } from "lucide-react";
-import { api, type AgentsSummary, type ApprovalMode, type GithubBudget, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
+import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
-import { cx } from "../lib/format";
+import { HerdrSetup } from "./HerdrSetup";
+import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
+import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
+import { Keys } from "../components/Shortcuts";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -118,6 +123,245 @@ function GithubUsage() {
   );
 }
 
+const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 text-accent");
+
+/** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
+function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
+  const [s, setS] = useState<BackupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    api.backups().then((v) => {
+      setS(v);
+      // Needs you links here when backups fail.
+      if (window.location.hash === "#backups") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
+    }).catch((e) => setErr((e as Error).message));
+  }, []);
+  const now = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setS(await api.backUpNow());
+    } catch (e) {
+      setErr((e as Error).message);
+      // The failure is recorded: show the last good backup next to it.
+      api.backups().then(setS).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+  const last = s?.last;
+  return (
+    <div ref={card} id="backups">
+      <Section title="Backups">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="min-w-0 flex-1 text-[13px] text-fg">
+            {!s ? " " : last ? (
+              <span title={last.path}>
+                Last backup {timeAgo(last.at)} · {new Date(last.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · {(last.bytes / 1e6).toFixed(1)} MB
+              </span>
+            ) : "No backup yet."}
+          </p>
+          <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
+            {busy ? "Backing up…" : "Back up now"}
+          </button>
+        </div>
+        {(s?.error || err) && (
+          <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">
+            {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className={chip(folder === "")} aria-pressed={folder === ""} onClick={() => onFolder("")}>This Mac</button>
+          {s?.icloud && <button type="button" className={chip(folder === s.icloud)} aria-pressed={folder === s.icloud} onClick={() => onFolder(s.icloud!)}>iCloud Drive</button>}
+        </div>
+        {s?.icloud && folder === s.icloud && (
+          <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+            Backups in iCloud Drive leave this Mac: all your chats and your GitHub token are then stored by Apple. Save to use it.
+          </p>
+        )}
+        <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
+          <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
+        </Field>
+        {folderErr && <p className="text-[12.5px] text-bad">{folderErr}</p>}
+      </Section>
+    </div>
+  );
+}
+
+/** Disk: the free space, and Clean. Check space lists every agent's workspace items in one table to tick and
+ * delete, and logs each removal; the last run's log, the daily sweep's included, stays here. */
+function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours: (v: number) => void }) {
+  const [s, setS] = useState<WorkspaceSizes | null>(null);
+  const [devices, setDevices] = useState<AgentDevice[] | null>(null);
+  // The log on screen: live while cleaning, then the summary.
+  const [shown, setShown] = useState<CleanLog | null>(null);
+  const [last, setLast] = useState<CleanLog | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const card = useRef<HTMLDivElement>(null);
+  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices))]);
+  useEffect(() => {
+    load().then(() => {
+      // Needs you links here when the disk is almost full.
+      if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
+    }).catch((e) => setErr((e as Error).message));
+  }, []);
+  const name = (id: string) => s?.agents.find((a) => a.id === id)?.name ?? `Deleted agent ${id.slice(0, 8)}`;
+  const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
+  return (
+    <div ref={card} id="workspaces">
+      <Section title="Disk">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
+            {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
+          </p>
+          <Link to="/settings/clean" className="btn shrink-0">
+            Check space
+          </Link>
+        </div>
+        {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+        {last?.at && (
+          <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
+            <span>
+              {last.title || last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
+              {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
+            </span>
+            <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
+              View log
+            </button>
+          </p>
+        )}
+        {devices && devices.length > 0 && (
+          <div className="space-y-1.5">
+            <h4 className="text-[12px] font-medium uppercase tracking-wide text-fg-3">Simulator devices</h4>
+            <ul className="space-y-1.5 text-[13px]">
+              {devices.map((d) => (
+                <li key={d.udid} className="flex items-center gap-3">
+                  <span className="min-w-0 flex-1 truncate text-fg-2" title={d.udid}>{d.agent ? d.agent.name : `Orphaned · ${d.name}`}</span>
+                  <span className={cx("shrink-0 text-[12px]", d.state === "Booted" ? "text-good" : "text-fg-3")}>{d.state === "Booted" ? "Booted" : "Shut down"}</span>
+                  <span className="w-16 shrink-0 text-right tabular-nums text-fg">{fmtBytes(d.bytes)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops the processes the agent left running (like a dev server) and shuts its Simulator device down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
+          <input
+            className="input w-24"
+            type="number"
+            min={1}
+            value={idleHours}
+            onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
+          />
+        </Field>
+        <p className="text-[12px] text-fg-3">
+          Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
+        </p>
+      </Section>
+      {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
+    </div>
+  );
+}
+
+function Modal({ onClose, children }: { onClose?: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="panel flex max-h-[85vh] w-full max-w-2xl flex-col gap-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Groups items by agent, in the order they come. */
+function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
+  const m = new Map<string, T[]>();
+  for (const i of items) m.set(i.agent, [...(m.get(i.agent) ?? []), i]);
+  return [...m];
+}
+
+/** Copies the equivalent `rm -rf` commands, by agent. */
+export function CopyCommands({ items, name }: { items: { agent: string; command: string }[]; name: (id: string) => string }) {
+  const [copied, setCopied] = useState(false);
+  const text = byAgent(items)
+    .map(([agent, xs]) => [`# ${oneLine(name(agent))}`, ...xs.map((x) => x.command)].join("\n"))
+    .join("\n\n");
+  return (
+    <button
+      type="button"
+      className="btn-ghost text-[12.5px]"
+      disabled={items.length === 0}
+      onClick={() => navigator.clipboard.writeText(text + "\n").then(() => setCopied(true))}
+    >
+      {copied ? "Copied" : "Copy commands"}
+    </button>
+  );
+}
+
+/** Says the commands shown are what Loft's removal amounts to, not what it runs. */
+export const EQUIVALENT = "Commands are the equivalent of each removal; Loft removes the paths itself.";
+
+function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) => string }) {
+  if (skipped.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <p className="eyebrow">Skipped</p>
+      <ul className="space-y-0.5 text-[12.5px] text-fg-3">
+        {skipped.map((k, i) => (
+          <li key={i} className="flex gap-2">
+            <span className="min-w-0 flex-1 truncate">
+              {name(k.agent)}
+              {k.rel && <span className="font-mono"> / {k.rel}</span>}
+            </span>
+            <span className="shrink-0">{k.reason}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A clean's log: each removal (or its error) as it happens, with the running total, then the summary. */
+export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string) => string; onClose: () => void }) {
+  return (
+    <Modal onClose={log.running ? undefined : onClose}>
+      <div>
+        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <p className="mt-1 text-[13px] text-fg-2">
+          {log.running && log.lines.length === 0 ? "Removing…" : `Freed ${fmtBytes(log.freed_bytes)} · ${log.removed} removed`} · {log.skipped.length} skipped
+          {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+        {byAgent(log.lines).map(([agent, lines]) => (
+          <div key={agent} className="space-y-0.5">
+            <p className="text-[13px] font-medium">{name(agent)}</p>
+            <ul className="space-y-0.5 font-mono text-[12px]">
+              {lines.map((l) => (
+                <li key={l.path} className="break-all">
+                  <span className={l.error ? "text-bad" : "text-fg-2"}>{cleanLineText(l)}</span>
+                  {l.command && <span className="block text-[11.5px] text-fg-3">{l.command}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+        {!log.running && log.lines.length === 0 && <p className="text-[13px] text-fg-3">Nothing was removed.</p>}
+        <Skipped skipped={log.skipped} name={name} />
+      </div>
+      {log.lines.some((l) => l.command) && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
+      <div className="flex justify-end gap-2">
+        <CopyCommands items={log.lines.filter((l) => l.command)} name={name} />
+        <span className="flex-1" />
+        <button className="btn-primary" disabled={log.running} onClick={onClose}>
+          {log.running ? "Cleaning…" : "Done"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 /** The All-time spend: every run Loft has counted, which the home line no longer shows. */
 function Spend() {
   const [all, setAll] = useState<AgentsSummary["all_time"] | null>(null);
@@ -131,6 +375,74 @@ function Spend() {
       </p>
       <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
     </Section>
+  );
+}
+
+/** The keyboard shortcuts: ⌘K and ⌘J can be recorded anew or reset, kept in this browser and used at once (no Save needed); the rest are fixed. */
+function ShortcutSettings() {
+  const [combos, setCombos] = useState(loadCombos);
+  const [listening, setListening] = useState<Rebindable | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
+
+  const use = (id: Rebindable, c: string) => {
+    saveCombo(id, c);
+    setCombos(loadCombos());
+    setHint(null);
+    window.dispatchEvent(new Event(SHORTCUTS_CHANGED));
+  };
+
+  useEffect(() => {
+    if (!listening) return;
+    recording.on = true;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.metaKey) return setListening(null);
+      if (/^(Shift|Control|Alt|Meta|OS)$/.test(e.key)) return;
+      const c = comboFromEvent(e);
+      if (!c) return setHint("Hold ⌘, Ctrl or Alt with the key.");
+      if (isReserved(c)) return setHint(`${formatCombo(c)} is the browser's (copy, paste, close tab…). Pick another.`);
+      const other = REBINDABLE.find((r) => r.id !== listening)!;
+      if (formatCombo(c) === formatCombo(loadCombos()[other.id])) return setHint(`${formatCombo(c)} already does “${other.label}”. Pick another.`);
+      use(listening, normalizeCombo(c));
+      setListening(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      recording.on = false;
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [listening]);
+
+  return (
+    <div className="space-y-3">
+      {REBINDABLE.map((r) => (
+        <div key={r.id} className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 flex-1 basis-40 text-[13px] text-fg-2">{r.label}</span>
+          <kbd className="chip min-w-12 justify-center font-mono text-[12px]">{listening === r.id ? "Press keys…" : formatCombo(combos[r.id])}</kbd>
+          <button type="button" className="btn" aria-label={listening === r.id ? "Cancel" : `Record ${r.label}`} onClick={() => { setHint(null); setListening((l) => (l === r.id ? null : r.id)); }}>
+            {listening === r.id ? "Cancel" : "Record"}
+          </button>
+          {combos[r.id] !== r.default && listening !== r.id && (
+            <button type="button" className="btn-ghost" onClick={() => use(r.id, r.default)}>
+              Reset to {formatCombo(r.default)}
+            </button>
+          )}
+        </div>
+      ))}
+      <span className="block text-[11.5px] text-fg-3">
+        {hint ?? "These two work from any page, even while typing. Press Record, then the new keys; they need ⌘, Ctrl or Alt. Kept in this browser."}
+      </span>
+      <ul className="space-y-2 border-t border-line pt-3">
+        {FIXED.map((f) => (
+          <li key={f.keys} className="flex items-center justify-between gap-3 text-[13px]">
+            <span className="min-w-0 text-fg-2">{f.label}</span>
+            <Keys keys={f.keys} />
+          </li>
+        ))}
+      </ul>
+      <span className="block text-[11.5px] text-fg-3">Fixed. They don't fire while you type in a text field.</span>
+    </div>
   );
 }
 
@@ -150,6 +462,7 @@ export default function SettingsPage() {
   const [token, setToken] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
 
@@ -179,10 +492,20 @@ export default function SettingsPage() {
   const save = async () => {
     setSaving(true);
     setErr(null);
+    setFolderErr(null);
     try {
-      const v = await api.saveSettings({ ...draft, github_token: token });
+      // The backups folder goes on its own, after the rest: a folder the server refuses fails only that field.
+      let v = await api.saveSettings({ ...draft, github_token: token, backup_dir: undefined });
+      if (draft.backup_dir !== v.settings.backup_dir) {
+        try {
+          // No github_token: the view's is blank, and blank would clear it.
+          v = await api.saveSettings({ ...v.settings, github_token: undefined, backup_dir: draft.backup_dir });
+        } catch (e) {
+          setFolderErr((e as Error).message);
+        }
+      }
       setView(v);
-      setDraft(v.settings);
+      setDraft({ ...v.settings, backup_dir: draft.backup_dir });
       setToken(undefined);
       window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
     } catch (e) {
@@ -273,6 +596,10 @@ export default function SettingsPage() {
           </Field>
         </Section>
 
+        <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
+
+        <Workspaces idleHours={draft.idle_timeout_hours ?? 4} onIdleHours={(v) => set("idle_timeout_hours", v)} />
+
         <GithubUsage />
         <Spend />
 
@@ -314,6 +641,13 @@ export default function SettingsPage() {
             hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
         </Section>
+
+        <Section title="Keyboard shortcuts">
+          <ShortcutSettings />
+        </Section>
+
+        <PairedClients />
+        <HerdrSetup />
 
         <PushSettings />
 

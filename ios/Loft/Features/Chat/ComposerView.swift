@@ -11,6 +11,8 @@ struct ComposerView: View {
     @Environment(Speaker.self) private var speaker
     @Binding var text: String
     let recipient: String
+    /// Who an auto-send goes to.
+    let agentId: String
     let isOrchestrator: Bool
     /// Set by the parent to start or cancel dictation (the grill's hands-free loop); reset to nil once handled.
     var control: Binding<ComposerControl?> = .constant(nil)
@@ -21,12 +23,18 @@ struct ComposerView: View {
     var dictateOnAppear = false
     /// Long-pressing the mic starts a full voice conversation instead of dictation.
     var startVoice: (() -> Void)?
+    /// The other way round (an agent's chat, #340): tapping the mic opens Talk, holding it dictates into the field.
+    var tapOpensTalk = false
     /// A dictation was just sent by voice ("send", or yes to the question), so the parent can read the reply and listen again.
     var onVoiceSent: (() -> Void)?
     /// "Stop" said on its own ends dictation without sending. Nil: "stop" is plain text (the grill reads it itself).
     var onVoiceStop: (() -> Void)?
-    /// Shows "Attach a task" next to @ (the chat keeps the attached task).
+    /// Shows "Attach an issue" next to @ (the chat keeps the attached task).
     var attachTask: (() -> Void)?
+    /// Shows the paperclip: photos and a video picked or taken are uploaded to this agent and kept here until sent
+    /// (the chat reads them when `send` is called).
+    var videoAgentId: String?
+    var attachments: Binding<[AttachmentDraft]> = .constant([])
     /// The text, and whether it went out as a voice turn (dictated, or sent by voice) rather than typed.
     let send: (String, Bool) -> Void
 
@@ -61,8 +69,8 @@ struct ComposerView: View {
     /// The transcript at the latest gap: words after it are one utterance ("…[pause] send").
     @State private var pauseBase = ""
     @State private var silenceWatch: Task<Void, Never>?
-    /// "Sending to … · Undo" after yes, with the cleaned text.
-    @State private var autoSend: Task<Void, Never>?
+    /// Whether the composer is on screen: an auto-send that ends after you left sends only the message.
+    @State private var shown = Shown()
     /// The text in the field is going out because of a voice yes / "send".
     @State private var voiceSending = false
     /// The text in the field was (at least partly) dictated: sending it, even with a tap, is a voice turn, so
@@ -76,13 +84,22 @@ struct ComposerView: View {
     @AppStorage(Prefs.voiceBrief) private var offerBrief = true
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canSend: Bool { !trimmed.isEmpty && store.canWrite }
+    /// A photo or video still reading or uploading, or one that failed, holds the message back until it's up or
+    /// removed; so do photos over the message limit together.
+    private var attachmentsHold: Bool { attachments.wrappedValue.contains { $0.uploaded == nil } || photosRefusal != nil }
+    private var photosRefusal: String? {
+        let a = attachments.wrappedValue
+        return PhotoAttachment.refusal(bytes: a.filter { !$0.isVideo }.map(\.bytes), video: a.contains(where: \.isVideo))
+    }
+    private var canSend: Bool { (!trimmed.isEmpty || !attachments.wrappedValue.isEmpty) && !attachmentsHold && store.canWrite }
+    /// "Sending to … · Undo" after yes, with the cleaned text: held by the store, so it still goes if you leave.
+    private var pending: LoftStore.VoiceAutoSend? { store.voiceAutoSend.flatMap { $0.agentId == agentId ? $0 : nil } }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 
     var body: some View {
         VStack(spacing: 6) {
-            if autoSend != nil {
-                AutoSendBar(recipient: recipient, undo: undoSend, sendNow: sendNow)
+            if let p = pending {
+                AutoSendBar(recipient: recipient, deadline: p.deadline, undo: undoSend, sendNow: { store.sendVoiceNow(p.id) })
             } else if phase == .cleaning {
                 Label("Tidying up what you said…", systemImage: "wand.and.stars")
                     .font(.footnote)
@@ -93,7 +110,7 @@ struct ComposerView: View {
                 SubmitPromptBar(question: VoiceSend.question(for: trimmed), yes: { answered(.yes, by: "tap") },
                                 no: { answered(.no, by: "tap") })
             }
-            if autoSend == nil, phase == .idle { briefBar }
+            if pending == nil, phase == .idle { briefBar }
             if let message = speech.state.message {
                 Label(message, systemImage: speech.state.isRecording ? "waveform" : "mic.slash")
                     .font(.caption)
@@ -107,9 +124,28 @@ struct ComposerView: View {
                     .foregroundStyle(Theme.attention)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            let photos = attachments.wrappedValue.filter { !$0.isVideo }
+            if !photos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { ForEach(photos) { p in PhotoChip(draft: p) { remove(p) } } }
+                }
+                .accessibilityIdentifier("draftPhotos")
+                if let why = photosRefusal {
+                    Text(why).font(.caption).foregroundStyle(Theme.failure).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let v = attachments.wrappedValue.first(where: \.isVideo) {
+                VideoChip(draft: v) { remove(v) }
+            }
             if let q = MentionQuery.query(in: text) {
-                MentionPicker(agents: MentionQuery.matches(q, in: store.agents, excluding: recipient)) { a in
+                MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
                     text = MentionQuery.insert(a, into: text)
+                }
+            }
+            if let q = TagQuery.query(in: text) {
+                let project = store.agents.first { $0.name == recipient }?.project ?? ""
+                TagPicker(rows: TagQuery.matches(TagQuery.rows(tasks: store.tasks, prs: store.pullRequests, project: project), q)) { r in
+                    text = TagQuery.insert(r.tag, into: text)
                 }
             }
             HStack(alignment: .bottom, spacing: 8) {
@@ -125,9 +161,27 @@ struct ComposerView: View {
                         Image(systemName: "checklist").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 44)
                     }
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel("Attach a task")
-                    .accessibilityHint("The agent gets the task with your message")
+                    .accessibilityLabel("Attach an issue")
+                    .accessibilityHint("The agent gets the issue with your message")
                     .accessibilityIdentifier("attachTaskButton")
+                }
+                if let agentId = videoAgentId {
+                    let upload = { (file: URL, progress: @escaping @Sendable (Double) -> Void) in
+                        try await store.upload(file, to: agentId, progress: progress)
+                    }
+                    AttachMenu(photosLeft: max(0, PhotoAttachment.maxPerMessage - attachments.wrappedValue.count)) { loads in
+                        for load in loads.prefix(PhotoAttachment.maxPerMessage - attachments.wrappedValue.count) {
+                            let draft = AttachmentDraft(video: false)
+                            draft.start(load: load, upload: upload)
+                            attachments.wrappedValue.append(draft)
+                        }
+                    } pickedVideo: { load in
+                        // At most one video per message: a new one takes the old one's place.
+                        attachments.wrappedValue.first(where: \.isVideo).map(remove)
+                        let draft = AttachmentDraft(video: true)
+                        draft.start(load: load, upload: upload)
+                        attachments.wrappedValue.append(draft)
+                    }
                 }
                 TextField(isOrchestrator ? "Ask \(recipient) to plan or delegate…" : "Message \(recipient)…", text: $text, axis: .vertical)
                     .lineLimit(1...6)
@@ -137,23 +191,41 @@ struct ComposerView: View {
                     .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composerField")
                 Button {
-                    if longPressed { longPressed = false } else { toggleMic() }
+                    if longPressed { longPressed = false } else if talks, !micOn { openTalk() } else { toggleMic() }
                 } label: {
-                    Image(systemName: speech.state.isRecording ? "stop.circle.fill" : "mic.circle.fill")
-                        .font(.system(size: 32))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(speech.state.isRecording ? Theme.failure : .secondary)
+                    if talks {
+                        // Home's Talk button, at the composer's size.
+                        Image(systemName: micOn ? "stop.fill" : "mic.fill")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Theme.onAccent)
+                            .frame(width: 32, height: 32)
+                            .background(micOn ? Theme.failure : Theme.accent, in: Circle())
+                    } else {
+                        Image(systemName: speech.state.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                            .font(.system(size: 32))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(speech.state.isRecording ? Theme.failure : .secondary)
+                    }
                 }
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                    guard let startVoice, !speech.state.isRecording else { return }
+                    guard startVoice != nil, !speech.state.isRecording, !micOn else { return }
                     longPressed = true
-                    focused = false
-                    startVoice()
+                    if talks { toggleMic() } else { openTalk() }
                 })
                 .sensoryFeedback(.impact(weight: .medium), trigger: longPressed) { _, new in new }
-                .accessibilityLabel(speech.state.isRecording ? "Stop dictation" : "Dictate")
-                .accessibilityHint(startVoice == nil ? "" : "Touch and hold for a voice conversation")
-                .accessibilityAction(named: "Voice conversation") { startVoice?() }
+                .accessibilityLabel(micOn ? "Stop dictation" : talks ? "Talk" : "Dictate")
+                .accessibilityHint(micOn || startVoice == nil ? ""
+                                   : talks ? "Opens a voice conversation. Touch and hold to dictate into the message instead."
+                                   : "Touch and hold for a voice conversation")
+                .accessibilityActions {
+                    if !micOn, startVoice != nil {
+                        if talks {
+                            Button("Dictate into the message") { toggleMic() }
+                        } else {
+                            Button("Voice conversation") { openTalk() }
+                        }
+                    }
+                }
                 .accessibilityIdentifier("micButton")
                 Button(action: sendNow) {
                     Image(systemName: "arrow.up.circle.fill")
@@ -165,6 +237,10 @@ struct ComposerView: View {
                 .accessibilityIdentifier("sendButton")
                 .sensoryFeedback(.impact(weight: .light), trigger: store.pending.count) { old, new in new > old }
             }
+            Text("@ agents and files · # specs, issues and PRs")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("composerHint")
         }
         .padding(.horizontal, Theme.gutter)
         .padding(.top, 8)
@@ -200,7 +276,7 @@ struct ComposerView: View {
         }
         .onChange(of: focused) { _, f in
             // Starting to edit stops listening and any pending send.
-            guard f, phase != .idle || autoSend != nil else { return }
+            guard f, phase != .idle || pending != nil else { return }
             VoiceLog.shared.add("field tapped: mic off, kept for editing")
             cancelAutoSend()
             endDictation()
@@ -210,7 +286,7 @@ struct ComposerView: View {
             control.wrappedValue = nil
             switch c {
             case .listen:
-                if phase == .idle, autoSend == nil { startDictation() }
+                if phase == .idle, pending == nil { startDictation() }
             case .cancelDictation:
                 // A spoken grill command: drop its words from the field.
                 VoiceLog.shared.add("spoken grill command: dictation dropped")
@@ -219,15 +295,24 @@ struct ComposerView: View {
                 text = prefix
             case .stopListening:
                 // The interview ended (or the chat asked): mic off, nothing sent, the words stay.
-                guard phase != .idle || autoSend != nil else { return }
+                guard phase != .idle || pending != nil else { return }
                 VoiceLog.shared.add("asked to stop listening: mic off, nothing sent")
                 cancelAutoSend()
                 endDictation()
             }
         }
+        .onAppear {
+            shown.on = true
+            // Back during the Undo window: the bar with the time left, and the message in the field.
+            if let p = pending {
+                text = p.text
+                voiceSending = true
+                scheduleSend(p.text, in: max(0, p.deadline.timeIntervalSinceNow))
+            }
+        }
         .onDisappear {
-            // Leaving keeps the draft rather than sending behind your back.
-            cancelAutoSend()
+            // A pending auto-send still goes: the bar said it would.
+            shown.on = false
             endDictation()
         }
         .task {
@@ -310,6 +395,13 @@ struct ComposerView: View {
     }
 
     // MARK: - Dictation
+
+    private var talks: Bool { tapOpensTalk && startVoice != nil }
+
+    private func openTalk() {
+        focused = false
+        startVoice?()
+    }
 
     private func toggleMic() {
         if micOn {
@@ -515,20 +607,24 @@ struct ComposerView: View {
             voiceSending = true
             if withUndo {
                 VoiceLog.shared.add("sending in \(Int(VoiceSend.undoWindow)) s with Undo")
-                autoSend = Task {
-                    try? await Task.sleep(for: .seconds(VoiceSend.undoWindow))
-                    guard !Task.isCancelled, autoSend != nil else { return }
-                    sendNow()
-                }
+                scheduleSend(cleaned, in: VoiceSend.undoWindow)
             } else {
                 sendNow()
             }
         }
     }
 
+    /// Hands the send to the store. On screen when it fires, it's a Send; after you left, only the message goes
+    /// (no reading the reply out or listening again).
+    private func scheduleSend(_ message: String, in window: TimeInterval) {
+        let shown = shown, field = $text, send = send
+        store.scheduleVoiceSend(message, to: agentId, in: window) {
+            if shown.on { sendNow() } else { field.wrappedValue = ""; send(message, true) }
+        }
+    }
+
     private func sendNow() {
-        autoSend?.cancel()
-        autoSend = nil
+        if pending != nil { store.cancelVoiceSend() }
         if micOn {
             // Tapping Send mid-dictation sends what's there.
             silenceWatch?.cancel()
@@ -539,7 +635,7 @@ struct ComposerView: View {
         voiceSending = false
         dictated = false
         let t = trimmed
-        guard !t.isEmpty, store.canWrite else {
+        guard !t.isEmpty || !attachments.wrappedValue.isEmpty, !attachmentsHold, store.canWrite else {
             VoiceLog.shared.add("send blocked: \(t.isEmpty ? "empty" : "offline")")
             return
         }
@@ -549,6 +645,11 @@ struct ComposerView: View {
         if byVoice { onVoiceSent?() }
     }
 
+    private func remove(_ draft: AttachmentDraft) {
+        draft.cancel()
+        attachments.wrappedValue.removeAll { $0 === draft }
+    }
+
     /// Undo on the Sending bar: nothing goes out, the (cleaned) text stays to edit.
     private func undoSend() {
         VoiceLog.shared.add("Undo tapped: not sent, kept for editing")
@@ -556,12 +657,13 @@ struct ComposerView: View {
     }
 
     private func cancelAutoSend() {
-        autoSend?.cancel()
-        autoSend = nil
+        if pending != nil { store.cancelVoiceSend() }
         voiceSending = false
         if phase == .cleaning { phase = .idle }
     }
 }
+
+private final class Shown { var on = false }
 
 /// "Would you like to submit this?" with Yes / No, while the mic listens for the answer.
 struct SubmitPromptBar: View {
@@ -586,7 +688,7 @@ struct SubmitPromptBar: View {
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("submitPromptNo")
                 Button(action: yes) { Text("Yes, send").multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).frame(maxWidth: ax ? .infinity : nil) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .accessibilityIdentifier("submitPromptYes")
             }
         }
@@ -609,9 +711,10 @@ enum ComposerControl: Equatable {
 struct AutoSendBar: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let recipient: String
+    /// When it goes; the bar runs out then.
+    let deadline: Date
     let undo: () -> Void
     let sendNow: () -> Void
-    @State private var started = Date()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -629,13 +732,13 @@ struct AutoSendBar: View {
                     .accessibilityHint("Doesn't send; keeps the message so you can edit it")
                     .accessibilityIdentifier("autoSendUndo")
                 Button(action: sendNow) { Text("Send now").fixedSize().frame(maxWidth: ax ? .infinity : nil) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.accent)
                     .accessibilityIdentifier("autoSendNow")
             }
             .controlSize(.regular)
             // Paused under UI tests: a bar redrawn ten times a second keeps the app from ever going idle.
             TimelineView(.animation(minimumInterval: 0.1, paused: TestMode.noAnimations)) { context in
-                ProgressView(value: min(1, context.date.timeIntervalSince(started) / VoiceSend.undoWindow))
+                ProgressView(value: min(1, max(0, 1 - deadline.timeIntervalSince(context.date) / VoiceSend.undoWindow)))
                     .tint(Theme.accent)
                     .accessibilityHidden(true)
             }
@@ -644,7 +747,6 @@ struct AutoSendBar: View {
         .padding(10)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onAppear {
-            started = Date()
             UIAccessibility.post(notification: .announcement, argument: "Sending to \(recipient). Tap Undo to keep it.")
         }
         .accessibilityElement(children: .contain)
@@ -654,11 +756,12 @@ struct AutoSendBar: View {
 
 /// The agents to mention while "@…" is typed: sticker and name. Picking one puts its exact name in the message.
 struct MentionPicker: View {
-    let agents: [Agent]
+    let sections: [(title: String, agents: [Agent])]
     let pick: (Agent) -> Void
 
     var body: some View {
-        if agents.isEmpty {
+        let rows = sections.reduce(0) { $0 + $1.agents.count + 1 }
+        if sections.isEmpty {
             Text("No agent by that name").font(.footnote).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
@@ -668,24 +771,30 @@ struct MentionPicker: View {
                 // Every match, scrolling past about five rows so the chat above stays in view.
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(agents) { a in
-                            Button { pick(a) } label: {
-                                HStack(spacing: 10) {
-                                    AgentAvatar(name: a.name, id: a.id, size: 28)
-                                    Text(a.name).font(.subheadline).foregroundStyle(.primary)
-                                    Spacer()
+                        ForEach(sections, id: \.title) { section in
+                            Text(section.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.top, 6)
+                                .accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("mentionSection-\(section.title)")
+                            ForEach(section.agents) { a in
+                                Button { pick(a) } label: {
+                                    HStack(spacing: 10) {
+                                        AgentAvatar(name: a.name, id: a.id, size: 28)
+                                        Text(a.name).font(.subheadline).foregroundStyle(.primary)
+                                        Spacer()
+                                    }
+                                    .frame(minHeight: 44)
+                                    .contentShape(Rectangle())
                                 }
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Mention \(a.name)")
+                                .accessibilityIdentifier("mention-\(a.name)")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Mention \(a.name)")
-                            .accessibilityIdentifier("mention-\(a.name)")
                         }
                     }
                 }
                 .frame(maxHeight: 44 * 5.5)
-                .fixedSize(horizontal: false, vertical: agents.count <= 5)
+                .fixedSize(horizontal: false, vertical: rows <= 6)
                 .scrollBounceBehavior(.basedOnSize)
                 .accessibilityIdentifier("mentionList")
             }
@@ -693,6 +802,74 @@ struct MentionPicker: View {
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Mention an agent")
+        }
+    }
+}
+
+/// The specs, issues and pull requests to tag while "#…" is typed. Picking one puts its tag in the message.
+struct TagPicker: View {
+    let rows: [TagQuery.Row]
+    let pick: (TagQuery.Row) -> Void
+
+    private func symbol(_ k: TagQuery.Kind) -> String {
+        switch k { case .spec: "doc.text"; case .issue: "circle.dotted"; case .pr: "arrow.triangle.pull" }
+    }
+
+    var body: some View {
+        // No match shows nothing, like the web menu: "#fff" in a message is often just text.
+        if !rows.isEmpty {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { r in
+                        Button { pick(r) } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: symbol(r.kind)).foregroundStyle(r.open ? .secondary : .tertiary).frame(width: 22)
+                                Text(r.title).font(.subheadline).foregroundStyle(.primary).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(r.number.map { "#\($0)" } ?? r.kind.rawValue).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Tag \(r.kind.rawValue): \(r.title)")
+                        .accessibilityIdentifier("tag-\(r.title)")
+                    }
+                }
+            }
+            .frame(maxHeight: 44 * 5.5)
+            .fixedSize(horizontal: false, vertical: rows.count <= 6)
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(10)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Tag a spec, issue or pull request")
+            .accessibilityIdentifier("tagList")
+        }
+    }
+}
+
+/// A `#` tag on a sent message: kind and title, opening the Loft issue or the pull request on GitHub.
+struct TagChip: View {
+    let tag: MessageTag
+
+    var body: some View {
+        let label = HStack(spacing: 4) {
+            Text(tag.kind).foregroundStyle(.tertiary)
+            Text(tag.title).lineLimit(1)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .foregroundStyle(.secondary)
+        if let id = tag.taskId {
+            NavigationLink(value: TaskRoute(id: id)) { label }.buttonStyle(.plain)
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it")
+        } else if let url = tag.url.flatMap(URL.init(string:)) {
+            Link(destination: url) { label }
+                .accessibilityLabel("\(tag.kind): \(tag.title)").accessibilityHint("Opens it on GitHub")
+        } else {
+            label
         }
     }
 }

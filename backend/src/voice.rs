@@ -152,17 +152,33 @@ pub fn added(input: &str, brief: &str) -> Option<String> {
     None
 }
 
+/// A file that is deleted when this is dropped.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn run(state: &AppState, text: &str, prompt: &str, effort: Option<&str>, timeout: Duration) -> anyhow::Result<String> {
+    // The prompt goes in a private file, not on argv, where a `pkill -f` with one of its phrases would match it. The
+    // path is relative to claude's folder so it names none of the user's.
+    let dir = std::env::temp_dir();
+    let name = std::path::Path::new("loft-voice").join(format!("{}.md", uuid::Uuid::new_v4()));
+    let file = TempFile(dir.join(&name));
+    crate::agents::write_private(&file.0, prompt)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     // No tools, no MCP, none of the user's settings: a single text-in, text-out turn.
-    cmd.current_dir(std::env::temp_dir())
+    cmd.current_dir(&dir)
         .args(["-p", "--model", "haiku", "--output-format", "text"])
         .args(["--tools", ""])
         .args(["--permission-mode", "dontAsk"])
         .args(["--setting-sources", ""])
         .arg("--strict-mcp-config")
         .arg("--no-session-persistence")
-        .args(["--system-prompt", prompt])
+        .arg("--system-prompt-file")
+        .arg(&name)
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -224,6 +240,13 @@ mod tests {
     /// A stand-in `claude`: echoes a canned brief depending on the dictation.
     const FAKE: &str = r#"#!/bin/sh
 input=$(cat)
+while [ $# -gt 0 ]; do
+  case "$1" in --system-prompt) echo 'prompt on argv' >&2; exit 1;; esac
+  # The prompt comes from a private file, at a path relative to the folder claude runs in.
+  [ "$1" = --system-prompt-file ] && case "$2" in /*) exit 1;; *) [ -s "$2" ] || exit 1;; esac
+  [ "$1" = --system-prompt-file ] && printf '%s\n' "$PWD/$2" >> "$(dirname "$0")/prompt-files.log"
+  shift
+done
 case "$input" in
   *FAIL*) exit 1;;
   *SLOW*) exec sleep 60;;
@@ -272,5 +295,13 @@ esac
         let r = brief_within(&st, &long("SLOW"), Duration::from_millis(100)).await.ok().unwrap().0;
         assert_eq!((r["briefed"].clone(), r["reason"].clone()), (json!(false), json!("cleanup timed out")));
         assert!(brief(State(st.clone()), Json(CleanBody { text: "  ".into() })).await.is_err());
+
+        // Each call's prompt file is gone once it returns: after a brief, a failure and a timeout alike.
+        let log = st.settings.get().projects_dir.join("prompt-files.log");
+        let files: Vec<String> = std::fs::read_to_string(log).unwrap().lines().map(String::from).collect();
+        assert_eq!(files.len(), 5, "{files:?}");
+        for f in files {
+            assert!(f.contains("loft-voice/") && !std::path::Path::new(&f).exists(), "{f} is left behind");
+        }
     }
 }

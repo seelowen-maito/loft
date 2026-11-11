@@ -31,7 +31,7 @@ struct TaskDetailView: View {
                     lookedUp = true
                 }
         } else {
-            EmptyState(symbol: "checklist", title: "Task not found", message: "It may have been deleted.")
+            EmptyState(symbol: "checklist", title: "Issue not found", message: "It may have been deleted.")
         }
     }
 
@@ -65,6 +65,9 @@ struct TaskDetailView: View {
                 }
             }
 
+            if t.hasDeliveryCard { DeliveryCardSection(task: t) }
+            if SpecViews.isSpec(t) { SpecDeliverySection(spec: t, underCard: t.hasDeliveryCard) }
+
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {
                 if let g = t.github {
@@ -79,7 +82,7 @@ struct TaskDetailView: View {
                         .accessibilityIdentifier("issueGitHubLink")
                     }
                     LabeledContent("State on GitHub", value: g.state == "closed" ? "Closed" : "Open")
-                    if let sub = g.subIssues { LabeledContent("Sub-issues", value: sub) }
+                    if let sub = g.subIssues, !SpecViews.isSpec(t) { LabeledContent("Sub-issues", value: sub) }
                 } else {
                     LabeledContent("Only in Loft", value: t.project.isEmpty ? "No project" : t.project)
                     // Its project's repo gets it as a GitHub issue; the server says why when it can't.
@@ -150,16 +153,19 @@ struct TaskDetailView: View {
 
             Section {
                 if children.isEmpty {
-                    Text("No subtasks.").foregroundStyle(.secondary)
+                    Text("No sub-issues.").foregroundStyle(.secondary)
+                } else if SpecViews.isSpec(t) {
+                    // A spec's sub-issues are its tickets, listed above.
+                    EmptyView()
                 } else {
                     ForEach(children) { c in
                         NavigationLink(value: TaskRoute(id: c.id)) { TaskRow(task: c) }
                     }
                 }
-                Button { router.composer = .newTask(agentId: nil, parentId: t.id) } label: { Label("Add subtask", systemImage: "plus") }
+                Button { router.composer = .newTask(agentId: nil, parentId: t.id) } label: { Label("Add sub-issue", systemImage: "plus") }
                     .disabled(!store.canWrite)
             } header: {
-                Text(children.isEmpty ? "Subtasks" : "Subtasks · \(children.filter { $0.state == .done }.count)/\(children.count) done")
+                Text(children.isEmpty ? "Sub-issues" : "Sub-issues · \(children.filter { $0.state == .done }.count)/\(children.count) done")
             }
 
             if !t.dependsOn.isEmpty {
@@ -190,7 +196,7 @@ struct TaskDetailView: View {
                 if let c = t.completedAt { LabeledContent("Finished", value: c.formatted(date: .abbreviated, time: .shortened)) }
             }
         }
-        .navigationTitle("Task")
+        .navigationTitle("Issue")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -201,19 +207,19 @@ struct TaskDetailView: View {
                     }
                 } label: { Image(systemName: "ellipsis.circle") }
                 .disabled(!store.canWrite)
-                .accessibilityLabel("Task options")
+                .accessibilityLabel("Issue options")
             }
         }
-        .confirmationDialog("Cancel this task?", isPresented: $confirmCancel, titleVisibility: .visible) {
-            Button("Cancel task", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: false) } }
+        .confirmationDialog("Cancel this issue?", isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("Cancel issue", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: false) } }
             if let agent, agent.running == true {
-                Button("Cancel task and stop \(agent.name)'s run", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: true) } }
+                Button("Cancel issue and stop \(agent.name)'s run", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: true) } }
             }
             Button("Keep working", role: .cancel) {}
         } message: {
             Text(agent.map { "\($0.name) is told to drop it. Stopping the run also ends anything else it is doing right now." } ?? "")
         }
-        .confirmationDialog("Delete this task?", isPresented: $confirmDelete, titleVisibility: .visible) {
+        .confirmationDialog("Delete this issue?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 act {
                     try await store.deleteTask(t.id)
@@ -221,7 +227,7 @@ struct TaskDetailView: View {
                 }
             }
         } message: {
-            Text(children.isEmpty ? "This can't be undone." : "Its subtasks are kept as top-level tasks.")
+            Text(children.isEmpty ? "This can't be undone." : "Its sub-issues are kept as top-level issues.")
         }
         .sheet(isPresented: $pickAgent) {
             NavigationStack {
@@ -260,7 +266,7 @@ struct TaskDetailView: View {
             }
         }
         if t.state.isActive {
-            Button(role: .destructive) { confirmCancel = true } label: { Label("Cancel task", systemImage: "xmark.circle").foregroundStyle(Theme.failure) }
+            Button(role: .destructive) { confirmCancel = true } label: { Label("Cancel issue", systemImage: "xmark.circle").foregroundStyle(Theme.failure) }
                 .disabled(!writable)
         }
         if !t.state.isActive && !t.state.isClosed {
@@ -276,7 +282,7 @@ struct TaskDetailView: View {
             .disabled(!writable)
         }
         if !store.canWrite {
-            Text("Reconnect to change this task.").font(.footnote).foregroundStyle(.secondary)
+            Text("Reconnect to change this issue.").font(.footnote).foregroundStyle(.secondary)
         }
     }
 

@@ -106,7 +106,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         )}
         {delivery && startedOn && (
           <Link to={`/agents/${startedOn.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
-            Delivery started · {delivery.local ? `“${startedOn.title ?? ""}”` : `#${startedOn.ticket}`} with {startedOn.agent_name}
+            {startedOn.ticket === 0 ? `Delivery started · ${startedOn.agent_name} hands out the tickets` : `Delivery started · ${delivery.local ? `“${startedOn.title ?? ""}”` : `#${startedOn.ticket}`} with ${startedOn.agent_name}`}
           </Link>
         )}
         {delivery?.local && stage?.state === "ready" && !merged && (

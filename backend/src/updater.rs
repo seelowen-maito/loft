@@ -62,7 +62,7 @@ fn running_agents(state: &AppState) -> usize {
 }
 
 async fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(program).args(args).current_dir(dir).output().await?;
+    let out = Command::new(program).args(args).current_dir(dir).env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0").output().await?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let lines: Vec<&str> = err.lines().collect();
@@ -88,6 +88,29 @@ async fn check(root: &Path, running: &str) -> Result<Option<String>> {
     Ok(Some(upstream))
 }
 
+/// The pinned pnpm (`packageManager` in frontend/package.json): an installed pnpm, else corepack's, else fetched
+/// through `npm exec`. Never plain `npm install`: that would resolve the dependencies fresh, with no lockfile.
+/// Keep in step with scripts/frontend-pm.sh.
+async fn pnpm(dir: &Path) -> Result<(&'static str, Vec<String>)> {
+    for (program, pre) in [("pnpm", &[][..]), ("corepack", &["pnpm"][..])] {
+        if run(dir, program, &[pre, &["--version"]].concat()).await.is_ok() {
+            return Ok((program, pre.iter().map(|s| s.to_string()).collect()));
+        }
+    }
+    let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json"))?)?;
+    let version = pkg["packageManager"].as_str().and_then(|p| p.strip_prefix("pnpm@")).and_then(|p| p.split('+').next());
+    let Some(version) = version.filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.')) else {
+        bail!("frontend/package.json has no pinned pnpm in `packageManager`");
+    };
+    Ok(("npm", ["exec", "--yes", &format!("pnpm@{version}"), "--"].map(String::from).to_vec()))
+}
+
+/// node_modules made by npm: pnpm leaves a `.modules.yaml` there, npm doesn't. pnpm won't reuse npm's without a
+/// terminal, and the updater has none, so it starts over.
+fn stale_modules(has_modules_yaml: bool) -> bool {
+    !has_modules_yaml
+}
+
 async fn install(root: &Path) -> Result<()> {
     run(root, "git", &["pull", "--ff-only", "--quiet"]).await?;
     // Backend first: if it fails, the live frontend bundle stays in step with the running binary.
@@ -97,8 +120,21 @@ async fn install(root: &Path) -> Result<()> {
     }
     run(&root.join("backend"), "cargo", &cargo).await?;
     let frontend = root.join("frontend");
-    run(&frontend, "npm", &["install", "--no-audit", "--no-fund"]).await?;
-    run(&frontend, "npm", &["run", "build"]).await?;
+    let (pm, pre) = pnpm(&frontend).await?;
+    let pre: Vec<&str> = pre.iter().map(String::as_str).collect();
+    let modules = frontend.join("node_modules");
+    if modules.is_dir() && stale_modules(modules.join(".modules.yaml").is_file()) {
+        std::fs::remove_dir_all(&modules)?;
+    }
+    run(&frontend, pm, &[&pre[..], &["install", "--frozen-lockfile", "--ignore-workspace"]].concat()).await?;
+    run(&frontend, pm, &[&pre[..], &["run", "build"]].concat()).await?;
+    // The Herdr UI client, once it was set up: rebuilt so new chat tabs run the new version.
+    let herdr = root.join("herdr");
+    if herdr.join("target").join("release").join("loft-herdr").is_file()
+        && let Err(e) = run(&herdr, "cargo", &["build", "--release", "--quiet"]).await
+    {
+        tracing::warn!("herdr ui client: {e}");
+    }
     Ok(())
 }
 
@@ -115,6 +151,15 @@ async fn wait_for_idle(state: &AppState) -> bool {
         }
         tokio::time::sleep(IDLE_POLL).await;
     }
+}
+
+/// Once the update is built: waits for agents started by hand during the build (the new build is on disk, so
+/// Loft restarts into it even if auto-update was turned off meanwhile), then sweeps.
+async fn before_restart(state: &AppState) {
+    while running_agents(state) > 0 {
+        tokio::time::sleep(IDLE_POLL).await;
+    }
+    crate::sweep::run(state, Some("Sweep before update"), None, crate::sweep::IDLE).await;
 }
 
 fn short(sha: &str) -> String {
@@ -164,11 +209,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 tracing::info!("updating {} -> {}", short(&head), short(&up));
                 match install(&root).await {
                     Ok(()) => {
-                        // Agents may have been started by hand during the build. The new build is
-                        // on disk, so restart into it even if auto-update was turned off meanwhile.
-                        while running_agents(&state) > 0 {
-                            tokio::time::sleep(IDLE_POLL).await;
-                        }
+                        before_restart(&state).await;
                         restart();
                     }
                     Err(e) => {
@@ -186,12 +227,44 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
-/// Replace this process with the binary on disk (same path, args and env): after an update, the new build.
-/// If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
+/// Replace this process with the build on disk (same args and env): after an update, the new build, which
+/// signs its own copy again. If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
 pub fn restart() -> ! {
     if let Ok(exe) = std::env::current_exe() {
-        let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+        let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
         tracing::error!("restart: exec failed: {err}");
     }
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn node_modules_made_by_npm_is_stale() {
+        assert!(super::stale_modules(false));
+        assert!(!super::stale_modules(true));
+    }
+
+    use std::time::{Duration, SystemTime};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_sweeps_before_restarting() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let ws = crate::agents::workspace(&st, &a.id);
+        // A real clone: the sweep asks git whether it tracks the folder.
+        std::fs::create_dir_all(ws.join("loft")).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(ws.join("loft")).args(["init", "-q"]).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap().success());
+        std::fs::write(ws.join("loft/Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(ws.join("loft/target/debug")).unwrap();
+        std::fs::write(ws.join("loft/target/debug/app"), "x").unwrap();
+        // Untouched for 4 days.
+        let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
+        for p in ["loft/Cargo.toml", "loft/target/debug/app", "loft/target", "loft/.git", "loft"] {
+            std::fs::File::open(ws.join(p)).unwrap().set_modified(then).unwrap();
+        }
+        super::before_restart(&st).await;
+        assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");
+        assert!(st.rt.lock().unwrap().clean.at.is_some());
+    }
 }

@@ -125,18 +125,17 @@ pub fn token(state: &AppState) -> Option<String> {
         return Some(t.trim().to_string());
     }
     let mut cache = state.gh_token.0.lock().unwrap();
-    if let Some((at, t)) = &*cache {
-        if at.elapsed() < TOKEN_TTL {
+    if let Some((at, t)) = &*cache
+        && at.elapsed() < TOKEN_TTL {
             return t.clone();
         }
-    }
     let t = gh_auth_token();
     *cache = Some((Instant::now(), t.clone()));
     t
 }
 
 /// The REST/GraphQL API root; tests point it at a local fake with LOFT_GITHUB_API_URL.
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     std::env::var("LOFT_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into())
 }
 
@@ -302,7 +301,9 @@ pub fn extract_pr_links(text: &str) -> Vec<(String, i64)> {
             .split('/')
             .collect();
         if seg.len() >= 4 && seg[2] == "pull" && !seg[0].is_empty() && !seg[1].is_empty() {
-            if let Ok(n) = seg[3].parse::<i64>() {
+            // A sentence may end right after the number ("…/pull/84."): only its digits count.
+            let digits = seg[3].split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+            if let Ok(n) = digits.parse::<i64>() {
                 let item = (format!("{}/{}", seg[0], seg[1].trim_end_matches(".git")), n);
                 if !out.contains(&item) {
                     out.push(item);
@@ -329,10 +330,13 @@ pub(crate) mod tests {
         pub body: Value,
     }
 
+    /// Keyed by (method, path).
+    type ByRoute<T> = Mutex<HashMap<(String, String), T>>;
+
     #[derive(Default)]
     pub(crate) struct Fake {
-        routes: Mutex<HashMap<(String, String), std::collections::VecDeque<(u16, Value)>>>,
-        headers: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
+        routes: ByRoute<std::collections::VecDeque<(u16, Value)>>,
+        headers: ByRoute<Vec<(String, String)>>,
         seen: Mutex<Vec<Seen>>,
     }
 
@@ -536,6 +540,7 @@ pub(crate) mod tests {
             vec![("octo/demo".to_string(), 5), ("a/b.c".to_string(), 12)]
         );
         assert!(extract_pr_links(r#"{"html_url":"https://github.com/o/r/pull/7"}"#) == vec![("o/r".to_string(), 7)]);
+        assert_eq!(extract_pr_links("a card for https://github.com/o/r/pull/84."), vec![("o/r".to_string(), 84)], "a sentence's full stop");
     }
 
     #[tokio::test]

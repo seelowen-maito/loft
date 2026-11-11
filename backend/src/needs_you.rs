@@ -151,7 +151,32 @@ fn open_chat(agent_id: &str) -> Value {
 }
 
 fn open_task(task_id: &str) -> Value {
-    json!({ "kind": "open", "label": "Open task", "target": { "screen": "task", "task_id": task_id } })
+    json!({ "kind": "open", "label": "Open issue", "target": { "screen": "task", "task_id": task_id } })
+}
+
+/// The Loft issue of a Delivery's spec (or standalone ticket).
+fn delivery_issue<'a>(tasks: &'a [Task], d: &crate::db::Delivery) -> Option<&'a Task> {
+    if d.local {
+        tasks.iter().find(|t| t.id == d.spec_id)
+    } else {
+        tasks.iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+    }
+}
+
+/// Opens a Delivery's spec (or standalone ticket): its Loft issue, else its issue on GitHub.
+fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
+    match issue {
+        Some(t) => open_task(&t.id),
+        None if !d.local => json!({ "kind": "open", "label": "Open issue", "target": { "url": format!("https://github.com/{}/issues/{}", d.repo, d.spec) } }),
+        None => json!({ "kind": "open", "label": "Open Needs you", "target": { "screen": "needs_you" } }),
+    }
+}
+
+/// Why a spec branch waits for Merge: "Built by A, B." only when the Delivery has builders.
+pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String {
+    let built = crate::delivery::builders(state, d);
+    let by = if built.is_empty() { String::new() } else { format!(" Built by {}.", built.join(", ")) };
+    format!("Its reviews passed: merge `{}` into `{}`.{by}", d.branch, d.base)
 }
 
 fn dismiss(id: &str) -> Value {
@@ -213,6 +238,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
+    // Deliveries whose ticket (or final review) waits for the user after too many changes rounds: the Loft
+    // issue it blocked offers Resume.
+    let mut by_rounds = state.db.deliveries_in_state("running").map_err(e)?;
+    by_rounds.extend(state.db.deliveries_in_state("needs_human").map_err(e)?);
+    by_rounds.retain(crate::delivery::waits_for_user);
+
     // Tasks waiting for you, blocked or failed.
     for t in &tasks {
         let (urgency, reason) = match t.status.as_str() {
@@ -222,7 +253,15 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             _ => continue,
         };
         let body = [&t.error, &t.note, &t.summary].iter().find(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_default();
-        let mut actions = vec![action("answer", "Reply on the task", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true }))];
+        // The answer goes to the issue's agent (a failed issue runs again with it); with nobody on it, the client
+        // asks for one (`agent_id`) or says it's kept as a note.
+        let mut actions = vec![];
+        if t.status == "blocked"
+            && let Some(d) = by_rounds.iter().find(|d| crate::delivery::blocked_by_rounds(d, t))
+        {
+            actions.push(action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })));
+        }
+        actions.push(action("answer", "Reply on the issue", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true })));
         if t.status == "failed" && t.agent_id.is_some() {
             actions.push(action("retry", "Reopen and send", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })));
         }
@@ -238,13 +277,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions,
             push: (
                 match t.status.as_str() {
-                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("A task".to_string(), who_name)),
-                    _ => "A task failed".to_string(),
+                    "waiting_approval" => format!("{} needs your approval", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    "blocked" => format!("{} is blocked", t.agent_id.as_deref().map_or("An issue".to_string(), who_name)),
+                    _ => "An issue failed".to_string(),
                 },
                 t.title.clone(),
             ),
@@ -267,7 +306,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("#{} was closed on GitHub while it's being worked on.", g.number), MAX_REASON),
             text: String::new(),
             created_at: t.updated_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("deny", "Cancel issue", "POST", format!("{base}/cancel"), json!({})),
                 action("approve", &format!("Keep working (reopens #{})", g.number), "POST", format!("{base}/keep-working"), json!({})),
@@ -296,7 +335,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&format!("Not on GitHub yet: approve to post it on {}#{}.", g.repo, g.number), MAX_REASON),
             text: text(&c.text, MAX_TEXT),
             created_at: c.created_at.clone(),
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("approve", "Approve", "POST", format!("{base}/approve"), json!({})),
                 action("answer", "Edit and approve", "POST", format!("{base}/approve"), json!({ "text": c.text })),
@@ -325,13 +364,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             reason: text(&if t.summary.is_empty() { "Done.".to_string() } else { format!("Done: {}", first_line(&t.summary)) }, MAX_REASON),
             text: text(&t.summary, MAX_TEXT),
             created_at: done_at,
-            links: vec![json!({ "label": "Task", "path": format!("/tasks/{}", t.id) })],
+            links: vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })],
             actions: vec![
                 action("answer", "Follow up", "POST", format!("/api/tasks/{}/comments", t.id), json!({ "text": "", "send": true, "reopen": true })),
                 open_task(&t.id),
                 dismiss(&id),
             ],
-            push: ("Task done".to_string(), t.title.clone()),
+            push: ("Issue done".to_string(), t.title.clone()),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             pr: None,
             id,
@@ -376,7 +415,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             let reason = if !waiting.is_empty() && age_secs(&since) / 60 >= QUIET_MINUTES {
                 Some(format!("Waiting on a background task for {} min: {}", age_secs(&since) / 60, waiting.join(", ")))
             } else if waiting.is_empty() && !last.is_empty() && quiet >= QUIET_MINUTES {
-                Some(format!("No activity for {quiet} min."))
+                let restarts = state.rt.lock().unwrap().auto_restarts.get(&a.id).copied().unwrap_or(0);
+                Some(if restarts >= crate::agents::MAX_AUTO_RESTARTS {
+                    format!("No activity for {quiet} min, after {restarts} automatic restarts. Loft won't restart it again.")
+                } else {
+                    format!("No activity for {quiet} min.")
+                })
             } else {
                 None
             };
@@ -451,6 +495,79 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         }
     }
 
+    // Deliveries waiting on a step no agent is working on: only the user can bring them back.
+    for d in state.db.deliveries_in_state("stalled").map_err(e)? {
+        let id = crate::delivery::stalled_item_id(&d);
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let open = open_delivery(&d, issue);
+        items.push(Item {
+            kind: "delivery_stalled",
+            urgency: 2,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            reason: text(&crate::delivery::stalled_reason(state, &d), MAX_REASON),
+            text: String::new(),
+            created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
+            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![
+                action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                open,
+                dismiss(&id),
+            ],
+            push: ("Delivery stalled".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
+    // Deliveries Loft marked done (the spec PR ready, or a plan kept in Loft ready to Merge), until the PR
+    // merges or closes, or the plan is merged.
+    let prs = state.db.list_pull_requests(None).map_err(e)?;
+    for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| !d.done_at.is_empty()) {
+        let tracked = d.pr.and_then(|n| prs.iter().find(|p| p.slug.eq_ignore_ascii_case(&d.repo) && p.number == n));
+        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) {
+            continue;
+        }
+        let id = format!("done:{}:{}", d.repo, d.spec);
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let pr_url = d.pr.map(|n| tracked.map_or_else(|| format!("https://github.com/{}/pull/{n}", d.repo), |p| p.url.clone()));
+        let (reason, act, link) = match &pr_url {
+            Some(url) if !d.local => (
+                format!("Every ticket is closed and its reviews passed: {} #{} is ready for review.", if d.standalone { "PR" } else { "spec PR" }, d.pr.unwrap_or_default()),
+                json!({ "kind": "open", "label": "Open PR", "target": { "url": url } }),
+                json!({ "label": "Pull request", "url": url }),
+            ),
+            _ => (
+                format!("Every ticket is done and its reviews passed: merge `{}` into `{}`.", d.branch, d.base),
+                action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                Value::Null,
+            ),
+        };
+        let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
+        links.extend(Some(link).filter(|l| !l.is_null()));
+        items.push(Item {
+            kind: "delivery_done",
+            urgency: 1,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("Delivery done: {title}"), MAX_TITLE),
+            reason: text(&reason, MAX_REASON),
+            text: String::new(),
+            created_at: d.done_at.clone(),
+            links,
+            // The issue first: it's where the push opens.
+            actions: vec![open_delivery(&d, issue), act, dismiss(&id)],
+            push: ("Delivery done".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
     // Plans kept in Loft whose reviews all passed: Merge merges the spec branch into the project's own repo.
     for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| d.local) {
         let id = format!("merge:{}:{}", d.repo, d.spec);
@@ -461,10 +578,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             agent: name(&d.dev),
             task_id: spec_task.map(|t| t.id.clone()),
             title: text(&format!("Merge \"{}\"", d.title), MAX_TITLE),
-            reason: text(&format!("Its reviews passed: merge `{}` into `{}`.", d.branch, d.base), MAX_REASON),
+            reason: text(&merge_reason(state, &d), MAX_REASON),
             text: String::new(),
             created_at: spec_task.map_or_else(|| d.created_at.clone(), |t| t.updated_at.clone()),
-            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/tasks/{}", t.id) })]).unwrap_or_default(),
+            links: spec_task.map(|t| vec![json!({ "label": "Spec", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
             actions: vec![
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 dismiss(&id),
@@ -480,7 +597,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     // opened here (they can be merged from the app), then the user's other ready PRs and review
     // requests found on GitHub (github_inbox).
     let mut seen_prs: HashSet<(String, i64)> = HashSet::new();
-    for p in state.db.list_pull_requests(None).map_err(e)? {
+    for p in prs {
         let checks = &p.checks;
         let n = |k: &str| checks[k].as_i64().unwrap_or(0);
         let ready = p.state == "open" && !p.draft && p.mergeable == Some(true) && ["clean", "unstable", "has_hooks"].contains(&p.mergeable_state.as_str()) && n("failed") == 0 && n("pending") == 0;
@@ -496,7 +613,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             kind: "pr_ready",
             urgency: 1,
             title: text(&format!("{}#{}: {}", p.slug, p.number, p.title), MAX_TITLE),
-            reason: text(&format!("Ready to merge{}.", if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
+            reason: text(&format!("{}Ready to merge{}.", if p.ready_sha == p.head_sha && !p.head_sha.is_empty() { "Loft marked it ready: its verdicts are in. " } else { "" }, if n("total") > 0 { format!(", {} checks passed", n("passed")) } else { String::new() }), MAX_REASON),
             text: text(&format!("{} → {} · +{} −{} in {} files", p.head_ref, p.base_ref, p.additions, p.deletions, p.changed_files), MAX_TEXT),
             agent: who,
             task_id: None,
@@ -532,6 +649,129 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             push: (if g.review_requested { "Review requested" } else { "Ready to merge" }.to_string(), format!("{}#{}: {}", g.repo, g.number, g.title)),
             project: Some(repo_name.clone()),
             pr: Some(pr_fields(&g.repo, &repo_name, g.number, &g.title, &g.url, &g.author, checks, g.review_requested)),
+            id,
+        });
+    }
+
+    // A new device asking to pair: paired devices compare its code and allow or deny it. With none paired yet,
+    // the Mac's dialog (or its terminal) answers instead.
+    if crate::pairing::count(state) > 0 {
+        for (code, name, since) in state.pairing.waiting_list() {
+            let body = json!({ "code": code });
+            items.push(Item {
+                id: format!("pairing:{code}"),
+                kind: "pairing",
+                urgency: 3,
+                agent: None,
+                task_id: None,
+                title: text("A new device wants to pair", MAX_TITLE),
+                reason: text(&format!("{name} shows the code {code}. Allow it only if the code on that device matches."), MAX_REASON),
+                text: text(&format!("{name} · code {code}"), MAX_TEXT),
+                created_at: since,
+                links: vec![],
+                actions: vec![
+                    action("approve", "Allow", "POST", "/api/pair/approve".into(), body.clone()),
+                    action("deny", "Deny", "POST", "/api/pair/deny".into(), body),
+                ],
+                push: ("A new device wants to pair".to_string(), format!("Code {code}")),
+                project: None,
+                pr: None,
+            });
+        }
+    }
+
+    // macOS asking on a Mac nobody's looking at: an agent's file read waits until someone answers.
+    let asking = state.rt.lock().unwrap().tcc.asking(std::time::Instant::now());
+    let host = crate::tailnet::host();
+    let mac = host.as_deref().and_then(|h| h.split('.').next()).unwrap_or("this Mac").to_string();
+    for a in asking {
+        let id = format!("mac_access:{}:{}", a.service, a.since);
+        let mut actions = vec![];
+        if let Some(h) = &host {
+            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("http://{h}:{}/settings#mac-access", state.cfg.port) } }));
+            actions.push(json!({ "kind": "open", "label": "Screen Sharing", "target": { "url": format!("vnc://{h}") } }));
+        }
+        actions.push(action("check", "Check again", "POST", "/api/system/mac-access".into(), json!({})));
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "mac_access",
+            urgency: 3,
+            agent: None,
+            task_id: None,
+            title: text(&format!("macOS is asking for access to {} on {mac}", a.folder), MAX_TITLE),
+            reason: text("A prompt is up on the Mac's screen; an agent's work waits until someone answers it.", MAX_REASON),
+            text: text("Answer it over Screen Sharing, or give Loft Full Disk Access (Settings → Mac access) so macOS stops asking.", MAX_TEXT),
+            created_at: a.since,
+            links: vec![],
+            actions,
+            push: ("macOS is asking for access".to_string(), format!("{} on {mac}", a.folder)),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
+    // Backups failing, with no good one for two days. One item until a good backup.
+    let backup = state.rt.lock().unwrap().backup.clone();
+    if let Some(err) = &backup.error
+        && backup.last.as_ref().is_none_or(|l| chrono::Local::now() - l.at >= chrono::Duration::hours(crate::backup::ALERT_AFTER_HOURS))
+    {
+        let id = format!("backup:{}", backup.last.as_ref().map(|l| l.at.to_rfc3339()).unwrap_or_default());
+        let since = match &backup.last {
+            Some(l) => format!("The last good one is from {}.", l.at.format("%b %-d, %H:%M")),
+            None => "There is no good backup yet.".into(),
+        };
+        let mut actions = vec![action("retry", "Back up now", "POST", "/api/backups".into(), json!({}))];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#backups", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "backup_failed",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Loft's backups are failing", MAX_TITLE),
+            reason: text(&format!("{since} {}", first_line(&err.message)), MAX_REASON),
+            text: text(&format!("{}
+
+Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
+            created_at: err.at.with_timezone(&Utc).to_rfc3339(),
+            links: vec![],
+            actions,
+            push: ("Loft's backups are failing".to_string(), since),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
+    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low.
+    if let Some(free) = crate::sweep::free_bytes(&state.cfg.storage_dir)
+        && free < crate::sweep::LOW_DISK
+    {
+        let id = "disk_low".to_string();
+        let gb = free as f64 / 1e9;
+        // Nothing is removed blind: Settings previews what a clean removes.
+        let mut actions = vec![];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#workspaces", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        items.push(Item {
+            kind: "disk_low",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Disk almost full", MAX_TITLE),
+            reason: text(&format!("{gb:.1} GB are free where agents' workspaces live."), MAX_REASON),
+            text: text("Settings → Disk shows each workspace's size and cleans build output after a preview. Deleting an agent deletes its workspace by default.", MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions,
+            push: ("Disk almost full".to_string(), format!("{gb:.1} GB free")),
+            project: None,
+            pr: None,
             id,
         });
     }
@@ -591,7 +831,8 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        kind: i.kind,
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
+        kind: if i.kind == "mac_access" { "stuck" } else if i.kind == "pairing" { "permission" } else { i.kind },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),
@@ -633,9 +874,9 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<J
 }
 
 /// `POST /api/needs-you/{id}/dismiss`: hide an item until it changes (a changed item gets a new id).
-/// Permission prompts and open grill rounds can't be dismissed: they block an agent until answered.
+/// Permission prompts, open grill rounds and pairing requests can't be dismissed: they block an agent until answered.
 pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    if id.starts_with("permission:") || id.starts_with("grill:") {
+    if id.starts_with("permission:") || id.starts_with("grill:") || id.starts_with("pairing:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
     let known = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?.iter().any(|i| i.id == id);

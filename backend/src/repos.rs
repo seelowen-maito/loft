@@ -20,11 +20,14 @@ const GIT_TTL: Duration = Duration::from_secs(120);
 const GITHUB_TTL: Duration = Duration::from_secs(15 * 60);
 /// Stars, forks, watchers and the description change rarely: read every few hours.
 const META_TTL: Duration = Duration::from_secs(6 * 3600);
+/// `project_problems` runs on every agent event: each project's folder is looked at once in this long.
+const PROBLEM_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct RepoCache {
     git: Mutex<Option<(Instant, Vec<RepoSummary>)>>,
     github: Mutex<HashMap<String, Cached>>,
+    problems: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
 /// A repo's GitHub numbers as last read, with what's needed to ask again cheaply.
@@ -192,6 +195,46 @@ pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf
     let dir = root.join(&name).canonicalize().ok()?;
     let workspaces = state.cfg.storage_dir.canonicalize().unwrap_or_else(|_| state.cfg.storage_dir.clone());
     (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
+}
+
+/// Why `project` can't be a project, if it can't: it must be one folder that is, or will become, one repo,
+/// so a missing folder and a folder holding several repos are out. None when it is fine.
+pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
+    let Some(dir) = project_dir(state, project).filter(|d| d.is_dir()) else {
+        return Some(format!("There's no folder {} in the projects folder", project.trim()));
+    };
+    let holds_repos = !dir.join(".git").exists()
+        && std::fs::read_dir(&dir).is_ok_and(|rd| rd.flatten().any(|e| e.path().is_dir() && e.path().join(".git").exists()));
+    holds_repos.then(|| format!("{} holds several repos: pick one of them", project.trim()))
+}
+
+/// An agent's projects that `project_problem` refuses, each with why, for clients to flag. Each answer
+/// is kept `PROBLEM_TTL`; saving a project (`new_agent`, a patch) checks the disk itself and drops it.
+pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::Value {
+    let cache = &state.repos.problems;
+    let problems: Vec<serde_json::Value> = a
+        .projects
+        .iter()
+        .filter_map(|p| {
+            let kept = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p).filter(|(at, _)| at.elapsed() < PROBLEM_TTL).map(|(_, why)| why.clone());
+            let why = kept.unwrap_or_else(|| {
+                // Read outside the lock, so a slow disk doesn't hold up other agents' events.
+                let why = project_problem(state, p);
+                cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.clone(), (Instant::now(), why.clone()));
+                why
+            });
+            why.map(|why| serde_json::json!({ "project": p, "problem": why }))
+        })
+        .collect();
+    serde_json::json!(problems)
+}
+
+/// Drops the kept `project_problems` answers for these projects, so the next one reads the disk.
+pub fn forget_project_problems(state: &AppState, projects: &[String]) {
+    let mut cache = state.repos.problems.lock().unwrap_or_else(|e| e.into_inner());
+    for p in projects {
+        cache.remove(p);
+    }
 }
 
 /// A repo whose history lives in its own `.git` folder: not a `.git` symlink or a `gitdir:` file, which
@@ -392,7 +435,7 @@ async fn fill(dir: &Path, s: &mut RepoSummary) -> Result<()> {
             }
         }
         let mut v: Vec<(String, i64)> = langs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
         v.truncate(6);
         s.languages = v;
     }
@@ -438,13 +481,11 @@ fn discover(root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 pub async fn list(state: &AppState, force: bool) -> Vec<RepoSummary> {
-    if !force {
-        if let Some((at, v)) = &*state.repos.git.lock().unwrap() {
-            if at.elapsed() < GIT_TTL {
+    if !force
+        && let Some((at, v)) = &*state.repos.git.lock().unwrap()
+            && at.elapsed() < GIT_TTL {
                 return v.clone();
             }
-        }
-    }
     let dirs = discover(&state.settings.boot().projects_dir);
     let handles: Vec<_> = dirs.into_iter().map(|(n, d)| tokio::spawn(summarize(n, d))).collect();
     let mut out = vec![];
@@ -591,7 +632,7 @@ mod tests {
 
     #[test]
     fn discovers_nested_repos() {
-        let root = std::env::temp_dir().join(format!("loft-discover-{}", std::process::id()));
+        let root = crate::testdir::for_this_test("discover");
         for d in ["top/.git", "top/inner/.git", "work/meuez/.git", "work/notes", ".hidden/x/.git", "a/b/c/d/deep/.git"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
@@ -612,7 +653,7 @@ mod tests {
 
     #[test]
     fn reads_sites() {
-        let dir = std::env::temp_dir().join(format!("loft-sites-{}", std::process::id()));
+        let dir = crate::testdir::for_this_test("sites");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read_sites(&dir).is_empty(), "no file, no sites");
         std::fs::write(
@@ -707,7 +748,7 @@ mod tests {
         assert!(crate::tasks::update(axum::extract::State(st.clone()), axum::extract::Path(t.id.clone()), axum::Json(json!({ "project": outside.to_str().unwrap() }))).await.is_err());
         let a = crate::tasks::tests::agent(&st, "Dev");
         let mut patched = a.clone();
-        assert!(crate::api::tests::apply_project(&mut patched, "../outside").is_err());
+        assert!(crate::api::tests::apply_project(&st, &mut patched, "../outside").is_err());
 
         // A project stored before this check (or through the symlink) still can't publish there.
         let mut old = st.db.get_task(&t.id).unwrap().unwrap();
@@ -723,7 +764,7 @@ mod tests {
         let st = crate::mirror::tests::state();
         let projects = st.settings.boot().projects_dir.clone();
         // Agents' workspaces inside the projects folder, as with ~/dev/loft/agent-local-storage.
-        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage") };
+        let cfg = crate::state::Config { port: 0, storage_dir: projects.join("loft").join("agent-local-storage"), xcrun: "no-xcrun".into(), xcode: st.cfg.xcode.clone() };
         let st = crate::state::AppState { cfg: std::sync::Arc::new(cfg), ..st };
         let fake = crate::github::tests::own_fake(&st);
         let git_in = |d: &std::path::Path, args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap().status.success());
@@ -766,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn many_repos_scanned_at_once_never_fail_to_spawn_git() {
         // Run under `ulimit -n 256` (launchd's default) to see the old failure.
-        let root = std::env::temp_dir().join(format!("loft-spawn-{}", uuid::Uuid::new_v4()));
+        let root = crate::testdir::for_this_test("spawn");
         for n in 0..40 {
             let d = root.join(format!("r{n}"));
             std::fs::create_dir_all(&d).unwrap();

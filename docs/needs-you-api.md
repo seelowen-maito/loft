@@ -34,7 +34,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 | `age_seconds` | int | At `generated_at` |
 | `links` | `[{label, url?, path?}]` | Kept apart from the text. `url`: external (GitHub); `path`: a Loft web path (`/tasks/<id>`) |
 | `actions` | `[Action]` | What the user can do, in display order |
-| `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the task's or agent's project |
+| `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the issue's or agent's project |
 | `repo` | string \| null | PR items: the GitHub slug (`acme/shop`), the same as `pr.repo` |
 | `pr` | object \| null | PR items only: `{repo: "owner/name", project, number, title, url, author, draft: false, checks: "passing"\|"none", checks_green: true, review_requested}` |
 
@@ -46,15 +46,19 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `type` | urgency | When | Actions |
 |---|---|---|---|
 | `permission` | 3 | A permission prompt is pending | approve, approve_always, deny, open |
-| `task_approval` | 3 | Task in `waiting_approval` | answer, open, dismiss |
-| `task_blocked` | 2 | Task `blocked` (reason = its error) | answer, open, dismiss |
+| `pairing` | 3 | A new browser or phone asks to pair (ADR 0004) and a client is already paired: the item shows its code. Pushed as a `permission`. Gone when answered, cancelled or after 2 minutes | approve, deny (`POST /api/pair/approve\|deny` with the code) |
+| `task_approval` | 3 | Issue in `waiting_approval` | answer, open, dismiss |
+| `task_blocked` | 2 | Issue `blocked` (reason = its error) | resume (when a Delivery ticket or final review blocked it after too many changes rounds), answer, open, dismiss |
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
-| `task_failed` | 1 | Task `failed` | answer, retry (reopen and send), open, dismiss |
+| `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall | resume, open (the spec's or standalone ticket's issue), dismiss |
+| `delivery_done` | 1 | Loft marked a Delivery's spec PR (or standalone ticket's PR) ready, or set a plan kept in Loft to ready to Merge, whatever GitHub says of its checks or conflicts. Until the PR merges or closes, or the plan is merged. One item per Delivery | open (the spec's or standalone ticket's issue), Open PR (GitHub) or merge (a plan kept in Loft), dismiss |
+| `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
-| `task_done` | 0 | A task **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
+| `backup_failed` | 1 | The last backup of Loft's database failed and the last good one is more than 2 days old (or there is none). One item until a good backup; not pushed | retry (Back up now: `POST /api/backups`), open (Settings → Backups, when the Mac has a tailnet name), dismiss |
+| `task_done` | 0 | An issue **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
 
 ### Action
 
@@ -66,13 +70,18 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 { "kind": "answer", "label": "Reply", "method": "POST", "path": "/api/agents/<id>/messages", "body": { "text": "" } }
 { "kind": "answer", "label": "Answer", "method": "POST", "path": "/api/agents/<id>/messages",
   "body": { "text": "", "meta": { "grill": { "role": "answer", "session_id": "…", "question_id": "…" } } } }
-{ "kind": "answer", "label": "Reply on the task", "method": "POST", "path": "/api/tasks/<id>/comments", "body": { "text": "", "send": true } }
+{ "kind": "answer", "label": "Reply on the issue", "method": "POST", "path": "/api/tasks/<id>/comments", "body": { "text": "", "send": true } }
+// The reply goes to the issue's agent and hands the turn back: blocked or waiting_approval moves to in_progress,
+// failed runs again with the reply. The item clears at once. When the item has no `agent`, ask which agent to
+// send it to and add `"agent_id"` (the agent takes the issue); without one the reply is kept as a private note and
+// the response's `delivered_to` is null, so say so (and dismiss the item if the user wants it gone).
 
 // Navigation, no request: `target` is { screen: "chat", agent_id } | { screen: "task", task_id } | { url }.
 { "kind": "open", "label": "Open chat", "target": { "screen": "chat", "agent_id": "…" } }
 ```
 
-`kind` values: `approve`, `approve_always`, `deny`, `answer`, `retry`, `skip`, `merge`, `restart`, `open`, `dismiss`.
+`kind` values: `approve`, `approve_always`, `deny`, `answer`, `retry`, `skip`, `merge`, `restart`, `resume`, `open`, `dismiss`.
+`resume` (on `delivery_stalled`, and on a `task_blocked` issue a Delivery ticket or final review blocked after too many changes rounds) is `POST /api/deliveries/resume` with `{ "repo", "spec" }`: Loft reconciles what was done while the Delivery stalled, then wakes only the agent its step waits on. On a ticket or final review waiting for the user, its rounds start over, `needs-human` comes off, the issue is unblocked and the Dev is woken with the last changes notes. A Delivery that isn't stalled or waiting for the user any more gets a 400 saying why.
 Use the `path` and `body` as given. Add `client_id` to message and comment bodies as the apps do today.
 
 ### Pull requests from GitHub
@@ -87,7 +96,7 @@ Teammates' PRs only appear when they request the user's review. A PR already tra
 ## `POST /api/needs-you/{id}/dismiss`
 
 Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
-`permission` and `grill_round` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
+`permission`, `grill_round` and `pairing` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
 
 ## Live updates
 

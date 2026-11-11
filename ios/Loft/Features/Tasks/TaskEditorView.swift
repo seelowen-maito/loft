@@ -84,7 +84,7 @@ struct TaskEditorView: View {
                 }
             } footer: {
                 if assignmentLocked {
-                    Text("An agent is working on this task. Cancel it to reassign. Editing the description doesn't change what the agent was already told.")
+                    Text("An agent is working on this issue. Cancel it to reassign. Editing the description doesn't change what the agent was already told.")
                 } else if editing == nil {
                     Text(agentId == nil
                          ? "Saved to your inbox. Nothing runs until you choose to run it."
@@ -92,7 +92,7 @@ struct TaskEditorView: View {
                 }
             }
         }
-        .navigationTitle(editing != nil ? "Edit task" : parentId != nil ? "New subtask" : "New task")
+        .navigationTitle(editing != nil ? "Edit issue" : parentId != nil ? "New sub-issue" : "New issue")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -105,7 +105,7 @@ struct TaskEditorView: View {
                 ToolbarItemGroup(placement: .bottomBar) {
                     if let agent = store.agent(agentId) {
                         Button { save(run: true) } label: { Label("Save & run with \(agent.name)", systemImage: "play.fill").labelStyle(.titleAndIcon) }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.accent)
                             .disabled(!valid || saving || !store.canWrite)
                     } else if let o = store.orchestrator {
                         Button { save(run: true, delegate: true) } label: { Label("Save & ask \(o.name) to plan", systemImage: "sparkles").labelStyle(.titleAndIcon) }

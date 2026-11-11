@@ -30,8 +30,9 @@ enum APIError: Error, Equatable, LocalizedError {
         case .insecureConnection: "Secure connection failed"
         case .server(let status, let message):
             switch status {
+            case 401: "This iPhone isn't paired with Loft"
             case 404: message == "not found" ? "Not found" : message
-            case 409: message
+            case 409, 429: message
             case 400, 422: message
             default: "Loft returned an error (\(status))"
             }
@@ -50,6 +51,7 @@ enum APIError: Error, Equatable, LocalizedError {
         case .unreachable: "Check that Tailscale is connected on this iPhone and that the Mac is awake and running Loft."
         case .timeout: "The Mac may be busy or asleep. Try again in a moment."
         case .insecureConnection: "Make sure the address starts with https:// and that `tailscale serve` is running on the Mac."
+        case .server(401, _): "Pair it in Settings, then try again."
         case .server(let status, _): status >= 500 ? "Check the Loft logs on the Mac." : "Nothing was changed."
         case .decoding: "The app and the server may be on different versions. Update Loft on the Mac."
         case .unsupported: "Pull the latest Loft on the Mac and restart it."

@@ -96,6 +96,9 @@ pub struct IssueLink {
     /// The Loft issue, for a plan saved in Loft instead of on GitHub.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
+    /// The GitHub repo of a ticket filed in another repo than its spec's; empty in the plan's own repo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,7 +184,7 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
         }
     }
     for t in tickets {
-        if !p.tickets.iter().any(|o| o.number == t.number) {
+        if !p.tickets.iter().any(|o| o.number == t.number && o.repo == t.repo) {
             p.tickets.push(t);
         }
     }
@@ -190,11 +193,24 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 
 /// The end-of-planning card for a grill that published something: links to the spec and tickets, the
 /// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// For an agent with several projects: the first round asks which one the grill is about (unless the user said),
+/// and the spec and tickets go there.
+fn which_project(a: &Agent) -> String {
+    if a.projects.len() < 2 {
+        return String::new();
+    }
+    let list = a.projects.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    format!(" You work in several projects ({list}): unless the user already said which one this is about, the first round asks it, with the most likely one as the recommendation. Read that project's documents, and pass it as `project` to publish_spec and publish_tickets; a ticket for another of your projects names it as its own `project`.")
+}
+
 /// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let p = s.published.as_ref().filter(|p| p.spec.is_some() || !p.tickets.is_empty())?;
     // A plan with no repo was saved as Loft issues: links open them in Loft, and `repo` is empty.
-    let url = |i: &IssueLink| if p.repo.is_empty() { format!("/tasks/{}", i.id) } else { format!("https://github.com/{}/issues/{}", p.repo, i.number) };
+    let url = |i: &IssueLink| match (p.repo.as_str(), i.repo.as_str()) {
+        ("", _) => format!("/issues/{}", i.id),
+        (repo, "") | (_, repo) => format!("https://github.com/{repo}/issues/{}", i.number),
+    };
     let link = |i: &IssueLink| json!({ "number": i.number, "title": i.title, "url": url(i) });
     // A spec's Delivery, or a single standalone ticket's.
     let has = |n: i64| matches!(state.db.get_delivery(&p.repo, n), Ok(Some(_)));
@@ -213,7 +229,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         (None, [t]) => say(s, &format!("Implement ticket #{}", t.number), &format!("Implemente o ticket #{}", t.number)),
         (None, _) => say(s, "Implement the ready tickets: hand them to the team", "Implemente os tickets prontos: entregue-os ao time"),
     };
-    let missing = crate::planning::missing_roles(state, &me.project);
+    let missing = crate::planning::missing_roles(state, me.team());
     let setup = (!missing.is_empty()).then(|| {
         let labels: Vec<&str> = missing.iter().map(|r| crate::planning::role_label(r)).collect();
         let roles = match labels.split_last() {
@@ -229,7 +245,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         };
         json!({
             "agent_id": crate::setup::LOFT_ID,
-            "message": format!("Set up the team for the {} project: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.project.trim(), me.name),
+            "message": format!("Set up the team for the {} group: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.team(), me.name),
         })
     });
     Some(json!({
@@ -538,8 +554,9 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         } else {
             ""
         };
+        let which = which_project(agent);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1175,6 +1192,9 @@ At the end of a grill, turn what was decided into a spec, published as a GitHub 
   ## Out of Scope
   - <What this spec doesn't cover.>
 
+  ## Repos
+  - <Each project this touches, and what changes there.>
+
   ## Further Notes
   - <Anything else: the glossary terms and ADRs it relies on.>
   ```
@@ -1187,13 +1207,16 @@ Once the spec is published, split it into tickets the team can pick up.
 - Vertical slices: each ticket is a thin tracer bullet through every layer it touches (data, API, UI, tests), verifiable on its own. Never one ticket per layer; prefer several thin slices to one thick one.
 - Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
 - Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
-- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
+- Repos: each ticket goes to one repo, one of your projects; propose it from what the slice touches. A slice that spans repos (an API plus a UI) becomes one ticket per repo, the UI one blocked by the API one, or names the primary repo it's mostly in.
+- Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, its repo, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
 - Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
 
   ```md
   ## Parent
 
   #<spec number>
+
+  Repo: <project>
 
   ## What to build
 
@@ -1204,7 +1227,7 @@ Once the spec is published, split it into tickets the team can pick up.
   - [ ] <A behaviour someone can check.>
   ```
 
-- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
+- Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it and, when it isn't the spec's repo, its `project`. A ticket in another repo is created there, still a sub-issue of the spec and linked to its blockers across repos. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
 /// The grill instructions in full.
 pub fn brief() -> String {
@@ -1225,6 +1248,17 @@ pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_lead_with_several_projects_is_told_to_ask_which_one_first() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Lead");
+        a.projects = vec!["web".into()];
+        assert_eq!(which_project(&a), "", "one project: nothing to ask");
+        a.projects = vec!["web".into(), "api".into()];
+        let w = which_project(&a);
+        assert!(w.contains("(`web`, `api`)") && w.contains("the first round asks it") && w.contains("pass it as `project` to publish_spec and publish_tickets"), "{w}");
+    }
     use crate::tasks::tests::{agent, state};
 
     fn q(text: &str) -> Value {
@@ -1480,9 +1514,9 @@ pub(crate) mod tests {
         let ids = qids(&st, &o);
         let (shot, logo, mock) = (upload(&st, &o), upload(&st, &o), upload(&st, &o));
         // Text with an image, an image alone, and an image alone as a comment to discuss.
-        answer_with(&st, &o, &ids[0], "Like this one", &[shot.clone()], false).await.unwrap();
-        answer_with(&st, &o, &ids[1], "", &[logo.clone()], false).await.unwrap();
-        answer_with(&st, &o, &ids[2], "  ", &[mock.clone()], true).await.unwrap();
+        answer_with(&st, &o, &ids[0], "Like this one", std::slice::from_ref(&shot), false).await.unwrap();
+        answer_with(&st, &o, &ids[1], "", std::slice::from_ref(&logo), false).await.unwrap();
+        answer_with(&st, &o, &ids[2], "  ", std::slice::from_ref(&mock), true).await.unwrap();
         let qs = active(&st, &o.id).unwrap().rounds[0].questions.clone();
         assert_eq!((qs[0].state.as_str(), qs[0].answer.as_deref(), qs[0].images.clone()), ("answered", Some("Like this one"), vec![shot.clone()]));
         assert_eq!((qs[1].state.as_str(), qs[1].answer.as_deref(), qs[1].images.clone()), ("answered", Some(""), vec![logo.clone()]));
@@ -1495,7 +1529,7 @@ pub(crate) mod tests {
         for f in [&shot, &logo, &mock] {
             assert!(wake.contains(&format!("[loft-image:{f}]")), "{wake}");
         }
-        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).unwrap().contains("\"type\":\"image\""));
+        assert!(crate::uploads::stdin_line(&st, &o.id, &wake).await.unwrap().contains("\"type\":\"image\""));
         // The chat's copy of the answers says how many images each had.
         let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == json!("answers")).unwrap();
         assert!(posted.content.contains("1. Like this one [1 image]\n2. [1 image]\n3. Let's discuss: [1 image]"), "{}", posted.content);
@@ -1562,7 +1596,7 @@ pub(crate) mod tests {
         let got: Vec<(&str, &str, &str, Option<u32>)> = qs.iter().map(|q| (q.text.as_str(), q.recommendation.as_str(), q.state.as_str(), q.from_round)).collect();
         assert_eq!(got, [("B?", "rec for B?", "open", Some(1)), ("C?", "rec for C?", "open", Some(1)), ("D?", "rec for D?", "open", None)]);
         assert!(qs.iter().all(|q| !ids.contains(&q.id)), "carried questions get new ids in the new round");
-        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.meta["grill"]["role"] == "round").last().unwrap();
+        let posted = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.meta["grill"]["role"] == "round").unwrap();
         assert_eq!(posted.meta["grill"]["questions"][0]["from_round"], json!(1));
         assert!(posted.content.contains("1. B?") && posted.content.contains("3. D?"), "{}", posted.content);
 
@@ -1590,7 +1624,7 @@ pub(crate) mod tests {
         assert!(apply_command(&st, &mut s, "decide", Some(&ids[1]), None).unwrap().is_none(), "deciding doesn't run the agent");
         let q = &active(&st, &o.id).unwrap().rounds[0].questions[1];
         assert_eq!((q.state.as_str(), q.answer.as_deref()), ("decided", Some("rec for Oferecer teste grátis?")));
-        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().filter(|m| m.kind == "notice").last().unwrap();
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.kind == "notice").unwrap();
         assert_eq!(row.content, "Pergunta 2 decidida pelo agente: rec for Oferecer teste grátis?");
         assert_eq!((row.meta["grill"]["state"].clone(), row.meta["grill"]["question_id"].clone()), (json!("decided"), json!(ids[1])));
         // Deciding it again (the voice went back to it) succeeds and leaves it as it was.
@@ -1866,7 +1900,7 @@ pub(crate) mod tests {
         assert!(wake.contains("about 92k tokens") && wake.contains("suggesting they type `/compact`"), "{wake}");
 
         // Once the tickets are published, the spec is written: no point compacting for it.
-        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into(), id: String::new() }), vec![IssueLink { number: 5, title: "Plans".into(), id: String::new() }]);
+        record_published(&st, &o.id, "octo/x", Some(IssueLink { number: 4, title: "Pricing".into(), id: String::new(), repo: String::new() }), vec![IssueLink { number: 5, title: "Plans".into(), id: String::new(), repo: String::new() }]);
         round(&st, &o, &["Annual too?"]).unwrap();
         assert!(!send(&st, &o).unwrap().contains("/compact"));
     }

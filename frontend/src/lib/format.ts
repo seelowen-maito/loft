@@ -1,4 +1,4 @@
-import type { Agent, QuietWindow } from "./api";
+import type { Agent, CleanItem, CleanLog, GitCheck, QuietWindow } from "./api";
 
 
 export function timeAgo(input: string | number | null | undefined): string {
@@ -22,6 +22,14 @@ export function fmtNum(n: number): string {
   if (n >= 10000) return `${(n / 1000).toFixed(0)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
+}
+
+/** Disk size in decimal units, like Finder: 980 KB, 4.2 MB, 12 GB. */
+export function fmtBytes(n: number): string {
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return i === 0 ? `${n} bytes` : `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
 export function fmtInterval(min: number): string {
@@ -55,18 +63,6 @@ export function fmtSchedule(a: Pick<Agent, "interval_minutes" | "quiet_hours">):
   return a.interval_minutes && a.quiet_hours?.length ? `${fmtInterval(a.interval_minutes)} · custom` : fmtInterval(a.interval_minutes);
 }
 
-/** Agents grouped by project, named groups A–Z, then those without one. */
-export function groupByProject<T extends Pick<Agent, "project">>(agents: T[]): { project: string; agents: T[] }[] {
-  const m = new Map<string, T[]>();
-  agents.forEach((a) => {
-    const p = a.project?.trim() ?? "";
-    m.set(p, [...(m.get(p) ?? []), a]);
-  });
-  return [...m.entries()]
-    .sort(([a], [b]) => (!a ? 1 : !b ? -1 : a.localeCompare(b, undefined, { sensitivity: "base" })))
-    .map(([project, agents]) => ({ project, agents }));
-}
-
 const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
 /** Whether `minute` (since midnight) on `day` falls in a window. Mirrors backend/src/schedule.rs. */
@@ -81,4 +77,73 @@ export function isQuiet(windows: QuietWindow[], day: number, minute: number): bo
 
 export function cx(...c: (string | false | null | undefined)[]) {
   return c.filter(Boolean).join(" ");
+}
+
+/** Clean: a main clone itself (labelled, opens, at the top) can't be ticked, nor can a blocked item; folders inside one can. */
+export function canTick(i: CleanItem, depth: number): boolean {
+  return !i.blocked && !(i.opens && depth === 0 && !!i.label);
+}
+
+/** Clean: the `rm -rf` shown under an item; none when it can't be removed. */
+export function shownCommand(i: CleanItem, depth: number): string {
+  return canTick(i, depth) ? i.command : "";
+}
+
+/** `s` without control characters, so a name stays on its one line (Clean's `# <agent>` in Copy commands). */
+export function oneLine(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+/** Clean: whether a row gets a Check button (a clone or worktree at the top of a workspace). */
+export function canCheck(i: CleanItem, depth: number): boolean {
+  return depth === 0 && (i.kind === "clone" || i.kind === "worktree");
+}
+
+/** Clean: what a Check found, after its sign: "✅ Clean, all pushed: safe to delete" or "⚠️ 2 commits not pushed (main) · …". */
+export function gitCheckText(c: GitCheck): string {
+  return `${c.state === "safe" ? "✅" : c.state === "unsafe" ? "⚠️" : "❔"} ${c.lines.join(" · ")}`;
+}
+
+/** Clean: a log line, past tense like its header: "Removed /path (2.2 GB)" or "failed /path: why". */
+export function cleanLineText(l: CleanLog["lines"][number]): string {
+  if (l.done) return l.error ? `failed: ${l.done} ${l.rel}: ${l.error}` : `${l.done} ${l.rel}${l.bytes ? ` (${fmtBytes(l.bytes)})` : ""}`;
+  return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;
+}
+
+/** Clean's table: what the Status column says about an item ("Working", "Kept: main clone of loft", "Deletable"),
+ * and whether it is locked (can't be ticked). */
+export function cleanStatus(i: CleanItem, depth: number): { text: string; locked: boolean } {
+  if (i.blocked) return { text: i.blocked === "Working" ? "Working" : `Locked: ${i.blocked}`, locked: true };
+  if (!canTick(i, depth)) return { text: `Kept: ${i.label}`, locked: true };
+  return { text: "Deletable", locked: false };
+}
+
+/** Clean's Type column: a clone says "git clone", build output says "build output". */
+export function cleanType(i: CleanItem): string {
+  return i.kind === "clone" ? "git clone" : i.kind === "build" ? "build output" : i.kind;
+}
+
+export type CleanSort = { by: "size" | "agent" | "changed"; desc: boolean };
+
+/** Clean's table order: by size, agent name or last change; ties go biggest first, then by name. */
+export function sortClean(items: CleanItem[], sort: CleanSort, agentName: (id: string) => string): CleanItem[] {
+  const key = (i: CleanItem) => (sort.by === "size" ? i.bytes : sort.by === "changed" ? new Date(i.changed).getTime() || 0 : agentName(i.agent).toLowerCase());
+  const dir = sort.desc ? -1 : 1;
+  return [...items].sort((a, b) => {
+    const ka = key(a);
+    const kb = key(b);
+    return (ka < kb ? -dir : ka > kb ? dir : 0) || b.bytes - a.bytes || a.name.localeCompare(b.name);
+  });
+}
+
+/** A locked reason is the git check's lines joined with " · ": the first one, and how many more there are. */
+export function reasonLines(blocked: string): string[] {
+  return blocked.split(" · ").filter(Boolean);
+}
+
+export type CleanFilter = { agent: string; type: string; deletable: boolean };
+
+/** The Clean table's filters: one agent, one type ("" is all), and only what can be ticked. */
+export function filterClean(items: CleanItem[], f: CleanFilter): CleanItem[] {
+  return items.filter((i) => (!f.agent || i.agent === f.agent) && (!f.type || cleanType(i) === f.type) && (!f.deletable || !cleanStatus(i, 0).locked));
 }

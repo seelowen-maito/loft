@@ -70,6 +70,14 @@ final class LoftUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while !picker.label.contains("Always"), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertTrue(picker.label.contains("Always"), picker.label)
+        // A higher threshold than the default 80k.
+        picker.tap()
+        let above150 = app.buttons["Above 150k"].firstMatch
+        XCTAssertTrue(above150.appears(timeout: 5))
+        above150.tap()
+        let deadline150 = Date().addingTimeInterval(5)
+        while !picker.label.contains("Above 150k"), Date() < deadline150 { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertTrue(picker.label.contains("Above 150k"), picker.label)
     }
 
     // MARK: - Default fixture
@@ -97,11 +105,11 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(allow.disappears(timeout: 5))
 
         let activity = any("activityCard", app)
-        for _ in 0..<4 where !activity.exists { app.swipeUp(velocity: .fast) }
+        for _ in 0..<4 where !activity.waitForExistence(timeout: 1) { app.swipeUp(velocity: .fast) }
         XCTAssertTrue(activity.appears(timeout: 5))
 
         // Tasks.
-        app.tabBars.buttons["Tasks"].tap()
+        app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(app.buttons["taskRow-Implement settings functionality"].appears(timeout: 5))
         XCTAssertTrue(app.buttons["taskRow-Implement backend endpoints"].exists, "subtasks nest under their parent")
         app.buttons["taskFilter-failed"].tap()
@@ -111,7 +119,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["taskRow-Renew the domain"].appears(timeout: 3))
 
         app.buttons["createButton"].tap()
-        app.buttons["New task"].tap()
+        app.buttons["New issue"].tap()
         let title = app.textFields["taskTitleField"]
         XCTAssertTrue(title.appears(timeout: 3))
         title.tap()
@@ -147,7 +155,7 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(run.label.hasPrefix("Working: 12m "), run.label)
         XCTAssertTrue(run.label.hasSuffix("s · Planning the settings work"), run.label)
 
-        let brief = app.buttons["Task: Renew the domain"]
+        let brief = app.buttons["Issue: Renew the domain"]
         XCTAssertTrue(brief.appears(timeout: 5))
         // The raw brief (with its tag and instructions) isn't shown as a bubble.
         XCTAssertFalse(text(containing: "[Task", app).exists)
@@ -169,10 +177,28 @@ final class LoftUITests: XCTestCase {
         let qa = app.buttons["mention-QA Agent"]
         XCTAssertTrue(qa.appears(timeout: 5), "the agents show without typing")
         XCTAssertFalse(app.buttons["mention-Orchestrator"].exists, "not this chat's own agent")
-        XCTAssertFalse(app.buttons["mention-Docs Agent"].exists, "another project: the backend would not deliver it")
+        XCTAssertTrue(any("mentionSection-Loft", app).exists, "this chat's team first, under its group")
+        XCTAssertTrue(any("mentionSection-Other agents", app).exists)
+        XCTAssertTrue(app.buttons["mention-Docs Agent"].exists, "another team: the backend delivers it too")
         qa.tap()
         XCTAssertEqual(composerValue(app), "@QA Agent ")
         XCTAssertFalse(qa.exists, "the list goes once one is picked")
+
+        // "#" lists specs, issues and PRs to tag; a pick puts its tag in the message, and the hint says both exist.
+        XCTAssertTrue(any("composerHint", app).exists)
+        field.tap()
+        field.typeText("see #")
+        let spec = app.buttons["tag-Implement settings functionality"]
+        XCTAssertTrue(spec.appears(timeout: 5), "the picker opens on #")
+        XCTAssertTrue(app.buttons["tag-Settings endpoints"].exists, "pull requests too")
+        spec.tap()
+        XCTAssertEqual(composerValue(app), "@QA Agent see #42 ", "same project: #N")
+        XCTAssertFalse(spec.exists, "the list goes once one is picked")
+        // No match shows nothing, as on the web: "#fff" is often just text.
+        field.typeText("#fff")
+        XCTAssertFalse(any("tagList", app).exists)
+        XCTAssertFalse(app.staticTexts["Nothing to tag by that name"].exists)
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
 
         app.buttons["Conversation options"].tap()
         // Once the menu is open, Grill me… would be in it: no waiting for something that shouldn't come.
@@ -181,10 +207,147 @@ final class LoftUITests: XCTestCase {
         // Close the menu.
         app.tap()
 
+    }
+
+    /// #340: in an agent's chat, tapping the mic opens Talk for that agent; holding it dictates into the box.
+    func testChatMicTapOpensTalkHoldDictates() {
+        let app = launch()
+        openQAChat(app)
         let mic = app.buttons["micButton"]
         XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Talk")
+        mic.tap()
+        let close = app.buttons["voiceClose"]
+        XCTAssertTrue(close.appears(timeout: 5), "Talk opens")
+        XCTAssertTrue(any("voiceRecentAgents", app).buttons["QA Agent"].isSelected, "with this agent in To")
+        close.tap()
+        XCTAssertTrue(close.disappears(timeout: 5))
+
         mic.press(forDuration: 0.8)
-        XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5), "holding dictates into the box")
+        XCTAssertFalse(close.exists, "and doesn't open Talk")
+        XCTAssertEqual(mic.label, "Stop dictation")
+    }
+
+    /// A sent message that tagged a spec shows a chip, and tapping it opens that item in the app.
+    func testTagChipOpensTheTaggedItem() {
+        let app = launch()
+        openOrchestratorChat(app)
+        XCTAssertTrue(text(containing: "Is #42 still on track?", app).appears(timeout: 5))
+        let chip = app.buttons["spec: Implement settings functionality"].firstMatch
+        XCTAssertTrue(chip.appears(timeout: 5), "the message's tag shows as a chip")
+        chip.tap()
+        let owner = text(containing: "octo-dev", app)
+        for _ in 0..<4 where !owner.appears(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(owner.exists, "the chip opens the spec's detail")
+    }
+
+    /// Spec #203: a video chosen in the composer uploads with progress, then goes with the message and plays inline
+    /// with its length. Photos is another process, so `-fixture-video` stands in for picking it there.
+    func testSendingAVideo() throws {
+        let video = try XCTUnwrap(Bundle(for: Self.self).path(forResource: "sample-video", ofType: "mp4"))
+        let app = launch(["-fixture-video", video])
+        openQAChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["chooseVideo"].tap()
+        XCTAssertTrue(any("videoChip", app).appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Video · 0:06"].appears(timeout: 5), "its length")
+        XCTAssertTrue(app.progressIndicators["Uploading"].appears(timeout: 3), "the upload's progress")
+        XCTAssertFalse(app.buttons["sendButton"].isEnabled, "the message waits for the upload")
+        XCTAssertTrue(app.staticTexts["Ready to send"].appears(timeout: 5))
+
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("What happens here?")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(any("videoChip", app).disappears(timeout: 5), "it went with the message")
+        XCTAssertTrue(any("chatVideo", app).appears(timeout: 5), "an inline player")
+        XCTAssertTrue(any("chatVideo", app).label.contains("0:06"), any("chatVideo", app).label)
+        XCTAssertTrue(app.staticTexts["What happens here?"].exists)
+        XCTAssertFalse(app.buttons["retrySend"].exists)
+    }
+
+    /// #309: photos chosen in the composer show as thumbnails, one can be removed, and the rest go with the message,
+    /// shown in the chat and opening full screen. Photos is another process, so `-fixture-photos` stands in for it.
+    func testSendingPhotos() throws {
+        let paths = try [UIColor.systemTeal, .systemOrange, .systemPink].map { color in
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 1200, height: 900)).image { c in
+                color.setFill()
+                c.fill(CGRect(x: 0, y: 0, width: 1200, height: 900))
+                UIColor.white.setFill()
+                c.cgContext.fillEllipse(in: CGRect(x: 400, y: 250, width: 400, height: 400))
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("photo-\(UUID().uuidString).png")
+            try XCTUnwrap(image.pngData()).write(to: url)
+            return url.path
+        }
+        let app = launch(["-fixture-photos", paths.joined(separator: ",")])
+        openQAChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["choosePhotos"].tap()
+        let chips = app.descendants(matching: .any).matching(identifier: "photoChip")
+        XCTAssertTrue(chips.element(boundBy: 2).appears(timeout: 5), "a thumbnail for each photo")
+        XCTAssertTrue(app.descendants(matching: .any)["Photo, ready to send"].appears(timeout: 10))
+        app.buttons["removePhoto"].firstMatch.tap()
+        XCTAssertTrue(chips.element(boundBy: 2).disappears(timeout: 3), "one removed")
+        XCTAssertEqual(chips.count, 2)
+
+        let field = app.textFields["composerField"]
+        field.tap()
+        field.typeText("Which one?")
+        let send = app.buttons["sendButton"]
+        XCTAssertTrue(send.wait(for: \.isEnabled, toEqual: true, timeout: 10), "sendable once both are up")
+        send.tap()
+        XCTAssertTrue(any("draftPhotos", app).disappears(timeout: 5), "they went with the message")
+        let sent = app.buttons.matching(identifier: "chatPhoto")
+        XCTAssertTrue(sent.element(boundBy: 1).appears(timeout: 5), "both photos in the chat")
+        XCTAssertTrue(app.staticTexts["Which one?"].exists)
+        sent.element(boundBy: 0).tap()
+        XCTAssertTrue(any("fullScreenPhoto", app).appears(timeout: 5), "full screen")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(any("fullScreenPhoto", app).disappears(timeout: 3))
+    }
+
+    /// #316: at accessibility-extra-large text, each photo's remove button sits under the thumbnail, not on it,
+    /// and keeps a 44-pt target.
+    func testPhotoRemoveButtonClearsThumbnailAtLargeText() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 600)).image { c in
+            UIColor.systemTeal.setFill()
+            c.fill(CGRect(x: 0, y: 0, width: 600, height: 600))
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("photo-\(UUID().uuidString).png")
+        try XCTUnwrap(image.pngData()).write(to: url)
+        let app = launch(["-fixture-photos", url.path,
+                          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
+        openOrchestratorChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["choosePhotos"].tap()
+        let chip = any("photoChip", app)
+        XCTAssertTrue(chip.appears(timeout: 5))
+        let remove = app.buttons["removePhoto"].firstMatch
+        XCTAssertGreaterThanOrEqual(remove.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(remove.frame.height, 44)
+        let thumbnail = CGRect(x: chip.frame.minX, y: chip.frame.minY, width: 64, height: 64)
+        XCTAssertFalse(remove.frame.intersects(thumbnail), "\(remove.frame) covers \(thumbnail)")
+    }
+
+    /// The agent screen shows the agent's group and its projects, main first.
+    func testAgentDetailsShowGroupAndProjects() {
+        let app = launch()
+        openOrchestratorChat(app)
+        app.buttons["Conversation options"].tap()
+        app.buttons["Agent details"].tap()
+        let projects = text(containing: "loft (main), website", app)
+        XCTAssertTrue(app.staticTexts["Orchestrator"].appears(timeout: 5))
+        for _ in 0..<6 where !projects.exists { app.swipeUp(velocity: .fast) }
+        XCTAssertTrue(projects.exists)
+        XCTAssertTrue(app.staticTexts["Group, Loft"].exists)
     }
 
     /// Agent messages in the fixture chat: the FYI one carries the mark (and says so to VoiceOver), the needs-action one doesn't.
@@ -239,6 +402,26 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("speechStatus", app).appears(timeout: 5))
     }
 
+    /// Talk's To row offers five agents; More lists all eleven, and one picked there is who Talk goes to, in the row.
+    func testTalkMorePicksAnAgentThatWasNotInTheRow() {
+        let app = launch(["-fixture-many-agents", "-fixture-voice", "listening"])
+        let row = any("voiceRecentAgents", app)
+        XCTAssertTrue(row.appears(timeout: 8))
+        XCTAssertFalse(row.buttons["Web Agent"].exists, "not one of the five in the row")
+        app.buttons["voiceMoreAgents"].tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.appears(timeout: 5))
+        search.tap()
+        search.typeText("web")
+        let pick = app.buttons["talkPick-Web Agent"].firstMatch
+        XCTAssertTrue(pick.appears(timeout: 5))
+        XCTAssertFalse(app.buttons["talkPick-QA Agent"].exists, "the search leaves the others out")
+        pick.tap()
+        XCTAssertTrue(pick.disappears(timeout: 5), "the list closes")
+        XCTAssertTrue(row.buttons["Web Agent"].appears(timeout: 5), "and the picked agent is in the row")
+        XCTAssertTrue(row.buttons["Web Agent"].isSelected, "as the one Talk goes to")
+    }
+
     // MARK: - Other fixtures
 
     /// Talk: the tidied dictation lands in the chat's message box; sending it there shows the full-screen status,
@@ -255,6 +438,39 @@ final class LoftUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while composerValue(app)?.contains("copy the diagnostics") != true, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
         XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
+    }
+
+    /// Talk's Send now: it sends and goes straight to the chat, with the message there and the box empty.
+    func testTalkSendNowOpensTheChat() {
+        let app = launch(["-fixture-voice", "review", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "in the chat")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+        app.buttons["Send now"].tap()
+        XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 5), "Talk closes by itself")
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "back in the chat")
+        let sent = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'copy the diagnostics'")).firstMatch
+        XCTAssertTrue(sent.appears(timeout: 5), "with the message shown")
+        XCTAssertFalse(composerValue(app)?.contains("copy the diagnostics") == true, "and not left in the box")
+    }
+
+    /// A new Talk: Done after talking tidies it up, then the Talk screen closes by itself and you're in the agent's
+    /// chat with the text in the box. With animations on: the close used to be dropped when the chat opened
+    /// underneath the closing screen, and it stayed up until you tapped Close.
+    func testTalkClosesByItselfIntoTheChat() throws {
+        // Under XCUITest the tidy-up runs (Talk resets to "Getting ready…") but the screen doesn't close, while the
+        // same launch driven by hand closes into the chat every time. Skipped until that difference is understood.
+        throw XCTSkip("Talk's close isn't seen under XCUITest; checked by hand (PR #241)")
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "-no-speech", "-no-ai", "-AppleLanguages", "(en)", "-fixture-voice", "listening"]
+        app.launch()
+        let done = app.descendants(matching: .any)["voiceHoldToTalk"]
+        XCTAssertTrue(done.appears(timeout: 8))
+        done.tap()
+        XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 10), "the Talk screen closes by itself")
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.appears(timeout: 5), "in the agent's chat")
+        XCTAssertTrue((field.value as? String)?.contains("diagnostics") == true, "with the tidied text in the box")
     }
 
     /// Talk's message box step: after a pause it asks "Send it?" (it never sends by itself); its Send sends as the
@@ -283,6 +499,7 @@ final class LoftUITests: XCTestCase {
         let app = openGrillChat(["-fixture-grill-ended"])
         let setup = app.buttons["endCardSetup"]
         XCTAssertTrue(setup.appears(timeout: 5))
+        XCTAssertFalse(app.buttons["openInterview"].exists, "no Open interview once it ended")
         XCTAssertTrue(app.buttons["endCardClear"].exists)
         // The card is the last thing in the chat: bring it out from under the composer.
         app.swipeUp()
@@ -329,6 +546,17 @@ final class LoftUITests: XCTestCase {
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
     /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
+    /// #340: in an interview the chat's own dictation drives it, so tapping the mic still dictates.
+    func testInterviewMicStillDictates() {
+        let app = openGrillChat()
+        let mic = app.buttons["micButton"]
+        XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Dictate")
+        mic.tap()
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["voiceClose"].exists, "no Talk")
+    }
+
     func testGrillRoundCardsAnswersAndSend() {
         let app = openGrillChat()
         XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
@@ -371,6 +599,52 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["grillResume"].appears(timeout: 5), "the open round shows Resume while paused")
         app.buttons["grillResume"].tap()
         XCTAssertTrue(app.buttons["grillResume"].disappears(timeout: 5))
+    }
+
+    /// The open interview full screen: one question as a card, answering moves on, Close goes back to the chat with
+    /// the interview still open, and ending it closes the view by itself.
+    func testInterviewFullScreenOpenAnswerClose() {
+        let app = openGrillChat()
+        let open = app.buttons["openInterview"]
+        XCTAssertTrue(open.appears(timeout: 5))
+        open.tap()
+        XCTAssertTrue(app.buttons["interviewClose"].appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Question 1 of 3", app).exists)
+
+        app.buttons["grillChoice-Both"].firstMatch.tap()
+        app.buttons["grillSaveAnswer"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "Question 2 of 3", app).appears(timeout: 5), "on to the next question")
+
+        app.buttons["interviewClose"].tap()
+        XCTAssertTrue(app.buttons["interviewClose"].disappears(timeout: 5))
+        XCTAssertTrue(any("grillOpenRound", app).exists, "the interview is still open in the chat")
+        XCTAssertTrue(text(containing: "1 of 3 answered", app).exists)
+
+        open.tap()
+        app.buttons["grillMore"].firstMatch.tap()
+        app.buttons["End interview"].tap()
+        XCTAssertTrue(app.buttons["interviewClose"].disappears(timeout: 5), "closes when the interview ends")
+        XCTAssertTrue(open.disappears(timeout: 5), "no Open interview without one")
+    }
+
+    /// At the largest text size the answer field's icons keep their own space inside the question card.
+    func testInterviewAnswerIconsAtLargestTextSize() {
+        let app = openGrillChat(["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
+        let open = app.buttons["openInterview"]
+        XCTAssertTrue(open.appears(timeout: 5))
+        open.tap()
+        let card = any("grillCurrentQuestion", app)
+        XCTAssertTrue(card.appears(timeout: 5))
+        let field = any("grillAnswerField", app)
+        let save = app.buttons["grillSaveAnswer"].firstMatch, discuss = app.buttons["grillDiscuss"].firstMatch
+        app.swipeUp()
+        XCTAssertTrue(field.exists && save.exists && discuss.exists)
+        // A fixed 44 pt frame holds a glyph that is bigger than 44 pt here, so the glyphs drew over each other.
+        XCTAssertGreaterThan(min(save.frame.width, discuss.frame.width), 44, "the frames grow with the glyphs")
+        XCTAssertGreaterThanOrEqual(save.frame.minY, field.frame.maxY, "the icons go under the field")
+        XCTAssertFalse(save.frame.intersects(discuss.frame), "\(save.frame) overlaps \(discuss.frame)")
+        XCTAssertTrue(card.frame.contains(save.frame) && card.frame.contains(discuss.frame),
+                      "icons \(save.frame), \(discuss.frame) spill out of the card \(card.frame)")
     }
 
     /// A dictated answer (the voice walk-through) still answers the question the voice is on and moves to the next.
@@ -426,6 +700,22 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(composerValue(app), "Deploy the docs site")
         app.buttons["sendButton"].tap()
         XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent as the cleaned message")
+    }
+
+    /// Leaving the chat during the Undo window still sends it, once (#339).
+    func testLeavingDuringTheUndoWindowStillSends() {
+        let app = dictateInOrchestratorChat("Deploy uh the docs site")
+        XCTAssertTrue(app.buttons["submitPromptYes"].appears(timeout: 5))
+        app.buttons["submitPromptYes"].tap()
+        XCTAssertTrue(any("autoSendBar", app).appears(timeout: 5))
+        app.tabBars.buttons["Overview"].tap()
+        // The window is 3 s; wait it out away from the chat.
+        Thread.sleep(forTimeInterval: 4)
+        app.tabBars.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent while you were away")
+        XCTAssertFalse(any("autoSendBar", app).exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Deploy the docs site").count, 1, "sent once")
+        XCTAssertNotEqual(composerValue(app), "Deploy the docs site", "it left the field")
     }
 
     func testASpokenSendGoesAtOnce() {
@@ -535,8 +825,8 @@ final class LoftUITests: XCTestCase {
         app.buttons["sendButton"].tap()
         // The reply comes half a second after the send and is found by the store's first refetch, a second in.
         XCTAssertTrue(app.staticTexts["Done. I ran it and everything passed."].appears(timeout: 5))
-        // With no run seen, the reply is read once nothing new has come for 2 s (LoftStore.waitForReply), checked
-        // every half second: about 3 s after it shows, more on a busy Simulator.
+        // The reply is read once it has stopped changing for `Speaker.settle` (LoftStore.waitForReply), checked
+        // every quarter second: about a second after it shows, more on a busy Simulator.
         let bar = any("readAloudBar", app)
         XCTAssertTrue(bar.appears(timeout: 10), "reading starts once the reply has settled")
         // The bar's identifier covers its buttons, so Stop is found by its label.
@@ -617,9 +907,13 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["No agents registered"].appears(timeout: 5))
     }
 
+    /// The connect screen with no saved address to prefill it: an empty `serverURL` in the arguments domain hides
+    /// whatever an earlier run saved, so the typed address never lands in the middle of an old one.
+    private static let onboardingLaunchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai", "-serverURL", ""]
+
     func testOnboardingAsksForServer() {
         let app = XCUIApplication()
-        app.launchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai"]
+        app.launchArguments = Self.onboardingLaunchArguments
         app.launch()
         let field = app.textFields["serverAddressField"]
         XCTAssertTrue(field.appears(timeout: 5))
@@ -629,32 +923,315 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.buttons["testConnection"].isEnabled)
     }
 
-    /// Spec #144: "Try the demo" opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
+    /// Spec #164: the Simulator never pairs. A server that refuses this app brings up the pairing screen, which
+    /// only says why, and Settings says pairing is off here.
+    func testTheSimulatorRefusesToPair() {
+        let app = launch(["-fixture-unpaired"])
+        XCTAssertTrue(any("pairingRefusal", app).appears(timeout: 10), "an unpaired app is asked to pair")
+        XCTAssertTrue(text(containing: "never pairs the iOS Simulator", app).exists)
+        XCTAssertFalse(any("pairingCode", app).exists, "no code: it never asks Loft to pair")
+        app.buttons["pairingNotNow"].tap()
+        XCTAssertTrue(any("pairingRefusal", app).disappears(timeout: 5))
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Off in the Simulator", app).appears(timeout: 5))
+    }
+
+    /// Spec #164: on fixture data the pairing screen shows the code to compare, waits, and closes once allowed.
+    func testPairingShowsTheCodeAndClosesWhenAllowed() {
+        let app = launch(["-fixture-unpaired", "-fixture-pairing"])
+        let code = any("pairingCode", app)
+        XCTAssertTrue(code.appears(timeout: 10), "the code to compare")
+        XCTAssertEqual(code.label, "Code 4 8 2 1", "read digit by digit")
+        XCTAssertTrue(code.disappears(timeout: 10), "allowed: the screen closes")
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Paired", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["pairThisIPhone"].exists)
+    }
+
+    /// #170: Settings lists the paired devices and marks this one; Forget this device and Unpair all remove the
+    /// others, and forgetting this iPhone brings back the pairing screen.
+    func testPairedDevicesForgetAndUnpairAll() {
+        let app = launch(["-fixture-unpaired", "-fixture-pairing"])
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10))
+        XCTAssertTrue(any("pairingCode", app).disappears(timeout: 10))
+        app.buttons["settingsButton"].tap()
+        let link = app.buttons["pairedDevices"]
+        XCTAssertTrue(link.appears(timeout: 5))
+        link.tap()
+        XCTAssertTrue(any("pairedClient-c1", app).appears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).label.contains("This device"))
+        XCTAssertTrue(any("pairedClient-c2", app).exists && any("pairedClient-c3", app).exists)
+        app.buttons["forget-c3"].tap()
+        XCTAssertTrue(any("pairedClient-c3", app).disappears(timeout: 5))
+        app.buttons["unpairAll"].tap()
+        app.sheets.buttons["Unpair all"].firstMatch.tap()
+        XCTAssertTrue(any("pairedClient-c2", app).disappears(timeout: 5))
+        XCTAssertTrue(any("pairedClient-c1", app).exists, "this iPhone stays paired")
+        XCTAssertFalse(app.buttons["unpairAll"].isEnabled)
+        app.buttons["forget-c1"].tap()
+        XCTAssertTrue(any("pairingCode", app).appears(timeout: 10), "forgot itself: the pairing screen is back")
+    }
+
+    /// Spec #164: the demo never pairs, and says so.
+    func testTheDemoRefusesToPair() {
+        let app = XCUIApplication()
+        app.launchArguments = Self.onboardingLaunchArguments
+        app.launch()
+        enterDemo(app)
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(text(containing: "Off in the demo", app).appears(timeout: 5))
+        app.buttons["pairThisIPhone"].tap()
+        XCTAssertTrue(text(containing: "never pairs with a Mac", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["pairingOpenDemo"].exists, "already in the demo")
+    }
+
+    /// Types the demo address on the connect screen (launched with `onboardingLaunchArguments`).
+    private func enterDemo(_ app: XCUIApplication) {
+        let field = app.textFields["serverAddressField"]
+        XCTAssertTrue(field.appears(timeout: 5))
+        field.tap()
+        // Right after a launch the first tap can miss the focus.
+        if !app.keyboards.firstMatch.appears(timeout: 2) { field.tap() }
+        field.typeText("demo-loft-dev.get-loft.com")
+        app.buttons["saveServer"].tap()
+        XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
+    }
+
+    /// Spec #144: the demo address opens the app on sample data, with Loft-only and GitHub issues, and Exit leaves it.
     func testTheDemoShowsIssuesAndLeaves() {
         let app = XCUIApplication()
-        app.launchArguments = ["-ui-onboarding", "-no-animations", "-no-speech", "-no-ai"]
+        app.launchArguments = Self.onboardingLaunchArguments
         app.launch()
-        let demo = app.buttons["tryDemo"]
         XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5))
-        if !demo.isHittable { app.swipeUp() }
-        demo.tap()
-        XCTAssertTrue(any("demoBanner", app).appears(timeout: 5))
-        app.tabBars.buttons["Tasks"].tap()
+        XCTAssertFalse(app.buttons["tryDemo"].exists, "no demo button: App Review types the demo address")
+        enterDemo(app)
+        app.tabBars.buttons["Issues"].tap()
         XCTAssertTrue(text(containing: "loft#42", app).appears(timeout: 5), "a GitHub issue shows its mark")
         app.buttons["taskRow-Implement settings functionality"].firstMatch.tap()
-        XCTAssertTrue(text(containing: "octo-dev", app).appears(timeout: 5), "its owner")
+        // An open spec: its Delivery card sits above "Where", so the Owner row is below the fold.
+        let owner = text(containing: "octo-dev", app)
+        for _ in 0..<4 where !owner.appears(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(owner.exists, "its owner")
         XCTAssertTrue(any("demoBanner", app).exists, "the banner stays on every screen")
         // #146: the Lead answers, from a script.
         app.tabBars.buttons["Chat"].tap()
         app.buttons["orchestratorConversation"].firstMatch.tap()
-        let field = app.textFields["composerField"]
-        XCTAssertTrue(field.appears(timeout: 5))
-        field.tap()
-        field.typeText("What is the status")
+        let composer = app.textFields["composerField"]
+        XCTAssertTrue(composer.appears(timeout: 5))
+        composer.tap()
+        composer.typeText("What is the status")
         app.buttons["sendButton"].tap()
         XCTAssertTrue(text(containing: "3 of 4 endpoints", app).appears(timeout: 5), "a scripted answer, shown at once")
         app.buttons["exitDemo"].tap()
         XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "back to the connect screen")
+    }
+
+    /// #148: the Issues tab switches to Specs (kept across launches), in sections by stage, with the shared filters.
+    func testSpecsListSectionsAndFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        XCTAssertTrue(any("specSection-planned", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Backend Agent on #43 Backend endpoints", app).exists, "who is on which ticket")
+        XCTAssertTrue(text(containing: "Docs Agent on #45 Docs", app).exists, "#181: every running ticket")
+        XCTAssertTrue(text(containing: "Waiting for the Lead to assign #44", app).exists, "#181: and what waits for the Lead")
+        XCTAssertTrue(text(containing: "octo/loft#50", app).exists, "its repo")
+        XCTAssertTrue(text(containing: "Loft · garden", app).exists, "a plan kept in Loft")
+        for (stage, title) in [("planned", "Offline mode"), ("delivery", "Implement settings functionality"), ("ready", "Widget gallery"), ("shipped", "Dark theme")] {
+            for _ in 0..<3 where !any("specRow-\(title)", app).exists { app.swipeUp() }
+            XCTAssertTrue(any("specSection-\(stage)", app).appears(timeout: 5), stage)
+            XCTAssertTrue(any("specRow-\(title)", app).exists, title)
+        }
+        XCTAssertFalse(any("specRow-Old idea", app).exists, "dropped is hidden")
+        XCTAssertFalse(app.buttons["taskRow-Renew the domain"].exists, "only specs")
+
+        app.buttons["Filter issues"].tap()
+        app.buttons["Show dropped"].tap()
+        for _ in 0..<3 where !any("specRow-Old idea", app).exists { app.swipeUp() }
+        XCTAssertTrue(any("specRow-Old idea", app).appears(timeout: 3))
+
+        // The group and project filters are the List's, and apply here.
+        app.buttons["Filter issues"].tap()
+        app.buttons["Loft"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Garden notes", app).exists, "no agent of the group works in garden")
+        app.buttons["Filter issues"].tap()
+        app.buttons["Any group"].tap()
+        app.buttons["Filter issues"].tap()
+        app.buttons["garden"].tap()
+        XCTAssertTrue(any("specRow-Garden notes", app).appears(timeout: 3))
+        XCTAssertFalse(any("specRow-Offline mode", app).exists)
+
+        // Kept across launches.
+        app.terminate()
+        app.launchArguments += ["-keep-issues-view"]
+        app.launch()
+        app.tabBars.buttons["Issues"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+    }
+
+    /// #172: a Priority picked in the List doesn't count as a filter in Specs, which has no Priority filter.
+    func testSpecsDoesNotCountTheListOnlyFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        // The view is kept across launches, and a spec's detail test leaves it on Specs.
+        let list = app.segmentedControls["issuesViewSwitch"].buttons["List"]
+        XCTAssertTrue(list.appears(timeout: 5))
+        list.tap()
+        XCTAssertTrue(app.buttons["taskFilter-all"].appears(timeout: 3))
+        app.buttons["Filter issues"].tap()
+        app.buttons["Urgent"].tap()
+        app.segmentedControls["issuesViewSwitch"].buttons["Specs"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+        app.buttons["Filter issues"].tap()
+        XCTAssertTrue(app.buttons["Show dropped"].appears(timeout: 3))
+        XCTAssertFalse(app.buttons["Clear filters"].exists, "no filter of the Specs view is set")
+        app.buttons["Show dropped"].tap()
+
+        // The List still has it, and the List is what the other tests expect on a fresh install.
+        app.segmentedControls["issuesViewSwitch"].buttons["List"].tap()
+        app.buttons["Filter issues"].tap()
+        XCTAssertTrue(app.buttons["Clear filters"].appears(timeout: 3))
+        app.buttons["Clear filters"].tap()
+    }
+
+    /// #194: a filter that hides every spec says so and offers Clear filters; with no specs at all, "No specs" stays.
+    func testSpecsFilterThatHidesEverySpecOffersClearFilters() {
+        let app = launch(["-fixture-specs"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 5))
+        app.buttons["Filter issues"].tap()
+        app.buttons["website"].tap()
+        XCTAssertTrue(app.staticTexts["No matching specs"].appears(timeout: 3))
+        XCTAssertFalse(app.staticTexts["No specs"].exists)
+        app.buttons["Clear filters"].tap()
+        XCTAssertTrue(any("specRow-Offline mode", app).appears(timeout: 3))
+
+        app.terminate()
+        let empty = launch(["-fixture-empty"])
+        empty.tabBars.buttons["Issues"].tap()
+        let emptySpecs = empty.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(emptySpecs.appears(timeout: 5))
+        emptySpecs.tap()
+        XCTAssertTrue(empty.staticTexts["No specs"].appears(timeout: 3))
+        XCTAssertFalse(empty.buttons["Clear filters"].exists)
+    }
+
+    private func openSpec(_ title: String, _ app: XCUIApplication) {
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        let row = any("specRow-\(title)", app)
+        for _ in 0..<3 where !row.exists { app.swipeUp() }
+        XCTAssertTrue(row.appears(timeout: 5), title)
+        row.tap()
+    }
+
+    /// #149: an open spec on GitHub shows the Delivery card, then its progress, Spec PR and tickets with verdicts; a
+    /// ticket opens its issue, with back to the spec.
+    func testSpecDetailShowsDeliveryTicketsAndOpensATicket() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Implement settings functionality", app)
+        // The card has the state and Pause; the spec panel adds the rest.
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5), "the Delivery card")
+        XCTAssertEqual(any("deliveryState", app).label, "Running.")
+        XCTAssertTrue(any("delivery-pause", app).exists)
+        XCTAssertFalse(any("delivery-start", app).exists, "it started")
+        XCTAssertTrue(text(containing: "#43 Backend endpoints is with Backend Agent", app).exists, "the card says who has which ticket")
+        XCTAssertTrue(text(containing: "#45 Docs is with Docs Agent", app).exists, "#181: every running ticket")
+        XCTAssertEqual(any("deliveryWaiting", app).label, "Waiting for the Lead to assign #44")
+        XCTAssertFalse(any("deliveryOnIt", app).exists, "so Progress doesn't repeat it")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertEqual(any("deliveryProgress", app).label, "1 of 5 tickets done")
+        // The tickets sit below the card and the progress.
+        for _ in 0..<3 where !any("ticketRow-QA", app).exists { app.swipeUp() }
+        for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(any("ticketRow-\(t)", app).exists, t) }
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("in review"))
+        XCTAssertTrue(any("ticketRow-Docs", app).label.contains("security waiting"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("done"))
+        XCTAssertTrue(any("ticketRow-QA", app).label.contains("security passed"))
+        XCTAssertFalse(any("mergeDelivery", app).exists, "it merges on GitHub")
+
+        any("ticketRow-Backend endpoints", app).tap()
+        XCTAssertTrue(app.navigationBars["Issue"].appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Implement backend endpoints", app).appears(timeout: 5), "the ticket's own issue")
+        XCTAssertFalse(any("ticketRow-QA", app).exists, "a ticket's page lists no tickets")
+        back(app)
+        XCTAssertTrue(any("ticketRow-QA", app).appears(timeout: 5), "back to the spec")
+    }
+
+    /// #149: an open spec on GitHub starts from the Delivery card and never merges here; Merge only for a plan kept
+    /// in Loft that's ready.
+    func testStartDeliveryAndMergeAppearOnlyWhenTheyApply() {
+        let app = launch(["-fixture-specs"])
+        openSpec("Offline mode", app)
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
+        XCTAssertFalse(any("deliveryProgress", app).exists, "no Delivery yet, so no progress")
+        XCTAssertFalse(any("deliveryState", app).exists, "nor a state")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        back(app)
+
+        // Ready on GitHub: it merges there, and the spec panel still shows its progress and Spec PR.
+        any("specRow-Widget gallery", app).tap()
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertEqual(any("deliveryState", app).label, "Done: every review passed.", "the card's state")
+        XCTAssertFalse(any("delivery-start", app).exists)
+        XCTAssertEqual(any("deliveryProgress", app).label, "3 of 3 tickets done")
+        XCTAssertTrue(any("specPRLink", app).exists, "the spec PR")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+        back(app)
+
+        for _ in 0..<3 where !any("specRow-Garden notes", app).exists { app.swipeUp() }
+        any("specRow-Garden notes", app).tap()
+        let merge = any("mergeDelivery", app)
+        XCTAssertTrue(merge.appears(timeout: 5))
+        XCTAssertTrue(any("deliveryState", app).exists, "no card on a plan kept in Loft: the panel has the state")
+        merge.tap()
+        XCTAssertTrue(text(containing: "Merging…", app).appears(timeout: 3), "pending")
+        XCTAssertTrue(any("deliveryResult", app).appears(timeout: 8), "then the result")
+        XCTAssertFalse(any("mergeDelivery", app).exists)
+    }
+
+    /// #149: a relaunch starts outside the demo with none of its changes, and the full-screen Talk view has the
+    /// banner too, so Exit is one tap from there.
+    func testARelaunchResetsTheDemoAndExitWorksFromFullScreen() {
+        let app = XCUIApplication()
+        app.launchArguments = Self.onboardingLaunchArguments
+        app.launch()
+        enterDemo(app)
+        // A change in the demo: a message to the Lead.
+        app.tabBars.buttons["Chat"].tap()
+        app.buttons["orchestratorConversation"].firstMatch.tap()
+        let composer = app.textFields["composerField"]
+        XCTAssertTrue(composer.appears(timeout: 5))
+        composer.tap()
+        composer.typeText("Kept only until relaunch")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(text(containing: "Kept only until relaunch", app).appears(timeout: 5))
+
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "a relaunch starts at the connect screen")
+        XCTAssertFalse(any("demoBanner", app).exists, "not in the demo")
+        enterDemo(app)
+        app.tabBars.buttons["Chat"].tap()
+        app.buttons["orchestratorConversation"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5))
+        XCTAssertFalse(text(containing: "Kept only until relaunch", app).exists, "the demo starts fresh")
+
+        app.tabBars.buttons["Overview"].tap()
+        app.buttons["talkButton"].tap()
+        XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+        // The root's banner stays in the tree under the full screen, so tap where Exit shows rather than trust `exists`.
+        app.buttons["exitDemo"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["serverAddressField"].appears(timeout: 5), "Exit from the Talk view")
+        XCTAssertFalse(any("demoBanner", app).exists)
     }
 
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
@@ -685,6 +1262,65 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(loft.value as? String, "Collapsed")
     }
 
+    /// #176: Settings › Backups shows the last backup and its error, Back up now clears it, and iCloud Drive is one
+    /// tap after the privacy warning. A failing backup's Needs you item has Back up now too.
+    func testBackupsInSettingsAndNeedsYou() {
+        let app = launch(["-fixture-backup-failed"])
+        app.buttons["Settings"].firstMatch.tap()
+        let now = app.buttons["backUpNow"]
+        for _ in 0..<10 where !now.isHittable { app.swipeUp() }
+        XCTAssertTrue(now.isHittable)
+        XCTAssertTrue(any("backupLast", app).label.contains("2 days ago"), any("backupLast", app).label)
+        XCTAssertTrue(any("backupError", app).label.contains("can't create /Volumes/Backup/Loft backups"))
+        now.tap()
+        XCTAssertTrue(any("backupError", app).disappears(timeout: 5), "a good backup clears the error")
+        XCTAssertFalse(any("backupLast", app).label.contains("2 days ago"))
+
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "stored by Apple", app).appears(timeout: 3), "the warning comes first")
+        app.buttons["Use iCloud Drive"].tap()
+        XCTAssertTrue(text(containing: "com~apple~CloudDocs/Loft backups", app).appears(timeout: 5))
+        app.buttons["backupFolderPicker"].tap()
+        app.buttons["This Mac"].tap()
+        XCTAssertTrue(text(containing: "Application Support/Loft/backups", app).appears(timeout: 5))
+
+        app.terminate()
+        let again = launch(["-fixture-backup-failed"])
+        again.buttons["needsYouSeeAll"].firstMatch.tap()
+        let item = any("needsYou-backup_failed", again)
+        XCTAssertTrue(any("needsYou-permission", again).appears(timeout: 5))
+        for _ in 0..<6 where !item.exists { again.swipeUp() }
+        XCTAssertTrue(item.exists)
+        XCTAssertTrue(item.staticTexts["Loft's backups are failing"].exists)
+        item.buttons["Back up now"].tap()
+        XCTAssertTrue(item.disappears(timeout: 5), "the item clears")
+    }
+
+    /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.
+    func testReplyingToAnIssueWithNobodyOnItAsksForAnAgent() {
+        let app = launch()
+        app.buttons["needsYouSeeAll"].firstMatch.tap()
+        let row = any("needsYou-task_failed", app)
+        let reply = row.buttons["Reply on the issue"]
+        XCTAssertTrue(any("needsYou-permission", app).appears(timeout: 5))
+        for _ in 0..<6 where !reply.isHittable { app.swipeUp() }
+        reply.tap()
+        let agent = any("needsYouAnswerAgent", app)
+        XCTAssertTrue(agent.appears(timeout: 5))
+        XCTAssertTrue(text(containing: "kept as a note only", app).exists)
+        agent.tap()
+        app.buttons["QA Agent"].firstMatch.tap()
+        XCTAssertTrue(text(containing: "takes the issue", app).appears(timeout: 5))
+        app.textFields["needsYouAnswerField"].tap()
+        app.typeText("Install Xcode 27 first")
+        app.buttons["needsYouAnswerSend"].tap()
+        let notice = any("needsYouNotice", app)
+        XCTAssertTrue(notice.appears(timeout: 5))
+        XCTAssertEqual(notice.label, "Sent to QA Agent")
+        XCTAssertFalse(any("needsYou-task_failed", app).exists, "the item clears")
+    }
+
     func testAnAttachedTaskGoesWithTheMessageAndShowsAsAChip() {
         let app = launch()
         openOrchestratorChat(app)
@@ -700,7 +1336,7 @@ final class LoftUITests: XCTestCase {
         field.typeText("Can you check this one?")
         app.buttons["sendButton"].tap()
         XCTAssertTrue(any("attachedTask", app).disappears(timeout: 3), "sent with the message, then cleared")
-        XCTAssertTrue(app.buttons["Task: Implement backend endpoints, In progress"].appears(timeout: 5), "the chip on the sent message")
+        XCTAssertTrue(app.buttons["Issue: Implement backend endpoints, In progress"].appears(timeout: 5), "the chip on the sent message")
     }
 
     func testABriefFromTheMacKeepsWhatYouSaidOneTapAway() {

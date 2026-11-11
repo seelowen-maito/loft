@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
 import { cx, timeAgo } from "../../lib/format";
+import { verdicts } from "../../lib/verdicts";
 
 const METHOD_LABEL: Record<string, string> = { squash: "Squash and merge", merge: "Create merge commit", rebase: "Rebase and merge" };
 
@@ -57,6 +58,18 @@ function Checks({ checks }: { checks: PullRequest["checks"] }) {
       <span className={cx("flex items-center gap-1", failed || pending ? "text-fg-3" : "text-good")}>
         <Check className="size-3" />{passed}/{total} checks
       </span>
+    </span>
+  );
+}
+
+function Verdicts({ labels }: { labels: string[] | undefined }) {
+  const v = verdicts(labels);
+  if (!v.length) return null;
+  return (
+    <span className="flex flex-wrap items-center gap-1.5" aria-label="Verdicts">
+      {v.map((x) => (
+        <span key={x.label} className={cx("rounded-full border px-2 py-px font-mono text-[10.5px]", x.tone === "good" ? "border-good/30 bg-good/10 text-good" : "border-bad/30 bg-bad/10 text-bad")}>{x.label}</span>
+      ))}
     </span>
   );
 }
@@ -154,6 +167,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
                 <span className="rounded bg-white/[0.05] px-1.5 py-px text-fg-2">{pr.base_ref}</span>
               </span>
             )}
+            {pr.state === "open" && !!pr.behind_by && <span className="text-warn">{pr.behind_by} behind {pr.base_ref}</span>}
             {(pr.additions > 0 || pr.deletions > 0) && (
               <span>
                 <span className="text-good">+{pr.additions}</span> <span className="text-bad">−{pr.deletions}</span>
@@ -173,6 +187,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
               <div className="text-[13px]">{m.label}</div>
               {m.detail && <div className="text-[11.5px] text-fg-3">{m.detail}</div>}
               {pr.state === "open" && <div className="mt-1"><Checks checks={pr.checks} /></div>}
+              {pr.state === "open" && <div className="mt-1"><Verdicts labels={pr.labels} /></div>}
             </div>
           </div>
 

@@ -25,3 +25,4 @@ ios/Evaluations/local/
 *.mov
 *.mp4
 !ios/Loft/Resources/Assets.xcassets/**/*.png
+!ios/LoftUITests/sample-video.mp4

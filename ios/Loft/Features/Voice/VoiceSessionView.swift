@@ -6,7 +6,6 @@ import SwiftUI
 struct VoiceSessionView: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
-    @Environment(Router.self) private var router
     @Environment(\.dynamicTypeSize) private var typeSize
     let dismiss: () -> Void
 
@@ -21,6 +20,8 @@ struct VoiceSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // A full screen covers the root's banner, so it shows its own.
+            if store.isDemo { DemoBanner() }
             header
             questionCard
             Group {
@@ -46,9 +47,17 @@ struct VoiceSessionView: View {
                 VoicePresentation.shared.statusAgentId = id
                 // Also for a chat that's already open, which keeps its own box.
                 VoicePresentation.shared.returnedText = text
-                router.openChat(id, draft: text)
+                VoicePresentation.shared.closeThenOpen(id, draft: text)
                 dismiss()
             }
+        }
+        .onChange(of: voice.handOff) { _, h in
+            // Sent after the countdown: straight to the chat, which shows it and reads the reply.
+            guard let h else { return }
+            voice.handOff = nil
+            VoicePresentation.shared.replyAfter = h
+            VoicePresentation.shared.closeThenOpen(h.agentId)
+            dismiss()
         }
         .sensoryFeedback(.selection, trigger: voice.phase)
         .task(id: agentId) {
@@ -178,14 +187,14 @@ struct VoiceSessionView: View {
                 Button { Task { await voice.retrySend() } } label: {
                     Label("Retry sending", systemImage: "arrow.clockwise").frame(maxWidth: .infinity, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .disabled(!store.canWrite)
                 .accessibilityIdentifier("voiceRetrySend")
             } else {
                 Button { Task { await voice.start(agentId: agentId) } } label: {
                     Text("Try again").frame(maxWidth: .infinity, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityIdentifier("voiceRetry")
             }
             if voice.failureNeedsPermission, let url = URL(string: UIApplication.openSettingsURLString) {
@@ -214,10 +223,22 @@ struct VoiceSessionView: View {
     var statusAgentId: String?
     /// Talk: text Undo sends back to that chat's message box.
     var returnedText: String?
+    /// Talk: a message it sent; that agent's chat waits for the reply and reads it aloud.
+    var replyAfter: VoiceSession.HandOff?
+
+    /// The chat to open once the Talk screen is gone. Opening it while the screen closes switched tabs under the
+    /// closing cover, and SwiftUI then dropped the close: the screen stayed up until you tapped Close.
+    struct PendingChat: Equatable { var agentId: String; var draft: String? }
+    var pendingChat: PendingChat?
+
+    func closeThenOpen(_ agentId: String, draft: String? = nil) {
+        pendingChat = PendingChat(agentId: agentId, draft: draft)
+    }
 }
 
 struct VoicePresenter: ViewModifier {
     @Environment(VoiceSession.self) private var voice
+    @Environment(Router.self) private var router
     @Bindable private var presentation = VoicePresentation.shared
     private var shown: Bool {
         get { presentation.shown }
@@ -229,7 +250,14 @@ struct VoicePresenter: ViewModifier {
             .onChange(of: voice.phase, initial: true) { old, new in
                 if new != .idle && (old == .idle || !shown) { shown = true }
             }
-            .fullScreenCover(isPresented: $presentation.shown, onDismiss: { voice.close() }) {
+            .fullScreenCover(isPresented: $presentation.shown, onDismiss: {
+                voice.close()
+                // Now that the screen is gone, the chat it handed over to.
+                if let p = presentation.pendingChat {
+                    presentation.pendingChat = nil
+                    router.openChat(p.agentId, draft: p.draft)
+                }
+            }) {
                 VoiceSessionView { shown = false }
             }
     }
@@ -273,7 +301,7 @@ struct VoiceDraftBanner: View {
                         } label: {
                             Text("Review").frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .accessibilityIdentifier("voiceDraftReview")
                         Button(role: .destructive) {
                             voice.discard()
