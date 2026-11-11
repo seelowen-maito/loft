@@ -41,6 +41,10 @@ pub struct Mirror {
     repos: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Cursor>>>>,
     /// Why each skipped project was last skipped, so the log says it once, not every poll.
     skipped: std::sync::Mutex<HashMap<String, String>>,
+    /// ETag of each issue of another repo last read by number (`repo#n`), so an unchanged one answers 304.
+    etags: std::sync::Mutex<HashMap<String, String>>,
+    /// Other repos already logged as unreadable this run, so the log says it once.
+    unreadable: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Where the change poll of one repo stands.
@@ -200,6 +204,9 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
         report.error = Some(e.to_string());
     }
     drop(cursor);
+    if full {
+        other_repos(state, project, &repo, &mut report).await;
+    }
     // A ticket closed on GitHub by hand: when it was its spec's last, the spec PR is ready for review.
     // Delivery records change under the repo's publish lock, like every other Delivery step, so a poll
     // can't write back a record a submit or review changed meanwhile.
@@ -280,6 +287,53 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
     }
     cursor.etag = None;
     Ok(())
+}
+
+/// Loft issues of `project` linked to a repo other than its own (its origin moved, say) aren't in its
+/// repo's reads: a full read reads each one still open by number and brings GitHub's changes in. Only
+/// those: nothing else of that repo is imported. A repo that can't be read is left as it is until the
+/// next full read, and logged once per run.
+async fn other_repos(state: &AppState, project: &str, repo: &str, report: &mut Report) {
+    let mut by_repo: HashMap<String, Vec<i64>> = HashMap::new();
+    for t in state.db.list_tasks().unwrap_or_default().into_iter().filter(|t| t.project == project) {
+        if let Some(g) = t.github.filter(|g| g.state == "open" && !g.repo.eq_ignore_ascii_case(repo)) {
+            by_repo.entry(g.repo).or_default().push(g.number);
+        }
+    }
+    for (other, numbers) in by_repo {
+        let cursor = state.mirror.cursor(&other);
+        let _held = cursor.lock().await;
+        for n in numbers {
+            let key = format!("{}#{n}", other.to_lowercase());
+            let etag = state.mirror.etags.lock().unwrap().get(&key).cloned();
+            let e = match crate::github::get_if_changed(state, &format!("/repos/{other}/issues/{n}"), etag.as_deref()).await {
+                Ok(None) => continue,
+                Ok(Some((i, etag))) => {
+                    if let Some(etag) = etag {
+                        state.mirror.etags.lock().unwrap().insert(key, etag);
+                    }
+                    // Transferred away: left as it is, like a link whose repo is gone.
+                    if same_repo(&i, &other) {
+                        let mut r = Report::default();
+                        apply(state, project, &other, &i, &mut r);
+                        report.updated += r.updated;
+                    }
+                    continue;
+                }
+                Err(e) => e,
+            };
+            if crate::github::is_paused(&e) {
+                break;
+            }
+            if state.mirror.unreadable.lock().unwrap().insert(other.to_lowercase()) {
+                tracing::warn!("mirror: can't read {other}, its linked issues stay as they are: {e}");
+            }
+            // One issue deleted: the others are still read. Anything else: the repo waits for the next full read.
+            if !crate::github::is_gone(&e) {
+                break;
+            }
+        }
+    }
 }
 
 /// What changed since the last read, open or closed. An unchanged answer comes back as 304 with the same ETag.
@@ -1262,6 +1316,56 @@ pub(crate) mod tests {
         let t4 = st.db.get_task(&ids[&4]).unwrap().unwrap();
         assert_eq!(t4.github.as_ref().map(|g| g.state.as_str()), Some("closed"), "a closed issue that has a Loft issue stays mirrored");
         assert_eq!(t4.status, "done", "closed on GitHub as completed: done in Loft");
+    }
+
+    #[tokio::test]
+    async fn issues_linked_to_another_repo_follow_it_on_a_full_read_and_nothing_else_comes_in() {
+        let st = state();
+        let fake = own_fake(&st);
+        // The project's origin moved to octo/new; some Loft issues still link to octo/old, one to a repo that's gone.
+        project(&st, "mir-moved", Some("https://github.com/octo/new"));
+        fake.route("GET", "/repos/octo/new/issues", 200, json!([]));
+        let at = "2026-10-02T00:00:00Z";
+        let mut ids = HashMap::new();
+        for (repo, n) in [("octo/gone", 5), ("octo/old", 1), ("octo/old", 2), ("octo/old", 3)] {
+            let t = Task {
+                id: format!("moved-{n}"),
+                title: format!("#{n}"),
+                kind: "todo".into(),
+                status: "ready".into(),
+                project: "mir-moved".into(),
+                github: Some(link(repo, &gh(repo, n, &format!("#{n}"), "open", at))),
+                ..Default::default()
+            };
+            st.db.save_task(&t).unwrap();
+            ids.insert(n, t.id);
+        }
+        fake.route("GET", "/repos/octo/old/issues/1", 200, gh("octo/old", 1, "Shipped", "closed", "2026-10-03T00:00:00Z"));
+        fake.in_turn("GET", "/repos/octo/old/issues/2", vec![(200, gh("octo/old", 2, "Renamed", "open", "2026-10-03T00:00:00Z")), (304, Value::Null)]);
+        fake.with_headers("GET", "/repos/octo/old/issues/2", &[("etag", "\"e2\"")]);
+        let mut dropped = gh("octo/old", 3, "Dropped", "closed", "2026-10-03T00:00:00Z");
+        dropped["state_reason"] = json!("not_planned");
+        fake.route("GET", "/repos/octo/old/issues/3", 200, dropped);
+        // octo/gone answers 404 (unrouted): left as it is, and the rest is still read.
+
+        let r = sync_project(&st, "mir-moved", true).await.unwrap();
+        assert_eq!((r.created, r.updated, r.error), (0, 3, None));
+        let task = |n: i64| st.db.get_task(&ids[&n]).unwrap().unwrap();
+        assert_eq!((task(1).status.as_str(), task(1).github.unwrap().state.as_str()), ("done", "closed"), "closed as completed on its own repo: done");
+        assert_eq!(task(3).status, "cancelled", "closed as not planned: cancelled");
+        assert_eq!((task(2).title.as_str(), task(2).status.as_str()), ("Renamed", "ready"), "still open: its title follows");
+        assert_eq!((task(5).status.as_str(), task(5).github.unwrap().state.as_str()), ("ready", "open"), "an unreadable repo's link stays as it is");
+        assert!(fake.seen("/repos/octo/old/issues?").is_empty() && fake.seen("/repos/octo/old/issues").len() == 3, "only the linked issues, by number: nothing of octo/old is imported");
+
+        // The next full read: only #2 is still open, and it answers 304 to its ETag. A change poll doesn't read other repos.
+        sync_project(&st, "mir-moved", false).await.unwrap();
+        let r = sync_project(&st, "mir-moved", true).await.unwrap();
+        assert_eq!((r.updated, r.error), (0, None));
+        let old = fake.seen("/repos/octo/old/");
+        assert_eq!(old.len(), 4, "{old:?}");
+        assert_eq!((old[3].path.as_str(), &old[3].headers["if-none-match"]), ("/repos/octo/old/issues/2", &json!("\"e2\"")));
+        assert_eq!(fake.seen("/repos/octo/gone/").len(), 2, "tried again on each full read");
+        assert_eq!(linked(&st, "octo/old").len(), 3);
     }
 
     #[tokio::test]
