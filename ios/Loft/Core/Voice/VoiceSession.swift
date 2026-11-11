@@ -151,6 +151,13 @@ final class VoiceSession {
         } catch {
             // Closed or discarded while starting: nothing more to do.
             guard gate.isCurrent(attempt) else { return }
+            // The audio went elsewhere while the mic waited for the route: pause, as losing it while listening does.
+            if error is CancellationError {
+                recognizer?.cancel()
+                recognizer = nil
+                if phase == .preparing { phase = .paused }
+                return
+            }
             stopAudio()
             let v = error as? VoiceError
             fail(v?.message ?? error.localizedDescription, needsPermission: v?.isPermission ?? false)

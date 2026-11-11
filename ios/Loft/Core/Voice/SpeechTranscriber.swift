@@ -147,6 +147,8 @@ final class SpeechTranscriber {
         } catch {
             // A start that was overtaken leaves the newer one alone.
             guard gate.isCurrent(attempt) else { return }
+            // Stopped, or the audio was lost, while the mic waited for the route: that path already said so.
+            if error is CancellationError { return }
             cleanUp()
             send(.error("Couldn't start the microphone: \(error.localizedDescription)"))
             return
