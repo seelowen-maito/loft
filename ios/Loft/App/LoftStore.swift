@@ -628,7 +628,6 @@ final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
-    /// `images`: uploads to send with the text (a video); with them the text may be empty.
     /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
     /// composer, so it still goes when you leave the chat during the window.
     struct VoiceAutoSend: Identifiable {
@@ -643,8 +642,10 @@ final class LoftStore {
     @ObservationIgnored private var voiceAutoSendTimer: Task<Void, Never>?
 
     /// Sends `text` to the agent (by calling `send`) once `window` is over, unless it's cancelled first.
-    /// Replaces any pending one (a composer coming back takes it over, with the time that's left).
+    /// Replaces a pending one for the same agent (a composer coming back takes it over, with the time that's left);
+    /// one for another agent goes now, so it isn't lost.
     func scheduleVoiceSend(_ text: String, to agentId: String, in window: TimeInterval, send: @escaping () -> Void) {
+        if let other = voiceAutoSend, other.agentId != agentId { sendVoiceNow(other.id) }
         voiceAutoSendTimer?.cancel()
         let pending = VoiceAutoSend(agentId: agentId, text: text, deadline: Date().addingTimeInterval(window), send: send)
         voiceAutoSend = pending
@@ -676,6 +677,7 @@ final class LoftStore {
         voiceAutoSend = nil
     }
 
+    /// `images`: uploads to send with the text (a video); with them the text may be empty.
     func send(_ text: String, to agentId: String, meta: JSONValue? = nil, images: [String] = []) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }

@@ -51,4 +51,16 @@ final class VoiceAutoSendTests: XCTestCase {
         try await Task.sleep(for: .seconds(0.5))
         XCTAssertEqual([first, second], [0, 1])
     }
+
+    func testAnotherChatsSendGoesFirstInsteadOfBeingDropped() async throws {
+        let s = store()
+        var first = 0, second = 0
+        s.scheduleVoiceSend("Deploy", to: "a1", in: 0.2) { first += 1 }
+        // Yes in chat A, leave, yes in chat B within A's window: A's goes now.
+        s.scheduleVoiceSend("Rebuild", to: "a2", in: 0.2) { second += 1 }
+        XCTAssertEqual(first, 1)
+        XCTAssertEqual(s.voiceAutoSend?.agentId, "a2")
+        try await Task.sleep(for: .seconds(0.5))
+        XCTAssertEqual([first, second], [1, 1])
+    }
 }
