@@ -10,6 +10,7 @@ import { pendingItems, type PendingItem } from "./lib/pending";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
+import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -242,6 +243,7 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
+          <Route path="/agents/:id/interview" element={<AgentsPage />} />
           {/* The old GitHub Issues tab's links: each opens that issue, found in the list. */}
           <Route path="/issues" element={<TasksPage />} />
           <Route path="/issues/:id" element={<TasksPage />} />
@@ -251,6 +253,7 @@ export default function App() {
           <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/clean" element={<CleanPage />} />
         </Routes>
       </main>
     </div>

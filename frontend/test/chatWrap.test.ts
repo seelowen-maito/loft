@@ -1,4 +1,4 @@
-// Run with `npm test`. Long words must wrap inside every chat bubble (#287).
+// Run with `pnpm test`. Long words must wrap inside every chat bubble (#287).
 // There is no DOM renderer here, so this checks the class names in the source.
 import { test } from "node:test";
 import assert from "node:assert/strict";

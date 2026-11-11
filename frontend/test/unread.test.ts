@@ -1,4 +1,4 @@
-// Run with `npm test` (Node's own test runner; Node strips the types).
+// Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { groupUnread, mergeLoaded, shouldMarkRead, showsUnreadDot, unreadBadge, unreadCount, unreadTitle } from "../src/lib/unread.ts";

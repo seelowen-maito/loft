@@ -497,13 +497,15 @@ export type BackupStatus = {
   icloud: string | null;
 };
 
-/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), and the disk's
- * free space. */
+/** Every agent's workspace size, whether it is busy, how many processes it left running, and the disk's free space. */
 export type WorkspaceSizes = {
-  agents: { id: string; name: string; bytes: number; busy: boolean }[];
+  /** `busy`: in a run, so Clean can't remove its items. `processes`: how many an idle agent left running. */
+  agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
   free_bytes: number | null;
   low_disk_bytes: number;
 };
+/** A process an idle agent left running, listed in Clean; `age_secs` is how long ago it started. */
+export type LeftProcess = { pid: number; command: string; age_secs: number };
 /** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
 export type CleanSkip = { agent: string; rel: string; reason: string };
 /** One thing Clean lists: a workspace's top-level item, or a folder inside a main clone. `path` is absolute; `command`
@@ -514,7 +516,7 @@ export type CleanItem = {
   path: string;
   rel: string;
   name: string;
-  kind: "clone" | "worktree" | "folder" | "file" | "symlink";
+  kind: "clone" | "worktree" | "build" | "folder" | "file" | "symlink";
   bytes: number;
   changed: string;
   command: string;
@@ -566,6 +568,8 @@ export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
   binary: string | null;
   adhoc_signed: boolean | null;
+  /** The identity Loft is signed with, like "loft"; null when ad-hoc or unknown. */
+  signed_by?: string | null;
   host: string | null;
 };
 
@@ -663,6 +667,10 @@ export const api = {
   clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
   /** The running or last clean's log, the daily sweep's included. */
   cleanLog: () => req<CleanLog>("GET", "/workspaces/log"),
+  /** What each idle agent left running, by agent id. */
+  leftRunning: () => req<Record<string, LeftProcess[]>>("GET", "/workspaces/processes"),
+  /** Stops what an agent not in a run left running (409 when it is in one). */
+  stopLeftRunning: (agent: string) => req<{ stopped: number }>("POST", `/workspaces/${agent}/stop-processes`),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),

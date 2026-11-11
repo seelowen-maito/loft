@@ -41,7 +41,6 @@ final class BackupsTests: XCTestCase {
         let s = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(json.utf8))
         XCTAssertEqual(s.agents.first?.bytes, 5000)
         XCTAssertEqual(s.agents.map(\.busy), [false, true])
-        XCTAssertEqual(s.idleCount, 1, "Clean all skips the busy agent")
         XCTAssertTrue(s.isLow)
         // A Mac without per-agent Clean: no `busy`, so no Clean button on the row.
         let old = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(#"{"agents":[{"id":"a","name":"Dev","bytes":5}],"free_bytes":null,"low_disk_bytes":1}"#.utf8))
@@ -63,6 +62,15 @@ final class BackupsTests: XCTestCase {
         XCTAssertEqual(items.map(\.ticked), [false, true, false])
         XCTAssertEqual(items.first?.command, "rm -rf /s/a/loft")
         XCTAssertEqual(items.map(\.shownCommand), ["", "rm -rf /s/a/old", ""], "no command on what can't be removed")
+        // The table's Status and Type columns.
+        XCTAssertEqual(items.map(\.status.text), ["Kept: main clone of loft", "Deletable", "Working"])
+        XCTAssertEqual(items.map(\.status.locked), [true, false, true])
+        XCTAssertEqual(items.map(\.typeText), ["git clone", "git clone", "folder"])
+        // Sorted by size, by agent name, and by last change.
+        let name: (String) -> String = { $0 == "a" ? "Zed" : "Amy" }
+        XCTAssertEqual(sortedClean(items, by: .size, agentName: name).map(\.rel), ["loft", "old", "x"])
+        XCTAssertEqual(sortedClean(items, by: .agent, agentName: name).map(\.rel), ["x", "loft", "old"])
+        XCTAssertEqual(sortedClean(items, by: .changed, agentName: name).map(\.rel), ["loft", "old", "x"])
 
         let log = try JSONCoding.decoder.decode(CleanLog.self, from: Data(#"""
         {"at":"2026-11-10T13:21:00.5+00:00","what":"Clean all","running":false,
@@ -77,11 +85,20 @@ final class BackupsTests: XCTestCase {
         XCTAssertNil(log.title, "an older Mac's log has no title")
     }
 
+    /// Settings › Disk lists what an idle agent left running, and counts it; an agent is busy only in a run.
+    func testDecodesWhatIdleAgentsLeftRunning() throws {
+        let sizes = try JSONCoding.decoder.decode(WorkspaceSizes.self, from: Data(#"{"agents":[{"id":"a","name":"Dev","bytes":5,"busy":false,"processes":2}],"free_bytes":9,"low_disk_bytes":20}"#.utf8))
+        XCTAssertEqual(sizes.agents.first?.processes, 2)
+        let left = try JSONCoding.decoder.decode([String: [LeftProcess]].self, from: Data(#"{"a-1":[{"pid":41,"command":"node vite","age_secs":21600},{"pid":42,"command":"tail -f x","age_secs":90}]}"#.utf8))
+        XCTAssertEqual(left["a-1"]?.map(\.pid), [41, 42])
+        XCTAssertEqual(left["a-1"]?.map(\.ageText), ["6 h", "1 min"])
+    }
+
     /// Settings › Disk lists agents' Simulator devices; the clean log says which device was deleted or shut down.
     func testDecodesAgentDevicesAndTheirLogLines() throws {
         let json = #"{"devices":[{"udid":"U1","name":"Loft Dev (Loft)","state":"Booted","bytes":2878722048,"agent":{"id":"a","name":"Loft Dev"}},{"udid":"U2","name":"Loft Lead (Loft)","state":"Shutdown","bytes":5,"agent":{"id":"b","name":"Loft Lead"}}]}"#
         let d = try JSONCoding.decoder.decode(AgentDevices.self, from: Data(json.utf8)).devices
-        XCTAssertEqual(d.map(\.agent.name), ["Loft Dev", "Loft Lead"])
+        XCTAssertEqual(d.map(\.title), ["Loft Dev", "Loft Lead"])
         XCTAssertEqual(d.map(\.stateText), ["Booted", "Shut down"])
         XCTAssertEqual(d.first?.bytes, 2_878_722_048)
 

@@ -1,15 +1,16 @@
 import SwiftUI
 
-/// Settings › Disk's clean: each workspace's top-level items (one agent, or all with nil), by agent, to tick what goes;
-/// a main clone opens to its folders, one level at a time. Then each removal as it happens and the summary. Opened on
-/// a log, it shows that one.
+/// Settings › Disk's Clean, a full screen: every workspace's top-level items in one list with agent, type, size, last
+/// change and status, sorted by size, agent or last change, to tick what goes; a main clone opens to its folders,
+/// one level at a time. An idle agent's leftover processes and Stop them sit before its first row. Then each removal
+/// as it happens and the summary. Opened on a log, it shows that one.
 struct CleanSheet: View {
     enum Start: Identifiable {
-        case preview(agentId: String?)
+        case check
         case log(CleanLog)
         var id: String {
             switch self {
-            case .preview(let a): "preview-\(a ?? "all")"
+            case .check: "check"
             case .log: "log"
             }
         }
@@ -18,8 +19,8 @@ struct CleanSheet: View {
     let start: Start
     /// Agent names by id; a deleted agent's workspace shows its id.
     let names: [String: String]
-    /// After a clean, with the agents it cleaned, so their sizes refresh.
-    var onCleaned: (Set<String>) async -> Void
+    /// After a clean, so the sizes behind refresh.
+    var onCleaned: () async -> Void
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var items: [CleanItem]?
@@ -31,11 +32,10 @@ struct CleanSheet: View {
     @State private var copied = false
     /// Check results by path; nil while checking. Git runs only when the user taps, and nothing gets ticked.
     @State private var checks: [String: GitCheck?] = [:]
-
-    private var agentId: String? {
-        if case .preview(let a) = start { return a }
-        return nil
-    }
+    @State private var sort: CleanSort = .size
+    /// What idle agents left running, by agent id, and the agent whose Stop them is working.
+    @State private var left: [String: [LeftProcess]] = [:]
+    @State private var stoppingId: String?
     /// Every item listed so far, opened folders' included, and those ticked.
     private var known: [CleanItem] { (items ?? []) + inside.values.flatMap { $0 ?? [] } }
     private var chosen: [CleanItem] { known.filter { ticked.contains($0.path) } }
@@ -61,19 +61,23 @@ struct CleanSheet: View {
         .task {
             switch start {
             case .log(let l): log = l
-            case .preview(let a):
-                do {
-                    let listed = try await store.cleanPreview(agentId: a)
-                    ticked = Set(listed.filter(\.ticked).map(\.path))
-                    items = listed
-                } catch { self.error = APIError.from(error) }
+            case .check: await load()
             }
         }
     }
 
+    /// Lists every agent's items; nothing is ticked.
+    private func load() async {
+        do {
+            if store.info?.supports(.leftProcesses) == true { left = (try? await store.leftRunning()) ?? [:] }
+            items = try await store.cleanPreview(agentId: nil)
+            ticked = []
+        } catch { self.error = APIError.from(error) }
+    }
+
     private var title: String {
         if let log { return log.title ?? (log.running ? "Cleaning…" : log.what.isEmpty ? "Clean" : log.what) }
-        return agentId.map { "Clean \(name($0))?" } ?? "Clean all?"
+        return "Clean"
     }
 
     private func name(_ id: String) -> String { names[id] ?? "Deleted agent \(id.prefix(8))" }
@@ -86,9 +90,9 @@ struct CleanSheet: View {
                 Button("Done") { dismiss() }.disabled(log.running)
             }
         } else {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button(items == nil ? "Remove" : "Remove \(bytes(chosen.reduce(0) { $0 + $1.bytes }))", role: .destructive) { confirm() }
+                Button("Delete selected", role: .destructive) { confirm() }
                     .disabled(chosen.isEmpty)
                     .accessibilityIdentifier("cleanConfirm")
             }
@@ -99,28 +103,56 @@ struct CleanSheet: View {
     private func previewSections(_ items: [CleanItem]) -> some View {
         Section {
             let total = chosen.reduce(0) { $0 + $1.bytes }
-            let kept = max(0, items.reduce(0) { $0 + $1.bytes } - total)
-            Text(items.isEmpty ? "Nothing to remove." : "Removes \(chosen.count) item\(chosen.count == 1 ? "" : "s") (\(bytes(total))) · keeps \(bytes(kept)).")
+            Text(chosen.isEmpty ? (items.isEmpty ? "Nothing in any workspace." : "Nothing selected") : "\(chosen.count) selected · \(bytes(total))")
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("cleanSummary")
+            Picker("Sort by", selection: $sort) {
+                ForEach(CleanSort.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("cleanSort")
         }
-        ForEach(groupedByAgent(items, \.agent), id: \.agent) { group in
-            Section {
-                rows(group.items, depth: 0)
-            } header: {
-                HStack {
-                    Text("\(name(group.agent)) · \(bytes(group.items.reduce(0) { $0 + $1.bytes }))")
-                    Spacer()
-                    if group.items.contains(where: \.canCheck) {
-                        Button("Check all") { checkAll(group.items) }
-                            .font(.caption)
-                            .textCase(nil)
-                            .accessibilityIdentifier("checkAll-\(group.agent)")
-                    }
+        let sorted = sortedClean(items, by: sort, agentName: name)
+        Section {
+            ForEach(Array(sorted.enumerated()), id: \.element.id) { n, i in
+                if !sorted[..<n].contains(where: { $0.agent == i.agent }), let ps = left[i.agent], !ps.isEmpty, i.blocked != "Working" {
+                    leftRunning(i.agent, ps)
                 }
+                rows([i], depth: 0)
             }
         }
         commandsSection(chosen.map { ($0.agent, $0.command) })
+    }
+
+    /// What an idle agent left running, and a button to stop it.
+    private func leftRunning(_ agent: String, _ ps: [LeftProcess]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("\(name(agent)): \(ps.count) process\(ps.count == 1 ? "" : "es") still running").font(.subheadline).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button(stoppingId == agent ? "Stopping…" : "Stop them") {
+                    stoppingId = agent
+                    Task {
+                        try? await store.stopLeftRunning(agentId: agent)
+                        await load()
+                        stoppingId = nil
+                    }
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(stoppingId != nil || !store.canWrite)
+                .accessibilityIdentifier("stop-\(agent)")
+            }
+            ForEach(ps) { p in
+                HStack(alignment: .firstTextBaseline) {
+                    Text(p.command).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Text(p.ageText).font(.caption).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("left-\(agent)")
     }
 
     /// The items at `depth`, each followed by its folders when opened.
@@ -157,8 +189,8 @@ struct CleanSheet: View {
                 Image(systemName: on ? "checkmark.square.fill" : "square").font(.title3)
             }
             .buttonStyle(.borderless)
-            .disabled(!i.canTick)
-            .accessibilityLabel("Remove \(i.rel)")
+            .disabled(i.status.locked)
+            .accessibilityLabel("Select \(i.rel)")
             .accessibilityValue(on ? "ticked" : "not ticked")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
@@ -166,10 +198,11 @@ struct CleanSheet: View {
                     Spacer(minLength: 4)
                     Text(bytes(i.bytes)).font(.subheadline).monospacedDigit()
                 }
-                Text("\(i.kind == "clone" ? "git clone" : i.kind) · changed \(i.changed.formatted(.relative(presentation: .named)))")
+                Text("\(depth == 0 ? name(i.agent) + " · " : "")\(i.typeText) · changed \(i.changed.formatted(.relative(presentation: .named)))")
                     .font(.caption).foregroundStyle(.secondary)
-                if !i.label.isEmpty { Text(i.label).font(.caption).foregroundStyle(Theme.accent) }
-                if !i.blocked.isEmpty { Text(i.blocked).font(.caption).foregroundStyle(Theme.attentionInk) }
+                Text(i.status.text).font(.caption).foregroundStyle(i.status.locked ? Theme.attentionInk : Color.green)
+                    .accessibilityIdentifier("status-\(i.rel)")
+                if !i.status.locked && !i.label.isEmpty { Text(i.label).font(.caption).foregroundStyle(.secondary) }
                 if on && !i.warning.isEmpty && checks[i.path] == nil { Text(i.warning).font(.caption).foregroundStyle(Theme.attentionInk) }
                 if i.canCheck { checkLine(i) }
                 if !i.note.isEmpty { Text(i.note).font(.caption).foregroundStyle(.secondary) }
@@ -308,7 +341,7 @@ struct CleanSheet: View {
     private func confirm() {
         let paths = chosen.map(\.path)
         copied = false
-        log = CleanLog(at: nil, what: "", title: agentId.map { "Cleaning \(name($0))…" } ?? "Cleaning all agents…", running: true, lines: [], skipped: [], freedBytes: 0, removed: 0, failed: 0)
+        log = CleanLog(at: nil, what: "", title: "Cleaning…", running: true, lines: [], skipped: [], freedBytes: 0, removed: 0, failed: 0)
         Task {
             // The log fills in as the Mac removes each folder.
             let poll = Task {
@@ -319,9 +352,9 @@ struct CleanSheet: View {
             }
             defer { poll.cancel() }
             do {
-                let done = try await store.clean(agentId: agentId, paths: paths)
+                let done = try await store.clean(agentId: nil, paths: paths)
                 log = done
-                await onCleaned(Set(done.lines.map(\.agent)))
+                await onCleaned()
             } catch {
                 log = nil
                 self.error = APIError.from(error)

@@ -1,18 +1,22 @@
 //! Workspace disk space: Settings' Clean, and the daily sweep.
 //!
 //! Clean (one agent) and Clean all list each workspace's top-level items (`GET /api/workspaces/clean/preview`)
-//! and remove the ones the user ticks (`POST /api/workspaces/clean`). Each project's main clone, `notes/` and
-//! `uploads/` start unticked, and so do all the clones of an agent with no project; everything else starts ticked. A main clone opens up to its own folders, one level
-//! at a time (`GET /api/workspaces/clean/folders`), so the user can remove just `backend/target`; its `.git`
-//! never goes, and neither does the clone itself. A working agent's items can't be removed, and each path is
-//! checked again just before it goes.
+//! and remove the ones the user ticks (`POST /api/workspaces/clean`). The listing runs the git check
+//! ([`crate::git_check`]) on every clone and worktree: one with nothing uncommitted, unpushed or stashed can be
+//! ticked and removed whole, a main clone too (the agent clones the project again on its next run); any other
+//! stays locked with the reason, and the check runs again just before it goes. `notes/` and `uploads/` start
+//! unticked. A main clone opens up to its own folders, one level at a time (`GET /api/workspaces/clean/folders`),
+//! so the user can remove just `backend/target`; `.git` on its own never goes. A working agent's items can't be
+//! removed, and each path is checked again just before it goes.
 //!
 //! The sweep deletes rebuildable build output (the table of `RULES`: Rust, Node, .NET, Gradle, Pods, Flutter,
 //! Python and the like, each only beside its marker file) whose newest file is 3 days old, so idle workspaces don't fill the disk.
 //! An agent that works often never leaves its `.cargo-build/` that old, so there its `*/incremental` caches go
-//! once together they pass 2 GB, and `deps/` stays (rebuilding incremental takes seconds, deps about 30 s). It
+//! once together they pass 2 GB, and once it passes 8 GB the `*/deps` files no build wrote for a day go, oldest
+//! first, until it's under (cargo keeps every old build's set there, and rebuilds what it still needs). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
-//! files kept, and skips running agents and agents with a live process (a dev server).
+//! files kept, and skips agents in a run. A process an idle agent left running (a dev server) doesn't keep its
+//! build output: the idle timeout (4 h by default) stops such processes long before output is 3 days old.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
 //! so Loft's own checkout stays. Each run writes a log of what it removed, skipped and why, and the last one
@@ -43,9 +47,23 @@ const SIZE_FOR: Duration = Duration::from_secs(60);
 const LOG_FILE: &str = "clean-log.json";
 /// Past this, a young `.cargo-build/`'s `*/incremental` caches go.
 const INCREMENTAL_CAP: u64 = 2_000_000_000;
+/// Past this, a young `.cargo-build/`'s old `*/deps` files go until it's under.
+const DEPS_CAP: u64 = 8_000_000_000;
+/// A `deps/` file no build wrote for this long is old.
+const DEPS_OLD: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[cfg(test)]
 thread_local!(static FAKE_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+#[cfg(test)]
+thread_local!(static FAKE_DEPS_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+
+fn deps_cap() -> u64 {
+    #[cfg(test)]
+    if let Some(c) = FAKE_DEPS_CAP.with(|c| c.get()) {
+        return c;
+    }
+    DEPS_CAP
+}
 
 fn incremental_cap() -> u64 {
     #[cfg(test)]
@@ -54,9 +72,6 @@ fn incremental_cap() -> u64 {
     }
     INCREMENTAL_CAP
 }
-
-/// Under a main clone in Clean: what keeping it costs.
-const KEPT: &str = "Kept: this is the agent's working copy. Its own build stays (e.g. backend/target or node_modules/), usually 1–5 GB, and the agent reuses it on its next build.";
 
 /// A build folder the sweep would remove.
 #[derive(Clone, Debug, Serialize)]
@@ -70,6 +85,9 @@ pub struct Folder {
     pub changed: DateTime<Local>,
     /// The shell command equivalent to its removal; Loft removes by path.
     pub command: String,
+    /// When not empty, only these files in it go (and what each frees), not the folder.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<(PathBuf, u64)>,
 }
 
 /// What a run leaves, and why.
@@ -96,7 +114,7 @@ pub struct Item {
     /// Inside the agent's workspace, like `loft` or `loft/backend/target`.
     pub rel: String,
     pub name: String,
-    /// "clone", "worktree", "folder", "file" or "symlink".
+    /// "clone", "worktree", "build" (build output), "folder", "file" or "symlink".
     pub kind: &'static str,
     pub bytes: u64,
     /// Its newest file's change.
@@ -163,8 +181,9 @@ impl Log {
             self.failed += 1;
         } else {
             self.removed += 1;
-            self.freed_bytes += l.bytes;
         }
+        // A trim that stopped partway freed what it removed before (a failed removal says 0).
+        self.freed_bytes += l.bytes;
         self.lines.push(l);
     }
 }
@@ -187,20 +206,21 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
 }
 
-/// `GET /api/workspaces`: every agent's workspace size and whether it is busy (running or with a live process,
-/// so Clean can't remove its items), and the disk's free space.
+/// `GET /api/workspaces`: every agent's workspace size, whether it is busy (in a run, so Clean can't remove its
+/// items) and how many processes it left running, and the disk's free space.
 pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) -> crate::api::ApiResult<serde_json::Value> {
     let agents = state.db.list_agents()?;
     let storage = state.cfg.storage_dir.clone();
     let running: Vec<String> = state.rt.lock().unwrap().running.keys().cloned().collect();
     let dirs: Vec<(String, String, PathBuf)> = agents.iter().map(|a| (a.id.clone(), a.name.clone(), crate::agents::workspace(&state, &a.id))).collect();
     let (rows, free) = tokio::task::spawn_blocking(move || {
-        let live = crate::processes::with_live_processes(&storage);
+        let live = crate::processes::live_processes(&storage);
         let rows: Vec<_> = dirs
             .into_iter()
             .map(|(id, name, d)| {
-                let busy = live.contains(&id) || running.contains(&id);
-                serde_json::json!({ "id": id, "name": name, "bytes": size(&d), "busy": busy })
+                let busy = running.contains(&id);
+                let left = if busy { 0 } else { live.get(&id).map_or(0, Vec::len) };
+                serde_json::json!({ "id": id, "name": name, "bytes": size(&d), "busy": busy, "processes": left })
             })
             .collect();
         (rows, free_bytes(&storage))
@@ -216,10 +236,10 @@ pub(crate) fn projects(state: &AppState) -> HashMap<String, Vec<String>> {
     agents.into_iter().map(|a| (a.id, if a.projects.is_empty() { vec![a.project].into_iter().filter(|p| !p.is_empty()).collect() } else { a.projects })).collect()
 }
 
-/// Whether an agent is running or has a live process. Asked again before each removal.
+/// Whether an agent is in a run. Asked again before each removal. What an idle agent left running doesn't lock
+/// it: Clean lists those processes and the user can stop them.
 fn busy_check(state: &AppState) -> impl Fn(&str) -> bool + '_ {
-    let live = crate::processes::with_live_processes(&state.cfg.storage_dir);
-    move |id: &str| live.contains(id) || state.rt.lock().unwrap().running.contains_key(id)
+    move |id: &str| state.rt.lock().unwrap().running.contains_key(id)
 }
 
 #[derive(Deserialize)]
@@ -229,14 +249,48 @@ pub struct PreviewOpts {
 
 /// `GET /api/workspaces/clean/preview[?agent=<id>]`: what Clean on that agent, or Clean all, lists.
 pub async fn preview(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<PreviewOpts>) -> axum::Json<Listing> {
+    let st = state.clone();
     let items = tokio::task::spawn_blocking(move || {
-        let projects = projects(&state);
+        let projects = projects(&st);
         let of = |id: &str| projects.get(id).cloned().unwrap_or_default();
-        listing(&state.cfg.storage_dir, q.agent.as_deref(), &of, &busy_check(&state))
+        listing(&st.cfg.storage_dir, q.agent.as_deref(), &of, &busy_check(&st))
     })
     .await
     .unwrap_or_default();
-    axum::Json(Listing { items })
+    axum::Json(Listing { items: git_checked(&state, items).await })
+}
+
+/// How many git checks run at once.
+const CHECKS_AT_ONCE: usize = 4;
+
+/// `items` with the git check run on each clone and worktree of an agent that isn't working: a safe one can be
+/// ticked, any other is locked with what the check found. This is the user's Check space click, so git runs.
+async fn git_checked(state: &AppState, items: Vec<Item>) -> Vec<Item> {
+    let projects = projects(state);
+    let storage = state.cfg.storage_dir.clone();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(CHECKS_AT_ONCE));
+    let mut set = tokio::task::JoinSet::new();
+    for (n, i) in items.iter().enumerate() {
+        if !matches!(i.kind, "clone" | "worktree") || !i.blocked.is_empty() {
+            continue;
+        }
+        let (storage, agent, name, projects, gate) = (storage.clone(), i.agent.clone(), i.name.clone(), projects.get(&i.agent).cloned().unwrap_or_default(), gate.clone());
+        set.spawn(async move {
+            let _turn = gate.acquire().await;
+            (n, crate::git_check::run(&storage, &agent, &name, &projects).await)
+        });
+    }
+    let mut items = items;
+    while let Some(Ok((n, c))) = set.join_next().await {
+        let i = &mut items[n];
+        i.warning.clear();
+        if c.state == "safe" {
+            (i.label, i.note) = (String::new(), c.lines.join(" · "));
+        } else {
+            (i.blocked, i.note, i.ticked) = (c.lines.join(" · "), String::new(), false);
+        }
+    }
+    items
 }
 
 #[derive(Deserialize)]
@@ -277,6 +331,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
         None => ("Clean all", "Cleaning all agents…".into(), "Cleaned all agents".into()),
     };
     let st = state.clone();
+    let rt = tokio::runtime::Handle::current();
     let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
         let root = storage.canonicalize().unwrap_or_default();
@@ -293,6 +348,15 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
                 }
                 Ok((id, _)) if b.agent.as_ref().is_some_and(|a| *a != id) => log.skipped.push(skip(&id, "", "another agent's")),
                 Ok((id, rel)) => {
+                    // A clone goes only when the git check, run again now, says it is safe.
+                    if !rel.contains('/') && path.join(".git").symlink_metadata().is_ok() {
+                        let c = rt.block_on(crate::git_check::run(storage, &id, &rel, projects.get(&id).map(Vec::as_slice).unwrap_or_default()));
+                        if c.state != "safe" {
+                            log.skipped.push(skip(&id, &rel, &format!("kept: {}", c.lines.join(" · "))));
+                            show(&st, &log);
+                            continue;
+                        }
+                    }
                     let bytes = size(&path);
                     let command = rm_command(&path);
                     let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&root, &path).err() };
@@ -340,17 +404,19 @@ pub async fn log(axum::extract::State(state): axum::extract::State<AppState>) ->
 /// One sweep or clean at a time.
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Removes the build output untouched for `idle` from every workspace but those of running agents and agents
-/// with a live process, or just from `only`'s. With `what`, the run's log is the one Settings shows, live and
+/// Removes the build output untouched for `idle` from every workspace but those of agents in a run, or just
+/// from `only`'s. With `what`, the run's log is the one Settings shows, live and
 /// saved; without, it is only returned.
 pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str>, idle: Duration) -> Log {
     let _one = RUNNING.lock().await;
     let (st, only) = (state.clone(), only.map(str::to_string));
+    let rt = tokio::runtime::Handle::current();
     let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
         // Asked again before each removal, so a run that starts mid-sweep keeps its build output.
         let busy = busy_check(&st);
         let p = plan(storage, only.as_deref(), &busy, SystemTime::now(), idle);
+        let p = untracked(&rt, p);
         let what = what.unwrap_or_default();
         let mut log = Log { at: Some(Local::now()), what: what.into(), title: format!("{what}…"), running: true, skipped: p.skipped, ..Default::default() };
         let show = |log: &Log| {
@@ -424,7 +490,7 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
                 let mut i = item(&id, name.clone(), e.path());
                 let dir = i.kind == "folder";
                 if let Some(project) = mains.get(&name) {
-                    (i.label, i.note, i.warning, i.ticked, i.opens) = (format!("main clone of {project}"), KEPT.into(), String::new(), false, true);
+                    (i.label, i.warning, i.ticked, i.opens) = (format!("main clone of {project}"), String::new(), false, true);
                 } else if projects.is_empty() && matches!(i.kind, "clone" | "worktree") {
                     // Any of them may be its working copy.
                     (i.label, i.ticked) = ("agent has no project: can't tell its main clone".into(), false);
@@ -453,10 +519,7 @@ fn inside(storage: &Path, id: &str, rel: &str, projects: &[String], busy: bool) 
     if !mains.contains_key(rel.split('/').next().unwrap_or_default()) {
         return Err("not inside a main clone".into());
     }
-    match check(&root, &dir, &|_| mains.clone()) {
-        Ok(_) | Err("main clone") => {}
-        Err(e) => return Err(e.into()),
-    }
+    check(&root, &dir, &|_| mains.clone())?;
     if !dir.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         return Err("not a folder".into());
     }
@@ -490,6 +553,7 @@ fn item(agent: &str, rel: String, path: PathBuf) -> Item {
         Some(m) if m.is_dir() => match path.join(".git").symlink_metadata() {
             Ok(g) if g.is_dir() => "clone",
             Ok(_) => "worktree",
+            Err(_) if is_build(&path) => "build",
             Err(_) => "folder",
         },
         _ => "file",
@@ -531,8 +595,8 @@ pub(crate) fn main_clones(ws: &Path, projects: &[String]) -> HashMap<String, Str
     found.iter().filter(|(d, p)| !named(p) || *d == last(p)).cloned().collect()
 }
 
-/// Whether Clean may remove `path`, as the workspace is now: a top-level item of an agent's workspace that isn't
-/// a main clone, or a folder inside a main clone, never `.git` and never through a symlink. Its agent and `rel`.
+/// Whether Clean may remove `path`, as the workspace is now: a top-level item of an agent's workspace,
+/// or a folder inside a main clone, never `.git` and never through a symlink. Its agent and `rel`.
 fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, String>) -> Result<(String, String), &'static str> {
     let rest = path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
     let parts = rest
@@ -566,8 +630,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
     }
     let main = mains(parts[0]).contains_key(parts[1]);
     match (parts.len(), main) {
-        (2, true) => Err("main clone"),
-        (2, false) => Ok(()),
+        (2, _) => Ok(()),
         (_, true) if p.is_dir() => Ok(()),
         (_, true) => Err("not a folder"),
         (_, false) => Err("not inside a main clone"),
@@ -609,6 +672,23 @@ pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now
             p.skipped.push(skip(&id, "", "agent is working"));
         } else if t.is_dir() {
             workspace(&root, &id, &e.path(), now, idle, &mut p);
+        }
+    }
+    p
+}
+
+/// The plan without the folders in a clone that git tracks any file in, or can't say: they are skipped. Some teams
+/// commit `Pods/` or `bin/`.
+fn untracked(rt: &tokio::runtime::Handle, mut p: Plan) -> Plan {
+    let folders = std::mem::take(&mut p.folders);
+    for f in folders {
+        // The clone or worktree it's in: the nearest folder above it with a `.git`, inside the workspace.
+        let ws = f.path.ancestors().nth(f.rel.split('/').count()).unwrap_or(&f.path).to_path_buf();
+        let repo = f.path.ancestors().skip(1).take_while(|a| a.starts_with(&ws)).find(|a| a.join(".git").symlink_metadata().is_ok());
+        match repo.map(|r| rt.block_on(crate::git_check::tracks(&ws, r, &f.path))) {
+            None | Some(Some(false)) => p.folders.push(f),
+            Some(Some(true)) => p.skipped.push(skip(&f.agent, &f.rel, "tracked by git")),
+            Some(None) => p.skipped.push(skip(&f.agent, &f.rel, "git can't say whether it tracks it")),
         }
     }
     p
@@ -657,11 +737,17 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
         // An agent that works often keeps it young, so its incremental caches are capped instead.
         if shared_dir && b == shared {
             let caches: Vec<_> = subdirs(&b).map(|(_, profile)| profile.join("incremental")).filter(|d| d.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
-            if caches.iter().map(|d| size(d)).sum::<u64>() > incremental_cap() {
+            let cached = caches.iter().map(|d| size(d)).sum::<u64>();
+            let mut total = size(&b);
+            if cached > incremental_cap() {
+                total = total.saturating_sub(cached);
                 for d in caches {
                     let (_, changed) = measure(&d);
                     folder(root, id, &rel(&d), d, changed, p);
                 }
+            }
+            if total > deps_cap() {
+                trim_deps(root, id, &b, total, now, p, &rel);
             }
         }
         // With the workspace's `.cargo-build/` holding the build, what a Cargo `target/` still has besides
@@ -687,29 +773,104 @@ fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, 
     }
     let bytes = size(&path);
     let command = rm_command(&path);
-    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command });
+    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command, files: vec![] });
+}
+
+/// Plans the removal of `shared`'s `*/deps` files no build wrote for `DEPS_OLD`, oldest first, until the
+/// `total` it measures is under the cap: one folder per `deps/`, only those files in it.
+fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTime, p: &mut Plan, rel: &dyn Fn(&Path) -> String) {
+    let mut old = vec![];
+    for (_, deps) in subdirs(shared).flat_map(|(_, profile)| subdirs(&profile).collect::<Vec<_>>()).filter(|(name, _)| name == "deps") {
+        for e in std::fs::read_dir(&deps).into_iter().flatten().flatten() {
+            let Ok(m) = e.path().symlink_metadata() else { continue };
+            let Ok(t) = m.modified() else { continue };
+            // A file with another link frees nothing (cargo links each binary into its profile too), so it stays.
+            if m.is_file() && m.nlink() == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
+                old.push((t, deps.clone(), e.path(), m.blocks() * 512));
+            }
+        }
+    }
+    old.sort_by_key(|o| o.0);
+    let mut by_dir: Vec<Folder> = vec![];
+    let mut last = None;
+    for (t, deps, file, bytes) in old {
+        // Files as old as the last one taken go too, so the logged `find ! -newer` removes exactly these.
+        if total <= deps_cap() && last != Some(t) {
+            break;
+        }
+        (total, last) = (total.saturating_sub(bytes), Some(t));
+        let f = match by_dir.iter_mut().find(|f| f.path == deps) {
+            Some(f) => f,
+            None => {
+                by_dir.push(Folder { agent: id.into(), rel: rel(&deps), path: deps, bytes: 0, changed: t.into(), command: String::new(), files: vec![] });
+                by_dir.last_mut().unwrap()
+            }
+        };
+        f.bytes += bytes;
+        f.changed = t.into();
+        f.command = format!("find {} -maxdepth 1 -type f -links 1 ! -newer {} -delete", quoted(&f.path), quoted(&file));
+        f.files.push((file, bytes));
+    }
+    for f in by_dir {
+        if f.path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+            p.folders.push(f);
+        } else {
+            p.skipped.push(skip(id, &f.rel, "outside agent-local-storage"));
+        }
+    }
 }
 
 /// `rm -rf <path>`, quoted for the shell when it needs to be, and on one line: control characters are written
 /// as escapes inside `$'…'`.
 fn rm_command(path: &Path) -> String {
+    format!("rm -rf {}", quoted(path))
+}
+
+/// `path` quoted for the shell when it needs to be, on one line.
+fn quoted(path: &Path) -> String {
     let p = path.to_string_lossy();
     if p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
-        format!("rm -rf {p}")
+        p.into()
     } else if p.chars().any(char::is_control) {
-        format!("rm -rf $'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
+        format!("$'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
     } else {
-        format!("rm -rf '{}'", p.replace('\'', "'\\''"))
+        format!("'{}'", p.replace('\'', "'\\''"))
     }
 }
 
-/// Removes the folders, reporting each as it goes; an agent that started working keeps its.
+/// Removes the folders (or only their planned files), reporting each as it goes; an agent that started working
+/// keeps its.
 fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &mut dyn FnMut(Line)) {
     for f in folders {
-        let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
-        let bytes = if error.is_none() { f.bytes } else { 0 };
-        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done: String::new() });
+        let (error, bytes, done) = if !f.files.is_empty() {
+            let (e, b) = trim(root, &f, busy);
+            (e, b, "Trimmed old build files in".into())
+        } else if busy(&f.agent) {
+            (Some("agent started working".into()), 0, String::new())
+        } else {
+            let e = remove(root, &f.path).err();
+            let b = if e.is_none() { f.bytes } else { 0 };
+            (e, b, String::new())
+        };
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done });
     }
+}
+
+/// Removes a trim's files one by one, asking `busy` before each, and skips one already gone. Stops when the
+/// agent starts a run or a removal fails, and says why; answers what it freed either way.
+fn trim(root: &Path, f: &Folder, busy: &dyn Fn(&str) -> bool) -> (Option<String>, u64) {
+    let mut freed = 0;
+    for (file, bytes) in &f.files {
+        if busy(&f.agent) {
+            return (Some("agent started working".into()), freed);
+        }
+        match remove_under(root, file) {
+            Ok(()) => freed += bytes,
+            Err(_) if file.symlink_metadata().is_err() => {}
+            Err(e) => return (Some(e), freed),
+        }
+    }
+    (None, freed)
 }
 
 /// Real (not symlinked) directories, never a dotfile one.
@@ -736,7 +897,7 @@ fn find_clones(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 /// One kind of build output: a `folder` (a name, or a path like `ios/build`) and the `markers` that must sit
-/// beside it, in the folder's parent (`*.csproj` matches any file with that ending). A folder is build output
+/// beside it, in the folder's parent (a `*` matches any run of characters: `*.csproj`, `requirements*.txt`). A folder is build output
 /// only when one marker is there, so a `build/` or `bin/` that is somebody's real files stays. No markers means
 /// the name never holds anything but rebuildable files.
 struct Rule {
@@ -750,6 +911,7 @@ const fn rule(folder: &'static str, markers: &'static [&'static str]) -> Rule {
 
 const GRADLE: &[&str] = &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"];
 const DOTNET: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
+const PYTHON: &[&str] = &["pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg", "Pipfile"];
 
 /// Everything the sweep and Clean's preview count as build output. To teach them a new stack, add a row here and
 /// a case to `every_rule_is_swept_beside_its_marker_and_kept_without_it`; see docs/sweep-rules.md.
@@ -781,7 +943,7 @@ const RULES: &[Rule] = &[
     rule("build", &["pubspec.yaml"]),
     rule(".dart_tool", &["pubspec.yaml"]),
     // Python
-    rule(".venv", &[]),
+    rule(".venv", PYTHON),
     rule("__pycache__", &[]),
     rule(".pytest_cache", &[]),
     rule(".mypy_cache", &[]),
@@ -797,8 +959,11 @@ impl Rule {
 }
 
 fn has_marker(dir: &Path, marker: &str) -> bool {
-    match marker.strip_prefix('*') {
-        Some(ending) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().ends_with(ending)),
+    match marker.split_once('*') {
+        Some((start, end)) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.len() >= start.len() + end.len() && n.starts_with(start) && n.ends_with(end)
+        }),
         None => dir.join(marker).exists(),
     }
 }
@@ -924,8 +1089,8 @@ type Measured = (Instant, u64, SystemTime);
 /// Measured sizes, by path.
 static SIZES: Mutex<Option<HashMap<PathBuf, Measured>>> = Mutex::new(None);
 
-/// Disk space `path` takes, as `du` measures it (the same measure as a sweep's freed bytes), measured at most
-/// once a minute; 0 when it doesn't exist. Blocking.
+/// Disk space removing `path` gives back, as `du` measures it (the same measure as a sweep's freed bytes),
+/// measured at most once a minute; 0 when it doesn't exist. Blocking.
 pub fn size(path: &Path) -> u64 {
     measure(path).0
 }
@@ -944,15 +1109,27 @@ fn measure(path: &Path) -> (u64, SystemTime) {
     (n, t)
 }
 
-/// Disk space `path` takes and its newest file's change, symlinks not followed.
+/// Disk space removing `path` gives back and its newest file's change, symlinks not followed. A file with hard
+/// links (cargo links its outputs) counts once, and only when all its links are inside `path`.
 fn du(path: &Path) -> (u64, Option<SystemTime>) {
+    let mut links = HashMap::new();
+    let (n, newest) = du_in(path, &mut links);
+    (n + links.into_values().filter(|&(seen, nlink, _)| seen >= nlink).map(|(_, _, b)| b).sum::<u64>(), newest)
+}
+
+/// `du` of `path`, leaving each file with hard links in `links` by (device, inode): links seen, links it has, size.
+fn du_in(path: &Path, links: &mut HashMap<(u64, u64), (u64, u64, u64)>) -> (u64, Option<SystemTime>) {
     let Ok(meta) = path.symlink_metadata() else { return (0, None) };
     let n = meta.blocks() * 512;
     if !meta.is_dir() {
+        if meta.nlink() > 1 {
+            links.entry((meta.dev(), meta.ino())).or_insert((0, meta.nlink(), n)).0 += 1;
+            return (0, meta.modified().ok());
+        }
         return (n, meta.modified().ok());
     }
     std::fs::read_dir(path).into_iter().flatten().flatten().fold((n, None), |(n, newest), e| {
-        let (b, t) = du(&e.path());
+        let (b, t) = du_in(&e.path(), links);
         (n + b, newest.max(t))
     })
 }
@@ -973,9 +1150,16 @@ mod tests {
         fs::write(p, "x").unwrap();
     }
 
+    fn git(dir: &Path, args: &[&str]) {
+        fs::create_dir_all(dir).unwrap();
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// A clone with Rust, web and iOS build output.
     fn clone(dir: &Path) {
-        for f in [".git/HEAD", ".git/index", "Cargo.toml", "src/main.rs", "ios/App/App.swift", "frontend/package.json"] {
+        git(dir, &["init", "-q"]);
+        for f in ["Cargo.toml", "src/main.rs", "ios/App/App.swift", "frontend/package.json"] {
             file(&dir.join(f));
         }
         for f in ["target/debug/app", "frontend/node_modules/vite/index.js", "ios/build/App.app/App", "ios/DerivedData/x", "Pkg/.build/x"] {
@@ -996,7 +1180,8 @@ mod tests {
     /// Plans and removes everything, as the daily sweep does.
     fn sweep(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Log {
         *SIZES.lock().unwrap() = None;
-        let p = plan(storage, only, busy, now, idle);
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let p = untracked(rt.handle(), plan(storage, only, busy, now, idle));
         let mut log = Log { skipped: p.skipped, ..Default::default() };
         apply(&storage.canonicalize().unwrap(), p.folders, busy, &mut |l| log.push(l));
         log
@@ -1036,7 +1221,12 @@ mod tests {
         (".build", None),
         ("build", Some("pubspec.yaml")),
         (".dart_tool", Some("pubspec.yaml")),
-        (".venv", None),
+        (".venv", Some("pyproject.toml")),
+        (".venv", Some("requirements.txt")),
+        (".venv", Some("requirements-dev.txt")),
+        (".venv", Some("setup.py")),
+        (".venv", Some("setup.cfg")),
+        (".venv", Some("Pipfile")),
         ("__pycache__", None),
         (".pytest_cache", None),
         (".mypy_cache", None),
@@ -1047,7 +1237,7 @@ mod tests {
     fn swept(folder: &str, marker: Option<&str>) -> bool {
         let storage = temp();
         let clone = storage.join("agent/app");
-        file(&clone.join(".git/HEAD"));
+        git(&clone, &["init", "-q"]);
         file(&clone.join("src/Program.cs"));
         file(&clone.join(folder).join("out.bin"));
         if let Some(m) = marker {
@@ -1072,6 +1262,40 @@ mod tests {
         }
     }
 
+    /// A clone with a stale `Pods/` beside its `Podfile`.
+    fn pods_clone() -> (PathBuf, PathBuf) {
+        let storage = temp();
+        let clone = storage.join("agent/app");
+        git(&clone, &["init", "-q"]);
+        file(&clone.join("Podfile"));
+        file(&clone.join("Pods/Lib/lib.m"));
+        (storage, clone)
+    }
+
+    #[test]
+    fn a_folder_git_tracks_is_kept_and_logged_and_the_same_folder_untracked_goes() {
+        let (storage, clone) = pods_clone();
+        git(&clone, &["add", "Podfile", "Pods"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(clone.join("Pods/Lib/lib.m").exists());
+        assert!(log.skipped.contains(&skip("agent", "app/Pods", "tracked by git")), "{:?}", log.skipped);
+
+        let (storage, clone) = pods_clone();
+        git(&clone, &["add", "Podfile"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert_eq!(log.removed_paths(), [clone.join("Pods")]);
+    }
+
+    #[test]
+    fn a_folder_in_a_clone_git_can_t_be_asked_about_is_kept() {
+        let (storage, clone) = pods_clone();
+        // A config key outside Check's allowlist: git isn't run.
+        git(&clone, &["config", "filter.x.clean", "cat"]);
+        let log = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert!(clone.join("Pods/Lib/lib.m").exists());
+        assert!(log.skipped.contains(&skip("agent", "app/Pods", "git can't say whether it tracks it")), "{:?}", log.skipped);
+    }
+
     #[test]
     fn a_bare_build_dist_or_bin_with_no_marker_is_never_swept() {
         for folder in ["build", "dist", "bin", "obj", "out", "target"] {
@@ -1089,7 +1313,7 @@ mod tests {
         for f in ["Api/Api.csproj", "Api/Program.cs", "Api/bin/Debug/Api.dll", "Api/obj/project.assets.json"] {
             file(&ws.join("app").join(f));
         }
-        file(&ws.join("app/.git/HEAD"));
+        git(&ws.join("app"), &["init", "-q"]);
         let planned = plan(&storage, None, &|_| false, later(), IDLE);
         let rels: Vec<&str> = planned.folders.iter().map(|f| f.rel.as_str()).collect();
         assert!(rels.contains(&"app/Api/bin") && rels.contains(&"app/Api/obj"), "{rels:?}");
@@ -1147,16 +1371,16 @@ mod tests {
         let kinds: Vec<_> = ["loft", "loft-old", "wt", "notes", "dev.log"].iter().map(|n| by(n).kind).collect();
         assert_eq!(kinds, ["clone", "clone", "worktree", "folder", "file"]);
         let main = by("loft");
-        assert_eq!((main.label.as_str(), main.ticked, main.opens, main.note.as_str()), ("main clone of loft", false, true, KEPT));
-        assert!(main.warning.is_empty());
+        assert_eq!((main.label.as_str(), main.ticked, main.opens, main.blocked.as_str()), ("main clone of loft", false, true, "Uncommitted changes (6 files)"));
+        assert!(main.warning.is_empty() && main.note.is_empty());
         assert_eq!((by("notes").label.as_str(), by("notes").ticked), ("reports and notes", false));
         assert_eq!((by("uploads").label.as_str(), by("uploads").ticked), ("chat attachments", false));
-        // Everything else starts ticked; other clones and worktrees warn.
-        for n in ["loft-old", "wt", ".cargo-build", "dev.log", "scratch"] {
+        // Everything else starts ticked; the git check locks the other clones and the worktree.
+        for n in [".cargo-build", "dev.log", "scratch"] {
             assert!(by(n).ticked && by(n).label.is_empty() && by(n).blocked.is_empty() && !by(n).opens, "{:?}", by(n));
         }
-        assert_eq!(by("loft-old").warning, "may contain unpushed work");
-        assert_eq!(by("wt").warning, "may contain unpushed work");
+        assert_eq!((by("loft-old").ticked, by("loft-old").blocked.as_str()), (false, "Uncommitted changes (6 files)"));
+        assert_eq!((by("wt").ticked, by("wt").blocked.as_str()), (false, "Can't check: not a git repo"));
         // Size, last change (the newest file), path and command.
         let log = by("dev.log");
         assert!(log.bytes >= 5000 && log.path == ws.join("dev.log") && log.rel == "dev.log", "{log:?}");
@@ -1184,13 +1408,14 @@ mod tests {
         let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
         for n in ["api", "api-old", "wt1895"] {
             let i = by(n);
-            assert_eq!((i.label.as_str(), i.ticked, i.blocked.as_str(), i.opens), ("agent has no project: can't tell its main clone", false, "", false), "{i:?}");
+            assert_eq!((i.label.as_str(), i.ticked, i.blocked.as_str(), i.opens), ("agent has no project: can't tell its main clone", false, i.blocked.as_str(), false), "{i:?}");
+            assert!(!i.blocked.is_empty(), "{i:?}");
         }
         assert!(by("scratch").ticked && by("scratch").label.is_empty());
-        // Still the user's to tick.
+        // Its changes aren't pushed: it stays, and the log says why.
         let l = clean_paths(&st, Some(&a.id), vec![ws.join("api-old")]).await;
-        assert_eq!(l.removed, 1, "{l:?}");
-        assert!(!ws.join("api-old").exists() && ws.join("api/src/main.rs").exists());
+        assert_eq!((l.removed, l.skipped.len()), (0, 1), "{l:?}");
+        assert!(ws.join("api-old/src/main.rs").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1200,11 +1425,11 @@ mod tests {
         let items = preview_of(&st, Some(&a.id)).await;
         let ticked: Vec<_> = items.iter().filter(|i| i.ticked).map(|i| i.path.clone()).collect();
         let l = clean_paths(&st, Some(&a.id), ticked).await;
-        assert_eq!((l.removed, l.failed, l.running), (5, 0, false), "{:?}", l);
-        for gone in ["loft-old", "wt", ".cargo-build", "dev.log", "scratch"] {
+        assert_eq!((l.removed, l.failed, l.running), (3, 0, false), "{:?}", l);
+        for gone in [".cargo-build", "dev.log", "scratch"] {
             assert!(!ws.join(gone).exists(), "{gone} stays");
         }
-        for kept in ["loft/src/main.rs", "loft/target/debug/app", "notes/plan.md", "uploads/1.png"] {
+        for kept in ["loft-old/src/main.rs", "wt/src/main.rs", "loft/src/main.rs", "loft/target/debug/app", "notes/plan.md", "uploads/1.png"] {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         assert!(l.freed_bytes >= 5000);
@@ -1244,7 +1469,7 @@ mod tests {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         let reasons: Vec<_> = l.skipped.iter().map(|s| (s.rel.as_str(), s.reason.as_str())).collect();
-        assert_eq!(reasons, [("loft", "main clone"), ("loft/.git", "git history: never deleted"), ("loft/.git/HEAD", "git history: never deleted")]);
+        assert_eq!(reasons, [("loft", "kept: Uncommitted changes (7 files)"), ("loft/.git", "git history: never deleted"), ("loft/.git/HEAD", "git history: never deleted")]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1313,7 +1538,7 @@ mod tests {
         assert!(folders_of(&st, &a.id, "loft").await.unwrap().iter().all(|i| !i.blocked.is_empty()));
         // A clean confirmed from before it started leaves its items.
         let l = clean_paths(&st, Some(&a.id), idle.iter().filter(|i| i.ticked).map(|i| i.path.clone()).collect()).await;
-        assert_eq!((l.removed, l.failed), (0, 5));
+        assert_eq!((l.removed, l.failed), (0, 3));
         assert!(l.lines.iter().all(|x| x.error.as_deref() == Some("agent started working") && x.bytes == 0));
         assert!(ws.join("scratch").exists() && ws.join("wt").exists());
     }
@@ -1547,6 +1772,131 @@ mod tests {
         FAKE_CAP.with(|c| c.set(None));
     }
 
+    /// A young `.cargo-build/` whose `debug/deps` holds four 64 KB files written 3, 2 and 1.5 days ago and now.
+    fn deps_by_age(ws: &Path) -> PathBuf {
+        let deps = ws.join(".cargo-build/debug/deps");
+        fs::create_dir_all(&deps).unwrap();
+        for (name, hours) in [("a.o", 72), ("b.o", 48), ("c.o", 36), ("d.o", 0)] {
+            fs::write(deps.join(name), vec![0u8; 64 * 1024]).unwrap();
+            fs::File::open(deps.join(name)).unwrap().set_modified(SystemTime::now() - Duration::from_secs(hours * 3600)).unwrap();
+        }
+        deps
+    }
+
+    #[test]
+    fn over_the_cap_a_working_agent_s_oldest_deps_files_go_until_it_s_under_and_newer_ones_stay() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        // 8 GB, scaled down: under it once two of the files go.
+        let (total, _) = du(&storage.join("a/.cargo-build"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(total - 100_000)));
+
+        let l = sweep(&storage, None, &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+
+        let left: Vec<bool> = ["a.o", "b.o", "c.o", "d.o"].iter().map(|f| deps.join(f).exists()).collect();
+        assert_eq!(left, [false, false, true, true], "oldest first, only until under the cap");
+        let [line] = &l.lines[..] else { panic!("{:?}", l.lines) };
+        assert_eq!((line.rel.as_str(), line.done.as_str(), line.error.as_deref()), (".cargo-build/debug/deps", "Trimmed old build files in", None));
+        assert!(line.bytes >= 2 * 64 * 1024, "the log shows what it freed: {}", line.bytes);
+    }
+
+    /// The trim `plan` makes for `a`'s `.cargo-build`, with a cap two files under its size.
+    fn deps_plan(storage: &Path) -> Plan {
+        *SIZES.lock().unwrap() = None;
+        let (total, _) = du(&storage.join("a/.cargo-build"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(total - 100_000)));
+        let p = plan(storage, Some("a"), &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+        p
+    }
+
+    #[test]
+    fn the_logged_command_removes_exactly_the_planned_files() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        let [f] = &p.folders[..] else { panic!("{:?}", p.folders) };
+        let out = std::process::Command::new("sh").args(["-c", &f.command]).output().unwrap();
+        assert!(out.status.success(), "{}: {}", f.command, String::from_utf8_lossy(&out.stderr));
+        let left: Vec<bool> = ["a.o", "b.o", "c.o", "d.o"].iter().map(|n| deps.join(n).exists()).collect();
+        assert_eq!(left, [false, false, true, true], "{}", f.command);
+    }
+
+    #[test]
+    fn a_deps_file_with_another_link_or_a_symlinked_deps_stays() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        // The binary cargo links into its profile: removing it from deps frees nothing.
+        fs::hard_link(deps.join("a.o"), storage.join("a/.cargo-build/debug/loft")).unwrap();
+        // A `deps` that leads elsewhere.
+        let elsewhere = deps_by_age(&storage.join("elsewhere"));
+        std::os::unix::fs::symlink(&elsewhere, storage.join("a/.cargo-build/release")).unwrap();
+        fs::create_dir_all(storage.join("a/.cargo-build/test")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, storage.join("a/.cargo-build/test/deps")).unwrap();
+
+        let p = deps_plan(&storage);
+        let planned: Vec<_> = p.folders.iter().flat_map(|f| f.files.iter().map(|(p, _)| p.clone())).collect();
+        assert_eq!(planned, [deps.join("b.o"), deps.join("c.o")], "linked a.o is passed over");
+    }
+
+    #[test]
+    fn a_trim_asks_before_each_file_skips_one_already_gone_and_counts_what_went() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        fs::remove_file(deps.join("a.o")).unwrap();
+        let mut log = Log::default();
+        apply(&storage.canonicalize().unwrap(), p.folders.clone(), &|_| false, &mut |l| log.push(l));
+        assert_eq!((log.removed, log.failed, log.lines[0].bytes > 0), (1, 0, true), "{:?}", log.lines);
+
+        let deps = deps_by_age(&storage.join("a"));
+        let p = deps_plan(&storage);
+        // The agent starts a run after the first file.
+        let asked = std::cell::Cell::new(0);
+        let busy = |_: &str| {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+        let mut log = Log::default();
+        apply(&storage.canonicalize().unwrap(), p.folders, &busy, &mut |l| log.push(l));
+        assert!(!deps.join("a.o").exists() && deps.join("b.o").exists());
+        assert_eq!(log.lines[0].error.as_deref(), Some("agent started working"));
+        assert_eq!(log.freed_bytes, fs::metadata(deps.join("b.o")).unwrap().blocks() * 512, "the first file's freed bytes count");
+    }
+
+    #[test]
+    fn while_the_agent_runs_or_under_the_cap_its_deps_files_stay() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("running"));
+        deps_by_age(&storage.join("b"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(1)));
+        let l = sweep(&storage, Some("running"), &|id| id == "running", SystemTime::now(), IDLE);
+        assert!(deps.join("a.o").exists() && l.lines.is_empty(), "removed during a run");
+
+        FAKE_DEPS_CAP.with(|c| c.set(Some(10_000_000)));
+        let l = sweep(&storage, Some("b"), &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+        assert!(storage.join("b/.cargo-build/debug/deps/a.o").exists() && l.lines.is_empty(), "{:?}", l.lines);
+    }
+
+    #[test]
+    fn a_file_and_its_hard_link_measure_as_one_file_counted_only_where_its_last_link_goes() {
+        let storage = temp();
+        let ws = storage.join("a/.cargo-build/debug");
+        fs::create_dir_all(ws.join("deps")).unwrap();
+        fs::write(ws.join("deps/loft-1a2b"), vec![0u8; 256 * 1024]).unwrap();
+        fs::hard_link(ws.join("deps/loft-1a2b"), ws.join("loft")).unwrap();
+        let one = fs::metadata(ws.join("loft")).unwrap().blocks() * 512;
+        let blocks = |d: &str| fs::metadata(storage.join(d)).unwrap().blocks() * 512;
+
+        let total = du(&storage.join("a/.cargo-build")).0;
+        assert_eq!(total, one + blocks("a/.cargo-build") + blocks("a/.cargo-build/debug") + blocks("a/.cargo-build/debug/deps"), "counted once");
+        assert_eq!(du(&ws.join("deps")).0, blocks("a/.cargo-build/debug/deps"), "removing deps alone frees nothing of it");
+        let r = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert_eq!((r.removed, r.freed_bytes), (1, total), "the whole .cargo-build frees it once");
+    }
+
     #[test]
     fn the_sweep_goes_by_the_newest_file_inside_each_build_folder() {
         let storage = temp();
@@ -1623,7 +1973,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_agent_with_a_live_process_is_skipped() {
+    async fn an_agent_in_a_run_is_skipped_but_one_with_only_a_leftover_process_is_not() {
         use std::os::unix::process::CommandExt;
         let st = crate::tasks::tests::state();
         let (server, idle) = (crate::tasks::tests::agent(&st, "Server"), crate::tasks::tests::agent(&st, "Idle"));
@@ -1639,12 +1989,18 @@ mod tests {
         let mut dev = cmd.spawn().unwrap();
         crate::processes::record(&st.cfg.storage_dir, &server.id, dev.id()).unwrap();
 
+        // In a run, its dev server is its own.
+        st.rt.lock().unwrap().running.insert(server.id.clone(), Default::default());
+        run(&st, None, None, IDLE).await;
+        assert!(crate::agents::workspace(&st, &server.id).join("loft/target").exists(), "an agent in a run lost its build output");
+        assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
+
+        // Out of the run, a leftover server doesn't lock it.
+        st.rt.lock().unwrap().running.remove(&server.id);
         run(&st, None, None, IDLE).await;
         let _ = dev.kill();
         let _ = dev.wait();
-
-        assert!(crate::agents::workspace(&st, &server.id).join("loft/target").exists(), "a dev server's agent lost its build output");
-        assert!(!crate::agents::workspace(&st, &idle.id).join("loft/target").exists());
+        assert!(!crate::agents::workspace(&st, &server.id).join("loft/target").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1726,6 +2082,22 @@ mod tests {
     }
 
     #[test]
+    fn clean_lists_every_agents_items_with_their_type() {
+        let storage = temp();
+        clone(&storage.join("a/loft"));
+        file(&storage.join("a/node_modules/x/index.js"));
+        file(&storage.join("a/notes.md"));
+        clone(&storage.join("b/loft"));
+        let items = listing(&storage, None, &|_| vec![], &|id| id == "b");
+        let kind = |agent: &str, name: &str| items.iter().find(|i| i.agent == agent && i.name == name).map(|i| i.kind);
+        assert_eq!(kind("a", "loft"), Some("clone"));
+        assert_eq!(kind("a", "node_modules"), Some("build"));
+        assert_eq!(kind("a", "notes.md"), Some("file"));
+        assert!(items.iter().filter(|i| i.agent == "b").all(|i| i.blocked == "Working"), "a Working agent's rows are locked");
+        assert!(items.iter().filter(|i| i.agent == "a").all(|i| i.blocked.is_empty() || i.blocked == "symlink"));
+    }
+
+    #[test]
     fn symlinks_are_not_followed_and_nothing_outside_the_agents_folder_is_touched() {
         let root = temp();
         let storage = root.join("agent-local-storage");
@@ -1779,5 +2151,124 @@ mod tests {
         }
         assert!(!ws.join("loft/target").exists(), "the kept workspace's build output stays");
         assert!(ws.join("loft/src/main.rs").exists());
+    }
+
+    /// An idle agent of project loft with a workspace, and `origin`: a bare `loft.git` holding main, pushed.
+    fn pushed_workspace(st: &AppState) -> (crate::db::Agent, PathBuf, PathBuf) {
+        let a = crate::tasks::tests::agent(st, "Git Tester");
+        let a = st.db.update_agent(&a.id, |a| (a.project, a.projects) = ("loft".into(), vec!["loft".into()])).unwrap().unwrap();
+        let ws = crate::agents::workspace(st, &a.id);
+        fs::create_dir_all(&ws).unwrap();
+        let ws = ws.canonicalize().unwrap();
+        let origin = temp().join("loft.git");
+        git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        let seed = temp().join("seed");
+        git(&temp(), &["clone", "-q", origin.to_str().unwrap(), seed.to_str().unwrap()]);
+        for kv in [["user.name", "T"], ["user.email", "t@example.com"]] {
+            git(&seed, &["config", kv[0], kv[1]]);
+        }
+        git(&seed, &["switch", "-q", "-c", "main"]);
+        file(&seed.join("a.txt"));
+        git(&seed, &["add", "a.txt"]);
+        git(&seed, &["commit", "-q", "-m", "a"]);
+        git(&seed, &["push", "-q", "-u", "origin", "main"]);
+        (a, ws, origin)
+    }
+
+    /// A clone of `origin` named `name` in `ws`, everything pushed.
+    fn pushed_clone(ws: &Path, origin: &Path, name: &str) -> PathBuf {
+        let dir = ws.join(name);
+        git(ws, &["clone", "-q", origin.to_str().unwrap(), name]);
+        for kv in [["user.name", "T"], ["user.email", "t@example.com"]] {
+            git(&dir, &["config", kv[0], kv[1]]);
+        }
+        dir
+    }
+
+    fn commit_in(dir: &Path, f: &str) {
+        file(&dir.join(f));
+        git(dir, &["add", f]);
+        git(dir, &["commit", "-q", "-m", f]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_with_a_worktree_is_not_safe_and_clean_keeps_it() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        let loft = pushed_clone(&ws, &origin, "loft");
+        git(&loft, &["worktree", "add", "-q", "--detach", "../wt"]);
+        commit_in(&ws.join("wt"), "only-here.txt");
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |n: &str| items.iter().find(|i| i.rel == n).unwrap_or_else(|| panic!("no {n}")).clone();
+        assert_eq!(by("loft").blocked, "Has worktrees: delete them first");
+        assert_eq!(by("wt").blocked, "1 commit not pushed (detached HEAD)");
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join("loft")]).await;
+        assert_eq!(l.removed, 0);
+        assert!(ws.join("loft/.git").exists());
+        git(&ws.join("wt"), &["log", "-1"]);
+        // Once the worktree is gone, the clone is safe again.
+        git(&loft, &["worktree", "remove", "--force", "../wt"]);
+        assert_eq!(preview_of(&st, Some(&a.id)).await.iter().find(|i| i.rel == "loft").unwrap().blocked, "");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_listing_runs_the_git_check_on_every_clone_and_locks_the_unsafe_ones_with_the_reason() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        pushed_clone(&ws, &origin, "loft");
+        let dirty = pushed_clone(&ws, &origin, "dirty");
+        fs::write(dirty.join("a.txt"), "changed").unwrap();
+        commit_in(&pushed_clone(&ws, &origin, "ahead"), "b.txt");
+        let stash = pushed_clone(&ws, &origin, "stash");
+        fs::write(stash.join("a.txt"), "changed").unwrap();
+        git(&stash, &["stash", "-q"]);
+        let detached = pushed_clone(&ws, &origin, "detached");
+        git(&detached, &["checkout", "-q", "--detach"]);
+        commit_in(&detached, "d.txt");
+        let refused = pushed_clone(&ws, &origin, "refused");
+        let config = fs::read_to_string(refused.join(".git/config")).unwrap();
+        fs::write(refused.join(".git/config"), format!("{config}[core]\n\tfsmonitor = true\n")).unwrap();
+
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
+        let main = by("loft");
+        assert_eq!((main.label.as_str(), main.blocked.as_str(), main.opens), ("", "", true), "{main:?}");
+        assert_eq!(main.note, "Clean, all pushed: safe to delete · the agent clones it again on its next ticket");
+        assert_eq!(by("dirty").blocked, "Uncommitted changes (1 file)");
+        assert_eq!(by("ahead").blocked, "1 commit not pushed (main)");
+        assert_eq!(by("stash").blocked, "Stashed changes");
+        assert_eq!(by("detached").blocked, "1 commit not pushed (detached HEAD)");
+        assert!(by("refused").blocked.starts_with("Can't check: "), "{:?}", by("refused").blocked);
+        assert!(items.iter().all(|i| i.name != ".git"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_safe_main_clone_goes_whole_and_an_unsafe_one_stays_with_the_reason_in_the_log() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        pushed_clone(&ws, &origin, "loft");
+        let ahead = pushed_clone(&ws, &origin, "ahead");
+        commit_in(&ahead, "b.txt");
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join("loft"), ahead.clone(), ws.join("loft/.git")]).await;
+        assert_eq!((l.removed, l.failed), (1, 0), "{l:?}");
+        assert!(!ws.join("loft").exists(), "the main clone goes, .git too");
+        assert!(ahead.join("b.txt").exists());
+        let reasons: Vec<_> = l.skipped.iter().map(|s| (s.rel.as_str(), s.reason.as_str())).collect();
+        assert_eq!(reasons, [("ahead", "kept: 1 commit not pushed (main)"), ("loft/.git", "no longer there")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_that_changed_since_the_table_loaded_is_kept_and_the_log_says_why() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        let loft = pushed_clone(&ws, &origin, "loft");
+        let items = preview_of(&st, Some(&a.id)).await;
+        let main = items.iter().find(|i| i.name == "loft").unwrap();
+        assert!(main.blocked.is_empty() && main.label.is_empty());
+        commit_in(&loft, "new.txt");
+        let l = clean_paths(&st, Some(&a.id), vec![main.path.clone()]).await;
+        assert_eq!((l.removed, l.skipped.len()), (0, 1), "{l:?}");
+        assert_eq!(l.skipped[0].reason, "kept: 1 commit not pushed (main)");
+        assert!(loft.join("new.txt").exists());
     }
 }

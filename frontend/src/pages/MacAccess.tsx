@@ -94,8 +94,13 @@ export function MacAccess() {
           )}
           {check.adhoc_signed && (
             <p className="text-[12px] text-warn">
-              This Loft build isn't signed with a lasting identity, so macOS forgets what you allowed every time Loft updates.
+              This Loft build isn't signed with a lasting identity, so macOS forgets what you allowed every time Loft updates. To fix it,
+              create a code-signing certificate named loft (Keychain Access → Certificate Assistant → Create a Certificate…, Certificate
+              Type: Code Signing) and restart Loft.
             </p>
+          )}
+          {check.adhoc_signed === false && check.signed_by && (
+            <p className="text-[12px] text-fg-3">Signed with “{check.signed_by}”, so macOS keeps what you allowed when Loft updates.</p>
           )}
         </>
       )}

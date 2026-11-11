@@ -41,10 +41,12 @@ pub async fn check(State(state): State<AppState>) -> Json<Value> {
     state.rt.lock().unwrap().tcc.clear_allowed(&v);
     let exe = std::env::current_exe().ok();
     v["binary"] = json!(exe.as_ref().map(|p| p.display().to_string()));
-    v["adhoc_signed"] = json!(match &exe {
-        Some(p) => adhoc_signed(p).await,
+    let sig = match &exe {
+        Some(p) => signature(p).await,
         None => None,
-    });
+    };
+    v["adhoc_signed"] = json!(sig.as_ref().map(|s| s.0));
+    v["signed_by"] = json!(sig.and_then(|s| s.1));
     v["host"] = json!(crate::tailnet::host());
     Json(v)
 }
@@ -70,10 +72,17 @@ pub(crate) async fn run(home: &Path, probe: &str) -> Value {
     json!({ "items": futures::future::join_all(checks).await })
 }
 
-/// Whether the binary is ad-hoc signed: macOS then remembers its grants only until the next build.
-async fn adhoc_signed(exe: &Path) -> Option<bool> {
-    let out = tokio::time::timeout(WAIT, Command::new("/usr/bin/codesign").arg("-dv").arg(exe).kill_on_drop(true).output()).await.ok()?.ok()?;
-    Some(String::from_utf8_lossy(&out.stderr).contains("Signature=adhoc"))
+/// Whether the binary is ad-hoc signed (macOS then remembers its grants only until the next build), and the
+/// identity it is signed with otherwise.
+async fn signature(exe: &Path) -> Option<(bool, Option<String>)> {
+    let out = tokio::time::timeout(WAIT, Command::new("/usr/bin/codesign").arg("-dvv").arg(exe).kill_on_drop(true).output()).await.ok()?.ok()?;
+    Some(parse_signature(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// `codesign -dvv`'s answer: ad-hoc, and the leaf certificate's name (its first `Authority=`).
+fn parse_signature(out: &str) -> (bool, Option<String>) {
+    let by = out.lines().find_map(|l| l.strip_prefix("Authority=")).map(String::from);
+    (out.contains("Signature=adhoc"), by)
 }
 
 /// The folder services macOS asks about: (service, what the item names, the check's id for it). Requests
@@ -196,6 +205,16 @@ pub async fn watcher(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_signature_says_ad_hoc_or_the_identity_loft_is_signed_with() {
+        let signed = "Identifier=dev.loft\nFormat=Mach-O thin (arm64)\nAuthority=loft\nTeamIdentifier=not set\n";
+        assert_eq!(parse_signature(signed), (false, Some("loft".into())));
+        let adhoc = "Identifier=loft-332bbbe6ee81afe8\nSignature=adhoc\nTeamIdentifier=not set\n";
+        assert_eq!(parse_signature(adhoc), (true, None));
+        let dev = "Authority=Apple Development: A B (TEAM123456)\nAuthority=Apple Worldwide Developer Relations Certification Authority\n";
+        assert_eq!(parse_signature(dev).1.as_deref(), Some("Apple Development: A B (TEAM123456)"));
+    }
 
     #[tokio::test]
     async fn each_folder_reads_as_allowed_blocked_waiting_or_missing_and_a_prompt_never_hangs_the_check() {

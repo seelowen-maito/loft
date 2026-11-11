@@ -14,19 +14,26 @@ struct AgentsListView: View {
         }
     }
 
-    private var grouped: [(String, [Agent])] {
-        Dictionary(grouping: filtered) { $0.project?.isEmpty == false ? $0.project! : "No project" }
-            .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
+    /// Leads first, then one section per group (alphabetical), then "No group"; each keeps the order it's given.
+    static func sections(_ agents: [Agent]) -> [AgentSection] {
+        let leads = agents.filter(\.isLead)
+        let byGroup = Dictionary(grouping: agents.filter { !$0.isLead }, by: \.team)
+        let groups = byGroup.keys.filter { !$0.isEmpty }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        var out: [AgentSection] = []
+        if !leads.isEmpty { out.append(AgentSection(id: "leads", title: "Leads", agents: leads)) }
+        out += groups.map { AgentSection(id: "group:" + $0, title: $0, agents: byGroup[$0]!) }
+        if let none = byGroup[""] { out.append(AgentSection(id: "none", title: "No group", agents: none)) }
+        return out
     }
 
     var body: some View {
         List {
             StaleBanner().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
             if search.isEmpty { Section { DigestCard() } }
-            ForEach(grouped, id: \.0) { project, agents in
-                Section(project) {
-                    ForEach(agents) { a in
-                        NavigationLink(value: AgentRoute(id: a.id)) { AgentRow(agent: a) }
+            ForEach(Self.sections(filtered)) { section in
+                Section(section.title) {
+                    ForEach(section.agents) { a in
+                        NavigationLink(value: AgentRoute(id: a.id)) { AgentRow(agent: a, showsGroup: section.id == "leads") }
                     }
                 }
             }
@@ -70,10 +77,18 @@ struct AgentsListView: View {
     }
 }
 
+struct AgentSection: Identifiable {
+    let id: String
+    let title: String
+    let agents: [Agent]
+}
+
 struct AgentRow: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.dynamicTypeSize) private var typeSize
     let agent: Agent
+    /// Shows its group under the name (in the Leads section, where the section title isn't the group).
+    var showsGroup = false
 
     var body: some View {
         let state = store.state(of: agent)
@@ -102,6 +117,12 @@ struct AgentRow: View {
                             HStack(spacing: 6) { chips(state) }
                         }
                     }
+                }
+                if showsGroup, !agent.team.isEmpty {
+                    Label(agent.team, systemImage: "person.3")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .readableLineLimit(1)
                 }
                 if let t = store.currentTask(for: agent.id) {
                     Label(t.title, systemImage: "checklist")

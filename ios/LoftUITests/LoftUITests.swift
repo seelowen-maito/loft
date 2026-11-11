@@ -207,10 +207,26 @@ final class LoftUITests: XCTestCase {
         // Close the menu.
         app.tap()
 
+    }
+
+    /// #340: in an agent's chat, tapping the mic opens Talk for that agent; holding it dictates into the box.
+    func testChatMicTapOpensTalkHoldDictates() {
+        let app = launch()
+        openQAChat(app)
         let mic = app.buttons["micButton"]
         XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Talk")
+        mic.tap()
+        let close = app.buttons["voiceClose"]
+        XCTAssertTrue(close.appears(timeout: 5), "Talk opens")
+        XCTAssertTrue(any("voiceRecentAgents", app).buttons["QA Agent"].isSelected, "with this agent in To")
+        close.tap()
+        XCTAssertTrue(close.disappears(timeout: 5))
+
         mic.press(forDuration: 0.8)
-        XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5), "holding dictates into the box")
+        XCTAssertFalse(close.exists, "and doesn't open Talk")
+        XCTAssertEqual(mic.label, "Stop dictation")
     }
 
     /// A sent message that tagged a spec shows a chip, and tapping it opens that item in the app.
@@ -294,6 +310,31 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("fullScreenPhoto", app).appears(timeout: 5), "full screen")
         app.buttons["Done"].tap()
         XCTAssertTrue(any("fullScreenPhoto", app).disappears(timeout: 3))
+    }
+
+    /// #316: at accessibility-extra-large text, each photo's remove button sits under the thumbnail, not on it,
+    /// and keeps a 44-pt target.
+    func testPhotoRemoveButtonClearsThumbnailAtLargeText() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 600)).image { c in
+            UIColor.systemTeal.setFill()
+            c.fill(CGRect(x: 0, y: 0, width: 600, height: 600))
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("photo-\(UUID().uuidString).png")
+        try XCTUnwrap(image.pngData()).write(to: url)
+        let app = launch(["-fixture-photos", url.path,
+                          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
+        openOrchestratorChat(app)
+        let attach = app.buttons["attachVideoButton"]
+        XCTAssertTrue(attach.appears(timeout: 5))
+        attach.tap()
+        app.buttons["choosePhotos"].tap()
+        let chip = any("photoChip", app)
+        XCTAssertTrue(chip.appears(timeout: 5))
+        let remove = app.buttons["removePhoto"].firstMatch
+        XCTAssertGreaterThanOrEqual(remove.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(remove.frame.height, 44)
+        let thumbnail = CGRect(x: chip.frame.minX, y: chip.frame.minY, width: 64, height: 64)
+        XCTAssertFalse(remove.frame.intersects(thumbnail), "\(remove.frame) covers \(thumbnail)")
     }
 
     /// The agent screen shows the agent's group and its projects, main first.
@@ -399,6 +440,20 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
     }
 
+    /// Talk's Send now: it sends and goes straight to the chat, with the message there and the box empty.
+    func testTalkSendNowOpensTheChat() {
+        let app = launch(["-fixture-voice", "review", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "in the chat")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+        app.buttons["Send now"].tap()
+        XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 5), "Talk closes by itself")
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "back in the chat")
+        let sent = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'copy the diagnostics'")).firstMatch
+        XCTAssertTrue(sent.appears(timeout: 5), "with the message shown")
+        XCTAssertFalse(composerValue(app)?.contains("copy the diagnostics") == true, "and not left in the box")
+    }
+
     /// A new Talk: Done after talking tidies it up, then the Talk screen closes by itself and you're in the agent's
     /// chat with the text in the box. With animations on: the close used to be dropped when the chat opened
     /// underneath the closing screen, and it stayed up until you tapped Close.
@@ -491,6 +546,17 @@ final class LoftUITests: XCTestCase {
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
     /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
+    /// #340: in an interview the chat's own dictation drives it, so tapping the mic still dictates.
+    func testInterviewMicStillDictates() {
+        let app = openGrillChat()
+        let mic = app.buttons["micButton"]
+        XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Dictate")
+        mic.tap()
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["voiceClose"].exists, "no Talk")
+    }
+
     func testGrillRoundCardsAnswersAndSend() {
         let app = openGrillChat()
         XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
@@ -636,6 +702,22 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent as the cleaned message")
     }
 
+    /// Leaving the chat during the Undo window still sends it, once (#339).
+    func testLeavingDuringTheUndoWindowStillSends() {
+        let app = dictateInOrchestratorChat("Deploy uh the docs site")
+        XCTAssertTrue(app.buttons["submitPromptYes"].appears(timeout: 5))
+        app.buttons["submitPromptYes"].tap()
+        XCTAssertTrue(any("autoSendBar", app).appears(timeout: 5))
+        app.tabBars.buttons["Overview"].tap()
+        // The window is 3 s; wait it out away from the chat.
+        Thread.sleep(forTimeInterval: 4)
+        app.tabBars.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent while you were away")
+        XCTAssertFalse(any("autoSendBar", app).exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Deploy the docs site").count, 1, "sent once")
+        XCTAssertNotEqual(composerValue(app), "Deploy the docs site", "it left the field")
+    }
+
     func testASpokenSendGoesAtOnce() {
         let app = dictateInOrchestratorChat("Fix the login bug, send to orchestrator")
         XCTAssertTrue(app.staticTexts["Fix the login bug"].appears(timeout: 5), "sent without the command words")
@@ -743,8 +825,8 @@ final class LoftUITests: XCTestCase {
         app.buttons["sendButton"].tap()
         // The reply comes half a second after the send and is found by the store's first refetch, a second in.
         XCTAssertTrue(app.staticTexts["Done. I ran it and everything passed."].appears(timeout: 5))
-        // With no run seen, the reply is read once nothing new has come for 2 s (LoftStore.waitForReply), checked
-        // every half second: about 3 s after it shows, more on a busy Simulator.
+        // The reply is read once it has stopped changing for `Speaker.settle` (LoftStore.waitForReply), checked
+        // every quarter second: about a second after it shows, more on a busy Simulator.
         let bar = any("readAloudBar", app)
         XCTAssertTrue(bar.appears(timeout: 10), "reading starts once the reply has settled")
         // The bar's identifier covers its buttons, so Stop is found by its label.

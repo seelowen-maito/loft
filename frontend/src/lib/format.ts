@@ -109,3 +109,41 @@ export function cleanLineText(l: CleanLog["lines"][number]): string {
   if (l.done) return l.error ? `failed: ${l.done} ${l.rel}: ${l.error}` : `${l.done} ${l.rel}${l.bytes ? ` (${fmtBytes(l.bytes)})` : ""}`;
   return l.error ? `failed ${l.path}: ${l.error}` : `Removed ${l.path} (${fmtBytes(l.bytes)})`;
 }
+
+/** Clean's table: what the Status column says about an item ("Working", "Kept: main clone of loft", "Deletable"),
+ * and whether it is locked (can't be ticked). */
+export function cleanStatus(i: CleanItem, depth: number): { text: string; locked: boolean } {
+  if (i.blocked) return { text: i.blocked === "Working" ? "Working" : `Locked: ${i.blocked}`, locked: true };
+  if (!canTick(i, depth)) return { text: `Kept: ${i.label}`, locked: true };
+  return { text: "Deletable", locked: false };
+}
+
+/** Clean's Type column: a clone says "git clone", build output says "build output". */
+export function cleanType(i: CleanItem): string {
+  return i.kind === "clone" ? "git clone" : i.kind === "build" ? "build output" : i.kind;
+}
+
+export type CleanSort = { by: "size" | "agent" | "changed"; desc: boolean };
+
+/** Clean's table order: by size, agent name or last change; ties go biggest first, then by name. */
+export function sortClean(items: CleanItem[], sort: CleanSort, agentName: (id: string) => string): CleanItem[] {
+  const key = (i: CleanItem) => (sort.by === "size" ? i.bytes : sort.by === "changed" ? new Date(i.changed).getTime() || 0 : agentName(i.agent).toLowerCase());
+  const dir = sort.desc ? -1 : 1;
+  return [...items].sort((a, b) => {
+    const ka = key(a);
+    const kb = key(b);
+    return (ka < kb ? -dir : ka > kb ? dir : 0) || b.bytes - a.bytes || a.name.localeCompare(b.name);
+  });
+}
+
+/** A locked reason is the git check's lines joined with " · ": the first one, and how many more there are. */
+export function reasonLines(blocked: string): string[] {
+  return blocked.split(" · ").filter(Boolean);
+}
+
+export type CleanFilter = { agent: string; type: string; deletable: boolean };
+
+/** The Clean table's filters: one agent, one type ("" is all), and only what can be ticked. */
+export function filterClean(items: CleanItem[], f: CleanFilter): CleanItem[] {
+  return items.filter((i) => (!f.agent || i.agent === f.agent) && (!f.type || cleanType(i) === f.type) && (!f.deletable || !cleanStatus(i, 0).locked));
+}

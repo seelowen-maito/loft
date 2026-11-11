@@ -236,13 +236,15 @@ struct ChatView: View {
                     }, done: { talkText = nil })
                     .id(t)
                 }
-                ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
+                ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
                              dictateOnAppear: dictate,
                              startVoice: { Task { await voice.start(agentId: agentId) } },
-                             onVoiceSent: continueByVoice,
+                             // In an interview the chat's own dictation drives it, so the mic stays as it was.
+                             tapOpensTalk: grill == nil,
+                             onVoiceSent: { continueByVoice() },
                              onVoiceStop: stopByVoice,
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
                              videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
@@ -277,6 +279,12 @@ struct ChatView: View {
             draft = t
             talkText = t
             VoicePresentation.shared.returnedText = nil
+        }
+        // Sent from Talk: the reply is waited for and read here, as for a message dictated in this chat.
+        .onChange(of: VoicePresentation.shared.replyAfter, initial: true) { _, h in
+            guard let h, h.agentId == agentId else { return }
+            VoicePresentation.shared.replyAfter = nil
+            continueByVoice(after: h.after)
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -458,13 +466,14 @@ extension ChatView {
 
     /// Hands-free chat: once the reply to a dictated message is in, read it and listen again, so after
     /// the first tap on the mic nothing needs a tap. A grill question that comes back is read by `readAloud`.
-    fileprivate func continueByVoice() {
-        let before = store.conversation(agentId).last?.id ?? 0
+    /// `after`: the last message before the one sent, when it went out before this chat opened (from Talk).
+    fileprivate func continueByVoice(after: Int64? = nil) {
+        let before = after ?? store.conversation(agentId).last?.id ?? 0
         let wasGrilling = grill != nil
         voiceLoop?.cancel()
         voiceLoop = Task {
             // The quick acknowledgement first, while the real reply is worked on.
-            if readReplies, !UIAccessibility.isVoiceOverRunning, let ack = await quickAckTask?.value, !Task.isCancelled {
+            if after == nil, readReplies, !UIAccessibility.isVoiceOverRunning, let ack = await quickAckTask?.value, !Task.isCancelled {
                 VoiceLog.shared.add("ai: reading the quick acknowledgement")
                 await speaker.speak(ack)
             }

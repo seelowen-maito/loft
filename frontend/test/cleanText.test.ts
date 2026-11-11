@@ -1,4 +1,4 @@
-// Run with `npm test` (Node's own test runner; Node strips the types).
+// Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canCheck, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
@@ -45,4 +45,50 @@ test("a check reads as its sign and lines", () => {
   assert.equal(gitCheckText({ state: "safe", lines: ["Clean, all pushed: safe to delete", "the agent clones it again on its next ticket"] }), "✅ Clean, all pushed: safe to delete · the agent clones it again on its next ticket");
   assert.equal(gitCheckText({ state: "unsafe", lines: ["2 commits not pushed (main)", "Uncommitted changes (1 file)"] }), "⚠️ 2 commits not pushed (main) · Uncommitted changes (1 file)");
   assert.equal(gitCheckText({ state: "unknown", lines: ["Can't check: unusual git config"] }), "❔ Can't check: unusual git config");
+});
+
+test("status says Working, why a row is locked, or Deletable", async () => {
+  const { cleanStatus, cleanType } = await import("../src/lib/format.ts");
+  assert.deepEqual(cleanStatus(item({ blocked: "Working" }), 0), { text: "Working", locked: true });
+  assert.deepEqual(cleanStatus(item({ blocked: "symlink" }), 0), { text: "Locked: symlink", locked: true });
+  assert.deepEqual(cleanStatus(item({ opens: true, note: "Clean, all pushed: safe to delete" }), 0), { text: "Deletable", locked: false }, "a main clone git says is safe");
+  assert.deepEqual(cleanStatus(item({ opens: true, blocked: "1 commit not pushed (main)" }), 0), { text: "Locked: 1 commit not pushed (main)", locked: true });
+  assert.deepEqual(cleanStatus(item({ label: "main clone of loft", opens: true }), 0), { text: "Kept: main clone of loft", locked: true });
+  assert.deepEqual(cleanStatus(item(), 0), { text: "Deletable", locked: false });
+  assert.equal(cleanType(item()), "git clone");
+  assert.equal(cleanType({ ...item(), kind: "build" }), "build output");
+});
+
+test("the table sorts by size, agent or last change, either way", async () => {
+  const { sortClean } = await import("../src/lib/format.ts");
+  const a = { ...item(), agent: "b", name: "x", bytes: 5, changed: "2026-01-02T00:00:00Z" };
+  const b = { ...item(), agent: "a", name: "y", bytes: 9, changed: "2026-01-01T00:00:00Z" };
+  const c = { ...item(), agent: "a", name: "z", bytes: 1, changed: "2026-01-03T00:00:00Z" };
+  const names = (s: "size" | "agent" | "changed", desc: boolean) => sortClean([a, b, c], { by: s, desc }, (id) => id).map((i) => i.name).join("");
+  assert.equal(names("size", true), "yxz");
+  assert.equal(names("size", false), "zxy");
+  assert.equal(names("agent", false), "yzx");
+  assert.equal(names("changed", true), "zxy");
+});
+
+test("an empty or invalid last change sorts as the oldest, not as NaN", async () => {
+  const { sortClean } = await import("../src/lib/format.ts");
+  const at = (name: string, changed: string) => ({ ...item(), name, bytes: 1, changed });
+  const rows = [at("a", "2026-01-02T00:00:00Z"), at("b", ""), at("c", "not a date"), at("d", "2026-01-01T00:00:00Z")];
+  const names = (desc: boolean) => sortClean(rows, { by: "changed", desc }, (id) => id).map((i) => i.name).join("");
+  assert.equal(names(false), "bcda");
+  assert.equal(names(true), "adbc");
+});
+
+test("a locked reason splits into its lines, and the filters keep one agent, one type, or what can be ticked", async () => {
+  const { reasonLines, filterClean } = await import("../src/lib/format.ts");
+  assert.deepEqual(reasonLines("2 commits not pushed (main) · Stashed changes · Uncommitted changes (3 files)"), ["2 commits not pushed (main)", "Stashed changes", "Uncommitted changes (3 files)"]);
+  assert.deepEqual(reasonLines(""), []);
+  const a = { ...item(), agent: "a", name: "x" };
+  const b = { ...item(), agent: "b", name: "y", kind: "build", blocked: "Working" };
+  const all = { agent: "", type: "", deletable: false };
+  assert.equal(filterClean([a, b], all).length, 2);
+  assert.deepEqual(filterClean([a, b], { ...all, agent: "b" }).map((i) => i.name), ["y"]);
+  assert.deepEqual(filterClean([a, b], { ...all, type: "build output" }).map((i) => i.name), ["y"]);
+  assert.deepEqual(filterClean([a, b], { ...all, deletable: true }).map((i) => i.name), ["x"]);
 });

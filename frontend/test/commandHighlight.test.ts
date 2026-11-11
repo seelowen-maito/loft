@@ -1,4 +1,4 @@
-// Run with `npm test` (Node's own test runner; Node strips the types).
+// Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { commandAt, completeCommand, enterOnMenu, highlightParts, mentionRanges, messageCommand, splitCommand, type CommandWord } from "../src/lib/commandHighlight.ts";

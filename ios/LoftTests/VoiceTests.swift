@@ -108,6 +108,47 @@ final class VoiceSessionTests: XCTestCase {
         XCTAssertNil(VoiceSession.savedDraft())
     }
 
+    private func connectedStore(_ api: MockAPI) async throws -> LoftStore {
+        let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("v-\(UUID()).json")))
+        store.activate()
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(store.connection, .connected)
+        return store
+    }
+
+    /// Talk's Send now (or the countdown ending): once sent, the chat takes over, from after the last message before it.
+    func testASendAfterTheCountdownHandsOverToTheChat() async throws {
+        let api = MockAPI()
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let session = VoiceSession(store: store)
+        session.sendWithStatus("Add a copy diagnostics button", to: "a1")
+        XCTAssertNotNil(session.autoSendAt)
+        await session.send("Add a copy diagnostics button")
+        XCTAssertEqual(session.handOff?.agentId, "a1")
+        XCTAssertNil(session.autoSendAt)
+        XCTAssertNil(session.failedSend)
+        XCTAssertEqual(api.sentClientIds.count, 1, "sent once")
+        XCTAssertTrue(store.pending.isEmpty, "and not kept as failed")
+        session.close()
+        XCTAssertEqual(session.phase, .idle, "closing Talk leaves nothing waiting")
+    }
+
+    /// A failed send stays on Talk with Retry, and nothing hands over.
+    func testAFailedSendAfterTheCountdownStaysOnTalk() async throws {
+        let api = MockAPI()
+        api.failSends = true
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let session = VoiceSession(store: store)
+        session.sendWithStatus("Add a copy diagnostics button", to: "a1")
+        await session.send("Add a copy diagnostics button")
+        XCTAssertNil(session.handOff)
+        XCTAssertNotNil(session.failedSend)
+        XCTAssertTrue(session.isFailed)
+        XCTAssertEqual(api.sentClientIds.count, 1, "it tried, rather than being offline")
+    }
+
     func testOnlyPermissionFailuresOfferSettings() {
         let store = LoftStore(api: MockAPI(), cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("v-\(UUID()).json")))
         let session = VoiceSession(store: store)
