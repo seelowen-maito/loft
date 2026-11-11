@@ -64,7 +64,8 @@ final class SpeechTranscriber {
     @ObservationIgnored private let engine = AVAudioEngine()
     @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var task: SFSpeechRecognitionTask?
-    @ObservationIgnored private var interruption: NSObjectProtocol?
+    /// The audio held from `AudioSessionOwner` while the mic is on.
+    @ObservationIgnored private var lease: UUID?
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     /// The microphone tap feeds whichever request is current.
     @ObservationIgnored private let feed = RequestFeed()
@@ -120,9 +121,15 @@ final class SpeechTranscriber {
         startup = StartupFailureGuard()
 
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.record, mode: .measurement, options: .duckOthers)
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            // Losing the audio (read-aloud, a call, another app) ends the dictation, keeping what was heard.
+            lease = try await AudioSessionOwner.shared.acquire(.listening, by: "dictation") { [weak self] loss in
+                guard let self, self.state.isRecording else { return }
+                self.lease = nil
+                self.cleanUp()
+                self.send(loss == .interrupted ? .interrupted : .stop)
+            }
+            // Stopped while the audio was being handed over.
+            guard state == .requestingPermission else { cleanUp(); return }
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
             guard format.channelCount > 0, format.sampleRate > 0 else {
@@ -142,13 +149,6 @@ final class SpeechTranscriber {
             return
         }
 
-        interruption = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.state == .recording else { return }
-                self.cleanUp()
-                self.send(.interrupted)
-            }
-        }
         beginRequest()
         send(.began)
         VoiceLog.shared.add("mic on (\(locale.identifier), on-device \(recognizer.supportsOnDeviceRecognition))")
@@ -211,9 +211,8 @@ final class SpeechTranscriber {
         task?.cancel()
         task = nil
         request = nil
-        if let interruption { NotificationCenter.default.removeObserver(interruption) }
-        interruption = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if let lease { AudioSessionOwner.shared.release(lease) }
+        lease = nil
     }
 }
 

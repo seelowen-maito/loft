@@ -79,7 +79,8 @@ final class VoiceSession {
     @ObservationIgnored private var started: Date?
     @ObservationIgnored private var accumulated: TimeInterval = 0
     @ObservationIgnored private var clock: Timer?
-    @ObservationIgnored private var interruption: NSObjectProtocol?
+    /// The audio held from `AudioSessionOwner` while the mic is on.
+    @ObservationIgnored private var lease: UUID?
     @ObservationIgnored private var lastLevelAt = Date.distantPast
     @ObservationIgnored private var confirmText = ""
     /// When the answer to "Would you like to submit this?" last changed, and when the question was asked.
@@ -138,7 +139,7 @@ final class VoiceSession {
             prompt = VoiceSend.Prompt(startedAt: lastHeard)
             evaluated = ""
             pauseBase = raw
-            if !TestMode.noSpeech { try startAudio(feeding: r) }
+            if !TestMode.noSpeech { try await startAudio(feeding: r) }
             try r.start()
             phase = .listening
             started = Date()
@@ -416,7 +417,7 @@ final class VoiceSession {
             r.onPartial = { [weak self] t in self?.confirmHeard(t) }
             r.onCommit = { [weak self] t in self?.confirmHeard(t) }
             recognizer = r
-            try startAudio(feeding: r)
+            try await startAudio(feeding: r)
             try r.start()
         } catch {
             // Tapping still works.
@@ -661,10 +662,16 @@ final class VoiceSession {
 
     // MARK: - Audio
 
-    private func startAudio(feeding r: SegmentRecognizer) throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
+    private func startAudio(feeding r: SegmentRecognizer) async throws {
+        if lease == nil {
+            // Losing it (read-aloud elsewhere, a call) pauses the dictation, or just stops the mic when it was
+            // only listening for the answer to "Would you like to submit this?".
+            lease = try await AudioSessionOwner.shared.acquire(.listening, by: "Talk") { [weak self] _ in
+                guard let self else { return }
+                self.lease = nil
+                if self.phase == .listening { self.pause() } else { self.stopAudio() }
+            }
+        }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else { throw VoiceError("No microphone is available.") }
@@ -676,18 +683,14 @@ final class VoiceSession {
         }
         engine.prepare()
         try engine.start()
-        if interruption == nil {
-            interruption = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
-                let began = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) == .began
-                Task { @MainActor in if began { self?.pause() } }
-            }
-        }
     }
 
     private func stopAudio() {
         if engine.isRunning { engine.stop() }
         if !TestMode.noSpeech { engine.inputNode.removeTap(onBus: 0) }
         level = 0
+        if let lease { AudioSessionOwner.shared.release(lease) }
+        lease = nil
     }
 
     private func setLevel(_ l: Float) {

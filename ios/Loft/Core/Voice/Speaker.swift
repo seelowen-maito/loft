@@ -38,6 +38,8 @@ final class Speaker: NSObject {
     @ObservationIgnored private var utterance: ObjectIdentifier?
     @ObservationIgnored private var finished: CheckedContinuation<Void, Never>?
     @ObservationIgnored private var reader: InterruptibleReader?
+    /// The audio held from `AudioSessionOwner` while the plain voice reads.
+    @ObservationIgnored private var lease: UUID?
     /// How the current reading was cut short, returned by `speak`.
     @ObservationIgnored private var endedBy: ReadAloudCommand?
 
@@ -113,10 +115,11 @@ final class Speaker: NSObject {
                 reader = nil
             }
         }
-        // The mic (the composer or the Talk screen) may still be letting go of the audio: wait for it, briefly.
-        if let problem = await activateSession() {
-            return failed(messageId, "the audio wasn't available (\(problem))")
+        if let problem = await takeAudio() {
+            return failed(messageId, problem)
         }
+        // Stopped while the audio was being handed over.
+        guard isSpeaking else { done(); return endedBy }
         synthStarted = false
         await withCheckedContinuation { c in
             finished = c
@@ -206,37 +209,26 @@ final class Speaker: NSObject {
         current = nil
         messageId = nil
         utterance = nil
+        if let lease { AudioSessionOwner.shared.release(lease) }
+        lease = nil
         finished?.resume()
         finished = nil
     }
 
-    /// Makes the audio session ready for speech, retrying for up to a second while the mic lets go of it.
-    /// Returns the error when it never became available.
-    private func activateSession() async -> String? {
-        let s = AVAudioSession.sharedInstance()
-        var last: String?
-        for attempt in 0..<5 {
-            do {
-                // Keep recording possible: a voice session listens again right after.
-                if s.category != .playAndRecord {
-                    try s.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-                }
-                try s.setActive(true)
-                if attempt > 0 { VoiceLog.shared.add("read-aloud: audio ready after \(attempt * 200) ms") }
-                return nil
-            } catch {
-                last = error.localizedDescription
-                if attempt == 0 { VoiceLog.shared.add("read-aloud: waiting for the audio (\(error.localizedDescription))") }
-                try? await Task.sleep(for: .milliseconds(200))
-            }
+    /// Takes the audio from the owner for reading aloud (the mic hands it over). Returns why it couldn't.
+    private func takeAudio() async -> String? {
+        do {
+            lease = try await AudioSessionOwner.shared.acquire(.speaking, by: "read-aloud") { [weak self] _ in self?.stopPlaying() }
+            return nil
+        } catch {
+            return (error as? VoiceError)?.message ?? error.localizedDescription
         }
-        return last
     }
 
     /// Reads a short sample in one voice, for the voice picker.
     func preview(_ voice: AVSpeechSynthesisVoice) async {
         stop()
-        _ = await activateSession()
+        _ = await takeAudio()
         isSpeaking = true
         let u = AVSpeechUtterance(string: VoiceChoice.sample(for: voice.language))
         u.voice = voice

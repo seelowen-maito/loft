@@ -32,6 +32,7 @@ final class InterruptibleReader {
     /// Silence played after the speech, so a command said right after it ("more") is still heard.
     private var tail: TimeInterval = 0
     private var lastFormat: AVAudioFormat?
+    private var lease: UUID?
 
     /// Whether listening can work here: permissions already given (never prompted mid-reply) and a recognizer
     /// that respects "On-device only".
@@ -46,10 +47,7 @@ final class InterruptibleReader {
     /// caller can read it the plain way instead.
     func play(_ utterance: AVSpeechUtterance, locale: Locale, listenAfter: TimeInterval = 0) async throws {
         tail = listenAfter
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true)
-        guard session.isInputAvailable else { throw VoiceError("No microphone is available.") }
+        lease = try await AudioSessionOwner.shared.acquire(.readingWhileListening, by: "listening reader") { [weak self] _ in self?.stop() }
         let engine = AVAudioEngine()
         self.engine = engine
         try engine.inputNode.setVoiceProcessingEnabled(true)
@@ -84,6 +82,8 @@ final class InterruptibleReader {
             engine.inputNode.removeTap(onBus: 0)
         }
         engine = nil
+        if let lease { AudioSessionOwner.shared.release(lease) }
+        lease = nil
         finished?.resume()
         finished = nil
     }
