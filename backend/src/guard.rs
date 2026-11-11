@@ -52,11 +52,9 @@ fn host_known(value: &str) -> Result<bool, String> {
     if matches!(host, "localhost" | "127.0.0.1" | "::1") {
         return Ok(true);
     }
-    // The tailnet's addresses: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => return Ok(ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1])),
-        Ok(std::net::IpAddr::V6(ip)) => return Ok(ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]),
-        Err(_) => {}
+    // Any IP literal: a rebound domain still sends its name as `Host`, never an address.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(true);
     }
     let mac = mac_name();
     if !mac.is_empty() && (host == mac || host == format!("{}.local", mac.trim_end_matches(".local"))) {
@@ -152,10 +150,10 @@ mod tests {
 
     #[test]
     fn only_this_macs_names_are_hosts() {
-        for ok in ["localhost", "localhost:7420", "127.0.0.1:7420", "[::1]:7420", "100.101.102.103", "100.64.0.1:7420", "[fd7a:115c:a1e0::1]", "[fd7a:115c:a1e0:ab12::1]:7420", "LOCALHOST."] {
+        for ok in ["localhost", "localhost:7420", "127.0.0.1:7420", "[::1]:7420", "100.101.102.103", "100.64.0.1:7420", "192.168.1.20:7420", "10.0.0.1", "100.128.0.1", "[fe80::1]:7420", "[fd7a::1]", "[fd7a:115c:a1e0::1]", "[fd7a:115c:a1e0:ab12::1]:7420", "LOCALHOST."] {
             assert!(host_ok(ok), "{ok}");
         }
-        for bad in ["evil.example", "evil.example:7420", "127.0.0.1.evil.example", "localhost.evil.example", "100.128.0.1", "100.63.0.1", "10.0.0.1", "[fd7a::1]", "", "evil.example:7420@localhost"] {
+        for bad in ["evil.example", "evil.example:7420", "127.0.0.1.evil.example", "localhost.evil.example", "", "evil.example:7420@localhost"] {
             assert!(!host_ok(bad), "{bad}");
         }
         assert!(host_ok(&format!("{}:7420", mac_name())));

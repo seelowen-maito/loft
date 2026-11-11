@@ -302,6 +302,11 @@ mod tests {
         assert_eq!(status(http.get(format!("{base}/api/info")).header("host", "127.0.0.1.evil.example")).await, 403);
         assert_eq!(status(http.post(format!("{base}/mcp/nobody")).header("host", "evil.example").body("{}")).await, 403);
         assert_ne!(status(http.post(format!("{base}/mcp/nobody")).body("{}")).await, 403);
+        // A LAN address can't be rebound, so it is served; `/kill` is checked like the rest.
+        assert_eq!(status(http.get(format!("{base}/api/info")).header("host", "192.168.1.20:7420")).await, 200);
+        let kill = format!("{base}/kill/nobody");
+        assert_eq!(status(http.post(&kill).header("host", "evil.example").json(&json!({}))).await, 403);
+        assert_ne!(status(http.post(&kill).json(&json!({}))).await, 403);
         // The herdr build is for same-site reads only; the platform here is wrong so no build starts.
         let bin = format!("{base}/api/herdr/bin/nowhere");
         assert_eq!(status(http.get(&bin).header("sec-fetch-site", "cross-site")).await, 403);
