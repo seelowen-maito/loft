@@ -73,7 +73,8 @@ final class VoiceSession {
 
     let speaker: Speaker
     @ObservationIgnored private let store: LoftStore
-    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let engine: MicEngine
+    @ObservationIgnored private let audio: AudioSessionOwner
     @ObservationIgnored private var recognizer: SegmentRecognizer?
     @ObservationIgnored private var segments: [String] = []
     @ObservationIgnored private var started: Date?
@@ -99,9 +100,20 @@ final class VoiceSession {
     /// Closing or discarding while the mic is still starting: that start gives up.
     @ObservationIgnored private var gate = StartGate()
 
-    init(store: LoftStore, speaker: Speaker? = nil) {
+    /// Asks for permission and makes a prepared recognizer. Tests swap it for one without either.
+    @ObservationIgnored var prepareRecognizer: () async throws -> SegmentRecognizer = {
+        if !TestMode.noSpeech { try await VoiceSession.requestPermissions() }
+        let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
+        let r = Recognizers.make(locale: locale)
+        try await r.prepare()
+        return r
+    }
+
+    init(store: LoftStore, speaker: Speaker? = nil, audio: AudioSessionOwner? = nil, engine: MicEngine = AVAudioEngine()) {
         self.store = store
         self.speaker = speaker ?? Speaker()
+        self.audio = audio ?? .shared
+        self.engine = engine
     }
 
     // MARK: - Listening
@@ -130,10 +142,7 @@ final class VoiceSession {
         phase = .preparing
         let attempt = gate.begin()
         do {
-            if !TestMode.noSpeech { try await Self.requestPermissions() }
-            let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
-            let r = Recognizers.make(locale: locale)
-            try await r.prepare()
+            let r = try await prepareRecognizer()
             guard gate.isCurrent(attempt) else { return r.cancel() }
             r.onPartial = { [weak self] text in self?.heard(partial: text) }
             r.onCommit = { [weak self] text in self?.heard(commit: text) }
@@ -680,20 +689,11 @@ final class VoiceSession {
     /// `attempt` is the start this is part of (`gate`), or nil for listening for the submit answer.
     private func startAudio(feeding r: SegmentRecognizer, attempt: Int? = nil) async throws {
         if lease == nil {
-            // Losing it (read-aloud elsewhere, a call) pauses the dictation, or just stops the mic when it was
-            // only listening for the answer to "Would you like to submit this?". A route with no microphone
-            // ends it with a message.
-            let id = try await AudioSessionOwner.shared.acquire(.listening, by: "Talk", onRouteChange: { [weak self] in
+            let id = try await audio.acquire(.listening, by: "Talk", onRouteChange: { [weak self] in
                 self?.routeChanged()
-            }) { [weak self] loss in
-                guard let self else { return }
-                self.lease = nil
-                if loss == .noMicrophone, self.phase == .listening {
-                    self.fail("The microphone stopped: this audio route has no microphone.")
-                } else if self.phase == .listening { self.pause() } else { self.stopAudio() }
-            }
+            }) { [weak self] loss in self?.lost(loss) }
             if let attempt, !gate.isCurrent(attempt) {
-                AudioSessionOwner.shared.release(id)
+                audio.release(id)
                 throw CancellationError()
             }
             lease = id
@@ -703,6 +703,16 @@ final class VoiceSession {
             guard let self, self.lease != nil, self.feeding === r else { return false }
             return attempt.map { self.gate.isCurrent($0) } ?? true
         }, block: tap(feeding: r))
+    }
+
+    /// Losing the audio (read-aloud elsewhere, a call) pauses the dictation, or just stops the mic when it was
+    /// only listening for the answer to "Would you like to submit this?". A route with no microphone ends it
+    /// with a message.
+    func lost(_ loss: AudioSessionOwner.Loss) {
+        lease = nil
+        if loss == .noMicrophone, phase == .listening {
+            fail("The microphone stopped: this audio route has no microphone.")
+        } else if phase == .listening { pause() } else { stopAudio() }
     }
 
     /// The recognizer the microphone feeds, kept to start the mic again after a route change.
@@ -723,7 +733,7 @@ final class VoiceSession {
 
     /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
     /// with it, so start the mic again there.
-    private func routeChanged() {
+    func routeChanged() {
         guard lease != nil, feeding != nil else { return }
         do {
             try startMic()
@@ -738,7 +748,7 @@ final class VoiceSession {
         if !TestMode.noSpeech { Microphone.stop(engine) }
         feeding = nil
         level = 0
-        if let lease { AudioSessionOwner.shared.release(lease) }
+        if let lease { audio.release(lease) }
         lease = nil
     }
 
