@@ -51,6 +51,8 @@ test("status says Working, why a row is locked, or Deletable", async () => {
   const { cleanStatus, cleanType } = await import("../src/lib/format.ts");
   assert.deepEqual(cleanStatus(item({ blocked: "Working" }), 0), { text: "Working", locked: true });
   assert.deepEqual(cleanStatus(item({ blocked: "symlink" }), 0), { text: "Locked: symlink", locked: true });
+  assert.deepEqual(cleanStatus(item({ opens: true, note: "Clean, all pushed: safe to delete" }), 0), { text: "Deletable", locked: false }, "a main clone git says is safe");
+  assert.deepEqual(cleanStatus(item({ opens: true, blocked: "1 commit not pushed (main)" }), 0), { text: "Locked: 1 commit not pushed (main)", locked: true });
   assert.deepEqual(cleanStatus(item({ label: "main clone of loft", opens: true }), 0), { text: "Kept: main clone of loft", locked: true });
   assert.deepEqual(cleanStatus(item(), 0), { text: "Deletable", locked: false });
   assert.equal(cleanType(item()), "git clone");

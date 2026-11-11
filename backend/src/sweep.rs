@@ -1,11 +1,13 @@
 //! Workspace disk space: Settings' Clean, and the daily sweep.
 //!
 //! Clean (one agent) and Clean all list each workspace's top-level items (`GET /api/workspaces/clean/preview`)
-//! and remove the ones the user ticks (`POST /api/workspaces/clean`). Each project's main clone, `notes/` and
-//! `uploads/` start unticked, and so do all the clones of an agent with no project; everything else starts ticked. A main clone opens up to its own folders, one level
-//! at a time (`GET /api/workspaces/clean/folders`), so the user can remove just `backend/target`; its `.git`
-//! never goes, and neither does the clone itself. A working agent's items can't be removed, and each path is
-//! checked again just before it goes.
+//! and remove the ones the user ticks (`POST /api/workspaces/clean`). The listing runs the git check
+//! ([`crate::git_check`]) on every clone and worktree: one with nothing uncommitted, unpushed or stashed can be
+//! ticked and removed whole, a main clone too (the agent clones the project again on its next run); any other
+//! stays locked with the reason, and the check runs again just before it goes. `notes/` and `uploads/` start
+//! unticked. A main clone opens up to its own folders, one level at a time (`GET /api/workspaces/clean/folders`),
+//! so the user can remove just `backend/target`; `.git` on its own never goes. A working agent's items can't be
+//! removed, and each path is checked again just before it goes.
 //!
 //! The sweep deletes rebuildable build output (the table of `RULES`: Rust, Node, .NET, Gradle, Pods, Flutter,
 //! Python and the like, each only beside its marker file) whose newest file is 3 days old, so idle workspaces don't fill the disk.
@@ -69,9 +71,6 @@ fn incremental_cap() -> u64 {
     }
     INCREMENTAL_CAP
 }
-
-/// Under a main clone in Clean: what keeping it costs.
-const KEPT: &str = "Kept: this is the agent's working copy. Its own build stays (e.g. backend/target or node_modules/), usually 1–5 GB, and the agent reuses it on its next build.";
 
 /// A build folder the sweep would remove.
 #[derive(Clone, Debug, Serialize)]
@@ -248,14 +247,48 @@ pub struct PreviewOpts {
 
 /// `GET /api/workspaces/clean/preview[?agent=<id>]`: what Clean on that agent, or Clean all, lists.
 pub async fn preview(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<PreviewOpts>) -> axum::Json<Listing> {
+    let st = state.clone();
     let items = tokio::task::spawn_blocking(move || {
-        let projects = projects(&state);
+        let projects = projects(&st);
         let of = |id: &str| projects.get(id).cloned().unwrap_or_default();
-        listing(&state.cfg.storage_dir, q.agent.as_deref(), &of, &busy_check(&state))
+        listing(&st.cfg.storage_dir, q.agent.as_deref(), &of, &busy_check(&st))
     })
     .await
     .unwrap_or_default();
-    axum::Json(Listing { items })
+    axum::Json(Listing { items: git_checked(&state, items).await })
+}
+
+/// How many git checks run at once.
+const CHECKS_AT_ONCE: usize = 4;
+
+/// `items` with the git check run on each clone and worktree of an agent that isn't working: a safe one can be
+/// ticked, any other is locked with what the check found. This is the user's Check space click, so git runs.
+async fn git_checked(state: &AppState, items: Vec<Item>) -> Vec<Item> {
+    let projects = projects(state);
+    let storage = state.cfg.storage_dir.clone();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(CHECKS_AT_ONCE));
+    let mut set = tokio::task::JoinSet::new();
+    for (n, i) in items.iter().enumerate() {
+        if !matches!(i.kind, "clone" | "worktree") || !i.blocked.is_empty() {
+            continue;
+        }
+        let (storage, agent, name, projects, gate) = (storage.clone(), i.agent.clone(), i.name.clone(), projects.get(&i.agent).cloned().unwrap_or_default(), gate.clone());
+        set.spawn(async move {
+            let _turn = gate.acquire().await;
+            (n, crate::git_check::run(&storage, &agent, &name, &projects).await)
+        });
+    }
+    let mut items = items;
+    while let Some(Ok((n, c))) = set.join_next().await {
+        let i = &mut items[n];
+        i.warning.clear();
+        if c.state == "safe" {
+            (i.label, i.note) = (String::new(), c.lines.join(" · "));
+        } else {
+            (i.blocked, i.note, i.ticked) = (c.lines.join(" · "), String::new(), false);
+        }
+    }
+    items
 }
 
 #[derive(Deserialize)]
@@ -296,6 +329,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
         None => ("Clean all", "Cleaning all agents…".into(), "Cleaned all agents".into()),
     };
     let st = state.clone();
+    let rt = tokio::runtime::Handle::current();
     let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
         let root = storage.canonicalize().unwrap_or_default();
@@ -312,6 +346,15 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
                 }
                 Ok((id, _)) if b.agent.as_ref().is_some_and(|a| *a != id) => log.skipped.push(skip(&id, "", "another agent's")),
                 Ok((id, rel)) => {
+                    // A clone goes only when the git check, run again now, says it is safe.
+                    if !rel.contains('/') && path.join(".git").symlink_metadata().is_ok() {
+                        let c = rt.block_on(crate::git_check::run(storage, &id, &rel, projects.get(&id).map(Vec::as_slice).unwrap_or_default()));
+                        if c.state != "safe" {
+                            log.skipped.push(skip(&id, &rel, &format!("kept: {}", c.lines.join(" · "))));
+                            show(&st, &log);
+                            continue;
+                        }
+                    }
                     let bytes = size(&path);
                     let command = rm_command(&path);
                     let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&root, &path).err() };
@@ -445,7 +488,7 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
                 let mut i = item(&id, name.clone(), e.path());
                 let dir = i.kind == "folder";
                 if let Some(project) = mains.get(&name) {
-                    (i.label, i.note, i.warning, i.ticked, i.opens) = (format!("main clone of {project}"), KEPT.into(), String::new(), false, true);
+                    (i.label, i.warning, i.ticked, i.opens) = (format!("main clone of {project}"), String::new(), false, true);
                 } else if projects.is_empty() && matches!(i.kind, "clone" | "worktree") {
                     // Any of them may be its working copy.
                     (i.label, i.ticked) = ("agent has no project: can't tell its main clone".into(), false);
@@ -474,10 +517,7 @@ fn inside(storage: &Path, id: &str, rel: &str, projects: &[String], busy: bool) 
     if !mains.contains_key(rel.split('/').next().unwrap_or_default()) {
         return Err("not inside a main clone".into());
     }
-    match check(&root, &dir, &|_| mains.clone()) {
-        Ok(_) | Err("main clone") => {}
-        Err(e) => return Err(e.into()),
-    }
+    check(&root, &dir, &|_| mains.clone())?;
     if !dir.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         return Err("not a folder".into());
     }
@@ -553,8 +593,8 @@ pub(crate) fn main_clones(ws: &Path, projects: &[String]) -> HashMap<String, Str
     found.iter().filter(|(d, p)| !named(p) || *d == last(p)).cloned().collect()
 }
 
-/// Whether Clean may remove `path`, as the workspace is now: a top-level item of an agent's workspace that isn't
-/// a main clone, or a folder inside a main clone, never `.git` and never through a symlink. Its agent and `rel`.
+/// Whether Clean may remove `path`, as the workspace is now: a top-level item of an agent's workspace,
+/// or a folder inside a main clone, never `.git` and never through a symlink. Its agent and `rel`.
 fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, String>) -> Result<(String, String), &'static str> {
     let rest = path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
     let parts = rest
@@ -588,8 +628,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
     }
     let main = mains(parts[0]).contains_key(parts[1]);
     match (parts.len(), main) {
-        (2, true) => Err("main clone"),
-        (2, false) => Ok(()),
+        (2, _) => Ok(()),
         (_, true) if p.is_dir() => Ok(()),
         (_, true) => Err("not a folder"),
         (_, false) => Err("not inside a main clone"),
@@ -1309,16 +1348,16 @@ mod tests {
         let kinds: Vec<_> = ["loft", "loft-old", "wt", "notes", "dev.log"].iter().map(|n| by(n).kind).collect();
         assert_eq!(kinds, ["clone", "clone", "worktree", "folder", "file"]);
         let main = by("loft");
-        assert_eq!((main.label.as_str(), main.ticked, main.opens, main.note.as_str()), ("main clone of loft", false, true, KEPT));
-        assert!(main.warning.is_empty());
+        assert_eq!((main.label.as_str(), main.ticked, main.opens, main.blocked.as_str()), ("main clone of loft", false, true, "Uncommitted changes (6 files)"));
+        assert!(main.warning.is_empty() && main.note.is_empty());
         assert_eq!((by("notes").label.as_str(), by("notes").ticked), ("reports and notes", false));
         assert_eq!((by("uploads").label.as_str(), by("uploads").ticked), ("chat attachments", false));
-        // Everything else starts ticked; other clones and worktrees warn.
-        for n in ["loft-old", "wt", ".cargo-build", "dev.log", "scratch"] {
+        // Everything else starts ticked; the git check locks the other clones and the worktree.
+        for n in [".cargo-build", "dev.log", "scratch"] {
             assert!(by(n).ticked && by(n).label.is_empty() && by(n).blocked.is_empty() && !by(n).opens, "{:?}", by(n));
         }
-        assert_eq!(by("loft-old").warning, "may contain unpushed work");
-        assert_eq!(by("wt").warning, "may contain unpushed work");
+        assert_eq!((by("loft-old").ticked, by("loft-old").blocked.as_str()), (false, "Uncommitted changes (6 files)"));
+        assert_eq!((by("wt").ticked, by("wt").blocked.as_str()), (false, "Can't check: not a git repo"));
         // Size, last change (the newest file), path and command.
         let log = by("dev.log");
         assert!(log.bytes >= 5000 && log.path == ws.join("dev.log") && log.rel == "dev.log", "{log:?}");
@@ -1346,13 +1385,14 @@ mod tests {
         let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
         for n in ["api", "api-old", "wt1895"] {
             let i = by(n);
-            assert_eq!((i.label.as_str(), i.ticked, i.blocked.as_str(), i.opens), ("agent has no project: can't tell its main clone", false, "", false), "{i:?}");
+            assert_eq!((i.label.as_str(), i.ticked, i.blocked.as_str(), i.opens), ("agent has no project: can't tell its main clone", false, i.blocked.as_str(), false), "{i:?}");
+            assert!(!i.blocked.is_empty(), "{i:?}");
         }
         assert!(by("scratch").ticked && by("scratch").label.is_empty());
-        // Still the user's to tick.
+        // Its changes aren't pushed: it stays, and the log says why.
         let l = clean_paths(&st, Some(&a.id), vec![ws.join("api-old")]).await;
-        assert_eq!(l.removed, 1, "{l:?}");
-        assert!(!ws.join("api-old").exists() && ws.join("api/src/main.rs").exists());
+        assert_eq!((l.removed, l.skipped.len()), (0, 1), "{l:?}");
+        assert!(ws.join("api-old/src/main.rs").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1362,11 +1402,11 @@ mod tests {
         let items = preview_of(&st, Some(&a.id)).await;
         let ticked: Vec<_> = items.iter().filter(|i| i.ticked).map(|i| i.path.clone()).collect();
         let l = clean_paths(&st, Some(&a.id), ticked).await;
-        assert_eq!((l.removed, l.failed, l.running), (5, 0, false), "{:?}", l);
-        for gone in ["loft-old", "wt", ".cargo-build", "dev.log", "scratch"] {
+        assert_eq!((l.removed, l.failed, l.running), (3, 0, false), "{:?}", l);
+        for gone in [".cargo-build", "dev.log", "scratch"] {
             assert!(!ws.join(gone).exists(), "{gone} stays");
         }
-        for kept in ["loft/src/main.rs", "loft/target/debug/app", "notes/plan.md", "uploads/1.png"] {
+        for kept in ["loft-old/src/main.rs", "wt/src/main.rs", "loft/src/main.rs", "loft/target/debug/app", "notes/plan.md", "uploads/1.png"] {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         assert!(l.freed_bytes >= 5000);
@@ -1406,7 +1446,7 @@ mod tests {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         let reasons: Vec<_> = l.skipped.iter().map(|s| (s.rel.as_str(), s.reason.as_str())).collect();
-        assert_eq!(reasons, [("loft", "main clone"), ("loft/.git", "git history: never deleted"), ("loft/.git/HEAD", "git history: never deleted")]);
+        assert_eq!(reasons, [("loft", "kept: Uncommitted changes (7 files)"), ("loft/.git", "git history: never deleted"), ("loft/.git/HEAD", "git history: never deleted")]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1475,7 +1515,7 @@ mod tests {
         assert!(folders_of(&st, &a.id, "loft").await.unwrap().iter().all(|i| !i.blocked.is_empty()));
         // A clean confirmed from before it started leaves its items.
         let l = clean_paths(&st, Some(&a.id), idle.iter().filter(|i| i.ticked).map(|i| i.path.clone()).collect()).await;
-        assert_eq!((l.removed, l.failed), (0, 5));
+        assert_eq!((l.removed, l.failed), (0, 3));
         assert!(l.lines.iter().all(|x| x.error.as_deref() == Some("agent started working") && x.bytes == 0));
         assert!(ws.join("scratch").exists() && ws.join("wt").exists());
     }
@@ -2024,5 +2064,104 @@ mod tests {
         }
         assert!(!ws.join("loft/target").exists(), "the kept workspace's build output stays");
         assert!(ws.join("loft/src/main.rs").exists());
+    }
+
+    /// An idle agent of project loft with a workspace, and `origin`: a bare `loft.git` holding main, pushed.
+    fn pushed_workspace(st: &AppState) -> (crate::db::Agent, PathBuf, PathBuf) {
+        let a = crate::tasks::tests::agent(st, "Git Tester");
+        let a = st.db.update_agent(&a.id, |a| (a.project, a.projects) = ("loft".into(), vec!["loft".into()])).unwrap().unwrap();
+        let ws = crate::agents::workspace(st, &a.id);
+        fs::create_dir_all(&ws).unwrap();
+        let ws = ws.canonicalize().unwrap();
+        let origin = temp().join("loft.git");
+        git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        let seed = temp().join("seed");
+        git(&temp(), &["clone", "-q", origin.to_str().unwrap(), seed.to_str().unwrap()]);
+        for kv in [["user.name", "T"], ["user.email", "t@example.com"]] {
+            git(&seed, &["config", kv[0], kv[1]]);
+        }
+        git(&seed, &["switch", "-q", "-c", "main"]);
+        file(&seed.join("a.txt"));
+        git(&seed, &["add", "a.txt"]);
+        git(&seed, &["commit", "-q", "-m", "a"]);
+        git(&seed, &["push", "-q", "-u", "origin", "main"]);
+        (a, ws, origin)
+    }
+
+    /// A clone of `origin` named `name` in `ws`, everything pushed.
+    fn pushed_clone(ws: &Path, origin: &Path, name: &str) -> PathBuf {
+        let dir = ws.join(name);
+        git(ws, &["clone", "-q", origin.to_str().unwrap(), name]);
+        for kv in [["user.name", "T"], ["user.email", "t@example.com"]] {
+            git(&dir, &["config", kv[0], kv[1]]);
+        }
+        dir
+    }
+
+    fn commit_in(dir: &Path, f: &str) {
+        file(&dir.join(f));
+        git(dir, &["add", f]);
+        git(dir, &["commit", "-q", "-m", f]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_listing_runs_the_git_check_on_every_clone_and_locks_the_unsafe_ones_with_the_reason() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        pushed_clone(&ws, &origin, "loft");
+        let dirty = pushed_clone(&ws, &origin, "dirty");
+        fs::write(dirty.join("a.txt"), "changed").unwrap();
+        commit_in(&pushed_clone(&ws, &origin, "ahead"), "b.txt");
+        let stash = pushed_clone(&ws, &origin, "stash");
+        fs::write(stash.join("a.txt"), "changed").unwrap();
+        git(&stash, &["stash", "-q"]);
+        let detached = pushed_clone(&ws, &origin, "detached");
+        git(&detached, &["checkout", "-q", "--detach"]);
+        commit_in(&detached, "d.txt");
+        let refused = pushed_clone(&ws, &origin, "refused");
+        let config = fs::read_to_string(refused.join(".git/config")).unwrap();
+        fs::write(refused.join(".git/config"), format!("{config}[core]\n\tfsmonitor = true\n")).unwrap();
+
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
+        let main = by("loft");
+        assert_eq!((main.label.as_str(), main.blocked.as_str(), main.opens), ("", "", true), "{main:?}");
+        assert_eq!(main.note, "Clean, all pushed: safe to delete · the agent clones it again on its next ticket");
+        assert_eq!(by("dirty").blocked, "Uncommitted changes (1 file)");
+        assert_eq!(by("ahead").blocked, "1 commit not pushed (main)");
+        assert_eq!(by("stash").blocked, "Stashed changes");
+        assert_eq!(by("detached").blocked, "1 commit not pushed (detached HEAD)");
+        assert!(by("refused").blocked.starts_with("Can't check: "), "{:?}", by("refused").blocked);
+        assert!(items.iter().all(|i| i.name != ".git"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_safe_main_clone_goes_whole_and_an_unsafe_one_stays_with_the_reason_in_the_log() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        pushed_clone(&ws, &origin, "loft");
+        let ahead = pushed_clone(&ws, &origin, "ahead");
+        commit_in(&ahead, "b.txt");
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join("loft"), ahead.clone(), ws.join("loft/.git")]).await;
+        assert_eq!((l.removed, l.failed), (1, 0), "{l:?}");
+        assert!(!ws.join("loft").exists(), "the main clone goes, .git too");
+        assert!(ahead.join("b.txt").exists());
+        let reasons: Vec<_> = l.skipped.iter().map(|s| (s.rel.as_str(), s.reason.as_str())).collect();
+        assert_eq!(reasons, [("ahead", "kept: 1 commit not pushed (main)"), ("loft/.git", "no longer there")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_that_changed_since_the_table_loaded_is_kept_and_the_log_says_why() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        let loft = pushed_clone(&ws, &origin, "loft");
+        let items = preview_of(&st, Some(&a.id)).await;
+        let main = items.iter().find(|i| i.name == "loft").unwrap();
+        assert!(main.blocked.is_empty() && main.label.is_empty());
+        commit_in(&loft, "new.txt");
+        let l = clean_paths(&st, Some(&a.id), vec![main.path.clone()]).await;
+        assert_eq!((l.removed, l.skipped.len()), (0, 1), "{l:?}");
+        assert_eq!(l.skipped[0].reason, "kept: 1 commit not pushed (main)");
+        assert!(loft.join("new.txt").exists());
     }
 }

@@ -316,7 +316,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
           />
         </Field>
         <p className="text-[12px] text-fg-3">
-          Check space lists what's in every agent's workspace; Delete selected removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
+          Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
         </p>
       </Section>
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}

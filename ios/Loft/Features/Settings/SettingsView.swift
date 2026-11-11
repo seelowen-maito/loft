@@ -483,7 +483,7 @@ struct SettingsView: View {
         } header: {
             Text("Disk")
         } footer: {
-            Text("Check space lists what's in every agent's workspace; Delete selected removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
+            Text("Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
         }
     }
 
