@@ -424,6 +424,20 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(composerValue(app)?.contains("copy the diagnostics") == true, "nothing sent; the text is back")
     }
 
+    /// Talk's Send now: it sends and goes straight to the chat, with the message there and the box empty.
+    func testTalkSendNowOpensTheChat() {
+        let app = launch(["-fixture-voice", "review", "-fixture-countdown-hold", "YES"])
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "in the chat")
+        app.buttons["sendButton"].tap()
+        XCTAssertTrue(app.staticTexts["voiceStatusTitle"].appears(timeout: 5))
+        app.buttons["Send now"].tap()
+        XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 5), "Talk closes by itself")
+        XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "back in the chat")
+        let sent = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'copy the diagnostics'")).firstMatch
+        XCTAssertTrue(sent.appears(timeout: 5), "with the message shown")
+        XCTAssertFalse(composerValue(app)?.contains("copy the diagnostics") == true, "and not left in the box")
+    }
+
     /// A new Talk: Done after talking tidies it up, then the Talk screen closes by itself and you're in the agent's
     /// chat with the text in the box. With animations on: the close used to be dropped when the chat opened
     /// underneath the closing screen, and it stayed up until you tapped Close.

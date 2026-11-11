@@ -50,6 +50,10 @@ final class VoiceSession {
     private(set) var reply: String?
     /// Set while a finished dictation waits to go out by itself ("Sending… Undo"); nil otherwise.
     private(set) var autoSendAt: Date?
+    /// Talk: a message that went out after its countdown (Send now, or the time ran out). The chat takes over from
+    /// here: it shows the message and waits for the reply, reading it aloud. Cleared by whoever hands over.
+    struct HandOff: Equatable { let agentId: String; let after: Int64 }
+    var handOff: HandOff?
 
     var raw: String { VoiceText.join([committed, live]) }
     /// Waiting for, or reading, the answer to what was just sent: the Talk screen reads the next question itself.
@@ -226,7 +230,6 @@ final class VoiceSession {
             try? await Task.sleep(for: .seconds(VoiceSend.undoWindow))
             guard let self, !Task.isCancelled, self.phase == .review, self.autoSendAt != nil else { return }
             VoiceLog.shared.add("talk: countdown over: sending")
-            self.autoSendAt = nil
             // `send` cancels any pending countdown: this one is done, so let go of it first rather than
             // cancelling the task we're running in (its request then failed as "Cancelled").
             self.autoSend = nil
@@ -487,6 +490,8 @@ final class VoiceSession {
     /// The only way anything leaves the phone: an explicit send of the reviewed text.
     func send(_ text: String) async {
         guard phase == .review, let agentId else { return }
+        // After the countdown, a message (not an interview answer) hands over to the chat once it's sent.
+        let handsOver = autoSendAt != nil && store.currentGrillQuestion(for: agentId) == nil
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
@@ -517,6 +522,15 @@ final class VoiceSession {
             return sendFailed(failed)
         }
         VoiceLog.shared.add("talk: sent \(VoiceLog.clip(text))")
+        if handsOver {
+            // Still `.sending` until the screen closes (`close` makes it idle), so it shows Sent, not the mic.
+            VoiceLog.shared.add("talk: on to the chat for the reply")
+            clearDraft()
+            segments = []
+            committed = ""
+            handOff = HandOff(agentId: agentId, after: before)
+            return
+        }
         await afterSent(agentId: agentId, before: before)
     }
 
