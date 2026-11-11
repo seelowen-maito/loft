@@ -144,7 +144,7 @@ final class StoreTests: XCTestCase {
     }
 
     /// A reply that arrives without a live event (missed in a reconnect) is still picked up and read: the wait
-    /// refetches history and counts the reply once nothing new has come for 2 s. (Was a 40 s UI test.)
+    /// refetches history and counts the reply once it has settled (`Speaker.settle`). (Was a 40 s UI test.)
     func testAReplyWithoutAnEventIsStillPickedUp() async throws {
         let store = LoftStore(api: FixtureAPI(replies: true), cache: SnapshotStore(url: cacheURL))
         store.activate()

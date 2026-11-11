@@ -263,7 +263,7 @@ struct GrillQuestionCard: View {
         // Wraps rather than squeezing the labels into broken words at large text sizes.
         FlowLayout(spacing: 0) {
             action("Repeat", "speaker.wave.2", id: "grillRepeat", enabled: true) {
-                Task { await speaker.speak(q.spoken(number: number, of: total, language: language)) }
+                Task { await speaker.speak(q.spoken(number: number, of: total, language: language), replace: true) }
             }
             action("Skip", "forward", id: "grillSkip", enabled: store.canWrite) { command(.skip) }
             action("Back", "backward", id: "grillBack", enabled: number > 1) { command(.back) }

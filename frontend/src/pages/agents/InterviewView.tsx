@@ -20,7 +20,7 @@ export function InterviewView({ agent, session }: { agent: Agent; session: Grill
 
   useEffect(() => {
     // A handler that already used Esc (the End confirmation, the @ menu) keeps it.
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && backRef.current();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && !e.isComposing && backRef.current();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -34,7 +34,8 @@ export function InterviewView({ agent, session }: { agent: Agent; session: Grill
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-ink-950" role="dialog" aria-modal aria-label="Interview">
-      <div className="sticky top-0 z-10 border-b border-line bg-ink-950/90 backdrop-blur-xl">
+      {/* Opaque, no backdrop blur: a filter here would trap the End confirmation's fixed overlay inside the header. */}
+      <div className="sticky top-0 z-10 border-b border-line bg-ink-950">
         <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3">
           <button className="btn-ghost shrink-0" onClick={back} title="Back to chat (Esc)">
             <ArrowLeft className="size-3.5" /> Back to chat
