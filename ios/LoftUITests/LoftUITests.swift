@@ -216,6 +216,9 @@ final class LoftUITests: XCTestCase {
         let mic = app.buttons["micButton"]
         XCTAssertTrue(mic.appears(timeout: 5))
         XCTAssertEqual(mic.label, "Talk")
+        // #358: Apple's minimum tap target.
+        XCTAssertGreaterThanOrEqual(mic.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(mic.frame.height, 44)
         mic.tap()
         let close = app.buttons["voiceClose"]
         XCTAssertTrue(close.appears(timeout: 5), "Talk opens")
