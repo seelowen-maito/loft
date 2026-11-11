@@ -242,6 +242,8 @@ struct ChatView: View {
                              holdAutoSend: { grillSuggestion != nil },
                              dictateOnAppear: dictate,
                              startVoice: { Task { await voice.start(agentId: agentId) } },
+                             // In an interview the chat's own dictation drives it, so the mic stays as it was.
+                             tapOpensTalk: grill == nil,
                              onVoiceSent: { continueByVoice() },
                              onVoiceStop: stopByVoice,
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,

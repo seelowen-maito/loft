@@ -207,10 +207,26 @@ final class LoftUITests: XCTestCase {
         // Close the menu.
         app.tap()
 
+    }
+
+    /// #340: in an agent's chat, tapping the mic opens Talk for that agent; holding it dictates into the box.
+    func testChatMicTapOpensTalkHoldDictates() {
+        let app = launch()
+        openQAChat(app)
         let mic = app.buttons["micButton"]
         XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Talk")
+        mic.tap()
+        let close = app.buttons["voiceClose"]
+        XCTAssertTrue(close.appears(timeout: 5), "Talk opens")
+        XCTAssertTrue(any("voiceRecentAgents", app).buttons["QA Agent"].isSelected, "with this agent in To")
+        close.tap()
+        XCTAssertTrue(close.disappears(timeout: 5))
+
         mic.press(forDuration: 0.8)
-        XCTAssertTrue(app.buttons["voiceClose"].appears(timeout: 5))
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5), "holding dictates into the box")
+        XCTAssertFalse(close.exists, "and doesn't open Talk")
+        XCTAssertEqual(mic.label, "Stop dictation")
     }
 
     /// A sent message that tagged a spec shows a chip, and tapping it opens that item in the app.
@@ -530,6 +546,17 @@ final class LoftUITests: XCTestCase {
 
     /// The open round as cards: Accept holds an answer, typed text in the composer is chat (it answers nothing),
     /// a choice saved on the current card answers it and moves to the next, Send round brings the next round, then Pause and Resume.
+    /// #340: in an interview the chat's own dictation drives it, so tapping the mic still dictates.
+    func testInterviewMicStillDictates() {
+        let app = openGrillChat()
+        let mic = app.buttons["micButton"]
+        XCTAssertTrue(mic.appears(timeout: 5))
+        XCTAssertEqual(mic.label, "Dictate")
+        mic.tap()
+        XCTAssertTrue(any("speechStatus", app).appears(timeout: 5))
+        XCTAssertFalse(app.buttons["voiceClose"].exists, "no Talk")
+    }
+
     func testGrillRoundCardsAnswersAndSend() {
         let app = openGrillChat()
         XCTAssertTrue(any("grillOpenRound", app).appears(timeout: 5))
