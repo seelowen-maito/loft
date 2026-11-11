@@ -541,6 +541,15 @@ function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onCon
       {items.length === 0 ? (
         <p className="text-[13px] text-fg-3">Nothing in any workspace.</p>
       ) : (
+        <>
+        <label className="flex items-center gap-2 text-[12.5px] text-fg-2 sm:hidden">
+          Sort by
+          <select className="input flex-1" aria-label="Sort by" value={sort.by} onChange={(e) => setSort({ by: e.target.value as CleanSort["by"], desc: e.target.value !== "agent" })}>
+            <option value="size">Size</option>
+            <option value="agent">Agent</option>
+            <option value="changed">Last change</option>
+          </select>
+        </label>
         <div className="overflow-x-auto rounded-xl border border-line">
           <table className="w-full text-left sm:min-w-[600px] text-[12.5px]">
             <thead className="text-[11.5px] uppercase tracking-wide text-fg-3">
@@ -563,6 +572,7 @@ function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onCon
             </tbody>
           </table>
         </div>
+        </>
       )}
       {items.length > 0 && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
