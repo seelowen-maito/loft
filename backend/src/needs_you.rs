@@ -501,22 +501,35 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         let issue = delivery_issue(&tasks, &d);
         let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
         let open = open_delivery(&d, issue);
+        // The run that stalled it ended asking the user something: the question leads, and Reply answers the agent
+        // (its call carries the Delivery on); Resume still wakes it afresh.
+        let ask = d.stall_ask.as_ref().and_then(|a| name(&a.agent).map(|who| (who, a)));
+        let (reason, body, push) = match &ask {
+            Some(((_, who), a)) => (
+                format!("{who} asks: {}", a.question),
+                format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
+                format!("{who} asks you something"),
+            ),
+            None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
+        };
+        let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
+        if let Some(((agent_id, _), _)) = &ask {
+            actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));
+            actions.push(open_chat(agent_id));
+        }
+        actions.extend([open, dismiss(&id)]);
         items.push(Item {
             kind: "delivery_stalled",
             urgency: 2,
-            agent: None,
+            agent: ask.as_ref().map(|(who, _)| who.clone()),
             task_id: issue.map(|t| t.id.clone()),
             title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
-            reason: text(&crate::delivery::stalled_reason(state, &d), MAX_REASON),
-            text: String::new(),
+            reason: text(&reason, MAX_REASON),
+            text: text(&body, MAX_TEXT),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
             links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
-            actions: vec![
-                action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })),
-                open,
-                dismiss(&id),
-            ],
-            push: ("Delivery stalled".to_string(), title),
+            actions,
+            push: ("Delivery stalled".to_string(), push),
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,
@@ -740,6 +753,34 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
             links: vec![],
             actions,
             push: ("Loft's backups are failing".to_string(), since),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
+    // Phones are paired but push is off (no APNs key, no relay key): every alert is dropped, so the web says so.
+    let phones = state.db.list_devices().map_err(e)?.len();
+    if phones > 0 && crate::apns::route(state) == crate::apns::Route::Off {
+        let id = "push_off".to_string();
+        let mut actions = vec![];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#push", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        let phones = if phones == 1 { "your phone".to_string() } else { format!("your {phones} phones") };
+        items.push(Item {
+            kind: "push_off",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Push is off", MAX_TITLE),
+            reason: text(&format!("No APNs key and no relay key: Loft drops every alert for {phones}."), MAX_REASON),
+            text: text("Settings → Push notifications: Sign in for push (the Loft relay, no Apple developer account needed), or add your own APNs key.", MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![json!({ "label": "Settings → Push notifications", "path": "/settings#push" })],
+            actions,
+            push: ("Push is off".to_string(), String::new()),
             project: None,
             pr: None,
             id,

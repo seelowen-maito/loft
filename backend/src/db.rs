@@ -52,6 +52,9 @@ pub struct Delivery {
     /// isn't about a ticket (the Lead's wake, the final steps).
     #[serde(default)]
     pub stalled_on: Vec<i64>,
+    /// The question the stalling run ended with, when its reply asked the user to decide something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_ask: Option<StallAsk>,
     /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
@@ -123,6 +126,7 @@ impl Delivery {
         }
         (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
         self.stalled_on.clear();
+        self.stall_ask = None;
     }
 
     /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
@@ -130,11 +134,27 @@ impl Delivery {
     pub fn clear_stall(&mut self, n: i64) {
         if self.state == "stalled" {
             self.stalled_on.retain(|t| *t != n);
+            if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
+                self.stall_ask = None;
+            }
             if self.stalled_on.is_empty() {
                 self.unstall();
             }
         }
     }
+}
+
+/// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StallAsk {
+    pub agent: String,
+    /// The ticket whose step the run was for; none for the Lead's or the final steps.
+    #[serde(default)]
+    pub ticket: Option<i64>,
+    /// The question's line.
+    pub question: String,
+    /// The whole reply it ends.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1542,6 +1562,7 @@ impl Db {
                 stall_reason: String::new(),
                 stalled_at: String::new(),
                 stalled_on: vec![],
+                stall_ask: None,
                 done_at: String::new(),
                 tech_debt: vec![],
                 ready_retry: has(&retry),

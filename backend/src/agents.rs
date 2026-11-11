@@ -809,6 +809,13 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     let _ = state.db.add_pending_fyi(&to.id, &prompt);
 }
 
+/// An FYI from Loft itself (a Delivery that stalled), shown as from "Loft": delivered like an agent's FYI, with
+/// the agent's next run.
+pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": "loft", "name": "Loft" }, "fyi": true }));
+    let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
+}
+
 /// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
 

@@ -3027,6 +3027,7 @@ pub(crate) mod tests {
         crate::delivery::run_ended(&st, &lead.id, false).await;
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str()), ("stalled", "running", "no_call"));
+        assert!(st.db.take_pending_fyis(&lead.id).unwrap().is_empty(), "no FYI to the Lead about its own run");
         crate::delivery::resume(&st, slug, 40).await.unwrap();
         assert_eq!(delivery(&st, slug).state, "running");
         let w = woken(&st, &lead);
@@ -3036,6 +3037,54 @@ pub(crate) mod tests {
         tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
         crate::delivery::run_ended(&st, &lead.id, false).await;
         assert_eq!(delivery(&st, slug).state, "running");
+    }
+
+    /// A Dev's run that ends with a question and no `submit_ticket` (spec #380): the stall item shows the question with
+    /// a Reply to the Dev, and the Lead gets an FYI with the ticket and why.
+    #[tokio::test]
+    async fn a_dev_run_ending_with_a_question_puts_it_on_the_stall_and_tells_the_lead() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-ask";
+        let (a, m) = planned(&st, &fake, "dl-ask", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-ask", "lead");
+        let dev = busy(&st, "First", "dl-ask", "dev");
+        fake.route("POST", &format!("/repos/{slug}/issues/41/comments"), 201, json!({}));
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        run_starts(&st, &dev);
+        let rid = uuid::Uuid::new_v4().to_string();
+        crate::agents::add_msg(&st, &dev.id, Some(&rid), "system", "run_start", "", json!({ "trigger": "delivery" }));
+        crate::agents::add_msg(&st, &dev.id, Some(&rid), "assistant", "text", "The store is built.\n\n**Should the API keep the old route or drop it?**\n\nLet me know.", json!({}));
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_ask.as_ref().map(|a| (a.agent.as_str(), a.ticket, a.question.as_str()))), ("stalled", Some((dev.id.as_str(), Some(41), "Should the API keep the old route or drop it?"))));
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let i = &items[0];
+        assert_eq!((&i["reason"], &i["agent"]["name"]), (&json!("First asks: Should the API keep the old route or drop it?"), &json!("First")));
+        assert!(i["text"].as_str().unwrap().starts_with("The run Loft woke for its step ended without its call. Stopped at: building #41 on First.\n\nThe store is built."), "{i:#}");
+        let kinds: Vec<&str> = i["actions"].as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["resume", "answer", "open", "open", "dismiss"]);
+        assert_eq!((&i["actions"][1]["path"], &i["actions"][2]["target"]), (&json!(format!("/api/agents/{}/messages", dev.id)), &json!({ "screen": "chat", "agent_id": dev.id })));
+        let all = crate::needs_you::collect(&st).unwrap();
+        let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("Delivery stalled", "First asks you something"));
+
+        // The Lead's FYI, shown in its chat as from Loft, waits for its next run: it isn't woken.
+        let fyis = st.db.take_pending_fyis(&lead.id).unwrap();
+        assert_eq!(fyis.len(), 1, "{fyis:?}");
+        assert!(fyis[0].1.starts_with("[FYI from Loft, not from the user."), "{}", fyis[0].1);
+        assert!(fyis[0].1.contains("[Loft Delivery: spec #40] The Delivery stalled at #41: the run Loft woke for its step ended without its call. First ended its run asking: \"Should the API keep the old route or drop it?\""), "{}", fyis[0].1);
+        let shown = st.db.list_messages(&lead.id, 5, None).unwrap().pop().unwrap();
+        assert_eq!((shown.meta["from_agent"]["name"].as_str(), shown.meta["fyi"].as_bool()), (Some("Loft"), Some(true)));
+        assert!(!woken(&st, &lead).iter().any(|w| w.contains("stalled")), "an FYI wakes nobody");
+
+        // Its call comes after all (the user replied): the question goes with the stall.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_ask.is_none()), ("running", true));
+        assert!(stalled_items(&st).is_empty());
     }
 
     #[tokio::test]

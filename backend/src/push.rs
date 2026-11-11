@@ -29,6 +29,8 @@ pub struct Pusher {
     sent_at: HashMap<String, VecDeque<Instant>>,
     /// device token -> when it last got a "N more" summary
     summary_at: HashMap<String, Instant>,
+    /// Push is off with phones paired, and the log said once that their alerts are dropped.
+    off_logged: bool,
 }
 
 fn minutes(hm: &str) -> Option<u32> {
@@ -69,7 +71,12 @@ impl Pusher {
         let devices = state.db.list_devices().unwrap_or_default();
         // What became news at startup (a Delivery stalled by the restart) is pushed on the first look.
         let news = if self.seeded { Default::default() } else { std::mem::take(&mut state.rt.lock().unwrap().news_at_start) };
-        if devices.is_empty() || apns::route(state) == apns::Route::Off {
+        let off = apns::route(state) == apns::Route::Off;
+        if off && !devices.is_empty() && !self.off_logged {
+            tracing::warn!("push is off (no APNs key and no relay key): Needs you alerts for {} paired phone(s) are dropped. Sign in for push in Settings → Push notifications.", devices.len());
+        }
+        self.off_logged = off && (self.off_logged || !devices.is_empty());
+        if devices.is_empty() || off {
             // What came in while push was off isn't news later.
             self.seeded = true;
             return;
@@ -370,6 +377,34 @@ mod tests {
         tick(&st, &mut p).await;
         assert_eq!(count(), 200);
         assert_eq!(got(&seen, &phone).len(), 1, "pruning never re-sends");
+    }
+
+    #[tokio::test]
+    async fn with_push_off_a_paired_phone_gets_a_needs_you_item_and_one_log_line() {
+        // Neither a key nor a relay key in this test's own key folder.
+        crate::apns::tests::THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(crate::testdir::for_this_test("push-off")));
+        let st = state();
+        let off = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "push_off").count();
+        assert_eq!(apns::route(&st), apns::Route::Off);
+        assert_eq!(off(&st), 0, "with no phone paired nothing is dropped");
+
+        device(&st, &format!("{}0f", "aa".repeat(31)), &["question"], None);
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "push_off").unwrap().clone();
+        assert_eq!((&item["reason"], &item["links"][0]["path"]), (&json!("No APNs key and no relay key: Loft drops every alert for your phone."), &json!("/settings#push")));
+        assert_eq!(item["actions"].as_array().unwrap().last().unwrap()["kind"], "dismiss");
+
+        // The pusher says once that it drops alerts, and again only after push was back on.
+        let dev = agent(&st, "Dev");
+        let mut p = Pusher::default();
+        permission(&st, "off1", &dev.id);
+        tick(&st, &mut p).await;
+        assert!(p.off_logged);
+        crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
+        assert_eq!(off(&st), 0, "a relay key turns push on");
+        permission(&st, "off2", &dev.id);
+        tick(&st, &mut p).await;
+        assert!(!p.off_logged);
     }
 
     /// A state with no key of its own but the test relay key: its pushes go through the (fake) relay.

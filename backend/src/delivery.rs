@@ -63,6 +63,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             stall_reason: String::new(),
             stalled_at: String::new(),
             stalled_on: vec![],
+            stall_ask: None,
             done_at: String::new(),
             tech_debt: vec![],
             ready_retry: false,
@@ -219,33 +220,87 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
                 Step::Build { ticket, .. } | Step::Review { ticket, .. } => Some(*ticket),
                 _ => None,
             };
-            stall(state, &d, if failed { "run_failed" } else { "no_call" }, ticket.into_iter().collect());
+            let ask = last_ask(state, agent_id, ticket);
+            stall(state, &d, if failed { "run_failed" } else { "no_call" }, ticket.into_iter().collect(), Some(agent_id), ask);
         }
     }
 }
 
+/// What the run of `agent_id` that just ended asked the user, when its last reply ends with a question: a
+/// Delivery it stalls shows it in Needs you, so the user sees what the agent waits for.
+fn last_ask(state: &AppState, agent_id: &str, ticket: Option<i64>) -> Option<crate::db::StallAsk> {
+    let msgs = state.db.list_messages(agent_id, 50, None).ok()?;
+    let last = msgs.iter().rposition(|m| m.role == "assistant" && m.kind == "text" && m.meta["subagent"].is_null())?;
+    // A reply from an earlier run doesn't count: this one ended without any.
+    if msgs[last..].iter().any(|m| m.kind == "run_start") {
+        return None;
+    }
+    let reply = &msgs[last];
+    Some(crate::db::StallAsk { agent: agent_id.into(), ticket, question: asked(&reply.content)?, text: reply.content.clone() })
+}
+
+/// The question a reply ends with: the last line that ends with `?`, when it's among the reply's last three
+/// lines (a closing "Let me know." still leaves the question at the end). Markdown emphasis is dropped.
+fn asked(reply: &str) -> Option<String> {
+    let lines: Vec<&str> = reply.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines.iter().rev().take(3).find(|l| l.trim_end_matches(['*', '_', ')', '`']).ends_with('?')).map(|l| {
+        l.trim_start_matches(['#', '>', '-', '*', ' ']).replace("**", "").replace('`', "")
+    })
+}
+
 /// Marks `d` stalled with `reason`, remembering the state to go back to. Only a Delivery whose step an
-/// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`).
-fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>) -> Option<Delivery> {
+/// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`). `who` is
+/// the agent whose run ended, and `ask` what that run asked the user. The team's Lead gets an FYI.
+fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: Option<&str>, ask: Option<crate::db::StallAsk>) -> Option<Delivery> {
     // Already stalled: another ticket's step joins the ones that stall it.
     if d.state == "stalled" && !tickets.is_empty() {
-        return update(state, &d.repo, d.spec, |d| {
-            for n in &tickets {
-                if !d.stalled_on.contains(n) {
-                    d.stalled_on.push(*n);
-                }
+        let new: Vec<i64> = tickets.iter().copied().filter(|n| !d.stalled_on.contains(n)).collect();
+        let d = update(state, &d.repo, d.spec, |d| {
+            d.stalled_on.extend(&new);
+            if ask.is_some() {
+                d.stall_ask = ask;
             }
-        });
+        })?;
+        if !new.is_empty() {
+            tell_lead(state, &d, reason, &new, who);
+        }
+        return Some(d);
     }
     if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") {
         return None;
     }
     tracing::info!("delivery {}#{}: stalled ({reason})", d.repo, d.spec);
-    update(state, &d.repo, d.spec, |d| {
+    let d = update(state, &d.repo, d.spec, |d| {
         d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
         (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
-        d.stalled_on = tickets;
-    })
+        d.stalled_on = tickets.clone();
+        d.stall_ask = ask;
+    })?;
+    tell_lead(state, &d, reason, &tickets, who);
+    Some(d)
+}
+
+/// An FYI to the team's Lead that `d` stalled, naming the tickets and why: it can't resume it (only the user
+/// can), but it knows what's going on when the user asks. Not when the run that stalled it was the Lead's own.
+fn tell_lead(state: &AppState, d: &Delivery, reason: &str, tickets: &[i64], who: Option<&str>) {
+    let Some(lead) = with_role(state, d, "lead") else { return };
+    if who == Some(lead.id.as_str()) {
+        return;
+    }
+    let at = match tickets.iter().filter_map(|n| d.ticket(*n)).map(|t| tag(d, t)).collect::<Vec<_>>() {
+        named if !named.is_empty() => format!(" at {}", list_of(&named)),
+        _ => String::new(),
+    };
+    let asked = d.stall_ask.as_ref().map_or(String::new(), |a| {
+        let name = state.db.get_agent(&a.agent).ok().flatten().map_or_else(|| "The agent".to_string(), |x| x.name);
+        format!(" {name} ended its run asking: \"{}\"", a.question)
+    });
+    let text = format!(
+        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked} Only the user can resume it (Needs you → Resume); nothing for you to do.",
+        subject(d),
+        stall_why(reason)
+    );
+    crate::agents::fyi_from_loft(state, &lead, &text);
 }
 
 /// The id of a stalled Delivery's Needs you item: a new stall is a new item, pushed again.
@@ -269,7 +324,7 @@ pub fn stall_lost_runs(state: &AppState) {
                 _ => true,
             };
             if lost
-                && let Some(d) = stall(state, &d, "restart", d.tickets.iter().filter(|t| lost_run(t)).map(|t| t.number).collect())
+                && let Some(d) = stall(state, &d, "restart", d.tickets.iter().filter(|t| lost_run(t)).map(|t| t.number).collect(), None, None)
             {
                 state.rt.lock().unwrap().news_at_start.insert(stalled_item_id(&d));
             }
@@ -2839,6 +2894,32 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_counts_only_at_the_end_of_the_last_runs_reply() {
+        assert_eq!(asked("Done.\n\n**Keep the old route?**\n\nLet me know."), Some("Keep the old route?".into()));
+        assert_eq!(asked("Is it fine? I'll check.\nA\nB\nC"), None, "a question further up isn't what it waits on");
+        assert_eq!(asked("All done."), None);
+
+        let st = crate::tasks::tests::state();
+        let dev = crate::tasks::tests::agent(&st, "Dev");
+        let run = |text: Option<&str>| {
+            let rid = uuid::Uuid::new_v4().to_string();
+            crate::agents::add_msg(&st, &dev.id, Some(&rid), "system", "run_start", "", serde_json::json!({}));
+            if let Some(t) = text {
+                crate::agents::add_msg(&st, &dev.id, Some(&rid), "assistant", "text", t, serde_json::json!({}));
+            }
+        };
+        run(Some("Which branch?"));
+        assert_eq!(last_ask(&st, &dev.id, Some(7)).map(|a| (a.question, a.ticket)), Some(("Which branch?".into(), Some(7))));
+        // A run with no reply of its own: the question of the run before isn't this one's.
+        run(None);
+        assert!(last_ask(&st, &dev.id, Some(7)).is_none());
+        // A subagent's text isn't the reply.
+        run(Some("Pushed."));
+        crate::agents::add_msg(&st, &dev.id, None, "assistant", "text", "Found it?", serde_json::json!({ "subagent": "x" }));
+        assert!(last_ask(&st, &dev.id, None).is_none());
+    }
 
     #[test]
     fn a_job_log_keeps_its_last_lines_without_their_timestamps() {
