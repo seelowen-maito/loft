@@ -643,14 +643,14 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         await measure()
         let items: [CleanItem] = [
             cleanItem("a2", "loft", "clone", 4_800_000_000, hoursAgo: 0.2, label: "main clone of loft", note: Self.kept, ticked: false, opens: true),
-            cleanItem("a2", ".cargo-build", "folder", 2_200_000_000, hoursAgo: 2.7),
+            cleanItem("a2", ".cargo-build", "build", 2_200_000_000, hoursAgo: 2.7),
             cleanItem("a2", "loft-review", "clone", 1_900_000_000, hoursAgo: 216),
             cleanItem("a2", "wt-253", "worktree", 730_000_000, hoursAgo: 216),
             cleanItem("a2", "test-run.log", "file", 12_000_000, hoursAgo: 50),
             cleanItem("a2", "notes", "folder", 1_200_000, hoursAgo: 1, label: "reports and notes", ticked: false),
             cleanItem("a2", "uploads", "folder", 3_100_000, hoursAgo: 30, label: "chat attachments", ticked: false),
             cleanItem("a1", "loft", "clone", 9_400_000_000, hoursAgo: 0.1, label: "main clone of loft", note: Self.kept, ticked: false, blocked: "Working", opens: true),
-            cleanItem("a1", ".cargo-build", "folder", 3_600_000_000, hoursAgo: 0.1, ticked: false, blocked: "Working"),
+            cleanItem("a1", ".cargo-build", "build", 3_600_000_000, hoursAgo: 0.1, ticked: false, blocked: "Working"),
         ]
         return items.filter { agentId == nil || $0.agent == agentId }
     }

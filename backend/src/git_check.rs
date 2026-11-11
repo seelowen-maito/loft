@@ -108,6 +108,9 @@ pub async fn run(storage: &Path, agent: &str, rel: &str, projects: &[String]) ->
     if has_stash(&dirs.common, &packed) {
         lines.push("Stashed changes".into());
     }
+    if dirs.dir == dirs.common && has_worktrees(&dirs.common) {
+        lines.push("Has worktrees: delete them first".into());
+    }
     let changed = status.lines().filter(|l| !l.is_empty()).count();
     if changed > 0 {
         lines.push(format!("Uncommitted changes ({changed} file{})", if changed == 1 { "" } else { "s" }));
@@ -216,6 +219,14 @@ fn read_small(f: &Path) -> std::io::Result<Option<String>> {
 /// Whether the repo has a stash, loose or packed.
 fn has_stash(common: &Path, packed: &str) -> bool {
     common.join("refs/stash").symlink_metadata().is_ok() || packed.lines().any(|l| l.ends_with(" refs/stash"))
+}
+
+/// Whether a linked worktree still lives off this clone: its commits and staged changes are kept in this `.git`.
+fn has_worktrees(common: &Path) -> bool {
+    std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten().any(|e| {
+        // A worktree whose folder is gone is stale: git prunes it.
+        std::fs::read_to_string(e.path().join("gitdir")).map_or(true, |g| Path::new(g.trim()).exists())
+    })
 }
 
 /// The branches the repo's refs files name (loose under `refs/heads/`, and `packed-refs`), sorted; symlinks and
@@ -435,6 +446,8 @@ mod tests {
         let wt = storage.join("a/wt");
         commit(&wt, "w.txt");
         assert_eq!(run(&storage, "a", "wt", &[]).await, GitCheck { state: "unsafe", lines: vec!["1 commit not pushed (detached HEAD)".into()] });
+        assert_eq!(run(&storage, "a", "loft", &[]).await, GitCheck { state: "unsafe", lines: vec!["Has worktrees: delete them first".into()] });
+        sh(&loft, &["worktree", "remove", "--force", "../wt"]);
         sh(&loft, &["switch", "-q", "--detach"]);
         commit(&loft, "d.txt");
         assert_eq!(run(&storage, "a", "loft", &[]).await.lines, ["1 commit not pushed (detached HEAD)"]);

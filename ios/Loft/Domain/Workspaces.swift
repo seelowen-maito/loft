@@ -19,8 +19,6 @@ struct WorkspaceSizes: Codable, Hashable {
 
     /// Under the server's limit (20 GB), where Needs you says "Disk almost full".
     var isLow: Bool { freeBytes.map { $0 < lowDiskBytes } ?? false }
-    /// How many agents Clean all cleans: those not busy.
-    var idleCount: Int { agents.filter { $0.busy != true }.count }
 }
 
 /// `GET /api/workspaces/processes`: a process an idle agent left running, and how long ago it started.
@@ -49,7 +47,7 @@ struct CleanItem: Codable, Hashable, Identifiable {
     /// Inside the agent's workspace, like `loft` or `loft/backend/target`.
     var rel: String
     var name: String
-    /// "clone", "worktree", "folder", "file" or "symlink".
+    /// "clone", "worktree", "build" (build output), "folder", "file" or "symlink".
     var kind: String
     var bytes: Int64
     /// Its newest file's change.
@@ -72,6 +70,14 @@ struct CleanItem: Codable, Hashable, Identifiable {
     var canTick: Bool { blocked.isEmpty && !(opens && !label.isEmpty) }
     /// The `rm -rf` shown under it; none when it can't be removed.
     var shownCommand: String { canTick ? command : "" }
+    /// The Type column: "git clone", "build output", or the kind as it is.
+    var typeText: String { kind == "clone" ? "git clone" : kind == "build" ? "build output" : kind }
+    /// The Status column: "Working", "Locked: symlink", "Kept: main clone of loft" or "Deletable", and whether it is locked.
+    var status: (text: String, locked: Bool) {
+        if !blocked.isEmpty { return (blocked == "Working" ? "Working" : "Locked: \(blocked)", true) }
+        if !canTick { return ("Kept: \(label)", true) }
+        return ("Deletable", false)
+    }
     /// It gets a Check button: a clone or worktree (only top-level items are).
     var canCheck: Bool { kind == "clone" || kind == "worktree" }
 }
@@ -167,4 +173,26 @@ func groupedByAgent<T>(_ items: [T], _ agent: (T) -> String) -> [(agent: String,
         if out.last?.agent == agent(i) { out[out.count - 1].items.append(i) } else { out.append((agent(i), [i])) }
     }
     return out
+}
+
+/// How Clean's table is ordered.
+enum CleanSort: String, CaseIterable, Identifiable {
+    case size = "Size", agent = "Agent", changed = "Last change"
+    var id: String { rawValue }
+}
+
+/// Clean's table order: by size (biggest first), agent name (A–Z) or last change (newest first); ties go biggest
+/// first, then by name.
+func sortedClean(_ items: [CleanItem], by sort: CleanSort, agentName: (String) -> String) -> [CleanItem] {
+    items.sorted { a, b in
+        switch sort {
+        case .size where a.bytes != b.bytes: return a.bytes > b.bytes
+        case .changed where a.changed != b.changed: return a.changed > b.changed
+        case .agent:
+            let (x, y) = (agentName(a.agent).lowercased(), agentName(b.agent).lowercased())
+            if x != y { return x < y }
+        default: break
+        }
+        return a.bytes != b.bytes ? a.bytes > b.bytes : a.name < b.name
+    }
 }
