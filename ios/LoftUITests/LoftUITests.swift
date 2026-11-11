@@ -1247,7 +1247,9 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("needsYouNew", app).exists, "new during this visit, though marked seen")
         let row = any("needsYou-task_done", app)
         let done = row.buttons["needsYouDone"]
-        for _ in 0..<8 where !done.isHittable { app.swipeUp() }
+        // Clear of the floating tab bar: under it the button still counts as hittable, and the tap goes to the bar.
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<8 where !done.exists || done.frame.maxY > bar.frame.minY - 8 { app.swipeUp() }
         done.tap()
         XCTAssertTrue(row.disappears(timeout: 5), "Done takes it off the list")
         app.navigationBars.buttons.element(boundBy: 0).tap()
