@@ -30,30 +30,10 @@ pub fn url() -> String {
     normalize(&from_env.or_else(from_file).unwrap_or_else(|| DEFAULT_URL.to_string()))
 }
 
-/// The paired client's token, from `config.json` (written by `loft-herdr setup`, see ADR 0004), only when
-/// `url` is the Loft it was issued for: the file's `url`. Any other Loft gets none.
-pub fn token_for(url: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(dir().join("config.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    if normalize(v.get("url")?.as_str()?) != normalize(url) {
-        return None;
-    }
-    v.get("token")?.as_str().map(str::to_string).filter(|t| !t.is_empty())
-}
-
-/// Writes `config.json` with the Loft address and, if there is one, the token: readable by this user only.
-pub fn save(url: &str, token: Option<&str>) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+/// Writes `config.json` with the Loft address.
+pub fn save(url: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir())?;
-    let mut v = serde_json::json!({ "url": url });
-    if let Some(t) = token {
-        v["token"] = t.into();
-    }
-    let path = dir().join("config.json");
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    writeln!(f, "{}", serde_json::to_string_pretty(&v)?)
+    std::fs::write(dir().join("config.json"), serde_json::to_string_pretty(&serde_json::json!({ "url": url }))? + "\n")
 }
 
 /// Trims spaces and trailing slashes, and adds `http://` to a bare host.
@@ -65,22 +45,6 @@ pub fn normalize(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn saves_the_token_readable_by_this_user_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = std::env::temp_dir().join(format!("loft-herdr-test-{}", std::process::id()));
-        // SAFETY: the only test that sets it.
-        unsafe { std::env::set_var("LOFT_HERDR_HOME", &tmp) };
-        std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(tmp.join("config.json"), "{}").unwrap();
-        std::fs::set_permissions(tmp.join("config.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
-        save("http://x:1", Some("abc")).unwrap();
-        assert_eq!(token_for("http://x:1/").as_deref(), Some("abc"));
-        assert_eq!(token_for("http://other:1"), None);
-        assert_eq!(std::fs::metadata(tmp.join("config.json")).unwrap().permissions().mode() & 0o777, 0o600);
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
 
     #[test]
     fn normalizes_addresses() {

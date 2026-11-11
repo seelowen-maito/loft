@@ -58,36 +58,12 @@ fn run_sync() -> Result<()> {
 
 fn setup(url: Option<&String>) -> Result<()> {
     let url = config::normalize(url.ok_or_else(|| anyhow!("usage: loft-herdr setup <loft-url>"))?);
-    let mut token = config::token_for(&url);
-    // A token kept from an earlier setup is good while Loft still lists this client as paired.
-    if Loft::new(&url).get("/paired-clients").is_err() {
-        token = pair(&url).map_err(|e| anyhow!("couldn't pair with Loft at {url}: {e}"))?;
-    }
-    config::save(&url, token.as_deref())?;
+    config::save(&url)?;
     match Loft::new(&url).agents() {
         Ok(a) => println!("Loft at {url}: {} agents.", a.len()),
         Err(e) => println!("Saved {url}, but Loft didn't answer: {e}"),
     }
     Ok(())
-}
-
-/// Asks Loft to pair this client (ADR 0004): shows the code, waits for a paired client or the Mac to allow it,
-/// and returns the token.
-fn pair(url: &str) -> Result<Option<String>> {
-    let http = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).user_agent("loft-herdr").build();
-    let started: serde_json::Value = http.post(&format!("{url}/api/pair")).send_json(serde_json::json!({ "name": "loft-herdr" }))?.into_json()?;
-    let secret = started["secret"].as_str().ok_or_else(|| anyhow!("Loft sent no pairing secret"))?;
-    println!("Allow \"loft-herdr\" in Loft (a paired device, or the dialog on the Mac). Code {}", started["code"].as_str().unwrap_or("?"));
-    for _ in 0..120 {
-        std::thread::sleep(Duration::from_secs(1));
-        let r: serde_json::Value = http.post(&format!("{url}/api/pair/poll")).send_json(serde_json::json!({ "secret": secret }))?.into_json()?;
-        match r["status"].as_str() {
-            Some("allowed") => return Ok(r["token"].as_str().map(str::to_string)),
-            Some("pending") => {}
-            other => return Err(anyhow!("Loft answered {}", other.unwrap_or("nothing useful"))),
-        }
-    }
-    Err(anyhow!("nobody allowed it in time"))
 }
 
 fn list() -> Result<()> {

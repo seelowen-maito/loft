@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -119,13 +119,7 @@ pub async fn setup_local(State(state): State<AppState>) -> ApiResult<Value> {
     let url = format!("http://localhost:{}", state.cfg.port);
     let config = home().join(".config/loft-herdr");
     std::fs::create_dir_all(&config).map_err(|e| bad(e.to_string()))?;
-    // Keeps the token `loft-herdr setup` stored there (ADR 0004).
-    let token = std::fs::read_to_string(config.join("config.json")).ok().and_then(|c| serde_json::from_str::<Value>(&c).ok()).and_then(|c| c.get("token").cloned());
-    let mut body = json!({ "url": url });
-    if let Some(t) = token {
-        body["token"] = t;
-    }
-    write_private(&config.join("config.json"), &format!("{}\n", serde_json::to_string_pretty(&body).unwrap())).map_err(|e| bad(e.to_string()))?;
+    std::fs::write(config.join("config.json"), format!("{}\n", serde_json::to_string_pretty(&json!({ "url": url })).unwrap())).map_err(|e| bad(e.to_string()))?;
     done.push(format!("Pointed it at {url}"));
 
     // A plain command on PATH, so Herdr can start a chat again after it restarts.
@@ -159,14 +153,6 @@ pub async fn setup_local(State(state): State<AppState>) -> ApiResult<Value> {
     Ok(Json(json!({ "ok": true, "done": done, "message": message })))
 }
 
-/// Writes `body` to `path`, readable by this user only (the file can hold a token).
-fn write_private(path: &std::path::Path, body: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    std::io::Write::write_all(&mut f, body.as_bytes())
-}
-
 fn text(body: String, kind: &'static str) -> Response {
     ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "no-store")], body).into_response()
 }
@@ -188,18 +174,11 @@ pub async fn file(State(state): State<AppState>, UrlPath(name): UrlPath<String>)
 }
 
 /// `GET /api/herdr/bin/{platform}`: the built client, for a machine with this one's OS and CPU.
-pub async fn binary(State(state): State<AppState>, headers: HeaderMap, UrlPath(wanted): UrlPath<String>) -> Result<Response, ApiError> {
+pub async fn binary(State(state): State<AppState>, UrlPath(wanted): UrlPath<String>) -> Result<Response, ApiError> {
     if wanted != platform() {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("this Loft has a {} build only", platform())));
     }
-    // Serving the built file is harmless; building one takes minutes of CPU, so only a paired client starts it.
-    let path = if built(&state).is_file() {
-        built(&state)
-    } else if crate::pairing::paired(&state, &headers) {
-        build(&state).await.map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, e))?
-    } else {
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "the client isn't built yet: pair this client with Loft first".into()));
-    };
+    let path = if built(&state).is_file() { built(&state) } else { build(&state).await.map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, e))? };
     let bytes = tokio::fs::read(&path).await.map_err(|e| ApiError(StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(([(header::CONTENT_TYPE, "application/octet-stream"), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }

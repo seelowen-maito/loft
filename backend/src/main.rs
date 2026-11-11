@@ -13,7 +13,6 @@ mod github_inbox;
 mod greenfield;
 mod grill;
 mod needs_you;
-mod pairing;
 mod planning;
 mod ports;
 mod guard;
@@ -68,22 +67,14 @@ fn main() -> anyhow::Result<()> {
     serve()
 }
 
-/// Everything under `/api`. Writes, and reads of devices, push and settings, need a paired client (pairing.rs).
-fn api_routes(state: &AppState) -> Router<AppState> {
+/// Everything under `/api`.
+fn api_routes() -> Router<AppState> {
     Router::new()
         .route("/info", get(api::info))
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
-        .route("/pair", post(pairing::start))
-        .route("/pair/poll", post(pairing::poll))
-        .route("/pair/cancel", post(pairing::cancel))
-        .route("/pair/approve", post(pairing::approve))
-        .route("/pair/deny", post(pairing::deny))
-        .route("/paired-clients", get(pairing::list))
-        .route("/paired-clients/unpair-all", post(pairing::unpair_all))
-        .route("/paired-clients/{id}", axum::routing::delete(pairing::forget))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
@@ -164,14 +155,13 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/herdr/bin/{platform}", get(herdr::binary))
         // GitHub requests a person's page or click makes count as `user` (a poller's have their own source).
         .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| github::as_source("user", next.run(req))))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), pairing::require_paired))
         .layer(axum::middleware::from_fn(guard::same_origin_writes))
 }
 
 /// The whole server. `dist` is the built frontend, served when present (production mode).
 fn app(state: &AppState, dist: &std::path::Path) -> Router {
     Router::new()
-        .nest("/api", api_routes(state))
+        .nest("/api", api_routes())
         .route("/mcp/{agent_id}", post(mcp::handle))
         // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
         .route("/kill/{agent_id}", post(processes::handle))
@@ -229,7 +219,6 @@ async fn serve() -> anyhow::Result<()> {
         mirror: Arc::new(Default::default()),
         listings: Arc::new(Default::default()),
         xcode: Arc::new(Default::default()),
-        pairing: Arc::new(pairing::Pairing::with_prompts()),
     };
     setup::ensure_loft(&state);
     {
@@ -258,7 +247,6 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));
     tokio::spawn(processes::idle_stopper(state.clone()));
-    tokio::spawn(pairing::read_terminal(state.clone()));
 
     // Serve the built frontend when present (production mode).
     let app = app(&state, &root.join("frontend").join("dist"));

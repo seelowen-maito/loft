@@ -46,7 +46,6 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `type` | urgency | When | Actions |
 |---|---|---|---|
 | `permission` | 3 | A permission prompt is pending | approve, approve_always, deny, open |
-| `pairing` | 3 | A new browser or phone asks to pair (ADR 0004) and a client is already paired: the item shows its code. Pushed as a `permission`. Gone when answered, cancelled or after 2 minutes | approve, deny (`POST /api/pair/approve\|deny` with the code) |
 | `task_approval` | 3 | Issue in `waiting_approval` | answer, open, dismiss |
 | `task_blocked` | 2 | Issue `blocked` (reason = its error) | resume (when a Delivery ticket or final review blocked it after too many changes rounds), answer, open, dismiss |
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
@@ -96,7 +95,7 @@ Teammates' PRs only appear when they request the user's review. A PR already tra
 ## `POST /api/needs-you/{id}/dismiss`
 
 Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
-`permission`, `grill_round` and `pairing` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
+`permission` and `grill_round` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
 
 ## Live updates
 
