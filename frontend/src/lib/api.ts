@@ -768,6 +768,8 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** The user opened the issue: a finished one's result to look at leaves Needs you, on every client. */
+  issueOpened: (id: string) => req<{ ok: boolean; cleared: number }>("POST", `/issues/${id}/opened`, {}),
   /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
   /** Every spec's Delivery in one read, for the Issues page's spec views. */
   deliverySummaries: () => req<import("./specViews").DeliverySummary[]>("GET", "/deliveries/summary"),

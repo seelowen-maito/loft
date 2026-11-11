@@ -3145,6 +3145,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_stall_waiting_on_the_leads_hand_out_ends_when_it_assigns_without_resume() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-lead-unstall";
+        let (a, m) = planned(&st, &fake, "dl-lead-unstall", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-lead-unstall", "lead");
+        let first = busy(&st, "First", "dl-lead-unstall", "dev");
+        press(&st, &a, &m).await.unwrap();
+        crate::delivery::stall_lost_runs(&st);
+        let stalled = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "delivery_stalled");
+        assert!(stalled(&st));
+
+        // The Lead hands #41 out anyway (the user nudged it in chat): the Delivery runs again and the item goes.
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.stalled_at.as_str()), ("running", "", "", ""));
+        assert!(woken(&st, &first).last().is_some_and(|p| p.contains("build ticket #41")));
+        assert!(!stalled(&st));
+    }
+
+    #[tokio::test]
+    async fn a_stall_on_a_devs_ticket_still_refuses_a_new_assignment() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-dev-stall";
+        let (a, m) = planned(&st, &fake, "dl-dev-stall", vec![ticket("Store", &[]), ticket("API", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-dev-stall", "lead");
+        busy(&st, "First", "dl-dev-stall", "dev");
+        busy(&st, "Second", "dl-dev-stall", "dev");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        crate::delivery::stall_lost_runs(&st);
+        assert_eq!(delivery(&st, slug).stalled_on, vec![41]);
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Second" })).await.unwrap_err();
+        assert!(err.contains("its Delivery isn't running"), "{err}");
+    }
+
+    #[tokio::test]
     async fn a_lead_on_a_team_with_no_dev_leaves_start_delivery_as_before() {
         let (fake, st) = (fake_github(), state());
         let (a, m) = planned(&st, &fake, "dl-nodev", vec![ticket("Store", &[])]).await;

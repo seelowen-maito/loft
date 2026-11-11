@@ -730,8 +730,11 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
     let name = tag(&d, t);
     let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
+    // A stall that waits on the Lead's hand-out (its run ended without one, or Loft restarted while it was due)
+    // ends with it, whichever run hands the ticket out.
+    let lead_stall = d.state == "stalled" && d.resume_to == "running" && d.stalled_on.is_empty();
     // A stalled Delivery (the Dev's run ended without submitting) can still move its ticket to another Dev.
-    if d.state != "running" && !(reassign && d.state == "stalled" && d.resume_to == "running") {
+    if d.state != "running" && !lead_stall && !(reassign && d.state == "stalled" && d.resume_to == "running") {
         return Err(format!("{name} can't be assigned: its Delivery isn't running."));
     }
     if !reassign && (t.state != "open" || !t.agent.is_empty()) {
@@ -794,6 +797,9 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Ok(format!("{name} moved to {}: Loft woke them with the ticket and told the previous Dev.", dev.name));
     }
     begin(state, &d, n, dev).await?;
+    if lead_stall {
+        update(state, &d.repo, d.spec, |d| d.unstall());
+    }
     Ok(format!("{name} is with {}: Loft woke them with the ticket.", dev.name))
 }
 

@@ -264,6 +264,11 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
   }, [t.id]);
+  // A finished issue's result was waiting in Needs you: opening it is looking at it.
+  const done = t.status === "done";
+  useEffect(() => {
+    if (done) api.issueOpened(t.id).catch(() => {});
+  }, [t.id, done]);
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {

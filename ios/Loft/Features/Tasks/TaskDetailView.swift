@@ -18,6 +18,10 @@ struct TaskDetailView: View {
     var body: some View {
         if let task = store.task(taskId) {
             content(task)
+                // A finished issue's result was waiting in Needs you: opening it is looking at it.
+                .task(id: task.state == .done) {
+                    if task.state == .done { await store.issueOpened(task.id) }
+                }
         } else if !lookedUp {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

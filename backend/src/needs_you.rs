@@ -21,7 +21,7 @@ use crate::state::{AppState, Event};
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
 const QUIET_MINUTES: i64 = 10;
 /// How long finished tasks you created stay here for review, and how far back unanswered questions go.
-const REVIEW_HOURS: i64 = 48;
+const REVIEW_HOURS: i64 = 24;
 const QUESTION_DAYS: i64 = 7;
 const MAX_TITLE: usize = 120;
 const MAX_REASON: usize = 160;
@@ -244,8 +244,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     by_rounds.extend(state.db.deliveries_in_state("needs_human").map_err(e)?);
     by_rounds.retain(crate::delivery::waits_for_user);
 
-    // Tasks waiting for you, blocked or failed.
+    // Tasks waiting for you, blocked or failed. A blocked or failed one whose GitHub issue was closed is settled
+    // there: it waits on nobody.
+    let closed_on_github = |t: &Task| t.github.as_ref().is_some_and(|g| g.state == "closed");
     for t in &tasks {
+        if matches!(t.status.as_str(), "blocked" | "failed") && closed_on_github(t) {
+            continue;
+        }
         let (urgency, reason) = match t.status.as_str() {
             "waiting_approval" => (3, if t.note.is_empty() { "Waiting for your approval.".to_string() } else { t.note.clone() }),
             "blocked" => (2, if t.error.is_empty() { "Blocked: needs your input.".to_string() } else { format!("Blocked: {}", first_line(&t.error)) }),
@@ -292,8 +297,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
-    // Closed on GitHub while an agent works on it: the user decides.
-    for t in tasks.iter().filter(|t| t.state() == "open" && crate::tasks::is_active(t) && t.github.as_ref().is_some_and(|g| g.state == "closed")) {
+    // Closed on GitHub while an agent works on it: the user decides. Not a blocked one: nobody works on it.
+    for t in tasks.iter().filter(|t| t.state() == "open" && crate::tasks::is_active(t) && t.status != "blocked" && closed_on_github(t)) {
         let g = t.github.as_ref().unwrap();
         let base = format!("/api/issues/{}", t.id);
         items.push(Item {
@@ -348,7 +353,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
-    // Tasks you created that finished recently: a result to look at.
+    // Tasks you created that finished recently: a result to look at, until you open the issue (`issue_opened`).
     for t in tasks.iter().filter(|t| t.status == "done" && t.created_by == "user") {
         let done_at = t.completed_at.clone().unwrap_or_else(|| t.updated_at.clone());
         if !within(&done_at, chrono::Duration::hours(REVIEW_HOURS)) {
@@ -453,13 +458,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             continue;
         }
 
-        // An agent that ended its reply to you with a question (and you haven't written since): like an
-        // Unread reply, only a run you started (a message or a schedule) counts, and only your own
-        // message answers it, not another agent's.
+        // An agent that ended its reply to you with a question (and nobody has written since): like an Unread
+        // reply, only a run you started (a message or a schedule) counts. Your message answers it, and so does
+        // another agent's that needs action (the Lead deciding for you); an FYI doesn't.
         let msgs = state.db.list_messages(&a.id, 30, None).map_err(e)?;
-        let last_turn = msgs.iter().rev().find(|m| {
-            m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || (m.role == "user" && m.kind == "text" && m.meta["from_agent"].is_null()))
-        });
+        let answers = |m: &Message| m.role == "user" && m.kind == "text" && (m.meta["from_agent"].is_null() || m.meta["fyi"] != json!(true));
+        let last_turn = msgs.iter().rev().find(|m| m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || answers(m)));
         // The reply's run marker is usually among the messages already loaded.
         let for_user = |m: &Message| {
             let Some(r) = m.run_id.as_deref() else { return false };
@@ -992,6 +996,24 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/issues/{id}/opened`: the user opened the issue on some client. A finished issue's result was there to
+/// look at, so its `task_done` item goes, everywhere.
+pub async fn issue_opened(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let looked: Vec<String> = items.iter().filter(|i| i.kind == "task_done" && i.task_id.as_deref() == Some(id.as_str())).map(|i| i.id.clone()).collect();
+    for item in &looked {
+        state.db.dismiss_needs_you(item)?;
+    }
+    if !looked.is_empty() {
+        items.retain(|i| !looked.contains(&i.id));
+        if let Ok(v) = look(&state, &items) {
+            emit_if_changed(&state, &v);
+        }
+    }
+    Ok(Json(json!({ "ok": true, "cleared": looked.len() })))
+}
+
 /// `POST /api/needs-you/seen` with `{ "ids": [...] }`: the user saw these items (the list was opened on some client),
 /// so the counter stops counting them everywhere. Ids not in the list are ignored. Answers with the new counts.
 pub async fn mark_seen(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
@@ -1321,8 +1343,31 @@ mod tests {
         assert!(same_site(&h(Some("same-site"))).is_err());
     }
 
+    #[tokio::test]
+    async fn a_finished_issues_result_leaves_when_the_issue_is_opened_or_after_24_hours() {
+        let st = state();
+        let done = |title: &str, hours_ago: i64| {
+            let (mut t, _) = crate::tasks::create(&st, &json!({ "title": title }), "user").unwrap();
+            t.status = "done".into();
+            t.completed_at = Some((Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339());
+            st.db.save_task(&t).unwrap();
+            t
+        };
+        let results = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "task_done").map(|i| i.title).collect::<Vec<_>>();
+        let (fresh, _day_old, other) = (done("Fresh", 1), done("Day old", 25), done("Other", 2));
+        assert_eq!(results(&st), ["Other", "Fresh"], "a day later it's gone");
+
+        let Json(r) = issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap();
+        assert_eq!(r["cleared"], json!(1));
+        assert_eq!(results(&st), ["Other"], "opening one leaves the other");
+        // Opening it again, or opening an issue with no result to look at, changes nothing.
+        assert_eq!(issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap().0["cleared"], json!(0));
+        assert!(issue_opened(State(st.clone()), Path("nope".into())).await.is_err());
+        assert_eq!(other.status, "done");
+    }
+
     #[test]
-    fn only_a_run_you_started_asks_you_something_and_only_your_message_answers_it() {
+    fn only_a_run_you_started_asks_you_something_and_your_message_or_an_agents_needs_action_answers_it() {
         let st = state();
         let (dev, qa) = (agent(&st, "Dev"), agent(&st, "QA"));
         let questions = |st: &AppState| {
@@ -1343,10 +1388,15 @@ mod tests {
         reply(&st, &dev.id, true, "Should I use B2 or S3?");
         assert_eq!(questions(&st), ["Dev"]);
 
-        // An agent's message after the question doesn't answer it; the user's does.
-        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Status update: CI is green.", from_qa);
+        // An agent's FYI after the question doesn't answer it; an agent's message that needs action does (the Lead
+        // decided), and so does the user's.
+        crate::agents::fyi_from_agent(&st, &qa, &dev, "Status update: CI is green.");
         assert_eq!(questions(&st), ["Dev"]);
-        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "S3", json!({}));
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Use S3.", from_qa);
+        assert!(questions(&st).is_empty());
+        reply(&st, &dev.id, true, "And the bucket name?");
+        assert_eq!(questions(&st), ["Dev"]);
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "loft-backups", json!({}));
         assert!(questions(&st).is_empty());
 
         // A long run: its marker is past the loaded messages, so it's looked up, walking back from the reply.

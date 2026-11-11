@@ -1173,6 +1173,12 @@ final class LoftStore {
         return t
     }
 
+    /// The user opened a finished issue: its result to look at leaves Needs you (an older server ignores it).
+    func issueOpened(_ id: String) async {
+        guard let api = try? requireTasks() else { return }
+        try? await api.issueOpened(id: id)
+    }
+
     func deleteTask(_ id: String) async throws {
         try await requireTasks().deleteTask(id: id)
         tasks.removeAll { $0.id == id }
