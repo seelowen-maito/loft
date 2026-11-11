@@ -2105,6 +2105,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_with_a_worktree_is_not_safe_and_clean_keeps_it() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, origin) = pushed_workspace(&st);
+        let loft = pushed_clone(&ws, &origin, "loft");
+        git(&loft, &["worktree", "add", "-q", "--detach", "../wt"]);
+        commit_in(&ws.join("wt"), "only-here.txt");
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |n: &str| items.iter().find(|i| i.rel == n).unwrap_or_else(|| panic!("no {n}")).clone();
+        assert_eq!(by("loft").blocked, "Has worktrees: delete them first");
+        assert_eq!(by("wt").blocked, "1 commit not pushed (detached HEAD)");
+        let l = clean_paths(&st, Some(&a.id), vec![ws.join("loft")]).await;
+        assert_eq!(l.removed, 0);
+        assert!(ws.join("loft/.git").exists());
+        git(&ws.join("wt"), &["log", "-1"]);
+        // Once the worktree is gone, the clone is safe again.
+        git(&loft, &["worktree", "remove", "--force", "../wt"]);
+        assert_eq!(preview_of(&st, Some(&a.id)).await.iter().find(|i| i.rel == "loft").unwrap().blocked, "");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_listing_runs_the_git_check_on_every_clone_and_locks_the_unsafe_ones_with_the_reason() {
         let st = crate::tasks::tests::state();
         let (a, ws, origin) = pushed_workspace(&st);
