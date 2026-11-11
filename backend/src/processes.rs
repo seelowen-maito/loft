@@ -88,15 +88,10 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
 /// session but aren't its processes: Clean doesn't list them, and the idle stop and Stop them leave them alone.
 const HELPERS: [&str; 4] = ["DTServiceHub", "DTDeviceKit", "XCBBuildService", "SWBBuildService"];
 
-fn is_helper(command: &str) -> bool {
-    let exe = command.split_whitespace().next().unwrap_or_default();
-    if HELPERS.contains(&exe.rsplit('/').next().unwrap_or_default()) {
-        return true;
-    }
-    // A path with a space in an app bundle (`/Applications/Xcode beta.app/…/DTServiceHub -x`).
-    command.starts_with('/')
-        && command.split_once(".app/").is_some_and(|(_, rest)| rest.split('/').any(|seg| HELPERS.contains(&seg.split_whitespace().next().unwrap_or_default())))
-        && command.split(".app/").next().is_some_and(|app| app.rsplit('/').next().is_some_and(|n| n.contains(' ')))
+/// Whether `comm`, a process's executable path with no arguments (`ps -o comm=`), is one of the helpers inside an
+/// app bundle. Never read from the command line, which the agent writes.
+fn is_helper(comm: &str) -> bool {
+    comm.contains(".app/") && HELPERS.contains(&comm.rsplit('/').next().unwrap_or_default())
 }
 
 /// A process an agent left alive, for Clean to list.
@@ -112,7 +107,7 @@ pub fn live_processes(storage: &Path) -> HashMap<String, Vec<Live>> {
     let owners = owners(storage);
     let me = std::process::id() as i32;
     let mut live: HashMap<String, Vec<Live>> = HashMap::new();
-    for p in table().into_iter().filter(|p| p.pid != me && !is_helper(&p.command)) {
+    for p in table().into_iter().filter(|p| p.pid != me && !p.helper) {
         if let Some(id) = session_of(p.pid).and_then(|s| owners.get(&s)) {
             live.entry(id.clone()).or_default().push(Live { pid: p.pid, command: p.command, age_secs: p.age_secs });
         }
@@ -240,7 +235,7 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me && !is_helper(&p.command))
+            .filter(|p| p.pid != me && !p.helper)
             .filter_map(|p| Some((p.pid, session_of(p.pid).filter(|s| mine.contains(s))?, p.command)))
             .collect();
         for (pid, _, _) in &targets {
@@ -347,6 +342,8 @@ struct Proc {
     /// Seconds since it started.
     age_secs: u64,
     command: String,
+    /// One of Xcode's helpers, by its executable.
+    helper: bool,
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
@@ -361,6 +358,12 @@ fn table() -> Vec<Proc> {
     let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,etime=,command="]).output() else {
         return vec![];
     };
+    // The executable on its own: `command` mixes it with arguments the agent chooses.
+    let helpers: HashSet<i32> = std::process::Command::new("/bin/ps")
+        .args(["-axww", "-o", "pid=,comm="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| { let (pid, comm) = field(l); is_helper(comm).then(|| pid.parse().ok()).flatten() }).collect())
+        .unwrap_or_default();
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
@@ -368,7 +371,8 @@ fn table() -> Vec<Proc> {
             let (ppid, rest) = field(rest);
             let (uid, rest) = field(rest);
             let (age, command) = field(rest);
-            Some(Proc { pid: pid.parse().ok()?, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string() })
+            let pid: i32 = pid.parse().ok()?;
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid) })
         })
         .collect()
 }
@@ -758,15 +762,6 @@ fn run(bin: &str, args: &[String], cwd: Option<&Path>) -> Output {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_helper_is_known_by_its_name_even_under_an_app_with_a_space() {
-        use super::is_helper;
-        assert!(is_helper("/usr/bin/DTServiceHub --x"));
-        assert!(is_helper("/Applications/Xcode beta.app/Contents/Developer/DTServiceHub --x /y"));
-        assert!(!is_helper("node /x/DTServiceHub"));
-        assert!(!is_helper("/usr/bin/node /srv/app.app/DTServiceHub"));
-    }
-
     use super::*;
     use crate::agents::tests::{fake_claude_state, until};
     use crate::agents::{enqueue, is_running, workspace};
@@ -865,6 +860,34 @@ mod tests {
     }
 
     #[test]
+    fn a_name_in_the_arguments_does_not_make_a_helper() {
+        // Security's probes: the helper's name and `.app/` only after the executable.
+        let mut kids: Vec<_> = ["x.app/DTServiceHub", "--tag=.app/DTServiceHub"]
+            .iter()
+            .map(|probe| std::process::Command::new("/bin/sh").args(["-c", "sleep 30", probe]).spawn().unwrap())
+            .collect();
+        let t = super::table();
+        for k in &kids {
+            let p = t.iter().find(|p| p.pid == k.id() as i32).expect("in the table");
+            assert!(p.command.contains("DTServiceHub") && !p.helper, "{}", p.command);
+        }
+        for k in &mut kids {
+            let _ = k.kill();
+            let _ = k.wait();
+        }
+    }
+
+    #[test]
+    fn a_helper_is_its_executable_in_an_app_never_the_arguments() {
+        use super::is_helper;
+        assert!(is_helper("/Applications/Xcode.app/Contents/SharedFrameworks/DTServiceHub"));
+        assert!(is_helper("/Applications/Xcode beta.app/Contents/Developer/DTServiceHub"));
+        assert!(!is_helper("/usr/bin/DTServiceHub"));
+        assert!(!is_helper("/bin/sleep"));
+        assert!(!is_helper("/Applications/Xcode.app/Contents/bin/node"));
+    }
+
+    #[test]
     fn ps_elapsed_time_is_read_in_seconds() {
         assert_eq!([etime("00:07"), etime("12:34"), etime("3:04:05"), etime("2-03:04:05"), etime("x")], [Some(7), Some(754), Some(11045), Some(183845), None]);
     }
@@ -877,7 +900,7 @@ mod tests {
         let server = Sleeper::start(true);
         record(&storage, &a.id, server.pid() as u32).unwrap();
         // Xcode's DTServiceHub, in the agent's session too.
-        let dir = crate::testdir::for_this_test("helpers");
+        let dir = crate::testdir::for_this_test("helpers").join("Xcode beta.app");
         std::fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink("/bin/sleep", dir.join("DTServiceHub")).unwrap();
         let helper = Sleeper::start_as(&dir.join("DTServiceHub"), true);
