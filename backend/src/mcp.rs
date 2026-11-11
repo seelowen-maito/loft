@@ -511,14 +511,18 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 .flatten()
                 .map(|a| a.allowed_tools.iter().any(|r| rule_matches(r, &tool, &input)))
                 .unwrap_or(false);
-            let d = if already {
-                crate::state::Decision { allow: true, message: None }
+            let mut d = if already {
+                crate::state::Decision { allow: true, message: None, input: None }
             } else {
                 let rule = suggest_rule(&tool, &input);
                 ask_permission(state, agent_id, "prompt", &tool, input.clone(), "", rule).await
             };
+            // Allowed to ask: now the questions themselves, whose answers go back in the input.
+            if d.allow && tool == agents::ASK_TOOL {
+                d = ask_permission(state, agent_id, agents::QUESTIONS, &tool, input.clone(), "", String::new()).await;
+            }
             let body = if d.allow {
-                json!({ "behavior": "allow", "updatedInput": input })
+                json!({ "behavior": "allow", "updatedInput": d.input.unwrap_or(input) })
             } else {
                 json!({ "behavior": "deny", "message": d.message.unwrap_or_else(|| "The user denied this action.".into()) })
             };
@@ -592,6 +596,72 @@ mod tests {
         assert_eq!(find_agent(&st, &team(&st, &me.id), "dev").unwrap().id, near.id);
         assert_eq!(find_agent(&st, &team(&st, &other.id), "Dev").unwrap().id, far.id);
         assert_eq!(find_agent(&st, &team(&st, &me.id), &far.id).unwrap().id, far.id, "an id is exact");
+    }
+
+    /// Calls the permission gate with two questions; `act` answers each pending request in turn (by its source)
+    /// until the gate replies, and returns that reply with the sources the user saw.
+    async fn gate(st: &AppState, agent: &str, mut act: impl FnMut(&crate::db::PermissionRequest)) -> (Value, Vec<String>) {
+        let (st2, agent2) = (st.clone(), agent.to_string());
+        let input = json!({ "questions": [{ "question": "Which store?", "header": "Store", "multiSelect": false, "options": [{ "label": "S3", "description": "" }, { "label": "B2", "description": "" }] }] });
+        let call = tokio::spawn(async move { call_tool(&st2, &agent2, "approval_prompt", json!({ "tool_name": agents::ASK_TOOL, "input": input })).await });
+        let pending = || st.db.list_permissions(Some(agent)).unwrap().into_iter().find(|p| p.status == "pending");
+        let mut seen = vec![];
+        while !call.is_finished() {
+            if let Some(p) = pending() {
+                seen.push(p.source.clone());
+                act(&p);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let r = call.await.unwrap();
+        (serde_json::from_str(said(&r).0).unwrap(), seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_are_asked_once_the_user_allows_them_and_come_back_answered() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let st2 = st.clone();
+        let (r, seen) = gate(&st, &a.id, |p| match p.source.as_str() {
+            "prompt" => drop(agents::decide(&st2, &p.id, "allow_always", None, None, None).unwrap()),
+            _ => drop(agents::decide(&st2, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "B2" }))).unwrap()),
+        })
+        .await;
+        assert_eq!(seen, ["prompt", agents::QUESTIONS], "the permission first, then the questions");
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["answers"], json!({ "Which store?": "B2" }));
+        assert_eq!(r["updatedInput"]["questions"][0]["header"], "Store");
+        let answered = st.db.list_permissions(Some(&a.id)).unwrap().into_iter().find(|p| p.source == agents::QUESTIONS).unwrap();
+        assert_eq!(answered.input["answers"]["Which store?"], "B2", "the card shows what was answered");
+
+        // Always allowed: straight to the questions.
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.iter().any(|t| t == agents::ASK_TOOL));
+        let st3 = st.clone();
+        let (r, seen) = gate(&st, &a.id, |p| drop(agents::decide(&st3, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "S3" }))).unwrap())).await;
+        assert_eq!((seen, r["updatedInput"]["answers"]["Which store?"].clone()), (vec![agents::QUESTIONS.to_string()], json!("S3")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_denied_skipped_or_allowed_without_answers_tell_the_agent_why() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let decide = |d: &'static str| {
+            let st = st.clone();
+            move |p: &crate::db::PermissionRequest| drop(agents::decide(&st, &p.id, if p.source == "prompt" && d != "deny" { "allow_once" } else { d }, None, None, None).unwrap())
+        };
+        // Denied at the permission: the questions never show.
+        let st2 = st.clone();
+        let (r, seen) = gate(&st, &a.id, move |p| drop(agents::decide(&st2, &p.id, "deny", None, None, None).unwrap())).await;
+        assert_eq!((r["behavior"].clone(), seen), (json!("deny"), vec!["prompt".to_string()]));
+        // Allowed, then skipped.
+        let st2 = st.clone();
+        let (r, _) = gate(&st, &a.id, move |p| drop(agents::decide(&st2, &p.id, if p.source == "prompt" { "allow_once" } else { "deny" }, None, None, None).unwrap())).await;
+        assert_eq!(r["message"], "The user chose not to answer your questions.");
+        // Allowed, then a plain allow from an older app, which can't show the options.
+        let (r, _) = gate(&st, &a.id, decide("allow_once")).await;
+        assert_eq!(r["behavior"], "deny");
+        assert!(r["message"].as_str().unwrap().contains("Ask them in your reply"), "{r}");
+        assert!(!st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.iter().any(|t| t == agents::ASK_TOOL), "allowed once: nothing saved");
     }
 
     #[tokio::test]

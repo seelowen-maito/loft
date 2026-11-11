@@ -590,7 +590,7 @@ pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) ->
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {
-        let _ = agents::decide(&state, &p.id, "deny", None, Some("Run stopped by user.".into()));
+        let _ = agents::decide(&state, &p.id, "deny", None, Some("Run stopped by user.".into()), None);
     }
     // Messages queued behind the run are kept: they run next (people press Stop to unstick an agent,
     // and what they sent while it looked stuck must not be lost).
@@ -794,13 +794,15 @@ pub struct DecideBody {
     decision: String,
     rule: Option<String>,
     note: Option<String>,
+    /// For an `AskUserQuestion` prompt: the chosen answer per question text.
+    answers: Option<Value>,
 }
 
 pub async fn decide_permission(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<DecideBody>) -> ApiResult<Value> {
     if !["allow_once", "allow_always", "deny"].contains(&b.decision.as_str()) {
         return Err(bad("decision must be allow_once | allow_always | deny"));
     }
-    let r = agents::decide(&state, &id, &b.decision, b.rule, b.note).map_err(|e| bad(e.to_string()))?;
+    let r = agents::decide(&state, &id, &b.decision, b.rule, b.note, b.answers).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!(r)))
 }
 

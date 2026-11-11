@@ -37,6 +37,8 @@ pub enum Event {
 pub struct Decision {
     pub allow: bool,
     pub message: Option<String>,
+    /// The tool's input as the user completed it: `AskUserQuestion` with their `answers`.
+    pub input: Option<serde_json::Value>,
 }
 
 pub struct Config {

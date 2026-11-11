@@ -262,6 +262,26 @@ pub fn rule_matches(rule: &str, tool: &str, input: &Value) -> bool {
     false
 }
 
+/// Claude Code's multiple-choice question tool. Headless, it reaches the user only through the permission prompt,
+/// whose `updatedInput` must carry the user's `answers`; a plain allow leaves them empty ("The user did not answer").
+/// So once it is allowed (a prompt, or a rule), Loft asks the questions themselves as a second request.
+pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// The source of that second request: the questions, answered rather than allowed.
+pub const QUESTIONS: &str = "questions";
+
+/// `input` with the user's answers, one per question text (choices joined by ", "), or why the user gave none.
+fn with_answers(input: &Value, answers: Option<Value>) -> Result<Value, String> {
+    let given = answers.as_ref().and_then(Value::as_object).filter(|a| a.values().any(|v| v.as_str().is_some_and(|v| !v.trim().is_empty())));
+    let Some(given) = given else {
+        // An allow from a client that can't show the questions (an older app's plain "Allow").
+        return Err("The user couldn't answer your questions where they saw them. Ask them in your reply instead and end your run.".into());
+    };
+    let mut done = input.clone();
+    done["answers"] = Value::Object(given.clone());
+    Ok(done)
+}
+
 /// Rule suggested for "always allow" on a blocked tool call.
 pub fn suggest_rule(tool: &str, input: &Value) -> String {
     match tool {
@@ -341,12 +361,13 @@ pub async fn ask_permission_for(
     let (tx, rx) = oneshot::channel();
     state.rt.lock().unwrap().waiters.insert(req.id.clone(), tx);
     if let Err(e) = state.db.save_permission(&req) {
-        return Decision { allow: false, message: Some(format!("loft error: {e}")) };
+        return Decision { allow: false, message: Some(format!("loft error: {e}")), input: None };
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
-    set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
+    let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
+    set_status(state, agent_id, "waiting", &waiting);
 
     let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
     let decision = match tokio::time::timeout(timeout, rx).await {
@@ -354,7 +375,7 @@ pub async fn ask_permission_for(
             pending.answered = true;
             d
         }
-        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) },
+        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
     if is_running(state, agent_id) {
@@ -363,17 +384,31 @@ pub async fn ask_permission_for(
     decision
 }
 
-/// Resolve a pending request from the UI. `always` persists the rule into the agent config.
-pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>) -> Result<PermissionRequest> {
+/// Resolve a pending request from the UI. `always` persists the rule into the agent config. `answers` answers an
+/// `AskUserQuestion` prompt.
+pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>, answers: Option<Value>) -> Result<PermissionRequest> {
     let mut req = state.db.get_permission(id)?.ok_or_else(|| anyhow::anyhow!("no such request"))?;
     anyhow::ensure!(req.status == "pending", "request already {}", req.status);
     if let Some(r) = rule.filter(|r| !r.trim().is_empty()) {
         req.rule = r.trim().to_string();
     }
-    let allow = decision != "deny";
+    let mut allow = decision != "deny";
+    let (mut note, mut input) = (note, None);
+    let asks = req.source == QUESTIONS;
+    if asks && allow {
+        match with_answers(&req.input, answers) {
+            Ok(done) => {
+                req.input = done.clone();
+                input = Some(done);
+            }
+            Err(why) => (allow, note) = (false, Some(why)),
+        }
+    } else if asks {
+        note = Some(note.map_or_else(|| "The user chose not to answer your questions.".into(), |n| format!("The user chose not to answer your questions: {n}")));
+    }
     // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
-    // is about those processes only: it is never saved.
-    let persist = req.tool_name != "Kill" && (decision == "allow_always" || (allow && req.source == "request"));
+    // is about those processes only: it is never saved, and nor are answers, which are for these questions only.
+    let persist = req.tool_name != "Kill" && !asks && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -395,7 +430,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let waiter = state.rt.lock().unwrap().waiters.remove(id);
     if let Some(tx) = waiter {
-        let _ = tx.send(Decision { allow, message: note });
+        let _ = tx.send(Decision { allow, message: note, input });
     }
     Ok(req)
 }

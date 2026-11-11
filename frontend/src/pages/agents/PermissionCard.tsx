@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Check, CheckCheck, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
+import { Check, CheckCheck, MessageCircleQuestion, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
 import { api, type PermissionRequest } from "../../lib/api";
 import { cx, timeAgo } from "../../lib/format";
+import { ASK_TOOL, answersOf, questionsOf, toggle, typeOther, type Pick } from "../../lib/questions";
 
 function describeInput(p: PermissionRequest) {
   const i = p.input ?? {};
+  if (p.tool_name === ASK_TOOL) return questionsOf(i).map((q) => q.question).join("\n");
   if (typeof i.command === "string") return i.command;
   if (typeof i.file_path === "string") return i.file_path;
   if (typeof i.url === "string") return i.url;
@@ -20,6 +22,124 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
 };
 
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
+  if (req.source === "questions") return <QuestionsCard req={req} compact={compact} />;
+  return <ToolCard req={req} compact={compact} />;
+}
+
+/** An agent's multiple-choice questions, once it may ask them: the picks go back as the tool's answers. */
+function QuestionsCard({ req, compact }: { req: PermissionRequest; compact: boolean }) {
+  const qs = questionsOf(req.input);
+  const [picks, setPicks] = useState<Record<number, Pick>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const pending = req.status === "pending";
+  const answered: Record<string, string> = req.input?.answers ?? {};
+  const answers = answersOf(qs, picks);
+  const pick = (i: number) => picks[i] ?? { chosen: [], other: "" };
+  const set = (i: number, p: Pick) => setPicks((ps) => ({ ...ps, [i]: p }));
+
+  const act = async (d: "allow_once" | "deny") => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.decide(req.id, d, undefined, d === "deny" ? undefined : (answers ?? undefined));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const status = req.status === "denied" ? "Skipped" : req.status === "expired" ? "Expired" : null;
+  return (
+    <div
+      id={`perm-${req.id}`}
+      className={cx(
+        "scroll-mt-4 rounded-2xl border p-4",
+        pending ? "border-warn/30 bg-warn/[0.05] shadow-[0_0_0_4px_rgb(242_196_109/0.04)]" : "border-line bg-ink-900/60",
+      )}
+    >
+      <div className="flex items-center gap-2 text-[13px]">
+        <MessageCircleQuestion className={cx("size-4", pending ? "text-warn" : "text-fg-3")} />
+        <span className="text-fg">{qs.length === 1 ? "Has a question for you" : "Has questions for you"}</span>
+        <span className="ml-auto font-mono text-[11px] text-fg-3">{timeAgo(req.created_at)}</span>
+      </div>
+      <div className="mt-3 space-y-4">
+        {qs.map((q, i) => {
+          const multi = !!q.multiSelect;
+          const p = pick(i);
+          return (
+            <div key={i}>
+              {q.header && <div className="eyebrow mb-1">{q.header}</div>}
+              <p className="text-[13.5px] text-fg">{q.question}</p>
+              {pending ? (
+                <div className="mt-2 space-y-1.5">
+                  {(q.options ?? []).map((o) => {
+                    const on = p.chosen.includes(o.label);
+                    return (
+                      <button
+                        key={o.label}
+                        type="button"
+                        disabled={busy}
+                        aria-pressed={on}
+                        onClick={() => set(i, toggle(p, o.label, multi))}
+                        className={cx(
+                          "block w-full rounded-xl border px-3 py-2 text-left transition",
+                          on ? "border-accent bg-accent/10" : "border-line bg-ink-950 hover:border-fg-3",
+                        )}
+                      >
+                        <span className="flex items-center gap-2 text-[13px] text-fg">
+                          {on && <Check className="size-3.5 shrink-0 text-accent" />}
+                          {o.label}
+                        </span>
+                        {o.description && !compact && <span className="mt-0.5 block text-[12px] text-fg-2">{o.description}</span>}
+                      </button>
+                    );
+                  })}
+                  <input
+                    className="input py-1.5 text-[13px]"
+                    placeholder={multi ? "Something else, too…" : "Something else…"}
+                    value={p.other}
+                    disabled={busy}
+                    onChange={(e) => set(i, typeOther(p, e.target.value, multi))}
+                  />
+                  {multi && <div className="text-[11.5px] text-fg-3">Pick any that apply.</div>}
+                </div>
+              ) : (
+                answered[q.question] && (
+                  <div className="mt-1 flex items-center gap-1.5 text-[13px] text-good">
+                    <Check className="size-3.5" /> {answered[q.question]}
+                  </div>
+                )
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {pending ? (
+        <div className="mt-4 space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <button className="btn-primary" disabled={busy || !answers} onClick={() => act("allow_once")}>
+              <Check className="size-3.5" /> Send answers
+            </button>
+            <button className="btn-ghost text-fg-2" disabled={busy} onClick={() => act("deny")}>
+              <X className="size-3.5" /> Skip
+            </button>
+          </div>
+          {err && <div className="text-[12px] text-bad">{err}</div>}
+        </div>
+      ) : (
+        status && (
+          <div className="mt-2 flex items-center gap-1.5 font-mono text-[11.5px] text-fg-3">
+            <X className="size-3.5" /> {status}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function ToolCard({ req, compact }: { req: PermissionRequest; compact: boolean }) {
   const [rule, setRule] = useState(req.rule);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
