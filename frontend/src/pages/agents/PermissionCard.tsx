@@ -88,9 +88,9 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
         </div>
       ) : (
         res && (
-          <div className={cx("mt-2 flex min-w-0 items-center gap-1.5 font-mono text-[11.5px]", res.cls)}>
+          <div className={cx("mt-2 flex min-w-0 flex-wrap items-center gap-x-1.5 font-mono text-[11.5px]", res.cls)}>
             {res.icon} <span className="shrink-0">{res.label}</span>
-            {req.status === "allowed_always" && <code className="ml-1 min-w-0 truncate text-fg-2" title={req.rule}>{req.rule}</code>}
+            {req.status === "allowed_always" && <code className="max-w-full min-w-0 truncate text-fg-2" title={req.rule}>{req.rule}</code>}
           </div>
         )
       )}
