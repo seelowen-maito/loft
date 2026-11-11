@@ -89,7 +89,8 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
 const HELPERS: [&str; 4] = ["DTServiceHub", "DTDeviceKit", "XCBBuildService", "SWBBuildService"];
 
 /// Whether `comm`, a process's executable path with no arguments (`ps -o comm=`), is one of the helpers inside an
-/// app bundle. Never read from the command line, which the agent writes.
+/// app bundle: decided from the executable, not from the arguments. `comm` is argv[0] on macOS, so an agent can
+/// still spoof the name (`exec -a`, a symlink) and hide a process from Clean; that low risk is accepted.
 fn is_helper(comm: &str) -> bool {
     comm.contains(".app/") && HELPERS.contains(&comm.rsplit('/').next().unwrap_or_default())
 }
