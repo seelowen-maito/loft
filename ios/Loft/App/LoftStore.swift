@@ -1204,6 +1204,8 @@ final class LoftStore {
         agents = []; tasks = []; deliverySummaries = [:]; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
+        // Its agent is on the old server: it must not go through the new one (#351).
+        cancelVoiceSend()
     }
 
     private func restore(_ s: Snapshot) {

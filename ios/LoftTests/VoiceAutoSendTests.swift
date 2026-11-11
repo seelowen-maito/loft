@@ -63,4 +63,16 @@ final class VoiceAutoSendTests: XCTestCase {
         try await Task.sleep(for: .seconds(0.5))
         XCTAssertEqual([first, second], [1, 1])
     }
+
+    func testSwitchingOrForgettingTheServerCancelsIt() async throws {
+        for next in [nil, MockAPI() as LoftAPI?] {
+            let s = store()
+            var sent = 0
+            s.scheduleVoiceSend("Deploy", to: "a1", in: 0.2) { sent += 1 }
+            s.configure(next)
+            XCTAssertNil(s.voiceAutoSend)
+            try await Task.sleep(for: .seconds(0.4))
+            XCTAssertEqual(sent, 0, "nothing goes to another server")
+        }
+    }
 }
