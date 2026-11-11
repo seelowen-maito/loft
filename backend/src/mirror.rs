@@ -1917,7 +1917,7 @@ pub(crate) mod tests {
             if worked {
                 let a = crate::tasks::tests::agent(&st, "Builder");
                 crate::tasks::tests::busy(&st, &a);
-                crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+                crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
             }
             // Closed on GitHub: a refresh (its ticket changed) reads it first, then the full read no longer lists it.
             let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
@@ -1942,7 +1942,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
 
         // Someone closes it on GitHub mid-work.
         fake.route("GET", "/repos/octo/cw/issues", 200, json!([gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z")]));
@@ -1985,7 +1985,7 @@ pub(crate) mod tests {
             let id = one_mirrored(&st, &fake, &name, &repo, "2026-10-02T00:00:00Z").await;
             let a = crate::tasks::tests::agent(&st, "Builder");
             crate::tasks::tests::busy(&st, &a);
-            crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+            crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
             let mut t = st.db.get_task(&id).unwrap().unwrap();
             (t.status, t.error) = (status.into(), "Wrong agent: I can't touch code.".into());
             st.db.save_task(&t).unwrap();
@@ -2022,7 +2022,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw2", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
         fake.route("GET", "/repos/octo/cw2/issues", 200, json!([]));
         fake.route("GET", "/repos/octo/cw2/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
         sync_project(&st, "cw2", true).await.unwrap();
@@ -2132,7 +2132,7 @@ pub(crate) mod tests {
         crate::tasks::tests::busy(&st, &a);
 
         // Handed over with a note, then a private note: in Loft, never queued for GitHub, never posted.
-        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", crate::tasks::By::User).unwrap();
         let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ask Tom about the deadline", "send": false })).unwrap();
         let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
         // A comment meant for the issue still goes (mode: all).
@@ -2206,14 +2206,14 @@ pub(crate) mod tests {
 
         // The spec is never handed to an agent as one task; nothing starts.
         let a = crate::tasks::tests::agent(&st, "Builder");
-        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
+        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).unwrap_err();
         assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
         assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
         // GitHub labels are case-insensitive: "Spec" is a spec too.
         let mut other = st.db.get_task(&spec.id).unwrap().unwrap();
         other.labels = vec!["SPEC".into()];
         st.db.save_task(&other).unwrap();
-        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).is_err());
     }
 
     #[tokio::test]
