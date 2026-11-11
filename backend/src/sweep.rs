@@ -10,7 +10,8 @@
 //! The sweep deletes rebuildable build output (the table of `RULES`: Rust, Node, .NET, Gradle, Pods, Flutter,
 //! Python and the like, each only beside its marker file) whose newest file is 3 days old, so idle workspaces don't fill the disk.
 //! An agent that works often never leaves its `.cargo-build/` that old, so there its `*/incremental` caches go
-//! once together they pass 2 GB, and `deps/` stays (rebuilding incremental takes seconds, deps about 30 s). It
+//! once together they pass 2 GB, and once it passes 8 GB the `*/deps` files no build wrote for a day go, oldest
+//! first, until it's under (cargo keeps every old build's set there, and rebuilds what it still needs). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
 //! files kept, and skips running agents and agents with a live process (a dev server).
 //!
@@ -43,9 +44,23 @@ const SIZE_FOR: Duration = Duration::from_secs(60);
 const LOG_FILE: &str = "clean-log.json";
 /// Past this, a young `.cargo-build/`'s `*/incremental` caches go.
 const INCREMENTAL_CAP: u64 = 2_000_000_000;
+/// Past this, a young `.cargo-build/`'s old `*/deps` files go until it's under.
+const DEPS_CAP: u64 = 8_000_000_000;
+/// A `deps/` file no build wrote for this long is old.
+const DEPS_OLD: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[cfg(test)]
 thread_local!(static FAKE_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+#[cfg(test)]
+thread_local!(static FAKE_DEPS_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+
+fn deps_cap() -> u64 {
+    #[cfg(test)]
+    if let Some(c) = FAKE_DEPS_CAP.with(|c| c.get()) {
+        return c;
+    }
+    DEPS_CAP
+}
 
 fn incremental_cap() -> u64 {
     #[cfg(test)]
@@ -70,6 +85,9 @@ pub struct Folder {
     pub changed: DateTime<Local>,
     /// The shell command equivalent to its removal; Loft removes by path.
     pub command: String,
+    /// When not empty, only these files in it go (and what each frees), not the folder.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<(PathBuf, u64)>,
 }
 
 /// What a run leaves, and why.
@@ -676,11 +694,17 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
         // An agent that works often keeps it young, so its incremental caches are capped instead.
         if shared_dir && b == shared {
             let caches: Vec<_> = subdirs(&b).map(|(_, profile)| profile.join("incremental")).filter(|d| d.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
-            if caches.iter().map(|d| size(d)).sum::<u64>() > incremental_cap() {
+            let cached = caches.iter().map(|d| size(d)).sum::<u64>();
+            let mut total = size(&b);
+            if cached > incremental_cap() {
+                total = total.saturating_sub(cached);
                 for d in caches {
                     let (_, changed) = measure(&d);
                     folder(root, id, &rel(&d), d, changed, p);
                 }
+            }
+            if total > deps_cap() {
+                trim_deps(root, id, &b, total, now, p, &rel);
             }
         }
         // With the workspace's `.cargo-build/` holding the build, what a Cargo `target/` still has besides
@@ -706,7 +730,51 @@ fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, 
     }
     let bytes = size(&path);
     let command = rm_command(&path);
-    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command });
+    p.folders.push(Folder { agent: id.into(), path, rel: rel.into(), bytes, changed: changed.into(), command, files: vec![] });
+}
+
+/// Plans the removal of `shared`'s `*/deps` files no build wrote for `DEPS_OLD`, oldest first, until the
+/// `total` it measures is under the cap: one folder per `deps/`, only those files in it.
+fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTime, p: &mut Plan, rel: &dyn Fn(&Path) -> String) {
+    let mut old = vec![];
+    for (_, profile) in subdirs(shared) {
+        let deps = profile.join("deps");
+        for e in std::fs::read_dir(&deps).into_iter().flatten().flatten() {
+            let Ok(m) = e.path().symlink_metadata() else { continue };
+            let Ok(t) = m.modified() else { continue };
+            if m.is_file() && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
+                // A file with another link frees nothing (cargo links each binary into its profile too).
+                let bytes = if m.nlink() == 1 { m.blocks() * 512 } else { 0 };
+                old.push((t, deps.clone(), e.path(), bytes));
+            }
+        }
+    }
+    old.sort_by_key(|o| o.0);
+    let mut by_dir: Vec<Folder> = vec![];
+    for (t, deps, file, bytes) in old {
+        if total <= deps_cap() {
+            break;
+        }
+        total = total.saturating_sub(bytes);
+        let f = match by_dir.iter_mut().find(|f| f.path == deps) {
+            Some(f) => f,
+            None => {
+                let command = format!("{} -type f -mtime +0 -delete", rm_command(&deps).replacen("rm -rf", "find", 1));
+                by_dir.push(Folder { agent: id.into(), rel: rel(&deps), path: deps, bytes: 0, changed: t.into(), command, files: vec![] });
+                by_dir.last_mut().unwrap()
+            }
+        };
+        f.bytes += bytes;
+        f.changed = t.into();
+        f.files.push((file, bytes));
+    }
+    for f in by_dir {
+        if f.path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+            p.folders.push(f);
+        } else {
+            p.skipped.push(skip(id, &f.rel, "outside agent-local-storage"));
+        }
+    }
 }
 
 /// `rm -rf <path>`, quoted for the shell when it needs to be, and on one line: control characters are written
@@ -722,12 +790,22 @@ fn rm_command(path: &Path) -> String {
     }
 }
 
-/// Removes the folders, reporting each as it goes; an agent that started working keeps its.
+/// Removes the folders (or only their planned files), reporting each as it goes; an agent that started working
+/// keeps its.
 fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &mut dyn FnMut(Line)) {
     for f in folders {
-        let error = if busy(&f.agent) { Some("agent started working".into()) } else { remove(root, &f.path).err() };
+        let trim = !f.files.is_empty();
+        let error = if busy(&f.agent) {
+            Some("agent started working".into())
+        } else if trim {
+            // Each file goes on its own; the first that fails says why.
+            f.files.iter().filter_map(|(file, _)| remove_under(root, file).err()).reduce(|first, _| first)
+        } else {
+            remove(root, &f.path).err()
+        };
         let bytes = if error.is_none() { f.bytes } else { 0 };
-        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done: String::new() });
+        let done = if trim { "Trimmed old build files in".into() } else { String::new() };
+        line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done });
     }
 }
 
@@ -947,8 +1025,8 @@ type Measured = (Instant, u64, SystemTime);
 /// Measured sizes, by path.
 static SIZES: Mutex<Option<HashMap<PathBuf, Measured>>> = Mutex::new(None);
 
-/// Disk space `path` takes, as `du` measures it (the same measure as a sweep's freed bytes), measured at most
-/// once a minute; 0 when it doesn't exist. Blocking.
+/// Disk space removing `path` gives back, as `du` measures it (the same measure as a sweep's freed bytes),
+/// measured at most once a minute; 0 when it doesn't exist. Blocking.
 pub fn size(path: &Path) -> u64 {
     measure(path).0
 }
@@ -967,15 +1045,27 @@ fn measure(path: &Path) -> (u64, SystemTime) {
     (n, t)
 }
 
-/// Disk space `path` takes and its newest file's change, symlinks not followed.
+/// Disk space removing `path` gives back and its newest file's change, symlinks not followed. A file with hard
+/// links (cargo links its outputs) counts once, and only when all its links are inside `path`.
 fn du(path: &Path) -> (u64, Option<SystemTime>) {
+    let mut links = HashMap::new();
+    let (n, newest) = du_in(path, &mut links);
+    (n + links.into_values().filter(|&(seen, nlink, _)| seen >= nlink).map(|(_, _, b)| b).sum::<u64>(), newest)
+}
+
+/// `du` of `path`, leaving each file with hard links in `links` by (device, inode): links seen, links it has, size.
+fn du_in(path: &Path, links: &mut HashMap<(u64, u64), (u64, u64, u64)>) -> (u64, Option<SystemTime>) {
     let Ok(meta) = path.symlink_metadata() else { return (0, None) };
     let n = meta.blocks() * 512;
     if !meta.is_dir() {
+        if meta.nlink() > 1 {
+            links.entry((meta.dev(), meta.ino())).or_insert((0, meta.nlink(), n)).0 += 1;
+            return (0, meta.modified().ok());
+        }
         return (n, meta.modified().ok());
     }
     std::fs::read_dir(path).into_iter().flatten().flatten().fold((n, None), |(n, newest), e| {
-        let (b, t) = du(&e.path());
+        let (b, t) = du_in(&e.path(), links);
         (n + b, newest.max(t))
     })
 }
@@ -1615,6 +1705,67 @@ mod tests {
         assert_eq!(l.lines.len(), 0, "{:?}", l.lines);
         assert!(storage.join("b/.cargo-build/debug/incremental/x-1/s-1/dep-graph.bin").exists());
         FAKE_CAP.with(|c| c.set(None));
+    }
+
+    /// A young `.cargo-build/` whose `debug/deps` holds four 64 KB files written 3, 2 and 1.5 days ago and now.
+    fn deps_by_age(ws: &Path) -> PathBuf {
+        let deps = ws.join(".cargo-build/debug/deps");
+        fs::create_dir_all(&deps).unwrap();
+        for (name, hours) in [("a.o", 72), ("b.o", 48), ("c.o", 36), ("d.o", 0)] {
+            fs::write(deps.join(name), vec![0u8; 64 * 1024]).unwrap();
+            fs::File::open(deps.join(name)).unwrap().set_modified(SystemTime::now() - Duration::from_secs(hours * 3600)).unwrap();
+        }
+        deps
+    }
+
+    #[test]
+    fn over_the_cap_a_working_agent_s_oldest_deps_files_go_until_it_s_under_and_newer_ones_stay() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("a"));
+        // 8 GB, scaled down: under it once two of the files go.
+        let (total, _) = du(&storage.join("a/.cargo-build"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(total - 100_000)));
+
+        let l = sweep(&storage, None, &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+
+        let left: Vec<bool> = ["a.o", "b.o", "c.o", "d.o"].iter().map(|f| deps.join(f).exists()).collect();
+        assert_eq!(left, [false, false, true, true], "oldest first, only until under the cap");
+        let [line] = &l.lines[..] else { panic!("{:?}", l.lines) };
+        assert_eq!((line.rel.as_str(), line.done.as_str(), line.error.as_deref()), (".cargo-build/debug/deps", "Trimmed old build files in", None));
+        assert!(line.bytes >= 2 * 64 * 1024, "the log shows what it freed: {}", line.bytes);
+    }
+
+    #[test]
+    fn while_the_agent_runs_or_under_the_cap_its_deps_files_stay() {
+        let storage = temp();
+        let deps = deps_by_age(&storage.join("running"));
+        deps_by_age(&storage.join("b"));
+        FAKE_DEPS_CAP.with(|c| c.set(Some(1)));
+        let l = sweep(&storage, Some("running"), &|id| id == "running", SystemTime::now(), IDLE);
+        assert!(deps.join("a.o").exists() && l.lines.is_empty(), "removed during a run");
+
+        FAKE_DEPS_CAP.with(|c| c.set(Some(10_000_000)));
+        let l = sweep(&storage, Some("b"), &|_| false, SystemTime::now(), IDLE);
+        FAKE_DEPS_CAP.with(|c| c.set(None));
+        assert!(storage.join("b/.cargo-build/debug/deps/a.o").exists() && l.lines.is_empty(), "{:?}", l.lines);
+    }
+
+    #[test]
+    fn a_file_and_its_hard_link_measure_as_one_file_counted_only_where_its_last_link_goes() {
+        let storage = temp();
+        let ws = storage.join("a/.cargo-build/debug");
+        fs::create_dir_all(ws.join("deps")).unwrap();
+        fs::write(ws.join("deps/loft-1a2b"), vec![0u8; 256 * 1024]).unwrap();
+        fs::hard_link(ws.join("deps/loft-1a2b"), ws.join("loft")).unwrap();
+        let one = fs::metadata(ws.join("loft")).unwrap().blocks() * 512;
+        let blocks = |d: &str| fs::metadata(storage.join(d)).unwrap().blocks() * 512;
+
+        let total = du(&storage.join("a/.cargo-build")).0;
+        assert_eq!(total, one + blocks("a/.cargo-build") + blocks("a/.cargo-build/debug") + blocks("a/.cargo-build/debug/deps"), "counted once");
+        assert_eq!(du(&ws.join("deps")).0, blocks("a/.cargo-build/debug/deps"), "removing deps alone frees nothing of it");
+        let r = sweep(&storage, None, &|_| false, later(), IDLE);
+        assert_eq!((r.removed, r.freed_bytes), (1, total), "the whole .cargo-build frees it once");
     }
 
     #[test]
