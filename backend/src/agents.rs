@@ -502,7 +502,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`). Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started or what runs in your workspace, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -1779,6 +1779,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
+        assert!(p.contains("Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`)."));
         assert!(!p.contains("start them in the background"));
     }
 

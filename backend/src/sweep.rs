@@ -214,7 +214,8 @@ pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) 
     let running: Vec<String> = state.rt.lock().unwrap().running.keys().cloned().collect();
     let dirs: Vec<(String, String, PathBuf)> = agents.iter().map(|a| (a.id.clone(), a.name.clone(), crate::agents::workspace(&state, &a.id))).collect();
     let (rows, free) = tokio::task::spawn_blocking(move || {
-        let live = crate::processes::live_processes(&storage);
+        let ids: Vec<String> = dirs.iter().map(|(id, _, _)| id.clone()).collect();
+        let live = crate::processes::live_processes(&storage, &ids);
         let rows: Vec<_> = dirs
             .into_iter()
             .map(|(id, name, d)| {
