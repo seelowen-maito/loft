@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { Maximize2, MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
+import { ArrowDownToLine, Maximize2, MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
 import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { interviewPath } from "../../lib/interview";
+import { interviewPath, nextQuestion, questionAnchor } from "../../lib/interview";
 
 /** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint).
  * In the chat it also opens the full-screen interview; `fullScreen` is the bar on that page. */
@@ -40,17 +40,30 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
 
   const answered = session.answered ?? 0;
   const total = session.total ?? 0;
+  const next = nextQuestion(session);
   const where =
     session.round == null ? "Preparing the first round…"
     : session.waiting ? `Round ${session.round} sent · the agent is preparing the next one`
-    : `Round ${session.round} · ${answered} of ${total} answered`;
+    : next ? `Round ${session.round} · Question ${next.n} of ${next.total}`
+    : `Round ${session.round} · all ${total} answered`;
+
+  // Scrolls to the first unanswered question's card and flashes it, so a long chat never loses the round.
+  const jump = () => {
+    if (!next || session.round == null) return;
+    const card = document.querySelector<HTMLElement>(`[data-grill-question="${CSS.escape(questionAnchor(session.session_id, session.round, next.id))}"]`);
+    if (!card) return;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    card.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "center" });
+    card.querySelector("textarea")?.focus({ preventScroll: true });
+    card.animate([{ boxShadow: "0 0 0 2px var(--color-accent)" }, { boxShadow: "0 0 0 2px transparent" }], { duration: 1800, easing: "ease-out" });
+  };
   const pct = total ? Math.round((answered / total) * 100) : 0;
 
   return (
     <>
-      <div className={cx("mb-3 flex items-center gap-3 rounded-xl border px-3 py-2", paused ? "border-warn/30 bg-warn/[0.07]" : "border-accent/25 bg-accent/[0.05]")} role="status">
+      <div className={cx("mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border px-3 py-2", paused ? "border-warn/30 bg-warn/[0.07]" : "border-accent/25 bg-accent/[0.05]")} role="status">
         <MessagesSquare className={cx("size-4 shrink-0", paused ? "text-warn" : "text-accent")} />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 basis-40">
           <div className="truncate text-[13px] text-fg">
             {paused ? "Interview paused" : "Interview"} · <span className="text-fg-2">{session.topic}</span>
           </div>
@@ -61,6 +74,13 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
             </div>
           )}
         </div>
+        {/* The buttons wrap below the text when the chat is narrow, so "Question N of M" stays readable. */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+        {next && (
+          <button className="btn shrink-0" onClick={jump} aria-label="Jump to questions" title={`Go to question ${next.n}, the first without an answer`}>
+            <ArrowDownToLine className="size-3" /> <span className="max-md:hidden">Jump to questions</span>
+          </button>
+        )}
         {session.round != null && !session.waiting && (
           <button className="btn shrink-0" onClick={() => send("send")} disabled={busy} aria-label="Send round" title="Send your answers to the agent">
             <Send className="size-3" /> <span className="max-md:hidden">Send round</span>
@@ -77,6 +97,7 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
             <Maximize2 className="size-3" />
           </button>
         )}
+        </div>
       </div>
       {error && <div className="-mt-2 mb-2 text-[12px] text-bad">{error}</div>}
 
