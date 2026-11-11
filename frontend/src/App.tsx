@@ -243,6 +243,7 @@ export default function App() {
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
+          <Route path="/agents/:id/interview" element={<AgentsPage />} />
           {/* The old GitHub Issues tab's links: each opens that issue, found in the list. */}
           <Route path="/issues" element={<TasksPage />} />
           <Route path="/issues/:id" element={<TasksPage />} />
