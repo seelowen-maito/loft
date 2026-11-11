@@ -512,7 +512,7 @@ fn is_build_folder(part: &str) -> bool {
 }
 
 /// Programs that run whatever script they are given: a rule for one would allow stopping anything they run.
-const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "php", "bash", "sh", "zsh", "fish", "deno", "bun", "java", "osascript"];
+const INTERPRETERS: &[&str] = &["node", "python", "ruby", "perl", "php", "bash", "sh", "zsh", "fish", "deno", "bun", "java", "osascript"];
 
 /// The `Kill(...)` rule for stopping the program at `exe`: its path, with each per-build folder as `*` so a rebuild
 /// still matches. `None` for a path that can't make a rule that names one program.
@@ -524,11 +524,15 @@ fn kill_rule(exe: &str) -> Option<String> {
     kill_spec_ok(&spec).then(|| format!("Kill({spec})"))
 }
 
-/// A path pattern names a program only if it ends in a literal file name that isn't an interpreter, so `*` and `*/`
-/// never match everything.
+fn is_interpreter(file: &str) -> bool {
+    INTERPRETERS.contains(&file.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
+/// A path pattern names a program only if it ends in a literal file name that isn't an interpreter (`python3.12` and
+/// `node22` count), so `*` and `*/` never match everything.
 fn kill_spec_ok(spec: &str) -> bool {
     let file = spec.rsplit('/').next().unwrap_or_default();
-    spec.starts_with('/') && !file.is_empty() && !file.contains('*') && !spec.contains(')') && !INTERPRETERS.contains(&file)
+    spec.starts_with('/') && !file.is_empty() && !file.contains('*') && !spec.contains(')') && !is_interpreter(file)
 }
 
 /// The pattern inside a saved `Kill(...)` rule. A bare `Kill` or a rule that would match every program has none.
@@ -1204,9 +1208,18 @@ mod tests {
         assert_eq!(kill_rule(&exe.replace("MacOS/Loft", "MacOS/node")), None);
         assert_eq!(kill_rule("/usr/local/bin/node"), None);
         assert!(!rule_allows(&["Kill(/a/*/node)".to_string()], "/a/b/node"));
+        for v in ["python3.12", "node22", "ruby3.3", "python3"] {
+            assert_eq!(kill_rule(&format!("/usr/bin/{v}")), None, "{v}");
+        }
+        assert!(kill_rule("/usr/bin/nodemon").is_some());
         // A folder is a build folder with exactly 28 lowercase letters after the dash.
-        assert_eq!(kill_rule("/d/Loft-abcdefghijklmnopqrstuvwxyz/x").unwrap(), "Kill(/d/Loft-abcdefghijklmnopqrstuvwxyz/x)");
-        assert_eq!(kill_rule("/d/Loft-abcdefghijklmnopqrstuvwxyz12/x").unwrap(), "Kill(/d/Loft-abcdefghijklmnopqrstuvwxyz12/x)");
+        let l28 = "abcdefghijklmnopqrstuvwxyz".to_string() + "ab";
+        assert_eq!(l28.len(), 28);
+        assert_eq!(kill_rule(&format!("/d/Loft-{l28}/x")).unwrap(), "Kill(/d/*/x)");
+        for hash in [&l28[..27], &(l28.clone() + "a"), &(l28[..27].to_string() + "1")] {
+            let p = format!("/d/Loft-{hash}/x");
+            assert_eq!(kill_rule(&p).unwrap(), format!("Kill({p})"), "{hash}");
+        }
         // No rule from a path that isn't absolute or holds rule syntax.
         for bad in ["", "sleep", "/tmp/a*b", "/tmp/a)b", "/tmp/"] {
             assert_eq!(kill_rule(bad), None, "{bad}");
