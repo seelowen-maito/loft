@@ -82,7 +82,7 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
 
 /** One question of the open round: the recommendation with Accept or Decide for me, and a field for any
  * other answer, saved as a decision or as a comment to discuss. */
-function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
+export function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
   const written = (q.state === "answered" && !q.accepted) || q.state === "discuss";
   const saved = q.images ?? [];
   // A half-typed answer, with its pasted images, is this question's Draft, so it survives switching agents or tabs.

@@ -1,14 +1,29 @@
-import { useState } from "react";
-import { MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router";
+import { Maximize2, MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
 import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
+import { interviewPath } from "../../lib/interview";
 
-/** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint). */
-export function GrillBar({ session }: { session: GrillSession }) {
+/** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint).
+ * In the chat it also opens the full-screen interview; `fullScreen` is the bar on that page. */
+export function GrillBar({ session, fullScreen = false }: { session: GrillSession; fullScreen?: boolean }) {
+  const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const paused = session.state === "paused";
+  // Esc cancels the End confirmation before anything else hears it (the full-screen page would close).
+  useEffect(() => {
+    if (!confirming) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setConfirming(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [confirming]);
 
   const send = async (command: "send" | "pause" | "resume" | "end") => {
     setBusy(true);
@@ -57,6 +72,11 @@ export function GrillBar({ session }: { session: GrillSession }) {
         <button className="btn shrink-0" onClick={() => setConfirming(true)} disabled={busy} aria-label="End interview" title="End interview">
           <Square className="size-3 fill-current" /> <span className="max-md:hidden">End interview</span>
         </button>
+        {!fullScreen && (
+          <button className="btn-ghost shrink-0" onClick={() => navigate(interviewPath(session.agent_id))} aria-label="Full screen" title="Answer on a full page">
+            <Maximize2 className="size-3" />
+          </button>
+        )}
       </div>
       {error && <div className="-mt-2 mb-2 text-[12px] text-bad">{error}</div>}
 
