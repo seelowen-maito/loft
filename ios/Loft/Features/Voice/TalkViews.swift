@@ -247,25 +247,40 @@ struct VoiceStatusView: View {
 
 // MARK: - E: dictate
 
-/// E's To: row: whoever it goes to now, then the agents that worked most recently. One tap switches; More lists
-/// every agent.
+/// E's To: row: whoever it goes to now, then every Lead, then the agents that worked most recently. One tap
+/// switches; More lists every agent.
 struct RecentAgentsRow: View {
     @Environment(LoftStore.self) private var store
     @Environment(VoiceSession.self) private var voice
     @State private var picking = false
 
+    /// The chips: `current`, then every Lead, then the others, each most recently run first. The others fill the row
+    /// up to `limit` chips; Leads are all shown, even past it.
+    static func chips(_ agents: [Agent], current: String?, limit: Int = 5) -> [Agent] {
+        let recent = agents.sorted { ($0.lastRunAt ?? .distantPast) > ($1.lastRunAt ?? .distantPast) }
+        let first = recent.filter { $0.id == current }
+        let leads = recent.filter { $0.id != current && $0.isLead }
+        let others = recent.filter { $0.id != current && !$0.isLead }
+        return first + leads + others.prefix(max(0, limit - first.count - leads.count))
+    }
+
+    /// A chip's name, with its group when another chip has the same name ("Lead · Dineout").
+    static func label(_ a: Agent, among shown: [Agent]) -> String {
+        let twin = shown.contains { $0.id != a.id && $0.name == a.name }
+        return twin && !a.team.isEmpty ? "\(a.name) · \(a.team)" : a.name
+    }
+
     var body: some View {
         let current = voice.agentId
-        let recent = store.agents.sorted { ($0.lastRunAt ?? .distantPast) > ($1.lastRunAt ?? .distantPast) }
-        let shown = (recent.filter { $0.id == current } + recent.filter { $0.id != current }).prefix(5)
+        let shown = Self.chips(store.agents, current: current)
         // More stays at the end of the row, outside the scrolling chips, so it's always on screen.
         HStack(spacing: 8) {
             ScrollView(.horizontal) {
                 HStack(spacing: 8) {
                     Text("To").font(.subheadline).foregroundStyle(.secondary)
-                    ForEach(Array(shown)) { a in
+                    ForEach(shown) { a in
                         Button { voice.switchAgent(a.id) } label: {
-                            Text(a.name).font(.subheadline.weight(a.id == current ? .semibold : .regular))
+                            Text(Self.label(a, among: shown)).font(.subheadline.weight(a.id == current ? .semibold : .regular))
                                 .padding(.horizontal, 12).padding(.vertical, 6)
                                 .background(a.id == current ? Theme.accent.opacity(0.25) : Color.secondary.opacity(0.12), in: Capsule())
                         }
