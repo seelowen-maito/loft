@@ -28,8 +28,9 @@ pub enum Event {
     Issues { project: String },
     /// A Delivery changed: its state, its tickets or who has them.
     Delivery { repo: String, spec: i64 },
-    /// The "needs you" list changed: its size, how many are urgent, and the item ids.
-    NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
+    /// The "needs you" list changed: its size, how many are urgent, how many of each the user hasn't seen
+    /// (`new`, `new_urgent`: the counter), and the item ids.
+    NeedsYou { count: u64, urgent: u64, new: u64, new_urgent: u64, ids: Vec<serde_json::Value> },
 }
 
 /// Decision sent back to a blocked permission prompt.
@@ -130,6 +131,11 @@ pub struct Runtime {
     /// Needs you item ids that became news at this start-up (Deliveries stalled by the restart): the pusher's
     /// first look pushes them, unlike the items already waiting
     pub news_at_start: std::collections::HashSet<String>,
+    /// When push was found off with a phone registered (RFC 3339), until it's back on: the `push_off` item's id
+    /// and age, so a Dismiss lasts for that off period only
+    pub push_off_since: Option<String>,
+    /// The disk is almost full: Needs you shows `disk_low`, until free space is back over LOW_DISK + LOW_DISK_MARGIN
+    pub disk_low: bool,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
@@ -179,6 +185,8 @@ pub struct AppState {
     pub listings: Arc<crate::file_search::Listings>,
     /// The Xcode `simctl` last found to run with.
     pub xcode: Arc<crate::simulator::XcodeCache>,
+    /// What Needs you last listed and last told clients (needs_you.rs).
+    pub needs_you: Arc<crate::needs_you::Watch>,
 }
 
 impl AppState {

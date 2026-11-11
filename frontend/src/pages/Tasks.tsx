@@ -11,7 +11,7 @@ import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
-import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, TaskActions } from "./TaskActions";
+import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, StuckCard, TaskActions } from "./TaskActions";
 import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
@@ -264,6 +264,11 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
     setThread(null);
     api.taskComments(t.id).then(setThread).catch(() => setThread([]));
   }, [t.id]);
+  // A finished issue's result was waiting in Needs you: opening it is looking at it.
+  const done = t.status === "done";
+  useEffect(() => {
+    if (done) api.issueOpened(t.id).catch(() => {});
+  }, [t.id, done]);
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {
@@ -346,6 +351,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
       </header>
 
       {t.state === "open" && t.github?.state === "closed" && ["in_progress", "blocked", "waiting_approval"].includes(t.status) && <ClosedOnGithubCard task={t} />}
+      {(t.status === "blocked" || t.status === "failed") && <StuckCard task={t} agents={agents} />}
       {isSpec(t) && <SpecPanel spec={t} tasks={tasks} deliveries={deliveries} agentById={agentById} openTicket={openTicket} />}
       {isStandaloneTicket(t) && <DeliveryCard key={t.id} task={t} />}
       {isDeliverableSpec(t) && <SpecDeliveryCard key={t.id} task={t} />}
@@ -364,7 +370,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
         </Link>
       )}
 
-      {t.error && t.status !== "done" && <Block title="Problem" tone="text-bad" text={t.error} />}
+      {t.error && !["done", "blocked", "failed"].includes(t.status) && <Block title="Problem" tone="text-bad" text={t.error} />}
       {t.summary && <Block title="Summary" text={t.summary} />}
       {t.note && t.status !== "done" && <Block title="Latest progress" text={t.note} />}
       {t.description && <Block title="Description" text={t.description} />}

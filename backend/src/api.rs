@@ -393,7 +393,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         grill_briefed: false,
         memory_index: None,
         role: "custom".into(),
-        fresh_context: crate::db::default_fresh_context(),
+        fresh_context: crate::db::NEW_AGENT_FRESH_CONTEXT.into(),
         delivery_ticket: None,
         avatar: Avatar::generate(&id),
         status: "idle".into(),
@@ -1253,6 +1253,18 @@ pub(crate) mod tests {
             assert_eq!(s["agents"][0]["cost_usd"], 15.0, "the agent card still counts 14 days");
             assert_eq!(s["all_time"]["runs"], 5);
         }
+    }
+
+    #[test]
+    fn every_fresh_context_option_stays_settable_on_a_new_agent() {
+        let st = crate::tasks::tests::state();
+        let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Dev", "role": "dev" }), None).unwrap();
+        assert_eq!(a.fresh_context, "always");
+        for v in crate::agents::FRESH_CONTEXT {
+            apply_patch(&st, &mut a, &serde_json::json!({ "fresh_context": v })).unwrap();
+            assert_eq!(a.fresh_context, *v);
+        }
+        assert!(apply_patch(&st, &mut a, &serde_json::json!({ "fresh_context": "above_90k" })).is_err());
     }
 
     #[test]

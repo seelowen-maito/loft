@@ -52,6 +52,9 @@ pub struct Delivery {
     /// isn't about a ticket (the Lead's wake, the final steps).
     #[serde(default)]
     pub stalled_on: Vec<i64>,
+    /// The question the stalling run ended with, when its reply asked the user to decide something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_ask: Option<StallAsk>,
     /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
@@ -71,6 +74,10 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// After Reopen delivery: the spec branch's newest commit when it reopened. Its commits passed a final
+    /// review already, so the next one reviews only what came after. Empty before any reopen.
+    #[serde(default)]
+    pub reviewed_to: String,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -120,6 +127,7 @@ impl Delivery {
         }
         (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
         self.stalled_on.clear();
+        self.stall_ask = None;
     }
 
     /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
@@ -127,6 +135,9 @@ impl Delivery {
     pub fn clear_stall(&mut self, n: i64) {
         if self.state == "stalled" {
             self.stalled_on.retain(|t| *t != n);
+            if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
+                self.stall_ask = None;
+            }
             if self.stalled_on.is_empty() {
                 self.unstall();
             }
@@ -134,14 +145,28 @@ impl Delivery {
     }
 }
 
+/// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StallAsk {
+    pub agent: String,
+    /// The ticket whose step the run was for; none for the Lead's or the final steps.
+    #[serde(default)]
+    pub ticket: Option<i64>,
+    /// The question's line.
+    pub question: String,
+    /// The whole reply it ends.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryTicket {
     pub number: i64,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
-    /// "open", "started" (being built), "review" (submitted), "closing" (passed, its close failed and is
+    /// "open", "started" (being built, or fixed), "review" (submitted), "changes" (sent back for changes while
+    /// the Dev builds another ticket: its fix waits in `changes`), "closing" (passed, its close failed and is
     /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
     /// never handed out, and done when it closes) or "closed".
     pub state: String,
@@ -151,21 +176,35 @@ pub struct DeliveryTicket {
     /// The commits last submitted, oldest first.
     #[serde(default)]
     pub commits: Vec<String>,
-    /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
+    /// This round's verdict per reviewing role ("qa", "security"), and "ci" for the CI Loft follows on GitHub:
+    /// "pending" or "pass".
     #[serde(default)]
     pub verdicts: std::collections::BTreeMap<String, String>,
+    /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
+    #[serde(default)]
+    pub submitted_at: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
+    /// A "changes" ticket's changes brief, sent to the Dev once it submits the ticket it's building.
+    #[serde(default)]
+    pub changes: String,
     /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
     #[serde(default)]
     pub agent: String,
     /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
     #[serde(default)]
     pub notes: String,
+}
+
+impl DeliveryTicket {
+    /// A ticket in `state` with nothing submitted, reviewed or assigned yet.
+    pub fn new(number: i64, title: impl Into<String>, blocked_by: Vec<i64>, state: &str) -> Self {
+        DeliveryTicket { number, title: title.into(), blocked_by, state: state.into(), ..Default::default() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,9 +296,14 @@ pub struct Agent {
     pub read_at: Option<String>,
 }
 
+/// The Fresh context of an agent saved before the setting existed: it keeps the old default.
 pub fn default_fresh_context() -> String {
     "above_80k".into()
 }
+
+/// The Fresh context a new agent starts with, from the dialog, a template or an agent: rereading the code each
+/// ticket costs less than carrying ~96k tokens of context through every call (measured on a 12-ticket spec).
+pub const NEW_AGENT_FRESH_CONTEXT: &str = "always";
 
 impl Agent {
     /// Its team's name: its group. Empty: it has no team.
@@ -623,6 +667,10 @@ CREATE TABLE IF NOT EXISTS needs_you_dismissed (
     item_id TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS needs_you_seen (
+    item_id TEXT PRIMARY KEY,
+    seen_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS published_issues (
     slug TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -847,6 +895,9 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        // Needs you seen marks are forgotten when their item leaves the list, but only while Loft watches: the marks
+        // of items that went while it was off go here, at start-up, after 30 days.
+        conn.execute("DELETE FROM needs_you_seen WHERE seen_at < ?1", [(Utc::now() - chrono::Duration::days(30)).to_rfc3339()])?;
         conn.execute(
             "DELETE FROM run_ledger WHERE ended_at < ?1",
             [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
@@ -1335,9 +1386,43 @@ impl Db {
         Ok(rows)
     }
 
+    /// Whether the user dismissed Needs you item `item_id`.
+    pub fn needs_you_dismissed(&self, item_id: &str) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT 1 FROM needs_you_dismissed WHERE item_id = ?1", [item_id], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn dismiss_needs_you(&self, item_id: &str) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute("INSERT OR REPLACE INTO needs_you_dismissed (item_id, dismissed_at) VALUES (?1, ?2)", params![item_id, now()])?;
+        Ok(())
+    }
+
+    /// The Needs you items the user has seen (on any client). A read only: a mark goes when its item leaves the list
+    /// (`forget_needs_you_seen`), or at start-up after 30 days (`open`), so one that waits longer stays seen.
+    pub fn seen_needs_you(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT item_id FROM needs_you_seen")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    /// Marks these items seen; one already seen keeps its first time.
+    pub fn mark_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let at = now();
+        for id in item_ids {
+            c.execute("INSERT OR IGNORE INTO needs_you_seen (item_id, seen_at) VALUES (?1, ?2)", params![id, at])?;
+        }
+        Ok(())
+    }
+
+    /// Forgets that these items were seen: they left the list, so if one comes back with the same id it is new again.
+    pub fn forget_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        for id in item_ids {
+            c.execute("DELETE FROM needs_you_seen WHERE item_id = ?1", [id])?;
+        }
         Ok(())
     }
 
@@ -1457,18 +1542,9 @@ impl Db {
             let tickets = subs
                 .iter()
                 .filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(s, _)| s == spec.to_string()))
-                .map(|(_, _, n)| DeliveryTicket {
-                    number: *n,
-                    title: String::new(),
-                    blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
-                    state: "open".into(),
-                    rounds: 0,
-                    commits: vec![],
-                    verdicts: Default::default(),
-                    id: String::new(),
-                    skipped: String::new(),
-                    agent: String::new(),
-                    notes: String::new(),
+                .map(|(_, _, n)| {
+                    let blocked_by = blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect();
+                    DeliveryTicket::new(*n, "", blocked_by, "open")
                 })
                 .collect();
             let d = Delivery {
@@ -1483,12 +1559,14 @@ impl Db {
                 stall_reason: String::new(),
                 stalled_at: String::new(),
                 stalled_on: vec![],
+                stall_ask: None,
                 done_at: String::new(),
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                reviewed_to: String::new(),
                 last_notes: String::new(),
                 migrated: true,
                 standalone: false,
@@ -1904,6 +1982,18 @@ mod tests {
         db.0.lock().unwrap().execute("INSERT INTO deliveries (repo, spec, state, data) VALUES ('o/r', 5, 'running', ?1)", params![json.to_string()]).unwrap();
         let d = db.get_delivery("o/r", 5).unwrap().unwrap();
         assert_eq!((d.spec, d.state.as_str()), (5, "running"));
+    }
+
+    #[test]
+    fn a_seen_mark_outlives_30_days_while_loft_runs_and_goes_at_the_next_start() {
+        let path = crate::testdir::for_this_test("seen").join("seen.db");
+        let db = Db::open(&path).unwrap();
+        db.mark_needs_you_seen(&["task:t:blocked".to_string(), "disk_low".to_string()]).unwrap();
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        db.0.lock().unwrap().execute("UPDATE needs_you_seen SET seen_at = ?1 WHERE item_id = 'task:t:blocked'", [&old]).unwrap();
+        assert_eq!(db.seen_needs_you().unwrap().len(), 2, "a look prunes nothing");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().seen_needs_you().unwrap(), vec!["disk_low".to_string()]);
     }
 
     #[test]

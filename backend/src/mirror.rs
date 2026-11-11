@@ -518,7 +518,8 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             let moved = t.github.as_ref().is_some_and(|g| g.state != l.state) && t.state() != l.state;
             // Closed on GitHub while an agent works on it: the work isn't stopped behind the user's back.
             // The issue stays open, the mismatch is shown (`github.state` closed, issue open) and asked about.
-            let working = crate::tasks::is_active(&t);
+            // A blocked one's agent stopped already: it closes, like a failed one, and leaves Needs you.
+            let working = crate::tasks::is_active(&t) && t.status != "blocked";
             let status = match (moved, l.state.as_str()) {
                 (true, "closed") if working => None,
                 (true, "closed") => Some(if i["state_reason"] == "not_planned" { "cancelled" } else { "done" }),
@@ -1924,7 +1925,7 @@ pub(crate) mod tests {
             if worked {
                 let a = crate::tasks::tests::agent(&st, "Builder");
                 crate::tasks::tests::busy(&st, &a);
-                crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+                crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
             }
             // Closed on GitHub: a refresh (its ticket changed) reads it first, then the full read no longer lists it.
             let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
@@ -2002,7 +2003,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
 
         // Someone closes it on GitHub mid-work.
         fake.route("GET", "/repos/octo/cw/issues", 200, json!([gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z")]));
@@ -2036,6 +2037,45 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_blocked_or_failed_issue_closed_on_github_closes_and_leaves_needs_you() {
+        for (status, reason, closed_as) in [("blocked", "completed", "done"), ("failed", "not_planned", "cancelled")] {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("cb-{status}");
+            let repo = format!("octo/{name}");
+            let id = one_mirrored(&st, &fake, &name, &repo, "2026-10-02T00:00:00Z").await;
+            let a = crate::tasks::tests::agent(&st, "Builder");
+            crate::tasks::tests::busy(&st, &a);
+            crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
+            let mut t = st.db.get_task(&id).unwrap().unwrap();
+            (t.status, t.error) = (status.into(), "Wrong agent: I can't touch code.".into());
+            st.db.save_task(&t).unwrap();
+            let mine = |st: &AppState| crate::needs_you::collect(st).unwrap().into_iter().filter(|i| i.task_id.as_deref() == Some(id.as_str())).map(|i| i.kind).collect::<Vec<_>>();
+            assert_eq!(mine(&st), [format!("task_{status}").as_str()]);
+
+            // Done elsewhere, and closed on GitHub: settled, so it closes in Loft, with no "closed on GitHub" question.
+            let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+            closed["state_reason"] = json!(reason);
+            fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([closed.clone()]));
+            fake.route("GET", &format!("/repos/{repo}/issues/1"), 200, closed);
+            sync_project(&st, &name, true).await.unwrap();
+            assert_eq!(st.db.get_task(&id).unwrap().unwrap().status, closed_as, "{status}");
+            assert!(mine(&st).is_empty(), "{status}: {:?}", mine(&st));
+        }
+    }
+
+    #[test]
+    fn a_block_after_a_github_close_is_no_needs_you_item() {
+        // Closed on GitHub mid-work, then the agent marks it blocked: nobody works on it, and GitHub settled it.
+        let st = state();
+        let (mut t, _) = crate::tasks::create(&st, &json!({ "title": "Retry cap" }), "user").unwrap();
+        t.status = "blocked".into();
+        t.github = Some(GithubLink { repo: "octo/late".into(), number: 1, state: "closed".into(), ..Default::default() });
+        st.db.save_task(&t).unwrap();
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.task_id.as_deref() != Some(t.id.as_str())));
+    }
+
+    #[tokio::test]
     async fn cancelling_after_a_github_close_leaves_githubs_reason_alone() {
         let st = state();
         let fake = own_fake(&st);
@@ -2043,7 +2083,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw2", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
         fake.route("GET", "/repos/octo/cw2/issues", 200, json!([]));
         fake.route("GET", "/repos/octo/cw2/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
         sync_project(&st, "cw2", true).await.unwrap();
@@ -2153,7 +2193,7 @@ pub(crate) mod tests {
         crate::tasks::tests::busy(&st, &a);
 
         // Handed over with a note, then a private note: in Loft, never queued for GitHub, never posted.
-        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", crate::tasks::By::User).unwrap();
         let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ask Tom about the deadline", "send": false })).unwrap();
         let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
         // A comment meant for the issue still goes (mode: all).
@@ -2227,14 +2267,14 @@ pub(crate) mod tests {
 
         // The spec is never handed to an agent as one task; nothing starts.
         let a = crate::tasks::tests::agent(&st, "Builder");
-        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
+        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).unwrap_err();
         assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
         assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
         // GitHub labels are case-insensitive: "Spec" is a spec too.
         let mut other = st.db.get_task(&spec.id).unwrap().unwrap();
         other.labels = vec!["SPEC".into()];
         st.db.save_task(&other).unwrap();
-        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).is_err());
     }
 
     #[tokio::test]

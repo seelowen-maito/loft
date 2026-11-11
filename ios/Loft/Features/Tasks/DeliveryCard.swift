@@ -48,6 +48,9 @@ struct DeliveryCardSection: View {
             if d?.showsResume == true {
                 button(.resume, "Resume", "Resuming…", symbol: "play.fill")
             }
+            if d?.showsReopen == true {
+                button(.reopen, "Reopen delivery", "Reopening…", symbol: "arrow.uturn.backward.circle")
+            }
             if let said {
                 Text(said.text).font(.footnote).foregroundStyle(said.ok ? Color.secondary : Theme.failureInk)
                     .accessibilityIdentifier("deliverySaid")

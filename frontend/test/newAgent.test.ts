@@ -1,11 +1,17 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EMPTY_FORM, TEMPLATES, createPayload, offersFreshContext, withTeam } from "../src/lib/newAgent.ts";
+import { EMPTY_FORM, FRESH_CONTEXT, TEMPLATES, createPayload, offersFreshContext, withTeam } from "../src/lib/newAgent.ts";
 
-test("a new agent starts Custom with Fresh context above 80k", () => {
+test("a new agent starts Custom with Fresh context always, from a template too", () => {
   assert.equal(EMPTY_FORM.role, "custom");
-  assert.equal(EMPTY_FORM.fresh_context, "above_80k");
+  assert.equal(EMPTY_FORM.fresh_context, "always");
+  for (const t of TEMPLATES) assert.equal(createPayload({ ...EMPTY_FORM, ...t }).fresh_context, "always", t.label);
+});
+
+test("every Fresh context option stays selectable, Always marked as the default", () => {
+  assert.deepEqual(FRESH_CONTEXT.map((f) => f.value).sort(), ["above_100k", "above_120k", "above_150k", "above_180k", "above_200k", "above_80k", "always", "off"]);
+  assert.deepEqual(FRESH_CONTEXT.filter((f) => f.label.includes("(default)")).map((f) => f.value), ["always"]);
 });
 
 test("each template sets its role", () => {

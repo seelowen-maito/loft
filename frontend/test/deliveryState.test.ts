@@ -55,14 +55,24 @@ test("Resume shows only on a stalled or paused Delivery, or a ticket or final re
   assert.equal(card("running", true), true, "a ticket waits for the user");
   for (const s of ["running", "final_review", "final_fixes", "ready", "settled", "merged"]) assert.equal(card(s, false), false, s);
   assert.equal(card("planned", false, false), false);
-  assert.deepEqual(deliveryButtons(null), { pause: false, resume: false });
-  assert.deepEqual(deliveryButtons({ started: true }), { pause: false, resume: false }, "an older server sends neither flag");
+  assert.deepEqual(deliveryButtons(null), { pause: false, resume: false, reopen: false });
+});
+
+test("Reopen delivery shows only when the server says a done Delivery has new tickets", () => {
+  assert.equal(deliveryButtons({ started: true, can_reopen: true }).reopen, true);
+  assert.equal(deliveryButtons({ started: true, can_reopen: false }).reopen, false);
+  assert.equal(deliveryButtons({ started: true }).reopen, false, "an older server says nothing");
+  assert.equal(deliveryButtons({ started: false, can_reopen: true }).reopen, false);
+});
+
+test("an older server sends no flag: no button", () => {
+  assert.deepEqual(deliveryButtons({ started: true }), { pause: false, resume: false, reopen: false });
 });
 
 test("Pause shows only while the Delivery runs, Resume while it's paused", () => {
   const card = (can_pause: boolean, can_resume: boolean, started = true) => deliveryButtons({ started, can_pause, can_resume });
   // As the server says for each state: running, final review and fixes pause; a paused one resumes.
-  for (const s of ["running", "final_review", "final_fixes"]) assert.deepEqual(card(true, false), { pause: true, resume: false }, s);
-  assert.deepEqual(card(false, true), { pause: false, resume: true }, "paused");
-  assert.deepEqual(card(true, false, false), { pause: false, resume: false }, "not started");
+  for (const s of ["running", "final_review", "final_fixes"]) assert.deepEqual(card(true, false), { pause: true, resume: false, reopen: false }, s);
+  assert.deepEqual(card(false, true), { pause: false, resume: true, reopen: false }, "paused");
+  assert.deepEqual(card(true, false, false), { pause: false, resume: false, reopen: false }, "not started");
 });

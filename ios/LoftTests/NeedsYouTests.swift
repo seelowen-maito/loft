@@ -142,4 +142,49 @@ final class NeedsYouTests: XCTestCase {
                                        item("y2", "pr_ready", urgency: 1, project: "app")])
         XCTAssertEqual(s.map(\.id), ["project:app", "project:site"])
     }
+
+    /// The seen mark (#395), shared with the web: the badge counts what no client has seen; a changed item (new id) is
+    /// unseen again; while the list is open, what was new when it appeared stays new.
+    func testTheSeenMarkDecodesAndOnlyUnseenItemsAreMarkedAndShownNew() throws {
+        var l = try fixture()
+        XCTAssertNil(l.new, "an older server sends no seen counts")
+        XCTAssertEqual(l.unseen, l.count, "so the badge is the whole list")
+        let json = #"{"version":1,"count":3,"urgent":1,"new":1,"new_urgent":0,"items":[]}"#
+        let decoded = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.unseen, 1)
+        XCTAssertEqual(decoded.newUrgent, 0)
+        XCTAssertEqual(decoded.headline, "Needs you · 1 new of 3")
+
+        l.items = Array(l.items.prefix(3))
+        l.items[0].seen = true
+        l.items[1].seen = false
+        XCTAssertEqual(NeedsYouSeen.unseen(l.items), [l.items[1].id, l.items[2].id])
+        var fresh = NeedsYouSeen.fresh(after: [], items: l.items)
+        XCTAssertEqual(fresh, [l.items[1].id, l.items[2].id])
+        // After marking: still new while the list is open; one that left the list drops out.
+        var after = Array(l.items.prefix(2))
+        after[1].seen = true
+        fresh = NeedsYouSeen.fresh(after: fresh, items: after)
+        XCTAssertEqual(fresh, [l.items[1].id])
+        XCTAssertEqual(NeedsYouSeen.body(["a"]), .object(["ids": .array([.string("a")])]))
+    }
+
+    /// Each item that can go has a Done check; a permission (it needs an answer) doesn't.
+    func testDoneIsTheCheckThatTakesAnItemOff() throws {
+        let l = try fixture()
+        XCTAssertNil(l.items.first { $0.type == "permission" }?.doneAction)
+        XCTAssertEqual(l.items.first { $0.type == "task_failed" }?.doneAction?.path?.hasSuffix("/dismiss"), true)
+    }
+
+    /// The fixture server keeps the seen mark like the real one: marking what's shown empties the badge.
+    func testMarkingSeenEmptiesTheBadge() async throws {
+        let api = FixtureAPI()
+        let before = try await api.needsYou()
+        XCTAssertEqual(before.new, before.count)
+        try await api.needsYouRequest(method: "POST", path: "/api/needs-you/seen", body: NeedsYouSeen.body(before.items.map(\.id)))
+        let after = try await api.needsYou()
+        XCTAssertEqual(after.new, 0)
+        XCTAssertEqual(after.count, before.count, "seen items stay in the list")
+        XCTAssertTrue(after.items.allSatisfy { $0.seen == true })
+    }
 }

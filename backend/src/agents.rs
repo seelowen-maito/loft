@@ -506,7 +506,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
 
 # Runs
-Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
+Each message starts a run that ends with your reply. Claude Code background work doesn't outlive it: `run_in_background` commands, `Monitor`, `ScheduleWakeup` and background subagents are stopped as soon as a new message arrives, and until then you look busy and messages wait. So finish the work, or wait for it inside the run (a foreground command with a long enough `timeout`, or a polling loop), before you reply. Anything that must keep running after the reply, like a dev server, goes detached from a normal Bash call: `nohup <command> > <log> 2>&1 &`. Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`). Stop your own processes any way (`kill $pid`, `pkill -f vite`, `killall node`): Loft lets kills reach only what your runs started or what runs in your workspace, and asks the user before stopping anything else (give that Bash call a `timeout` of {tool_wait}: it waits for them). To check on it later, say so in the reply; your next message or wake-up is the next turn.
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
@@ -811,6 +811,17 @@ pub fn fyi_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
         id = from.id,
     );
     let _ = state.db.add_pending_fyi(&to.id, &prompt);
+}
+
+/// The sender id of an FYI from Loft itself: no agent has it (agents get UUIDs, and the guide agent is `setup::LOFT_ID`,
+/// "loft"), so the chat names it "Loft" instead of finding an agent.
+pub const LOFT_SENDER: &str = "loft-delivery";
+
+/// An FYI from Loft itself (a Delivery that stalled), shown as from "Loft": delivered like an agent's FYI, with
+/// the agent's next run.
+pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
+    add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": LOFT_SENDER, "name": "Loft" }, "fyi": true }));
+    let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
 }
 
 /// The most FYIs put in front of one prompt; older ones are only counted.
@@ -1784,6 +1795,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
+        assert!(p.contains("Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`)."));
         assert!(!p.contains("start them in the background"));
     }
 
@@ -2812,7 +2824,7 @@ esac
         let (st, a) = fake_claude_state();
         let save = |spec: i64| {
             let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "o/r", "spec": spec, "state": "running", "current": spec + 1, "dev": a.id, "created_at": "" })).unwrap();
-            d.tickets.push(crate::db::DeliveryTicket { number: spec + 1, title: "T".into(), blocked_by: vec![], state: "started".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new(), agent: String::new(), notes: String::new() });
+            d.tickets.push(crate::db::DeliveryTicket::new(spec + 1, "T", vec![], "started"));
             st.db.save_delivery(&d).unwrap();
         };
         let wake = |spec: i64, prompt: &str| {

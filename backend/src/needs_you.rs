@@ -21,7 +21,7 @@ use crate::state::{AppState, Event};
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
 const QUIET_MINUTES: i64 = 10;
 /// How long finished tasks you created stay here for review, and how far back unanswered questions go.
-const REVIEW_HOURS: i64 = 48;
+const REVIEW_HOURS: i64 = 24;
 const QUESTION_DAYS: i64 = 7;
 const MAX_TITLE: usize = 120;
 const MAX_REASON: usize = 160;
@@ -180,7 +180,7 @@ pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String 
 }
 
 fn dismiss(id: &str) -> Value {
-    action("dismiss", "Dismiss", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
+    action("dismiss", "Done", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
 }
 
 fn urlencode(s: &str) -> String {
@@ -246,8 +246,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     by_rounds.extend(state.db.deliveries_in_state("needs_human").map_err(e)?);
     by_rounds.retain(crate::delivery::waits_for_user);
 
-    // Tasks waiting for you, blocked or failed.
+    // Tasks waiting for you, blocked or failed. A blocked or failed one whose GitHub issue was closed is settled
+    // there: it waits on nobody.
+    let closed_on_github = |t: &Task| t.github.as_ref().is_some_and(|g| g.state == "closed");
     for t in &tasks {
+        if matches!(t.status.as_str(), "blocked" | "failed") && closed_on_github(t) {
+            continue;
+        }
         let (urgency, reason) = match t.status.as_str() {
             "waiting_approval" => (3, if t.note.is_empty() { "Waiting for your approval.".to_string() } else { t.note.clone() }),
             "blocked" => (2, if t.error.is_empty() { "Blocked: needs your input.".to_string() } else { format!("Blocked: {}", first_line(&t.error)) }),
@@ -294,8 +299,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
-    // Closed on GitHub while an agent works on it: the user decides.
-    for t in tasks.iter().filter(|t| t.state() == "open" && crate::tasks::is_active(t) && t.github.as_ref().is_some_and(|g| g.state == "closed")) {
+    // Closed on GitHub while an agent works on it: the user decides. Not a blocked one: nobody works on it.
+    for t in tasks.iter().filter(|t| t.state() == "open" && crate::tasks::is_active(t) && t.status != "blocked" && closed_on_github(t)) {
         let g = t.github.as_ref().unwrap();
         let base = format!("/api/issues/{}", t.id);
         items.push(Item {
@@ -350,13 +355,9 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
-    // Tasks you created that finished recently: a result to look at.
-    for t in tasks.iter().filter(|t| t.status == "done" && t.created_by == "user") {
-        let done_at = t.completed_at.clone().unwrap_or_else(|| t.updated_at.clone());
-        if !within(&done_at, chrono::Duration::hours(REVIEW_HOURS)) {
-            continue;
-        }
-        let id = format!("done:{}:{}", t.id, done_at);
+    // Tasks you created that finished recently: a result to look at, until you open the issue (`issue_opened`).
+    for t in &tasks {
+        let Some((id, done_at)) = done_item(t) else { continue };
         items.push(Item {
             kind: "task_done",
             urgency: 0,
@@ -455,13 +456,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             continue;
         }
 
-        // An agent that ended its reply to you with a question (and you haven't written since): like an
-        // Unread reply, only a run you started (a message or a schedule) counts, and only your own
-        // message answers it, not another agent's.
+        // An agent that ended its reply to you with a question (and nobody has written since): like an Unread
+        // reply, only a run you started (a message or a schedule) counts. Your message answers it, and so does
+        // another agent's that needs action (the Lead deciding for you); an FYI doesn't.
         let msgs = state.db.list_messages(&a.id, 30, None).map_err(e)?;
-        let last_turn = msgs.iter().rev().find(|m| {
-            m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || (m.role == "user" && m.kind == "text" && m.meta["from_agent"].is_null()))
-        });
+        let answers = |m: &Message| m.role == "user" && m.kind == "text" && (m.meta["from_agent"].is_null() || m.meta["fyi"] != json!(true));
+        let last_turn = msgs.iter().rev().find(|m| m.meta["subagent"].is_null() && m.meta.get("grill").is_none() && ((m.role == "assistant" && m.kind == "text") || answers(m)));
         // The reply's run marker is usually among the messages already loaded.
         let for_user = |m: &Message| {
             let Some(r) = m.run_id.as_deref() else { return false };
@@ -503,22 +503,35 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         let issue = delivery_issue(&tasks, &d);
         let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
         let open = open_delivery(&d, issue);
+        // The run that stalled it ended asking the user something: the question leads, and Reply answers the agent
+        // (its call carries the Delivery on); Resume still wakes it afresh.
+        let ask = d.stall_ask.as_ref().and_then(|a| name(&a.agent).map(|who| (who, a)));
+        let (reason, body, push) = match &ask {
+            Some(((_, who), a)) => (
+                format!("{who} asks: {}", a.question),
+                format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
+                format!("{who} asks you something"),
+            ),
+            None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
+        };
+        let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
+        if let Some(((agent_id, _), _)) = &ask {
+            actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));
+            actions.push(open_chat(agent_id));
+        }
+        actions.extend([open, dismiss(&id)]);
         items.push(Item {
             kind: "delivery_stalled",
             urgency: 2,
-            agent: None,
+            agent: ask.as_ref().map(|(who, _)| who.clone()),
             task_id: issue.map(|t| t.id.clone()),
             title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
-            reason: text(&crate::delivery::stalled_reason(state, &d), MAX_REASON),
-            text: String::new(),
+            reason: text(&reason, MAX_REASON),
+            text: text(&body, MAX_TEXT),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
             links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
-            actions: vec![
-                action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec })),
-                open,
-                dismiss(&id),
-            ],
-            push: ("Delivery stalled".to_string(), title),
+            actions,
+            push: ("Delivery stalled".to_string(), push),
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,
@@ -530,7 +543,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     let prs = state.db.list_pull_requests(None).map_err(e)?;
     for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| !d.done_at.is_empty()) {
         let tracked = d.pr.and_then(|n| prs.iter().find(|p| p.slug.eq_ignore_ascii_case(&d.repo) && p.number == n));
-        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) {
+        // Tickets published since it was done: the Reopen item below says so instead.
+        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) || crate::delivery::can_reopen(state, &d) {
             continue;
         }
         let id = format!("done:{}:{}", d.repo, d.spec);
@@ -564,6 +578,39 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             // The issue first: it's where the push opens.
             actions: vec![open_delivery(&d, issue), act, dismiss(&id)],
             push: ("Delivery done".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
+    // A done spec Delivery with tickets published since: Reopen delivery builds them (its spec PR goes back to draft).
+    // A new ticket is a new item.
+    let mut done = state.db.deliveries_in_state("ready").map_err(e)?;
+    done.extend(state.db.deliveries_in_state("settled").map_err(e)?);
+    for d in done.into_iter().filter(|d| crate::delivery::can_reopen(state, d)) {
+        let open: Vec<&crate::db::DeliveryTicket> = d.tickets.iter().filter(|t| t.state == "open").collect();
+        let id = format!("reopen:{}:{}:{}", d.repo, d.spec, open.iter().map(|t| t.number.to_string()).collect::<Vec<_>>().join(","));
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let names = open.iter().map(|t| format!("#{}", t.number)).collect::<Vec<_>>();
+        let (pr, many) = (d.pr.unwrap_or_default(), open.len() > 1);
+        items.push(Item {
+            kind: "delivery_reopen",
+            urgency: 1,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("New tickets on a done Delivery: {title}"), MAX_TITLE),
+            reason: text(&format!("{} {} open, published after the Delivery was done. Reopen delivery builds {}; spec PR #{pr} goes back to draft until the final review passes again.", names.join(", "), if many { "are" } else { "is" }, if many { "them" } else { "it" }), MAX_REASON),
+            text: open.iter().map(|t| format!("#{} {}", t.number, t.title)).collect::<Vec<_>>().join("\n"),
+            created_at: if d.done_at.is_empty() { d.created_at.clone() } else { d.done_at.clone() },
+            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![
+                action("reopen", "Reopen delivery", "POST", "/api/deliveries/reopen".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                open_delivery(&d, issue),
+                dismiss(&id),
+            ],
+            push: ("New tickets on a done Delivery".to_string(), title),
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,
@@ -721,9 +768,54 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
-    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low.
-    if let Some(free) = crate::sweep::free_bytes(&state.cfg.storage_dir)
-        && free < crate::sweep::LOW_DISK
+    // Phones are paired but push is off (no APNs key, no relay key): every alert is dropped, so the web says so.
+    let phones = state.db.list_devices().map_err(e)?.len();
+    let off_since = {
+        let mut rt = state.rt.lock().unwrap();
+        if phones > 0 && crate::apns::route(state) == crate::apns::Route::Off {
+            Some(rt.push_off_since.get_or_insert_with(|| Utc::now().to_rfc3339()).clone())
+        } else {
+            rt.push_off_since = None;
+            None
+        }
+    };
+    if let Some(since) = off_since {
+        let id = format!("push_off:{since}");
+        let mut actions = vec![];
+        if let Some(h) = crate::tailnet::host() {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#push", state.cfg.port) } }));
+        }
+        actions.push(dismiss(&id));
+        let phones = if phones == 1 { "your phone".to_string() } else { format!("your {phones} phones") };
+        items.push(Item {
+            kind: "push_off",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Push is off", MAX_TITLE),
+            reason: text(&format!("No APNs key and no relay key: Loft drops every alert for {phones}."), MAX_REASON),
+            text: text("Settings → Push notifications: Sign in for push (the Loft relay, no Apple developer account needed), or add your own APNs key.", MAX_TEXT),
+            created_at: since,
+            links: vec![json!({ "label": "Settings → Push notifications", "path": "/settings#push" })],
+            actions,
+            push: ("Push is off".to_string(), String::new()),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
+    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low, and until 2 GB more are
+    // free: near the line it would come and go, new each time.
+    let free = crate::sweep::free_bytes(&state.cfg.storage_dir);
+    let disk_low = {
+        let mut rt = state.rt.lock().unwrap();
+        let line = crate::sweep::LOW_DISK + if rt.disk_low { crate::sweep::LOW_DISK_MARGIN } else { 0 };
+        rt.disk_low = free.is_some_and(|f| f < line);
+        rt.disk_low
+    };
+    if let Some(free) = free
+        && disk_low
     {
         let id = "disk_low".to_string();
         let gb = free as f64 / 1e9;
@@ -817,18 +909,61 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     }
 }
 
-/// The whole list, as `GET /api/needs-you` returns it.
-pub fn snapshot(state: &AppState) -> Result<Value, String> {
-    collect(state).map(|items| snapshot_of(&items))
+/// What Needs you last listed and last told clients: every read goes through it, so seen marks follow the list and a
+/// change is emitted once.
+#[derive(Default)]
+pub struct Watch(std::sync::Mutex<Last>);
+
+#[derive(Default)]
+struct Last {
+    /// The ids last listed.
+    ids: HashSet<String>,
+    /// The fingerprint last emitted.
+    sent: String,
 }
 
-fn snapshot_of(items: &[Item]) -> Value {
+/// The whole list, as `GET /api/needs-you` returns it.
+pub fn snapshot(state: &AppState) -> Result<Value, String> {
+    look(state, &collect(state)?)
+}
+
+/// The snapshot of these items. An item keeps its id while it lasts (`task:{id}:blocked`, `disk_low`), so the seen
+/// marks of items that left the list since the last look are forgotten first: one that comes back (an issue blocked
+/// again with a new question) is new again. Only what left while Loft watched: at startup nothing has left, and lists
+/// filled later (the GitHub inbox) don't lose their marks.
+fn look(state: &AppState, items: &[Item]) -> Result<Value, String> {
+    let ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
+    {
+        let mut last = state.needs_you.0.lock().unwrap();
+        let gone: Vec<String> = last.ids.difference(&ids).cloned().collect();
+        if !gone.is_empty() {
+            state.db.forget_needs_you_seen(&gone).map_err(|e| e.to_string())?;
+        }
+        last.ids = ids;
+    }
+    Ok(snapshot_of(items, &seen(state)?))
+}
+
+/// The items the user has seen, on any client.
+fn seen(state: &AppState) -> Result<HashSet<String>, String> {
+    Ok(state.db.seen_needs_you().map_err(|e| e.to_string())?.into_iter().collect())
+}
+
+/// `count` and `urgent` are the whole list; `new` and `new_urgent` only what the user hasn't seen (the counter).
+fn snapshot_of(items: &[Item], seen: &HashSet<String>) -> Value {
+    let new: Vec<&Item> = items.iter().filter(|i| !seen.contains(&i.id)).collect();
     json!({
         "version": 1,
         "count": items.len(),
         "urgent": items.iter().filter(|i| i.urgency >= 2).count(),
+        "new": new.len(),
+        "new_urgent": new.iter().filter(|i| i.urgency >= 2).count(),
         "generated_at": crate::db::now(),
-        "items": items.iter().map(to_json).collect::<Vec<_>>(),
+        "items": items.iter().map(|i| {
+            let mut v = to_json(i);
+            v["seen"] = json!(seen.contains(&i.id));
+            v
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -854,52 +989,103 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
-    let known = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?.iter().any(|i| i.id == id);
-    if !known {
+    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !items.iter().any(|i| i.id == id) {
         return Err(not_found());
     }
     state.db.dismiss_needs_you(&id)?;
-    emit_now(&state);
+    items.retain(|i| i.id != id);
+    if let Ok(v) = look(&state, &items) {
+        emit_if_changed(&state, &v);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The ids and count last sent, so the watcher only emits on a change.
+/// The `task_done` item of `t`, its id and when it finished: an issue the user created that finished in the last
+/// `REVIEW_HOURS`.
+fn done_item(t: &Task) -> Option<(String, String)> {
+    if t.status != "done" || t.created_by != "user" {
+        return None;
+    }
+    let done_at = t.completed_at.clone().unwrap_or_else(|| t.updated_at.clone());
+    within(&done_at, chrono::Duration::hours(REVIEW_HOURS)).then(|| (format!("done:{}:{}", t.id, done_at), done_at))
+}
+
+/// `POST /api/issues/{id}/opened`: the user opened the issue on some client. A finished issue's result was there to
+/// look at, so its `task_done` item goes, everywhere. Clients call it on every view of a done issue, so it reads the
+/// whole list only when that item is there to clear.
+pub async fn issue_opened(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let Some((item, _)) = done_item(&t) else { return Ok(Json(json!({ "ok": true, "cleared": 0 }))) };
+    if state.db.needs_you_dismissed(&item)? {
+        return Ok(Json(json!({ "ok": true, "cleared": 0 })));
+    }
+    state.db.dismiss_needs_you(&item)?;
+    if let Ok(v) = collect(&state).and_then(|items| look(&state, &items)) {
+        emit_if_changed(&state, &v);
+    }
+    Ok(Json(json!({ "ok": true, "cleared": 1 })))
+}
+
+/// `POST /api/needs-you/seen` with `{ "ids": [...] }`: the user saw these items (the list was opened on some client),
+/// so the counter stops counting them everywhere. Ids not in the list are ignored. Answers with the new counts.
+pub async fn mark_seen(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let ids: HashSet<&str> = body["ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let shown: Vec<String> = items.iter().filter(|i| ids.contains(i.id.as_str())).map(|i| i.id.clone()).collect();
+    state.db.mark_needs_you_seen(&shown)?;
+    let v = look(&state, &items).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    emit_if_changed(&state, &v);
+    Ok(Json(json!({ "ok": true, "new": v["new"], "new_urgent": v["new_urgent"] })))
+}
+
+/// The ids, and which are seen, last sent, so the watcher only emits on a change.
 fn fingerprint(v: &Value) -> String {
-    v["items"].as_array().map(|a| a.iter().filter_map(|i| i["id"].as_str()).collect::<Vec<_>>().join("|")).unwrap_or_default()
+    v["items"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|i| Some(format!("{}{}", i["id"].as_str()?, if i["seen"] == true { "+" } else { "" }))).collect::<Vec<_>>().join("|"))
+        .unwrap_or_default()
 }
 
 fn emit(state: &AppState, v: &Value) {
-    state.emit(Event::NeedsYou { count: v["count"].as_u64().unwrap_or(0), urgent: v["urgent"].as_u64().unwrap_or(0), ids: v["items"].as_array().map(|a| a.iter().map(|i| i["id"].clone()).collect()).unwrap_or_default() });
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    state.emit(Event::NeedsYou {
+        count: n("count"),
+        urgent: n("urgent"),
+        new: n("new"),
+        new_urgent: n("new_urgent"),
+        ids: v["items"].as_array().map(|a| a.iter().map(|i| i["id"].clone()).collect()).unwrap_or_default(),
+    });
 }
 
-fn emit_now(state: &AppState) {
-    if let Ok(v) = snapshot(state) {
-        emit(state, &v);
+/// Emits this snapshot unless clients already have it: a seen mark or a Done emits at once, and the next tick doesn't
+/// send it again.
+fn emit_if_changed(state: &AppState, v: &Value) {
+    let fp = fingerprint(v);
+    let mut last = state.needs_you.0.lock().unwrap();
+    if last.sent != fp {
+        last.sent = fp;
+        emit(state, v);
     }
 }
 
 /// One tick's push items and snapshot, from a single read of everything.
 fn tick_lists(state: &AppState) -> Result<(Vec<PushItem>, Value), String> {
     let items = collect(state)?;
-    Ok((items.iter().map(to_push).collect(), snapshot_of(&items)))
+    Ok((items.iter().map(to_push).collect(), look(state, &items)?))
 }
 
 /// Tells clients when the list changes (`needs_you` event with the count and ids). Checks every few
 /// seconds instead of on every event: messages stream fast, and the list rarely changes. The list is
 /// built once per tick; push and the event both come from it.
 pub async fn watcher(state: AppState) {
-    let mut last = String::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let mut pusher = crate::push::Pusher::default();
     loop {
         tick.tick().await;
         let Ok((push, v)) = tick_lists(&state) else { continue };
-        pusher.tick(&state, &push).await;
-        let fp = fingerprint(&v);
-        if fp != last {
-            emit(&state, &v);
-            last = fp;
-        }
+        pusher.tick(&state, &push, v["new"].as_u64().unwrap_or(0)).await;
+        emit_if_changed(&state, &v);
     }
 }
 
@@ -950,6 +1136,102 @@ mod tests {
         let kinds = |id: &str| items.iter().find(|i| i.id == format!("permission:{id}")).unwrap().actions.iter().map(|a| a["kind"].as_str().unwrap()).collect::<Vec<_>>();
         assert!(kinds("k1").contains(&"approve_always"));
         assert_eq!(kinds("k2"), vec!["approve", "deny", "open"]);
+    }
+
+    #[tokio::test]
+    async fn the_counter_counts_only_what_the_user_has_not_seen_on_any_client() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let mk = |status: &str| {
+            let t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": status, "status": status, "created_by": "user",
+                "agent_id": qa.id, "created_at": now(), "updated_at": now() })).unwrap();
+            st.db.save_task(&t).unwrap();
+            t
+        };
+        let blocked = mk("blocked"); // urgency 2
+        let failed = mk("failed"); // urgency 1
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["urgent"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(1), json!(2), json!(1)), "nothing is seen yet");
+        assert!(v["items"].as_array().unwrap().iter().all(|i| i["seen"] == false));
+        let (blocked_id, failed_id) = (format!("task:{}:blocked", blocked.id), format!("task:{}:failed", failed.id));
+        assert_eq!(item(&v, "task_failed")["actions"].as_array().unwrap().last().unwrap()["label"], "Done", "Dismiss is the Done check");
+
+        // Opening the list on one client marks what it showed; ids not in the list are ignored.
+        let r = mark_seen(State(st.clone()), Json(json!({ "ids": [blocked_id, failed_id, "question:gone"] }))).await.unwrap().0;
+        assert_eq!((r["new"].clone(), r["new_urgent"].clone()), (json!(0), json!(0)));
+        assert!(!st.db.seen_needs_you().unwrap().contains(&"question:gone".to_string()));
+        // Every client reads the same marks: seen items stay in the list, the counter is empty.
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(0), json!(0)));
+        assert!(v["items"].as_array().unwrap().iter().all(|i| i["seen"] == true));
+
+        // A new item counts again; it is urgent only if it is.
+        mk("failed");
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(3), json!(1), json!(0)));
+        // A changed item has a new id, so it counts again: an issue failed, then blocked.
+        let mut failed2 = failed.clone();
+        failed2.status = "blocked".into();
+        st.db.save_task(&failed2).unwrap();
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(1)), "the changed one is new and urgent");
+        assert_eq!(v["items"].as_array().unwrap().iter().find(|i| i["id"] == format!("task:{}:blocked", failed.id)).unwrap()["seen"], false);
+
+        // Done (dismiss) still takes an item out of the list, and out of the counts.
+        assert!(dismiss_item(State(st.clone()), Path(blocked_id.clone())).await.is_ok());
+        let v = snapshot(&st).unwrap();
+        assert!(!ids(&v).contains(&blocked_id));
+        assert_eq!(v["count"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn an_item_that_leaves_and_comes_back_with_the_same_id_is_new_again() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let mut t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": "Pick a name", "status": "blocked",
+            "created_by": "user", "agent_id": qa.id, "error": "Which name?", "created_at": now(), "updated_at": now() })).unwrap();
+        st.db.save_task(&t).unwrap();
+        let id = format!("task:{}:blocked", t.id);
+        snapshot(&st).unwrap();
+        mark_seen(State(st.clone()), Json(json!({ "ids": [id] }))).await.unwrap();
+        assert_eq!(snapshot(&st).unwrap()["new"], json!(0));
+
+        // Answered: it runs again and leaves the list (the watcher's next look)...
+        t.status = "in_progress".into();
+        st.db.save_task(&t).unwrap();
+        tick_lists(&st).unwrap();
+        // ...then blocks again with a new question, under the same id: it counts again, everywhere.
+        t.status = "blocked".into();
+        t.error = "And the icon?".into();
+        st.db.save_task(&t).unwrap();
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["new"].clone(), v["new_urgent"].clone()), (json!(1), json!(1)), "blocked again: new and urgent");
+        assert_eq!(item(&v, "task_blocked")["seen"], false);
+
+        // Lists filled after startup keep their marks: a mark is only forgotten for an item seen leaving.
+        let fresh = state();
+        fresh.db.mark_needs_you_seen(&["review:o/r#7".to_string()]).unwrap();
+        snapshot(&fresh).unwrap();
+        assert!(fresh.db.seen_needs_you().unwrap().contains(&"review:o/r#7".to_string()), "nothing left at the first look");
+    }
+
+    #[tokio::test]
+    async fn a_seen_mark_is_emitted_once() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": "x", "status": "failed",
+            "created_by": "user", "agent_id": qa.id, "created_at": now(), "updated_at": now() })).unwrap();
+        st.db.save_task(&t).unwrap();
+        let mut rx = st.events.subscribe();
+        let (_, v) = tick_lists(&st).unwrap();
+        emit_if_changed(&st, &v);
+        let mut events = || std::iter::from_fn(|| rx.try_recv().ok()).filter(|e| matches!(e, Event::NeedsYou { .. })).count();
+        assert_eq!(events(), 1, "the watcher tells clients about the new item");
+
+        mark_seen(State(st.clone()), Json(json!({ "ids": [format!("task:{}:failed", t.id)] }))).await.unwrap();
+        let (_, v) = tick_lists(&st).unwrap();
+        emit_if_changed(&st, &v);
+        assert_eq!(events(), 1, "the mark emits at once, and the next tick doesn't send it again");
     }
 
     #[tokio::test]
@@ -1090,8 +1372,40 @@ mod tests {
         assert!(same_site(&h(Some("same-site"))).is_err());
     }
 
+    #[tokio::test]
+    async fn a_finished_issues_result_leaves_when_the_issue_is_opened_or_after_24_hours() {
+        let st = state();
+        let done = |title: &str, hours_ago: i64| {
+            let (mut t, _) = crate::tasks::create(&st, &json!({ "title": title }), "user").unwrap();
+            t.status = "done".into();
+            t.completed_at = Some((Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339());
+            st.db.save_task(&t).unwrap();
+            t
+        };
+        let results = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "task_done").map(|i| i.title).collect::<Vec<_>>();
+        let (fresh, day_old, other) = (done("Fresh", 1), done("Day old", 25), done("Other", 2));
+        assert_eq!(results(&st), ["Other", "Fresh"], "a day later it's gone");
+
+        let Json(r) = issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap();
+        assert_eq!(r["cleared"], json!(1));
+        assert_eq!(results(&st), ["Other"], "opening one leaves the other");
+        // Opening it again, or opening an issue with no result to look at, changes nothing.
+        assert_eq!(issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap().0["cleared"], json!(0));
+        assert!(issue_opened(State(st.clone()), Path("nope".into())).await.is_err());
+        assert_eq!(other.status, "done");
+        // Nor does opening an issue with no item: not done, an agent's, or done over 24 hours ago.
+        let (open, _) = crate::tasks::create(&st, &json!({ "title": "Open" }), "user").unwrap();
+        let (mut agents, _) = crate::tasks::create(&st, &json!({ "title": "An agent's" }), "agent").unwrap();
+        agents.status = "done".into();
+        st.db.save_task(&agents).unwrap();
+        for t in [&open.id, &agents.id, &day_old.id] {
+            assert_eq!(issue_opened(State(st.clone()), Path(t.clone())).await.unwrap().0["cleared"], json!(0));
+        }
+        assert_eq!(results(&st), ["Other"]);
+    }
+
     #[test]
-    fn only_a_run_you_started_asks_you_something_and_only_your_message_answers_it() {
+    fn only_a_run_you_started_asks_you_something_and_your_message_or_an_agents_needs_action_answers_it() {
         let st = state();
         let (dev, qa) = (agent(&st, "Dev"), agent(&st, "QA"));
         let questions = |st: &AppState| {
@@ -1112,10 +1426,15 @@ mod tests {
         reply(&st, &dev.id, true, "Should I use B2 or S3?");
         assert_eq!(questions(&st), ["Dev"]);
 
-        // An agent's message after the question doesn't answer it; the user's does.
-        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Status update: CI is green.", from_qa);
+        // An agent's FYI after the question doesn't answer it; an agent's message that needs action does (the Lead
+        // decided), and so does the user's.
+        crate::agents::fyi_from_agent(&st, &qa, &dev, "Status update: CI is green.");
         assert_eq!(questions(&st), ["Dev"]);
-        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "S3", json!({}));
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "Use S3.", from_qa);
+        assert!(questions(&st).is_empty());
+        reply(&st, &dev.id, true, "And the bucket name?");
+        assert_eq!(questions(&st), ["Dev"]);
+        crate::agents::add_msg(&st, &dev.id, None, "user", "text", "loft-backups", json!({}));
         assert!(questions(&st).is_empty());
 
         // A long run: its marker is past the loaded messages, so it's looked up, walking back from the reply.
