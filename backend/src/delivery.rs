@@ -93,7 +93,7 @@ pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: id.into(), skipped: String::new() });
+        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: id.into(), skipped: String::new() });
     });
 }
 
@@ -109,7 +109,7 @@ pub fn update(state: &AppState, repo: &str, spec: i64, f: impl FnOnce(&mut Deliv
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
     update(state, repo, spec, |d| {
         if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: String::new() });
+            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: String::new() });
         }
     });
 }
@@ -245,7 +245,7 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
          - {work}\n\
          - One or more commits, each message ending with `{refs}`.\n\
          - {own}\n\
-         - When the commits are pushed and the checks pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Loft hands them to the team's reviewers and closes the ticket when they pass: never close it yourself.",
+         - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass and the CI is green: never close it yourself.",
         about = subject(d),
         ticket = ticket_ref(d, t),
         refs = refs(d, t),
@@ -412,14 +412,14 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "submit_ticket",
-        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and the checks pass. Loft wakes the team's QA and Security to review them, and closes the ticket and starts the next one when they pass. On changes, Loft wakes you with their notes: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
+        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, and closes the ticket and starts the next one when they pass and the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for final Code Review fixes, the spec PR's number, or the spec's Loft issue id." },
             "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of all the ticket's commits, oldest first." }
         }, "required": ["number", "commits"] }
     }), json!({
         "name": "review_ticket",
-        "description": "As QA or Security on a Delivery: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
+        "description": "As QA or Security on a Delivery: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket and its CI is green, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for the Code reviewer, the spec PR's number, or the spec's Loft issue id." },
             "verdict": { "type": "string", "enum": ["pass", "changes"], "description": "\"changes\" only for problems that must be fixed first." },
@@ -506,24 +506,39 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Err(format!("{name} is with {who}: only the agent building it submits it."));
     }
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
+    // A plan kept in Loft has no GitHub CI to follow.
+    let ci = !d.local;
     let d = update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.state = "review".into();
             t.commits = commits.clone();
             t.verdicts = reviewers.iter().map(|(r, _)| (r.to_string(), "pending".to_string())).collect();
+            if ci {
+                t.verdicts.insert("ci".into(), "pending".into());
+            }
+            t.submitted_at = crate::db::now();
         }
     })
     .ok_or("The Delivery record couldn't be saved.")?;
-    if reviewers.is_empty() {
+    if reviewers.is_empty() && !ci {
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted.{closed}"));
+    }
+    if reviewers.is_empty() {
+        let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
+            tracing::warn!("delivery {slug}#{}: CI: {e}", d.spec);
+            String::new()
+        });
+        let waits = if followed.is_empty() { " Loft closes it when the CI is green, and wakes you if it fails." } else { "" };
+        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{waits}{followed}"));
     }
     let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
         crate::agents::wake_on_ticket(state, &a.id, &ticket_key(&d, Some(n)), false, review_brief(state, &d, t, role));
     }
     let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
-    Ok(format!("Submitted {name}: {names} are reviewing it. Loft wakes you if they ask for changes, and closes it when they pass."))
+    let (and_ci, fails, green) = if ci { (", and Loft follows its CI", " or the CI fails", " and the CI is green") } else { ("", "", "") };
+    Ok(format!("Submitted {name}: {names} are reviewing it{and_ci}. Loft wakes you if they ask for changes{fails}, and closes it when they pass{green}."))
 }
 
 /// Changes rounds after which a ticket waits for the user instead of going back to the Dev.
@@ -584,8 +599,17 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         })
         .ok_or("The Delivery record couldn't be saved.")?;
         let t = d.ticket(n).expect("just saved");
-        if t.verdicts.values().any(|v| v != "pass") {
+        if t.verdicts.iter().any(|(r, v)| r != "ci" && v != "pass") {
             return Ok(format!("Posted your pass on {on}.{labelled} {name} waits for its other reviewers."));
+        }
+        if t.verdicts.get("ci").is_some_and(|v| v != "pass") {
+            // The last reviewer: the CI may well be done by now, so it's read at once.
+            let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
+                tracing::warn!("delivery {slug}#{}: CI: {e}", d.spec);
+                String::new()
+            });
+            let waits = if followed.is_empty() { format!(" {name} waits for its CI: Loft closes it when the CI is green.") } else { String::new() };
+            return Ok(format!("Posted your pass on {on}.{labelled}{waits}{followed}"));
         }
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Posted your pass on {on}.{labelled}{closed}"));
@@ -605,20 +629,27 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let why = needs_human(state, &d, Some(&t), rounds, notes).await;
         return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on {name}, so it waits for the user now{why}."));
     }
-    let brief = format!(
-        "[Loft Delivery: {about}] This is not a message from the user. {who} ({label}) asked for changes on ticket {ticket} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`, push, then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
-        own = own_rules("build and check the work"),
-        about = subject(&d),
-        bname = branch_name(&d),
-        who = me.name,
-        ticket = if d.local { ticket_ref(&d, &t) } else { format!("#{n} \"{}\"", t.title) },
-        refs = refs(&d, &t),
-        arg = ticket_arg(&d, &t),
-        branch = d.branch,
-    );
+    let brief = changes_brief(&d, &t, rounds, &format!("{} ({label})", me.name), notes);
     crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, Some(n)), true, brief);
     Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
+}
+
+/// The wake that sends ticket `t` back to the Dev for changes round `rounds`, asked for by `who` (a reviewer,
+/// or the CI) with `notes`. It names the ticket and the commits it judged, so it stands on its own after a
+/// cleared context.
+fn changes_brief(d: &Delivery, t: &DeliveryTicket, rounds: u32, who: &str, notes: &str) -> String {
+    let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
+    format!(
+        "[Loft Delivery: {about}] This is not a message from the user. {who} asked for changes on ticket {ticket} (round {rounds} of {MAX_ROUNDS}), submitted as {commits}:\n\n{notes}\n\n\
+         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`, push, then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
+        own = own_rules("build and check the work"),
+        about = subject(d),
+        bname = branch_name(d),
+        ticket = if d.local { ticket_ref(d, t) } else { format!("#{} \"{}\"", t.number, t.title) },
+        refs = refs(d, t),
+        arg = ticket_arg(d, t),
+        branch = d.branch,
+    )
 }
 
 /// Adds label `name` to issue or PR #n, creating it on the repo first if it's missing.
@@ -734,6 +765,251 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
     }
     let next = start_next(state, &d.repo, d.spec).await;
     Ok(format!("\n{closed}{next}"))
+}
+
+/// How often Loft reads the CI of the tickets waiting for it.
+const CI_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a commit with no check at all waits for one when the repo has workflows: a workflow's checks
+/// show up seconds after a push, so none after this means none runs on the branch.
+const CI_GRACE_MINUTES: i64 = 10;
+
+/// The last lines of a failed job's log a changes round carries; the whole log is at the check's link.
+const LOG_LINES: usize = 300;
+
+/// Whether ticket `t` is submitted and waits for its CI.
+fn waits_for_ci(t: &DeliveryTicket) -> bool {
+    t.state == "review" && t.verdicts.get("ci").is_some_and(|v| v == "pending")
+}
+
+/// What the checks of a commit say.
+enum Ci {
+    /// Some still run, or none showed up yet.
+    Running,
+    Green,
+    /// The repo has no CI, or none runs on the branch.
+    Absent,
+    /// The failed checks' names, and each one's failure with its log.
+    Red(Vec<String>, String),
+}
+
+/// Follows the CI of `d`'s tickets that wait for it, on the newest commit of its branch on GitHub. For the
+/// waiting tickets that commit includes, a green CI (or none at all) is their pass, and a red one is a
+/// changes round with the failure's log for the oldest open ticket it includes. The caller holds the
+/// repo's publish lock. The lines for the reply, empty when nothing changed.
+async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
+    if d.local || !d.tickets.iter().any(waits_for_ci) {
+        return Ok(String::new());
+    }
+    let err = |e: anyhow::Error| e.to_string();
+    let head = crate::github::get(state, &format!("/repos/{}/git/ref/heads/{}", d.repo, d.branch)).await.map_err(err)?;
+    let head = head["object"]["sha"].as_str().ok_or_else(|| format!("GitHub gave the branch `{}` no commit", d.branch))?.to_string();
+    // The tickets still open that the commit includes, oldest first.
+    let mut included = vec![];
+    for t in d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "needs_human")) {
+        let Some(last) = t.commits.last() else { continue };
+        if includes(state, &d.repo, &head, last).await.map_err(err)? {
+            included.push(t);
+        }
+    }
+    let ready: Vec<&DeliveryTicket> = included.iter().copied().filter(|t| waits_for_ci(t)).collect();
+    if ready.is_empty() {
+        return Ok(String::new());
+    }
+    let since = ready.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
+    match ci_of(state, &d.repo, &head, since).await.map_err(err)? {
+        Ci::Running => Ok(String::new()),
+        ci @ (Ci::Green | Ci::Absent) => {
+            let why = match ci {
+                Ci::Green => format!("its CI is green on `{}`", short(&head)),
+                _ => "the repo runs no CI on its branch".to_string(),
+            };
+            let mut out = String::new();
+            for n in ready.iter().map(|t| t.number).collect::<Vec<_>>() {
+                out += &ci_passed(state, &d.repo, d.spec, n, &why).await?;
+            }
+            Ok(out)
+        }
+        Ci::Red(names, log) => {
+            // A ticket whose CI already passed on an earlier commit isn't what broke it.
+            match included.iter().find(|t| t.verdicts.get("ci").is_none_or(|v| v != "pass")) {
+                Some(t) if waits_for_ci(t) => ci_failed(state, d, t, &head, &names, &log).await,
+                // Being fixed, or waiting for the user: its next commit runs the CI again.
+                _ => Ok(String::new()),
+            }
+        }
+    }
+}
+
+/// Whether commit `sha` (full or short) is `head` or one of its ancestors.
+async fn includes(state: &AppState, repo: &str, head: &str, sha: &str) -> anyhow::Result<bool> {
+    let sha = sha.to_ascii_lowercase();
+    if head.starts_with(&sha) {
+        return Ok(true);
+    }
+    match crate::github::get(state, &format!("/repos/{repo}/compare/{sha}...{head}")).await {
+        Ok(v) => Ok(matches!(v["status"].as_str(), Some("ahead" | "identical"))),
+        // A commit GitHub doesn't have isn't on the branch.
+        Err(e) if crate::github::is_gone(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The checks on commit `sha` of `repo`: its check runs and commit statuses. With none at all, a repo
+/// with active workflows waits for them until `CI_GRACE_MINUTES` after `since`, the ticket's submit.
+async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::Result<Ci> {
+    let runs = crate::github::get(state, &format!("/repos/{repo}/commits/{sha}/check-runs?per_page=100")).await?;
+    let statuses = crate::github::get(state, &format!("/repos/{repo}/commits/{sha}/status")).await?;
+    let runs = runs["check_runs"].as_array().cloned().unwrap_or_default();
+    let statuses = statuses["statuses"].as_array().cloned().unwrap_or_default();
+    if runs.is_empty() && statuses.is_empty() {
+        let workflows = match crate::github::get(state, &format!("/repos/{repo}/actions/workflows")).await {
+            Ok(v) => v,
+            Err(e) if crate::github::is_gone(&e) => Value::Null,
+            Err(e) => return Err(e),
+        };
+        let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
+        let waited = chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(CI_GRACE_MINUTES));
+        return Ok(if active && !waited { Ci::Running } else { Ci::Absent });
+    }
+    if runs.iter().any(|c| c["status"] != "completed") || statuses.iter().any(|s| s["state"] == "pending") {
+        return Ok(Ci::Running);
+    }
+    let failed_runs: Vec<&Value> = runs.iter().filter(|c| !matches!(c["conclusion"].as_str(), Some("success" | "neutral" | "skipped"))).collect();
+    let failed_statuses: Vec<&Value> = statuses.iter().filter(|s| s["state"] != "success").collect();
+    if failed_runs.is_empty() && failed_statuses.is_empty() {
+        return Ok(Ci::Green);
+    }
+    let (mut names, mut log) = (vec![], String::new());
+    for c in failed_runs {
+        let name = c["name"].as_str().unwrap_or("a check");
+        names.push(name.to_string());
+        log += &format!("### `{name}`: {}\n", c["conclusion"].as_str().unwrap_or("failed"));
+        if let Some(url) = c["details_url"].as_str() {
+            log += &format!("{url}\n");
+        }
+        for part in ["title", "summary", "text"] {
+            if let Some(x) = c["output"][part].as_str().map(str::trim).filter(|x| !x.is_empty()) {
+                log += &format!("{x}\n");
+            }
+        }
+        if c["app"]["slug"] == "github-actions"
+            && let Some(id) = c["id"].as_i64()
+        {
+            match crate::github::get_text(state, &format!("/repos/{repo}/actions/jobs/{id}/logs")).await {
+                Ok(text) => log += &format!("```\n{}\n```\n", log_tail(&text)),
+                Err(e) => log += &format!("(Loft couldn't read its log: {e})\n"),
+            }
+        }
+        log.push('\n');
+    }
+    for s in failed_statuses {
+        let name = s["context"].as_str().unwrap_or("a status");
+        names.push(name.to_string());
+        log += &format!("### `{name}`: {}\n", s["state"].as_str().unwrap_or("failed"));
+        for part in ["description", "target_url"] {
+            if let Some(x) = s[part].as_str().map(str::trim).filter(|x| !x.is_empty()) {
+                log += &format!("{x}\n");
+            }
+        }
+        log.push('\n');
+    }
+    Ok(Ci::Red(names, log.trim_end().to_string()))
+}
+
+/// The last `LOG_LINES` lines of a GitHub Actions job log, without the timestamp GitHub starts each with.
+fn log_tail(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let cut = lines.len().saturating_sub(LOG_LINES);
+    let strip = |l: &'_ str| -> String {
+        match l.split_once(' ') {
+            Some((stamp, rest)) if stamp.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(stamp).is_ok() => rest.to_string(),
+            _ => l.to_string(),
+        }
+    };
+    let tail = lines[cut..].iter().map(|l| strip(l)).collect::<Vec<_>>().join("\n");
+    if cut > 0 { format!("… ({cut} earlier lines cut)\n{tail}") } else { tail }
+}
+
+/// The CI of ticket #n passed (`why`): it closes when its reviewers passed too. The lines for the reply.
+async fn ci_passed(state: &AppState, repo: &str, spec: i64, n: i64, why: &str) -> Result<String, String> {
+    let d = update(state, repo, spec, |d| {
+        if let Some(t) = d.ticket_mut(n) {
+            t.verdicts.insert("ci".into(), "pass".into());
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+    let name = tag(&d, t);
+    if t.verdicts.values().any(|v| v != "pass") {
+        return Ok(format!("\n{name}: {why}. It waits for its reviewers."));
+    }
+    let closed = finish(state, &d, n).await?;
+    Ok(format!("\n{name}: {why}.{closed}"))
+}
+
+/// The CI failed on commit `head`, which includes ticket `t`: a changes round for `t`, with the failure's
+/// log for the Dev, counted against `MAX_ROUNDS` like a reviewer's. The lines for the reply.
+async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &str, names: &[String], log: &str) -> Result<String, String> {
+    let (n, name) = (t.number, tag(d, t));
+    let checks = names.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ");
+    let mut posted = String::new();
+    if let Some(pr) = d.pr {
+        let body = format!("**CI** failed on `{}`, which includes ticket {name}: {checks}.", short(head));
+        posted = match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{pr}/comments", d.repo), Some(json!({ "body": body }))).await {
+            Ok(_) => label_issue(state, &d.repo, pr, "changes-requested").await.err().map(|e| format!(" Posted on #{pr}, but {e}.")).unwrap_or_default(),
+            Err(e) => format!(" Couldn't post it on #{pr}: {e}."),
+        };
+    }
+    let rounds = t.rounds + 1;
+    let stuck = rounds >= MAX_ROUNDS;
+    update(state, &d.repo, d.spec, |d| {
+        if let Some(t) = d.ticket_mut(n) {
+            t.rounds = rounds;
+            t.verdicts.clear();
+            t.state = if stuck { "needs_human" } else { "started" }.into();
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    if stuck {
+        let why = needs_human(state, d, Some(t), rounds, &format!("the CI failed: {checks}")).await;
+        return Ok(format!("\nThe CI failed on {name} ({checks}).{posted} That's round {rounds} of changes, so it waits for the user now{why}."));
+    }
+    let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, which includes the ticket. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch);
+    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(d, Some(n)), true, changes_brief(d, t, rounds, "The CI", &notes));
+    Ok(format!("\nThe CI failed on {name} ({checks}).{posted} The Dev is fixing it (round {rounds} of {MAX_ROUNDS})."))
+}
+
+/// Follows the CI of every running Delivery's tickets that wait for it, on a tick of its own: a ticket
+/// closes, or goes back to the Dev, within a minute of its CI finishing, without waiting for the PR card's
+/// poll or spending an agent's run.
+pub async fn ci_poller(state: AppState) {
+    let mut tick = tokio::time::interval(CI_EVERY);
+    crate::github::as_source("delivery", async {
+        loop {
+            tick.tick().await;
+            follow_all(&state).await;
+        }
+    })
+    .await
+}
+
+/// One tick of `ci_poller`.
+pub(crate) async fn follow_all(state: &AppState) {
+    for d in state.db.deliveries_in_state("running").unwrap_or_default() {
+        if d.local || !d.tickets.iter().any(waits_for_ci) {
+            continue;
+        }
+        let _held = state.publish_locks.of(&d.repo).lock_owned().await;
+        // Read again under the lock: a submit or a review may have changed it.
+        let Some(d) = state.db.get_delivery(&d.repo, d.spec).ok().flatten() else { continue };
+        match follow_ci(state, &d).await {
+            Ok(line) if !line.is_empty() => tracing::info!("delivery {}#{}: {}", d.repo, d.spec, line.trim()),
+            Ok(_) => {}
+            Err(e) if e.starts_with("GitHub paused") => {}
+            Err(e) => tracing::warn!("delivery {}#{}: CI: {e}", d.repo, d.spec),
+        }
+    }
 }
 
 /// The mirror's catch-up: closes the tickets whose close failed after they passed, then starts the next
@@ -866,7 +1142,7 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                 let title = x["title"].as_str().unwrap_or_default().to_string();
                 match d.ticket_mut(n) {
                     Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
-                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: String::new(), skipped: skipped.unwrap_or_default() }),
+                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: skipped.unwrap_or_default() }),
                 }
             }
             // A ticket taken off the spec on GitHub isn't the Delivery's any more.
@@ -1320,6 +1596,16 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_job_log_keeps_its_last_lines_without_their_timestamps() {
+        let log = (1..=LOG_LINES + 2).map(|i| format!("2026-11-11T10:00:00.1234567Z line {i}")).collect::<Vec<_>>().join("\n");
+        let tail = log_tail(&format!("{log}\nno stamp here"));
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines[0], "… (3 earlier lines cut)");
+        assert_eq!((lines[1], lines[lines.len() - 2], lines[lines.len() - 1]), ("line 4", "line 302", "no stamp here"));
+        assert_eq!(log_tail("short\nlog"), "short\nlog");
+    }
+
     /// The keys an agent's message naming the same ticket gets (`agents::message_ticket_key`), so Delivery and
     /// a hand-off by message share one ticket boundary.
     #[test]
@@ -1329,7 +1615,7 @@ mod tests {
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
-        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), id: "loft-issue-1".into(), skipped: String::new() });
+        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: "loft-issue-1".into(), skipped: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 

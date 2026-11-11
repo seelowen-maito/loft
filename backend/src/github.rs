@@ -268,6 +268,27 @@ pub async fn get(state: &AppState, path: &str) -> Result<Value> {
     request(state, reqwest::Method::GET, path, None).await
 }
 
+/// A GET whose answer is text, not JSON, like a job's log. GitHub redirects that one to a signed URL,
+/// which reqwest follows without the token.
+pub async fn get_text(state: &AppState, path: &str) -> Result<String> {
+    if let Err(why) = state.gh_budget.allow("core", source()) {
+        bail!(why);
+    }
+    let mut req = state.http.get(format!("{}{path}", api_base())).header("User-Agent", "loft").header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(t) = token(state) {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    state.gh_budget.record(resp.headers(), false);
+    let text = resp.text().await?;
+    if !status.is_success() {
+        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(String::from)).unwrap_or_else(|| "request failed".into());
+        bail!("GitHub {}: {msg}", status.as_u16());
+    }
+    Ok(text)
+}
+
 /// Every `owner/repo#number` PR link in a blob of text, in order, deduplicated.
 pub fn extract_pr_links(text: &str) -> Vec<(String, i64)> {
     let mut out: Vec<(String, i64)> = vec![];

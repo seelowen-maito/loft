@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
+    tokio::spawn(delivery::ci_poller(state.clone()));
 
     let api = Router::new()
         .route("/info", get(api::info))

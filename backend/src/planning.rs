@@ -2611,7 +2611,23 @@ pub(crate) mod tests {
         fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/changes-requested"), 200, json!([]));
         fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(&slug, 41, "open", "## What to build\n\nStore."));
         fake.route("PATCH", &format!("/repos/{slug}/issues/41"), 200, gh_ticket(&slug, 41, "closed", "## What to build\n\nStore."));
+        ci_on(fake, &slug, "spec/40-rounds", json!([]));
         (dev, team)
+    }
+
+    /// The newest commit of a Delivery's branch in these tests: it includes every commit they submit.
+    const CI_HEAD: &str = "c1c1c1c1c1";
+
+    /// The Delivery's branch `branch` on GitHub at `CI_HEAD`, with these check runs on it, no commit status,
+    /// and no workflow: with no run at all, the repo has no CI.
+    fn ci_on(fake: &Fake, slug: &str, branch: &str, runs: Value) {
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/{branch}"), 200, json!({ "object": { "sha": CI_HEAD } }));
+        for sha in ["fed4321abc", "1234567abc", "0123abcd", "abc1234"] {
+            fake.route("GET", &format!("/repos/{slug}/compare/{sha}...{CI_HEAD}"), 200, json!({ "status": "ahead" }));
+        }
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "total_count": 0, "check_runs": runs }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/status"), 200, json!({ "statuses": [] }));
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 0, "workflows": [] }));
     }
 
     fn submit_41() -> Value {
@@ -2692,7 +2708,7 @@ pub(crate) mod tests {
         let (fake, st) = (fake_github(), state());
         let (dev, team) = building(&st, &fake, "rv-submit", &["qa", "security", "code_reviewer"]).await;
         let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
-        assert!(out.starts_with("Submitted #41: qa agent (QA) and security agent (Security) are reviewing it."), "{out}");
+        assert_eq!(out, "Submitted #41: qa agent (QA) and security agent (Security) are reviewing it, and Loft follows its CI. Loft wakes you if they ask for changes or the CI fails, and closes it when they pass and the CI is green.");
         let (qa, sec, cr) = (woken(&st, &team[0]), woken(&st, &team[1]), woken(&st, &team[2]));
         assert!(cr.is_empty(), "Code review comes once, at the end of the spec: {cr:?}");
         assert_eq!((qa.len(), sec.len()), (1, 1));
@@ -2708,7 +2724,7 @@ pub(crate) mod tests {
         assert!(qa[0].contains("acceptance criteria") && sec[0].contains("security problems"));
         let d = st.db.get_delivery("octo/rv-submit", 40).unwrap().unwrap();
         assert_eq!((d.tickets[0].state.as_str(), d.tickets[0].commits.len()), ("review", 2));
-        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "qa": "pending", "security": "pending" }));
+        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "ci": "pending", "qa": "pending", "security": "pending" }));
     }
 
     #[tokio::test]
@@ -2716,15 +2732,15 @@ pub(crate) mod tests {
         let (fake, st) = (fake_github(), state());
         let (dev, team) = building(&st, &fake, "rv-qa-only", &["qa"]).await;
         let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
-        assert!(out.starts_with("Submitted #41: qa agent (QA) are reviewing it."), "{out}");
+        assert!(out.starts_with("Submitted #41: qa agent (QA) are reviewing it, and Loft follows its CI."), "{out}");
         assert_eq!(woken(&st, &team[0]).len(), 1);
         let d = st.db.get_delivery("octo/rv-qa-only", 40).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "qa": "pending" }));
+        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "ci": "pending", "qa": "pending" }));
 
         let (fake, st) = (fake_github(), state());
         let (dev, _) = building(&st, &fake, "rv-alone", &[]).await;
         let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
-        assert!(out.contains("The team has no QA or Security, so it passed as submitted.") && out.contains("Next: #42 is with Builder."), "{out}");
+        assert!(out.starts_with("Submitted #41. The team has no QA or Security, so only its CI is waited for.\n#41: the repo runs no CI on its branch.") && out.contains("Next: #42 is with Builder."), "{out}");
         assert_eq!(standing(&st, "octo/rv-alone", 41), ("closed".into(), Some(42), None));
     }
 
@@ -2777,7 +2793,7 @@ pub(crate) mod tests {
                 assert!(out.ends_with(&format!("The Dev is fixing #41 (round {round} of 3).")), "{out}");
                 let w = woken(&st, &dev);
                 assert_eq!(w.len(), before + 1);
-                assert!(w.last().unwrap().contains(&format!("qa agent (QA) asked for changes on ticket #41 \"Store\" (round {round} of 3):\n\nRound {round}: the total is off by one.")), "{w:?}");
+                assert!(w.last().unwrap().contains(&format!("qa agent (QA) asked for changes on ticket #41 \"Store\" (round {round} of 3), submitted as `abc1234`, `fed4321`:\n\nRound {round}: the total is off by one.")), "{w:?}");
                 assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` again"));
             } else {
                 assert!(out.contains("That's round 3 of changes on #41, so it waits for the user now."), "{out}");
@@ -2884,6 +2900,156 @@ pub(crate) mod tests {
         tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
         assert_eq!(deletes(), 1);
         assert_eq!(standing(&st, slug, 41).0, "closed");
+    }
+
+    fn run(status: &str, conclusion: Option<&str>) -> Value {
+        json!({ "id": 77, "name": "test", "status": status, "conclusion": conclusion, "app": { "slug": "github-actions" }, "details_url": "https://github.com/octo/ci/actions/runs/1/job/77", "output": { "title": "1 test failed" } })
+    }
+
+    #[tokio::test]
+    async fn the_dev_brief_says_not_to_wait_for_the_ci() {
+        let (fake, st) = (fake_github(), state());
+        let (dev, _) = building(&st, &fake, "ci-brief", &[]).await;
+        let w = woken(&st, &dev);
+        assert!(w[0].contains("When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with 41") && w[0].contains("Don't wait for the CI: Loft follows it."), "{}", w[0]);
+        assert!(!w[0].contains("checks pass"), "{}", w[0]);
+        let submit = crate::delivery::mcp_tools().into_iter().find(|t| t["name"] == "submit_ticket").unwrap();
+        assert!(submit["description"].as_str().unwrap().contains("Don't wait for the CI"));
+    }
+
+    #[tokio::test]
+    async fn a_ticket_its_reviewers_passed_closes_only_when_its_ci_is_green() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-green";
+        let (dev, team) = building(&st, &fake, "ci-green", &["qa"]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.in_turn("GET", &runs, vec![
+            (200, json!({ "check_runs": [run("in_progress", None)] })),
+            (200, json!({ "check_runs": [run("in_progress", None)] })),
+            (200, json!({ "check_runs": [run("completed", Some("success")), { "name": "lint", "status": "completed", "conclusion": "skipped" }] })),
+        ]);
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("and Loft follows its CI"), "{out}");
+        assert!(fake.seen(&runs).is_empty(), "with reviewers to wait for, the CI isn't read on submit");
+
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(out, "Posted your pass on #500. #41 waits for its CI: Loft closes it when the CI is green.");
+        assert_eq!(standing(&st, slug, 41), ("review".into(), Some(41), None));
+        assert!(posts(&fake, slug, "issues/41/comments").is_empty(), "not closed while the CI runs");
+
+        // The Delivery's own tick: still running, then green.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "review");
+        let dev_wakes = woken(&st, &dev).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(woken(&st, &dev)[dev_wakes..].iter().any(|w| w.contains("build ticket #42")), "the next ticket starts");
+        assert_eq!(fake.seen(&runs).len(), 3);
+        // Nothing waits for a CI now: the tick reads nothing.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&runs).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_red_ci_is_a_changes_round_with_its_log_and_counts_toward_the_limit() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-red";
+        let (dev, team) = building(&st, &fake, "ci-red", &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked: off by one"));
+
+        // Round 1: the CI fails before QA is done, and QA's review of that round is moot.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let before = woken(&st, &dev).len();
+        crate::delivery::follow_all(&st).await;
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        for want in [
+            "[Loft Delivery: spec #40] This is not a message from the user. The CI asked for changes on ticket #41 \"Store\" (round 1 of 3), submitted as `abc1234`, `fed4321`:",
+            "The CI failed on `c1c1c1c`, the newest commit of the spec branch `spec/40-rounds`, which includes the ticket. Failed: `test`.",
+            "### `test`: failure\nhttps://github.com/octo/ci/actions/runs/1/job/77\n1 test failed\n",
+            "panicked: off by one",
+            "call `mcp__loft__submit_ticket` again with 41",
+        ] {
+            assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
+        }
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**CI** failed on `c1c1c1c`, which includes ticket #41: `test`.");
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        assert_eq!(standing(&st, slug, 41).0, "started");
+        assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.is_err());
+
+        // Round 2: QA's.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "Still off." })).await.unwrap();
+        assert!(woken(&st, &dev).last().unwrap().contains("(round 2 of 3)"));
+
+        // Round 3: QA passes, the CI read at once is red again, and it's the user's now.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("The CI failed on #41 (`test`). That's round 3 of changes, so it waits for the user now."), "{out}");
+        assert_eq!(woken(&st, &dev).len(), before, "the Dev isn't woken a third time");
+        assert_eq!(standing(&st, slug, 41).0, "needs_human");
+        assert_eq!(posts(&fake, slug, "issues/41/labels").last().unwrap(), &json!({ "labels": ["needs-human"] }));
+    }
+
+    #[tokio::test]
+    async fn a_repo_without_ci_closes_on_its_reviewers_and_one_with_workflows_waits_for_their_checks() {
+        // No workflow and no check: the reviewers' passes close it.
+        let (fake, st) = (fake_github(), state());
+        let (dev, team) = building(&st, &fake, "ci-none", &["qa"]).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("#41: the repo runs no CI on its branch.\nClosed #41"), "{out}");
+        assert_eq!(standing(&st, "octo/ci-none", 41), ("closed".into(), Some(42), None));
+
+        // An active workflow with no check on the commit yet: it waits, until the grace after the submit.
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-late";
+        let (dev, team) = building(&st, &fake, "ci-late", &["qa"]).await;
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.ends_with("#41 waits for its CI: Loft closes it when the CI is green."), "{out}");
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "review");
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+    }
+
+    #[tokio::test]
+    async fn a_red_ci_on_a_commit_with_two_open_tickets_goes_to_the_oldest() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-two";
+        let (dev, _) = building(&st, &fake, "ci-two", &["qa"]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("boom"));
+        let in_review = |t: &mut crate::db::DeliveryTicket, commits: &[&str]| {
+            t.state = "review".into();
+            t.commits = commits.iter().map(|c| c.to_string()).collect();
+            t.verdicts = [("qa".to_string(), "pending".to_string()), ("ci".to_string(), "pending".to_string())].into();
+        };
+        // #41 is being fixed and #42 waits for its CI: the red CI is #41's to fix, so #42 just waits.
+        crate::delivery::update(&st, slug, 40, |d| {
+            let t = d.ticket_mut(41).unwrap();
+            (t.state, t.commits) = ("started".into(), vec!["fed4321abc".into()]);
+            in_review(d.ticket_mut(42).unwrap(), &["0123abcd"]);
+        });
+        let before = woken(&st, &dev).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(woken(&st, &dev).len(), before);
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.ticket(42).unwrap().state.as_str(), d.ticket(42).unwrap().rounds), ("review", 0));
+
+        // Both wait for it: the round is #41's, and #42 keeps waiting for the next commit's CI.
+        crate::delivery::update(&st, slug, 40, |d| in_review(d.ticket_mut(41).unwrap(), &["abc1234def", "fed4321abc"]));
+        crate::delivery::follow_all(&st).await;
+        assert!(woken(&st, &dev).last().unwrap().contains("The CI asked for changes on ticket #41 \"Store\" (round 1 of 3)"));
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        let (a, b) = (d.ticket(41).unwrap(), d.ticket(42).unwrap());
+        assert_eq!((a.state.as_str(), a.rounds, b.state.as_str(), b.rounds, b.verdicts["ci"].as_str()), ("started", 1, "review", 0, "pending"));
     }
 
     /// `building` for both tickets: closing #42 is routed too.
@@ -3138,6 +3304,8 @@ pub(crate) mod tests {
         let (a, m, team) = standalone(&st, &fake, "solo-flow", &["dev", "qa", "security", "code_reviewer"]).await;
         let (dev, qa, sec, cr) = (&team[0], &team[1], &team[2], &team[3]);
         press(&st, &a, &m).await.unwrap();
+        // Its CI runs on the ticket branch.
+        ci_on(&fake, slug, "ticket/41-store", json!([]));
 
         tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
         assert!(woken(&st, qa)[0].contains("on the ticket branch `ticket/41-store` (PR https://github.com/octo/solo-flow/pull/500)"));

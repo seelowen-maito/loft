@@ -104,9 +104,13 @@ pub struct DeliveryTicket {
     /// The commits last submitted, oldest first.
     #[serde(default)]
     pub commits: Vec<String>,
-    /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
+    /// This round's verdict per reviewing role ("qa", "security"), and "ci" for the CI Loft follows on GitHub:
+    /// "pending" or "pass".
     #[serde(default)]
     pub verdicts: std::collections::BTreeMap<String, String>,
+    /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
+    #[serde(default)]
+    pub submitted_at: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
@@ -1306,6 +1310,7 @@ impl Db {
                     rounds: 0,
                     commits: vec![],
                     verdicts: Default::default(),
+                    submitted_at: String::new(),
                     id: String::new(),
                     skipped: String::new(),
                 })
