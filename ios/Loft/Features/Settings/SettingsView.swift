@@ -130,16 +130,6 @@ struct SettingsView: View {
                 }
                 if let v = store.info?.version { LabeledContent("Loft version", value: v) }
                 if let sync = store.lastSync { LabeledContent("Last sync", value: sync.formatted(date: .abbreviated, time: .standard)) }
-                LabeledContent("Pairing") {
-                    Text(store.pairingRefusal != nil ? (store.isDemo ? "Off in the demo" : "Off in the Simulator")
-                         : store.isPaired ? "Paired" : "Not paired")
-                }
-                .accessibilityIdentifier("pairingStatus")
-                if store.isPaired {
-                    NavigationLink("Paired devices") { PairedDevicesView() }.accessibilityIdentifier("pairedDevices")
-                } else {
-                    Button("Pair this iPhone") { store.showsPairing = true }.accessibilityIdentifier("pairThisIPhone")
-                }
                 Button("Reconnect") { store.reconnect() }
                 NavigationLink("Change server") { ConnectView(isOnboarding: false) }
             }

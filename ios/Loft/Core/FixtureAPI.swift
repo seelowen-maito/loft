@@ -42,14 +42,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         let mode: Mode = args.contains("-fixture-offline") ? .offline
             : args.contains("-fixture-empty") ? .empty
             : args.contains("-fixture-fail-sends") ? .failSends : .normal
-        let api = FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
-        api.paired = !args.contains("-fixture-unpaired")
-        return api
+        return FixtureAPI(mode: mode, grill: args.contains("-fixture-grill"), replies: args.contains("-fixture-replies"))
     }
-
-    /// `-fixture-unpaired`: the server refuses this app until it pairs (code 4821, allowed on the second poll).
-    private var paired = true
-    private var pairPolls = 0
 
     /// What the sample issues are about (spec #144: the demo's issues open with a description).
     static let descriptions: [String: String] = [
@@ -965,59 +959,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     func serverSettings() async throws -> JSONValue {
         try check()
-        guard locked({ paired }) else {
-            Pairing.reportUnpaired()
-            throw APIError.server(status: 401, message: "pair this client with Loft first")
-        }
         return locked { settings }
-    }
-
-    func startPairing(name: String) async throws -> PairingStart {
-        try check()
-        locked { pairPolls = 0 }
-        return PairingStart(secret: "fixture-secret", code: "4821", expiresIn: 120)
-    }
-
-    func pollPairing(secret: String) async throws -> PairingPoll {
-        try check()
-        return locked {
-            pairPolls += 1
-            guard pairPolls >= 2 else { return PairingPoll(status: "pending") }
-            paired = true
-            return PairingPoll(status: "allowed", token: "fixture-token")
-        }
-    }
-
-    func cancelPairing(secret: String) async throws {}
-
-    /// Paired devices on fixture data: this iPhone plus two others.
-    private var clients = [
-        PairedClient(id: "c1", name: "iPhone", pairedAt: Date(timeIntervalSinceNow: -6 * 86_400), lastUsedAt: Date(), this: true),
-        PairedClient(id: "c2", name: "Chrome on Mac", pairedAt: Date(timeIntervalSinceNow: -7 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -1_500), this: false),
-        PairedClient(id: "c3", name: "Safari on iOS", pairedAt: Date(timeIntervalSinceNow: -13 * 86_400), lastUsedAt: Date(timeIntervalSinceNow: -9 * 86_400), this: false),
-    ]
-
-    func pairedClients() async throws -> [PairedClient] {
-        try check()
-        guard locked({ paired }) else {
-            Pairing.reportUnpaired()
-            throw APIError.server(status: 401, message: "pair this client with Loft first")
-        }
-        return locked { clients }
-    }
-
-    /// Forgetting this iPhone unpairs it: the next request is refused, like Loft does.
-    func forgetClient(id: String) async throws {
-        try check()
-        locked {
-            if clients.contains(where: { $0.id == id && $0.this }) { paired = false }
-            clients.removeAll { $0.id == id }
-        }
-    }
-
-    func unpairAll() async throws {
-        try check()
-        locked { clients.removeAll { !$0.this } }
     }
 
     /// The Mac's backups: one this morning; with `-fixture-backup-failed`, none since two days ago and the error.

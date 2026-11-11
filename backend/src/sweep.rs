@@ -43,7 +43,7 @@ const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long a measured size is reused: Settings and the delete dialog reload often, and a walk is slow.
 const SIZE_FOR: Duration = Duration::from_secs(60);
 /// The last run's log, in Loft's data folder next to its database: outside the agents' workspaces, not out of
-/// their reach (they run as the same Mac user; see ADR 0004's threat model).
+/// their reach (they run as the same Mac user).
 const LOG_FILE: &str = "clean-log.json";
 /// Past this, a young `.cargo-build/`'s `*/incremental` caches go.
 const INCREMENTAL_CAP: u64 = 2_000_000_000;

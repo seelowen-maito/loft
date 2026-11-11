@@ -148,16 +148,6 @@ _Avoid_: Billing week, 7 days, week
 The runs and estimated cost of every agent run since Loft started counting, kept as a stored running total: it never goes down, even when an agent is deleted or its history is cleared.
 _Avoid_: Total cost, lifetime cost
 
-## Pairing
-
-**Paired client**:
-A browser or iPhone the user allowed once, which holds its own token. Only a paired client can change things through Loft's API; agents use their own tools and never are one.
-_Avoid_: Session, login, account
-
-**Pairing code**:
-The short code a new client shows and the user compares before allowing it, at the Mac or from a paired client. It is not the secret the client polls with.
-_Avoid_: PIN, password
-
 ## Push
 
 **Push relay**:
