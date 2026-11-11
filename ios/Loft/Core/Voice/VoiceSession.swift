@@ -290,7 +290,7 @@ final class VoiceSession {
     func replay() async {
         guard phase == .replied, let text = reply else { return }
         phase = .speaking
-        _ = await speaker.readReply(text, isActive: { phase == .speaking })
+        _ = await speaker.readReply(text, replace: true, isActive: { self.phase == .speaking })
         if phase == .speaking { phase = .replied }
     }
 
@@ -583,7 +583,7 @@ final class VoiceSession {
             phase = .speaking
             let id = next != nil ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
             VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
-            let ended = await speaker.readReply(spoken, messageId: id, isActive: { phase == .speaking })
+            let ended = await speaker.readReply(spoken, messageId: id, isActive: { self.phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")
             if next == nil {
                 // The reply stays on screen with Replay, Reply by voice, Open chat and Done.
