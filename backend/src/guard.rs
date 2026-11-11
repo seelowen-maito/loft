@@ -59,13 +59,18 @@ fn host_known(value: &str) -> Result<bool, String> {
         Err(_) => {}
     }
     let mac = mac_name();
-    if host == mac || host == format!("{}.local", mac.trim_end_matches(".local")) {
+    if !mac.is_empty() && (host == mac || host == format!("{}.local", mac.trim_end_matches(".local"))) {
         return Ok(true);
     }
-    if std::env::var("LOFT_ALLOWED_HOSTS").is_ok_and(|v| v.split(',').any(|h| h.trim().eq_ignore_ascii_case(host))) {
+    if in_list(&std::env::var("LOFT_ALLOWED_HOSTS").unwrap_or_default(), host) {
         return Ok(true);
     }
     Err(host.to_string())
+}
+
+/// Whether `host` is one of the comma-separated names in `list` (names only, no ports).
+fn in_list(list: &str, host: &str) -> bool {
+    !host.is_empty() && list.split(',').any(|h| h.trim().eq_ignore_ascii_case(host))
 }
 
 /// This Mac's name, as `gethostname` gives it.
@@ -92,16 +97,19 @@ fn tailnet_name() -> Option<String> {
 /// A browser that still holds the `__Host-loft` cookie of the removed pairing is told to drop it.
 pub async fn local_host(req: Request, next: Next) -> Response {
     let old_cookie = req.headers().get_all(axum::http::header::COOKIE).iter().any(|c| c.to_str().is_ok_and(|c| c.contains("__Host-loft=")));
-    let ok = match req.headers().get(axum::http::header::HOST).map(|v| v.to_str().unwrap_or_default().to_string()) {
-        None => true,
+    let ok: Result<(), String> = match req.headers().get(axum::http::header::HOST).map(|v| v.to_str().unwrap_or_default().to_string()) {
+        None => Ok(()),
         // Asking Tailscale for its name is a process: off the async threads.
         Some(v) => match host_known(&v) {
-            Ok(known) => known,
-            Err(_) => tokio::task::spawn_blocking(move || host_ok(&v)).await.unwrap_or(false),
+            Ok(known) => known.then_some(()).ok_or(v),
+            Err(_) => {
+                let h = v.clone();
+                if tokio::task::spawn_blocking(move || host_ok(&h)).await.unwrap_or(false) { Ok(()) } else { Err(v) }
+            }
         },
     };
-    if !ok {
-        return (StatusCode::FORBIDDEN, "unknown host refused").into_response();
+    if let Err(host) = ok {
+        return (StatusCode::FORBIDDEN, format!("host \"{host}\" refused: not this Mac's name; add it to LOFT_ALLOWED_HOSTS (comma-separated, no port)")).into_response();
     }
     let mut res = next.run(req).await;
     if old_cookie {
@@ -156,10 +164,9 @@ mod tests {
 
     #[test]
     fn extra_hosts_come_from_the_environment() {
-        assert!(!host_ok("extra.example"));
-        unsafe { std::env::set_var("LOFT_ALLOWED_HOSTS", "other.example, Extra.Example") };
-        assert!(host_ok("extra.example:80") && host_ok("other.example"));
-        unsafe { std::env::remove_var("LOFT_ALLOWED_HOSTS") };
+        let list = "other.example, Extra.Example";
+        assert!(in_list(list, "extra.example") && in_list(list, "other.example"));
+        assert!(!in_list(list, "evil.example") && !in_list(list, "") && !in_list("a,,b", ""));
     }
 
     #[test]
