@@ -932,11 +932,17 @@ async fn refresh_link(state: &AppState, repo: &str, n: i64) {
     }
 }
 
-/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it.
+/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it. A state
+/// the Loft issue doesn't have yet (a spec read closed here before the poll got to it) stays as it was,
+/// so the poll's `apply` still sees GitHub move and moves the Loft issue with it.
 fn keep_link(state: &AppState, repo: &str, v: &Value) {
     let Some(n) = v["number"].as_i64() else { return };
     if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
-        t.github = Some(link(repo, v));
+        let mut l = link(repo, v);
+        if l.state != t.state() {
+            l.state = t.github.as_ref().unwrap().state.clone();
+        }
+        t.github = Some(l);
         if state.db.save_task(&t).is_ok() {
             crate::tasks::emit(state, &t);
         }
@@ -1898,6 +1904,33 @@ pub(crate) mod tests {
         fake.route("POST", "/repos/octo/pub-proj/issues", 201, gh(repo, 5, "Bare", "open", "2026-10-29T00:00:00Z"));
         let Json(v) = publish_route(State(st.clone()), axum::extract::Path(bare.id)).await.unwrap();
         assert_eq!(v["github"]["number"], 5);
+    }
+
+    #[tokio::test]
+    async fn a_spec_read_closed_by_a_refresh_before_the_poll_still_closes_in_loft() {
+        for (name, reason, worked, status) in [("kl-done", "completed", false, "done"), ("kl-dropped", "not_planned", false, "cancelled"), ("kl-worked", "completed", true, "in_progress")] {
+            let st = state();
+            let fake = own_fake(&st);
+            let repo = format!("octo/{name}");
+            let id = one_mirrored(&st, &fake, name, &repo, "2026-10-02T00:00:00Z").await;
+            if worked {
+                let a = crate::tasks::tests::agent(&st, "Builder");
+                crate::tasks::tests::busy(&st, &a);
+                crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+            }
+            // Closed on GitHub: a refresh (its ticket changed) reads it first, then the full read no longer lists it.
+            let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+            closed["state_reason"] = json!(reason);
+            fake.route("GET", &format!("/repos/{repo}/issues/1"), 200, closed);
+            refresh_link(&st, &repo, 1).await;
+            fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([]));
+            let r = sync_project(&st, name, true).await.unwrap();
+            assert_eq!((r.updated, r.error), (1, None), "{name}");
+            let t = st.db.get_task(&id).unwrap().unwrap();
+            assert_eq!((t.status.as_str(), t.github.as_ref().unwrap().state.as_str()), (status, "closed"), "{name}");
+            let asked = st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("#1 was closed on GitHub while it's being worked on"));
+            assert_eq!(asked, worked, "{name}: only the worked-on one is asked about");
+        }
     }
 
     #[tokio::test]
