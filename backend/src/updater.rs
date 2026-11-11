@@ -62,7 +62,7 @@ fn running_agents(state: &AppState) -> usize {
 }
 
 async fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(program).args(args).current_dir(dir).output().await?;
+    let out = Command::new(program).args(args).current_dir(dir).env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0").output().await?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let lines: Vec<&str> = err.lines().collect();
@@ -88,6 +88,29 @@ async fn check(root: &Path, running: &str) -> Result<Option<String>> {
     Ok(Some(upstream))
 }
 
+/// The pinned pnpm (`packageManager` in frontend/package.json): an installed pnpm, else corepack's, else fetched
+/// through `npm exec`. Never plain `npm install`: that would resolve the dependencies fresh, with no lockfile.
+/// Keep in step with scripts/frontend-pm.sh.
+async fn pnpm(dir: &Path) -> Result<(&'static str, Vec<String>)> {
+    for (program, pre) in [("pnpm", &[][..]), ("corepack", &["pnpm"][..])] {
+        if run(dir, program, &[pre, &["--version"]].concat()).await.is_ok() {
+            return Ok((program, pre.iter().map(|s| s.to_string()).collect()));
+        }
+    }
+    let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json"))?)?;
+    let version = pkg["packageManager"].as_str().and_then(|p| p.strip_prefix("pnpm@")).and_then(|p| p.split('+').next());
+    let Some(version) = version.filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.')) else {
+        bail!("frontend/package.json has no pinned pnpm in `packageManager`");
+    };
+    Ok(("npm", ["exec", "--yes", &format!("pnpm@{version}"), "--"].map(String::from).to_vec()))
+}
+
+/// node_modules made by npm: pnpm leaves a `.modules.yaml` there, npm doesn't. pnpm won't reuse npm's without a
+/// terminal, and the updater has none, so it starts over.
+fn stale_modules(has_modules_yaml: bool) -> bool {
+    !has_modules_yaml
+}
+
 async fn install(root: &Path) -> Result<()> {
     run(root, "git", &["pull", "--ff-only", "--quiet"]).await?;
     // Backend first: if it fails, the live frontend bundle stays in step with the running binary.
@@ -97,8 +120,14 @@ async fn install(root: &Path) -> Result<()> {
     }
     run(&root.join("backend"), "cargo", &cargo).await?;
     let frontend = root.join("frontend");
-    run(&frontend, "npm", &["install", "--no-audit", "--no-fund"]).await?;
-    run(&frontend, "npm", &["run", "build"]).await?;
+    let (pm, pre) = pnpm(&frontend).await?;
+    let pre: Vec<&str> = pre.iter().map(String::as_str).collect();
+    let modules = frontend.join("node_modules");
+    if modules.is_dir() && stale_modules(modules.join(".modules.yaml").is_file()) {
+        std::fs::remove_dir_all(&modules)?;
+    }
+    run(&frontend, pm, &[&pre[..], &["install", "--frozen-lockfile", "--ignore-workspace"]].concat()).await?;
+    run(&frontend, pm, &[&pre[..], &["run", "build"]].concat()).await?;
     // The Herdr UI client, once it was set up: rebuilt so new chat tabs run the new version.
     let herdr = root.join("herdr");
     if herdr.join("target").join("release").join("loft-herdr").is_file()
@@ -210,6 +239,12 @@ pub fn restart() -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn node_modules_made_by_npm_is_stale() {
+        assert!(super::stale_modules(false));
+        assert!(!super::stale_modules(true));
+    }
+
     use std::time::{Duration, SystemTime};
 
     #[tokio::test(flavor = "multi_thread")]
