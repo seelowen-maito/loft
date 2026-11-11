@@ -749,6 +749,15 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let agents = state.db.list_agents().map_err(|e| e.to_string())?;
     let dev = agents.iter().find(|a| a.id == key || a.name.eq_ignore_ascii_case(key)).filter(|a| is_team_dev(&d, a));
     let dev = dev.ok_or_else(|| format!("{key:?} isn't a Dev on your team."))?;
+    // The pipeline: a Dev builds one ticket at a time, and takes the next only with at most one in review.
+    if !free(&d, &dev.id) {
+        let on: Vec<String> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review") && builder_id(&d, t) == dev.id).map(|t| format!("{} ({})", tag(&d, t), t.state)).collect();
+        return Err(format!(
+            "{name} can't go to {}: they're on {}, and a Dev builds one ticket at a time, with at most one more in review. Give it to a free Dev, or assign it once they submit.",
+            dev.name,
+            list_of(&on)
+        ));
+    }
     if reassign {
         // Unlike a first assignment, this skips the blocked-by check on purpose: the ticket is already started.
         let old = t.agent.clone();

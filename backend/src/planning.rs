@@ -2814,6 +2814,41 @@ pub(crate) mod tests {
         assert!(woken(&st, &second).is_empty());
     }
 
+    /// The pipeline limit holds whatever the Lead asks: a Dev building a ticket takes no second one, and one
+    /// with a ticket in review and another being built takes no third.
+    #[tokio::test]
+    async fn the_lead_cant_give_a_dev_more_than_the_pipeline_holds() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-limit";
+        let (a, m) = planned(&st, &fake, "dl-limit", vec![ticket("Store", &[]), ticket("API", &[]), ticket("UI", &[])]).await;
+        let lead = busy(&st, "Lofty", "dl-limit", "lead");
+        let first = busy(&st, "First", "dl-limit", "dev");
+        busy(&st, "Second", "dl-limit", "dev");
+        busy(&st, "Tester", "dl-limit", "qa");
+        ci_on(&fake, slug, "spec/40-rounds", json!([]));
+        press(&st, &a, &m).await.unwrap();
+        let assign = |n: i64, dev: &str| json!({ "ticket": n, "dev": dev });
+        tool(&st, &lead, "assign_ticket", assign(41, "First")).await.unwrap();
+
+        // Building #41: no second ticket, and nobody is woken for it.
+        let before = woken(&st, &first).len();
+        let err = tool(&st, &lead, "assign_ticket", assign(42, "First")).await.unwrap_err();
+        assert!(err.contains("#42 can't go to First: they're on #41 (started)"), "{err}");
+        assert_eq!(woken(&st, &first).len(), before);
+        let d = delivery(&st, slug);
+        assert_eq!((d.ticket(42).unwrap().state.as_str(), d.ticket(42).unwrap().agent.as_str()), ("open", ""));
+
+        // #41 in review: First takes #42, and then nothing more while it builds it.
+        tool(&st, &first, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &lead, "assign_ticket", assign(42, "First")).await.unwrap();
+        let err = tool(&st, &lead, "assign_ticket", assign(43, "First")).await.unwrap_err();
+        assert!(err.contains("they're on #41 (review) and #42 (started)"), "{err}");
+        // Another Dev takes it, and a move to the busy Dev is refused too.
+        tool(&st, &lead, "assign_ticket", assign(43, "Second")).await.unwrap();
+        let err = tool(&st, &lead, "assign_ticket", json!({ "ticket": 43, "dev": "First", "reassign": true })).await.unwrap_err();
+        assert!(err.contains("#43 can't go to First"), "{err}");
+    }
+
     #[tokio::test]
     async fn the_lead_reassigns_a_started_ticket_but_not_one_under_review() {
         let (fake, st) = (fake_github(), state());
