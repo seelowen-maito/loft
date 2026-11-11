@@ -123,3 +123,20 @@ export function badgeTitle(c: Counts): string {
 export function idsChanged(shown: string[], ids: string[]): boolean {
   return shown.length !== ids.length || shown.some((id, n) => id !== ids[n]);
 }
+
+/** Where closing Needs you leads: back to the page it was opened from, or home when this tab started on it (opened
+ * by its URL: the router's first entry has the key "default"). */
+export function closeTarget(historyKey: string): "back" | "/" {
+  return historyKey === "default" ? "/" : "back";
+}
+
+/** What the top bar's icon does: open Needs you, or close it when it's already open. */
+export function iconAction(pathname: string): "open" | "close" {
+  return pathname === "/needs-you" ? "close" : "open";
+}
+
+/** Whether a key press closes Needs you: Esc, unless the user is typing (an answer), composing, a handler already used
+ * it, or a dialog over the page (⌘K, ?) takes it. */
+export function escCloses(e: { key: string; defaultPrevented: boolean; isComposing: boolean; typing: boolean; dialogOpen: boolean }): boolean {
+  return e.key === "Escape" && !e.defaultPrevented && !e.isComposing && !e.typing && !e.dialogOpen;
+}

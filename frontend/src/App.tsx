@@ -7,14 +7,14 @@ import { cx } from "./lib/format";
 import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import { pendingItems, type PendingItem } from "./lib/pending";
-import { badgeText, badgeTitle, countAfter, type Counts } from "./lib/needsYou";
+import { badgeText, badgeTitle, countAfter, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
-import NeedsYouPage from "./pages/NeedsYou";
+import NeedsYouPage, { useCloseNeedsYou } from "./pages/NeedsYou";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
@@ -109,8 +109,11 @@ function PendingBadge() {
   );
 }
 
-/** The Needs you counter, on every page: the count from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost. */
+/** The Needs you counter, on every page: the count from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost.
+ * It opens Needs you, and closes it when it's open. */
 function NeedsYouBadge({ live }: { live: boolean }) {
+  const { pathname } = useLocation();
+  const close = useCloseNeedsYou();
   const [c, setC] = useState<Counts>({ count: 0, urgent: 0 });
   useEffect(() => {
     if (!live) return;
@@ -124,6 +127,11 @@ function NeedsYouBadge({ live }: { live: boolean }) {
       title={badgeTitle(c)}
       aria-label={`Needs you: ${badgeTitle(c)}`}
       data-needs-you-count={c.count}
+      onClick={(e) => {
+        if (iconAction(pathname) !== "close") return;
+        e.preventDefault();
+        close();
+      }}
       className={({ isActive }) => cx("relative rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}
     >
       <Inbox className="size-4" />

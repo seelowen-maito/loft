@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router";
-import { ExternalLink, Inbox, Send } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router";
+import { ExternalLink, Inbox, Send, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
-import { answerBody, idsChanged, itemView, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { isTyping } from "../lib/shortcuts";
+import { answerBody, closeTarget, escCloses, idsChanged, itemView, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
 
@@ -110,9 +111,33 @@ function ItemCard({ item, onDone }: { item: NeedsYouItem; onDone: () => void }) 
   );
 }
 
+/** Closes Needs you: back to the page it was opened from, or home when it was opened by its URL. The top bar's icon, the
+ * X and Esc all use it. */
+export function useCloseNeedsYou(): () => void {
+  const navigate = useNavigate();
+  const { key } = useLocation();
+  return useCallback(() => {
+    if (closeTarget(key) === "back") navigate(-1);
+    else navigate("/", { replace: true });
+  }, [key, navigate]);
+}
+
 /** Needs you: everything waiting on the user, the same list the iPhone gets, kept live. */
 export default function NeedsYouPage() {
   const live = useLiveConnection();
+  const close = useCloseNeedsYou();
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const dialogOpen = !!document.querySelector('[role="dialog"]');
+      if (!escCloses({ key: e.key, defaultPrevented: e.defaultPrevented, isComposing: e.isComposing, typing: isTyping(e.target), dialogOpen })) return;
+      e.preventDefault();
+      closeRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [list, setList] = useState<NeedsYouList | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const shown = useRef<string[]>([]);
@@ -150,6 +175,9 @@ export default function NeedsYouPage() {
               {list.count} waiting{list.urgent > 0 && `, ${list.urgent} urgent`}
             </span>
           )}
+          <button type="button" onClick={close} title="Close (Esc)" aria-label="Close Needs you" className="ml-auto self-center rounded-full p-1.5 text-fg-3 transition-colors hover:bg-white/[0.06] hover:text-fg">
+            <X className="size-4" />
+          </button>
         </div>
         {err && <p className="text-[12.5px] text-bad">Couldn't load Needs you: {err}</p>}
         {list && list.items.length === 0 && (

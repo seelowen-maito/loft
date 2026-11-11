@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerBody, badgeText, badgeTitle, countAfter, idsChanged, itemView, placeOf, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
+import { answerBody, badgeText, badgeTitle, closeTarget, countAfter, escCloses, iconAction, idsChanged, itemView, placeOf, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
 
 const HOST = "mac.tail1234.ts.net";
 
@@ -102,4 +102,24 @@ test("the page reloads only when the ids change", () => {
   assert.equal(idsChanged(["a", "b"], ["a", "b"]), false);
   assert.equal(idsChanged(["a", "b"], ["b", "a"]), true);
   assert.equal(idsChanged(["a"], ["a", "c"]), true);
+});
+
+test("the icon opens Needs you from any page and closes it while it's open", () => {
+  for (const p of ["/", "/agents/dev1", "/issues", "/needs-you/x"]) assert.equal(iconAction(p), "open", p);
+  assert.equal(iconAction("/needs-you"), "close");
+});
+
+test("closing (icon, X or Esc) goes back to the page Needs you was opened from, or home when it was opened by its URL", () => {
+  assert.equal(closeTarget("k3x9f2"), "back");
+  assert.equal(closeTarget("default"), "/");
+});
+
+test("Esc closes Needs you, but not while typing an answer, composing, or with a dialog over it", () => {
+  const esc = { key: "Escape", defaultPrevented: false, isComposing: false, typing: false, dialogOpen: false };
+  assert.equal(escCloses(esc), true);
+  assert.equal(escCloses({ ...esc, typing: true }), false);
+  assert.equal(escCloses({ ...esc, isComposing: true }), false);
+  assert.equal(escCloses({ ...esc, defaultPrevented: true }), false);
+  assert.equal(escCloses({ ...esc, dialogOpen: true }), false);
+  assert.equal(escCloses({ ...esc, key: "Enter" }), false);
 });
