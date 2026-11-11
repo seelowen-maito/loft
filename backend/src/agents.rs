@@ -372,8 +372,11 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     }
     let allow = decision != "deny";
     // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
-    // is about those processes only: it is never saved.
-    let persist = req.tool_name != "Kill" && (decision == "allow_always" || (allow && req.source == "request"));
+    // saves only a rule naming a program (`Kill(<path>)`), never a bare `Kill`.
+    if req.tool_name == "Kill" && decision == "allow_always" {
+        anyhow::ensure!(crate::processes::kill_spec(&req.rule).is_some(), "there is no rule for this kill: allow it once");
+    }
+    let persist = decision == "allow_always" || (allow && req.source == "request");
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -1112,7 +1115,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     );
     let mcp_config = json!({ "mcpServers": servers }).to_string();
 
-    let mut allowed: Vec<String> = a.allowed_tools.clone();
+    // `Kill(<path>)` rules are Loft's own (see processes.rs), not claude tools.
+    let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(")).cloned().collect();
     allowed.push("mcp__loft".into());
     let mut disallowed = a.disallowed_tools.clone();
     if a.max_subagents == Some(0) {

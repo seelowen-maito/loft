@@ -156,8 +156,6 @@ struct RootView: View {
             if store.isDemo { DemoBanner() }
             main
         }
-        // Loft refused this app as unpaired (spec #164).
-        .sheet(isPresented: $store.showsPairing) { PairingView() }
     }
 
     @ViewBuilder private var main: some View {

@@ -516,13 +516,16 @@ struct ApprovalCard: View {
                     .buttonStyle(.bordered)
                 Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
                     .buttonStyle(.accent)
-                Menu {
-                    Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
-                } label: {
-                    Image(systemName: "ellipsis").frame(height: 20)
+                // A kill with no program to name has no rule to save.
+                if request.toolName != "Kill" || !(request.rule ?? "").isEmpty {
+                    Menu {
+                        Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("More options")
                 }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("More options")
             }
             .disabled(busy || !store.canWrite)
             .controlSize(.small)

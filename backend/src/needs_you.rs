@@ -214,11 +214,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
-        let mut actions = vec![
-            action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" })),
-            action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })),
-            action("deny", "Deny", "POST", base, json!({ "decision": "deny" })),
-        ];
+        // A kill with no program to name has no rule to save, so no Always.
+        let always = p.tool_name != "Kill" || crate::processes::kill_spec(&p.rule).is_some();
+        let mut actions = vec![action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" }))];
+        if always {
+            actions.push(action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })));
+        }
+        actions.push(action("deny", "Deny", "POST", base, json!({ "decision": "deny" })));
         actions.push(open_chat(&p.agent_id));
         items.push(Item {
             id: format!("permission:{}", p.id),
@@ -653,33 +655,6 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         });
     }
 
-    // A new device asking to pair: paired devices compare its code and allow or deny it. With none paired yet,
-    // the Mac's dialog (or its terminal) answers instead.
-    if crate::pairing::count(state) > 0 {
-        for (code, name, since) in state.pairing.waiting_list() {
-            let body = json!({ "code": code });
-            items.push(Item {
-                id: format!("pairing:{code}"),
-                kind: "pairing",
-                urgency: 3,
-                agent: None,
-                task_id: None,
-                title: text("A new device wants to pair", MAX_TITLE),
-                reason: text(&format!("{name} shows the code {code}. Allow it only if the code on that device matches."), MAX_REASON),
-                text: text(&format!("{name} · code {code}"), MAX_TEXT),
-                created_at: since,
-                links: vec![],
-                actions: vec![
-                    action("approve", "Allow", "POST", "/api/pair/approve".into(), body.clone()),
-                    action("deny", "Deny", "POST", "/api/pair/deny".into(), body),
-                ],
-                push: ("A new device wants to pair".to_string(), format!("Code {code}")),
-                project: None,
-                pr: None,
-            });
-        }
-    }
-
     // macOS asking on a Mac nobody's looking at: an agent's file read waits until someone answers.
     let asking = state.rt.lock().unwrap().tcc.asking(std::time::Instant::now());
     let host = crate::tailnet::host();
@@ -832,7 +807,7 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     PushItem {
         id: i.id.clone(),
         // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
-        kind: if i.kind == "mac_access" { "stuck" } else if i.kind == "pairing" { "permission" } else { i.kind },
+        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),
@@ -874,9 +849,9 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<J
 }
 
 /// `POST /api/needs-you/{id}/dismiss`: hide an item until it changes (a changed item gets a new id).
-/// Permission prompts, open grill rounds and pairing requests can't be dismissed: they block an agent until answered.
+/// Permission prompts and open grill rounds can't be dismissed: they block an agent until answered.
 pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    if id.starts_with("permission:") || id.starts_with("grill:") || id.starts_with("pairing:") {
+    if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
     let known = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?.iter().any(|i| i.id == id);
@@ -959,6 +934,22 @@ mod tests {
         }
         assert!(r.contains("password=[redacted]") && r.contains("--api-key=[redacted]") && r.ends_with(" ok"), "{r}");
         assert_eq!(redact("Monthly pricing, 8 dollars? Yes."), "Monthly pricing, 8 dollars? Yes.");
+    }
+
+    #[tokio::test]
+    async fn a_kill_with_no_rule_offers_no_always_allow() {
+        let st = state();
+        let dev = agent(&st, "Dev");
+        for (id, rule) in [("k1", "Kill(/bin/sleep)"), ("k2", "")] {
+            st.db.save_permission(&PermissionRequest {
+                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: "Kill".into(), input: json!({ "command": "pkill sleep" }),
+                reason: String::new(), rule: rule.into(), status: "pending".into(), created_at: now(),
+            }).unwrap();
+        }
+        let items = collect(&st).unwrap();
+        let kinds = |id: &str| items.iter().find(|i| i.id == format!("permission:{id}")).unwrap().actions.iter().map(|a| a["kind"].as_str().unwrap()).collect::<Vec<_>>();
+        assert!(kinds("k1").contains(&"approve_always"));
+        assert_eq!(kinds("k2"), vec!["approve", "deny", "open"]);
     }
 
     #[tokio::test]

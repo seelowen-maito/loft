@@ -21,6 +21,8 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
 
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
   const [rule, setRule] = useState(req.rule);
+  // A kill with no program to name has no rule to save: Allow once or Deny only.
+  const noRule = req.tool_name === "Kill" && !req.rule;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const pending = req.status === "pending";
@@ -60,19 +62,23 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
       )}
       {pending ? (
         <div className="mt-3 space-y-2.5">
-          <label className="flex items-center gap-2">
-            <span className="eyebrow shrink-0">Rule</span>
-            <input className="input py-1 font-mono text-[12px]" value={rule} onChange={(e) => setRule(e.target.value)} />
-          </label>
+          {!noRule && (
+            <label className="flex items-center gap-2">
+              <span className="eyebrow shrink-0">Rule</span>
+              <input className="input py-1 font-mono text-[12px]" value={rule} onChange={(e) => setRule(e.target.value)} />
+            </label>
+          )}
           <div className="flex flex-wrap gap-2">
             {req.source === "prompt" && (
               <button className="btn" disabled={busy} onClick={() => act("allow_once")}>
                 <Check className="size-3.5" /> Allow once
               </button>
             )}
-            <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
-              <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
-            </button>
+            {!noRule && (
+              <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
+                <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
+              </button>
+            )}
             <button className="btn-ghost text-bad hover:text-bad" disabled={busy} onClick={() => act("deny")}>
               <X className="size-3.5" /> Deny
             </button>

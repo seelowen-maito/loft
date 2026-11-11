@@ -18,7 +18,6 @@ import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
 import { TempMeter } from "./components/TempMeter";
 import { Shortcuts } from "./components/Shortcuts";
-import { PairRequests } from "./components/PairRequests";
 
 function Clock() {
   const [now, setNow] = useState(new Date());
@@ -234,7 +233,6 @@ export default function App() {
           </div>
         </div>
       </header>
-      <PairRequests />
       <UpdateBanner live={live} />
       <Shortcuts />
       <main className="min-h-0 flex-1">
