@@ -102,6 +102,7 @@ fn api_routes() -> Router<AppState> {
         .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/deliveries/resume", post(delivery::resume_route))
+        .route("/deliveries/reopen", post(delivery::reopen_route))
         .route("/agents/{id}/uploads", post(uploads::upload))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
@@ -133,6 +134,7 @@ fn api_routes() -> Router<AppState> {
         .nest("/tasks", tasks::routes())
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
+        .route("/needs-you/seen", post(needs_you::mark_seen))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
@@ -219,6 +221,7 @@ async fn serve() -> anyhow::Result<()> {
         mirror: Arc::new(Default::default()),
         listings: Arc::new(Default::default()),
         xcode: Arc::new(Default::default()),
+        needs_you: Arc::new(Default::default()),
     };
     setup::ensure_loft(&state);
     {
@@ -243,6 +246,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
     tokio::spawn(mirror::poller(state.clone()));
+    tokio::spawn(delivery::ci_poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));

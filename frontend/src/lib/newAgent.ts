@@ -15,8 +15,20 @@ export type NewAgentForm = {
 };
 
 export const EMPTY_FORM: NewAgentForm = {
-  name: "", title: "", group: "", projects: [], role: "custom", fresh_context: "above_80k", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
+  name: "", title: "", group: "", projects: [], role: "custom", fresh_context: "always", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
 };
+
+/** Fresh context for each Delivery ticket, as the backend's `agents::FRESH_CONTEXT`. A new agent starts Always. */
+export const FRESH_CONTEXT = [
+  { value: "always", label: "Always (default)" },
+  { value: "above_80k", label: "Above 80k" },
+  { value: "above_100k", label: "Above 100k" },
+  { value: "above_120k", label: "Above 120k" },
+  { value: "above_150k", label: "Above 150k" },
+  { value: "above_180k", label: "Above 180k" },
+  { value: "above_200k", label: "Above 200k" },
+  { value: "off", label: "Off" },
+];
 
 export const TEMPLATES = [
   {

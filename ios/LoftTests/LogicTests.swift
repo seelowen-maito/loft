@@ -26,6 +26,8 @@ final class StatusTests: XCTestCase {
         XCTAssertTrue(TaskState.failed.canExecute)
         XCTAssertFalse(TaskState.inProgress.canExecute)
         XCTAssertFalse(TaskState.done.canExecute)
+        XCTAssertTrue(TaskState.blocked.canSendAgain && TaskState.failed.canSendAgain)
+        XCTAssertFalse(TaskState.inProgress.canSendAgain || TaskState.waitingApproval.canSendAgain || TaskState.done.canSendAgain)
         XCTAssertTrue(TaskFilter.blocked.matches(.waitingApproval))
         XCTAssertFalse(TaskFilter.all.matches(.cancelled))
         XCTAssertTrue(TaskFilter.done.matches(.cancelled))

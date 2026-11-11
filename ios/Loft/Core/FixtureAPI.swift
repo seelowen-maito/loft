@@ -741,6 +741,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     private var needsYouDone: Set<String> = []
+    private var needsYouSeen: Set<String> = []
 
     func needsYou() async throws -> NeedsYouList {
         try check()
@@ -767,8 +768,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
         list.items.removeAll { done.contains($0.id) }
+        let seen = locked { needsYouSeen }
+        for n in list.items.indices { list.items[n].seen = seen.contains(list.items[n].id) }
         list.count = list.items.count
         list.urgent = list.items.filter { $0.urgency >= 2 }.count
+        list.new = list.items.filter { $0.seen != true }.count
+        list.newUrgent = list.items.filter { $0.seen != true && $0.urgency >= 2 }.count
         return list
     }
 
@@ -776,6 +781,12 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func needsYouRequest(method: String, path: String, body: JSONValue?) async throws {
         try check()
         if path == "/api/backups" { _ = try await backUpNow(); return }
+        if path == "/api/needs-you/seen" {
+            guard case .array(let a)? = body?["ids"] else { return }
+            let ids = a.compactMap(\.stringValue)
+            _ = locked { needsYouSeen.formUnion(ids) }
+            return
+        }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }

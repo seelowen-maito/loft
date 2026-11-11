@@ -29,6 +29,8 @@ pub struct Pusher {
     sent_at: HashMap<String, VecDeque<Instant>>,
     /// device token -> when it last got a "N more" summary
     summary_at: HashMap<String, Instant>,
+    /// Push is off with phones paired, and the log said once that their alerts are dropped.
+    off_logged: bool,
 }
 
 fn minutes(hm: &str) -> Option<u32> {
@@ -49,8 +51,9 @@ pub fn in_quiet(q: &QuietHours, utc_minute: u32) -> bool {
 }
 
 impl Pusher {
-    /// Called with the current list every few seconds by the "needs you" watcher.
-    pub async fn tick(&mut self, state: &AppState, items: &[PushItem]) {
+    /// Called with the current list every few seconds by the "needs you" watcher. `badge` is how many items the user
+    /// hasn't seen on any client: the app icon shows that, like the counter on the web.
+    pub async fn tick(&mut self, state: &AppState, items: &[PushItem], badge: u64) {
         if self.pruned_at.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
             self.pruned_at = Some(Instant::now());
             let _ = state.db.prune_push_seen();
@@ -69,7 +72,12 @@ impl Pusher {
         let devices = state.db.list_devices().unwrap_or_default();
         // What became news at startup (a Delivery stalled by the restart) is pushed on the first look.
         let news = if self.seeded { Default::default() } else { std::mem::take(&mut state.rt.lock().unwrap().news_at_start) };
-        if devices.is_empty() || apns::route(state) == apns::Route::Off {
+        let off = apns::route(state) == apns::Route::Off;
+        if off && !devices.is_empty() && !self.off_logged {
+            tracing::warn!("push is off (no APNs key and no relay key): Needs you alerts for {} paired phone(s) are dropped. Sign in for push in Settings → Push notifications.", devices.len());
+        }
+        self.off_logged = off && (self.off_logged || !devices.is_empty());
+        if devices.is_empty() || off {
             // What came in while push was off isn't news later.
             self.seeded = true;
             return;
@@ -95,14 +103,14 @@ impl Pusher {
                     skipped += 1;
                     continue;
                 }
-                self.send(state, d, item_push(i, items.len())).await;
+                self.send(state, d, item_push(i, badge)).await;
             }
             if skipped > 0 && self.summary_at.get(&d.token).is_none_or(|t| t.elapsed() > WINDOW) {
                 self.summary_at.insert(d.token.clone(), Instant::now());
                 let p = Push {
                     title: "Loft".into(),
                     body: format!("{skipped} more {} need you", if skipped == 1 { "thing" } else { "things" }),
-                    badge: Some(items.len() as u64),
+                    badge: Some(badge),
                     thread_id: Some("loft-summary".into()),
                     time_sensitive: false,
                     collapse_id: Some("loft-summary".into()),
@@ -134,13 +142,13 @@ impl Pusher {
     }
 }
 
-/// The notification for one item: its push title and body (names and titles only), the count as badge,
+/// The notification for one item: its push title and body (names and titles only), the unseen count as badge,
 /// a thread per agent, Time Sensitive for urgency 3, and where tapping it goes.
-pub fn item_push(i: &PushItem, count: usize) -> Push {
+pub fn item_push(i: &PushItem, badge: u64) -> Push {
     Push {
         title: i.title.clone(),
         body: i.body.clone(),
-        badge: Some(count as u64),
+        badge: Some(badge),
         thread_id: Some(i.agent_id.clone().unwrap_or_else(|| "loft".into())),
         time_sensitive: i.urgency >= 3,
         collapse_id: Some(i.id.clone()),
@@ -194,7 +202,8 @@ mod tests {
 
     async fn tick(st: &AppState, p: &mut Pusher) {
         let items: Vec<_> = collect(st).unwrap().iter().map(to_push).collect();
-        p.tick(st, &items).await;
+        let badge = crate::needs_you::snapshot(st).unwrap()["new"].as_u64().unwrap();
+        p.tick(st, &items, badge).await;
     }
 
     #[tokio::test]
@@ -219,6 +228,8 @@ mod tests {
         let mut p = Pusher::default();
         tick(&st, &mut p).await;
         assert!(got(&seen, &all).is_empty());
+        // The user opened Needs you somewhere: the badge counts only what they haven't seen.
+        st.db.mark_needs_you_seen(&["permission:old".to_string()]).unwrap();
 
         // A new permission prompt: pushed once, to the device that wants permissions.
         permission(&st, "new", &dev.id);
@@ -229,7 +240,7 @@ mod tests {
         let (h, b) = &pushes[0];
         assert_eq!((b["aps"]["alert"]["title"].clone(), b["aps"]["alert"]["body"].clone()), (serde_json::json!("Web Dev needs your approval"), serde_json::json!("Wants to use Bash")));
         assert!(!b.to_string().contains("git push") && !b.to_string().contains("ghp_"), "no tool input in a push: {b}");
-        assert_eq!((b["aps"]["interruption-level"].clone(), b["aps"]["badge"].clone(), b["aps"]["thread-id"].clone()), (serde_json::json!("time-sensitive"), serde_json::json!(2), serde_json::json!(dev.id)));
+        assert_eq!((b["aps"]["interruption-level"].clone(), b["aps"]["badge"].clone(), b["aps"]["thread-id"].clone()), (serde_json::json!("time-sensitive"), serde_json::json!(1), serde_json::json!(dev.id)), "the badge leaves out the seen one");
         assert_eq!((b["needs_you_id"].clone(), b["type"].clone(), b["target"]["screen"].clone()), (serde_json::json!("permission:new"), serde_json::json!("permission"), serde_json::json!("chat")));
         assert_eq!((h["apns-priority"].clone(), h["apns-collapse-id"].clone()), (serde_json::json!("10"), serde_json::json!("permission:new")));
         assert!(got(&seen, &only_questions).is_empty(), "it only wants questions");
@@ -370,6 +381,49 @@ mod tests {
         tick(&st, &mut p).await;
         assert_eq!(count(), 200);
         assert_eq!(got(&seen, &phone).len(), 1, "pruning never re-sends");
+    }
+
+    #[tokio::test]
+    async fn with_push_off_a_paired_phone_gets_a_needs_you_item_and_one_log_line() {
+        // Neither a key nor a relay key in this test's own key folder.
+        crate::apns::tests::THIS_TEST_DIR.with(|d| *d.borrow_mut() = Some(crate::testdir::for_this_test("push-off")));
+        let st = state();
+        let off = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "push_off").count();
+        assert_eq!(apns::route(&st), apns::Route::Off);
+        assert_eq!(off(&st), 0, "with no phone paired nothing is dropped");
+
+        device(&st, &format!("{}0f", "aa".repeat(31)), &["question"], None);
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "push_off").unwrap().clone();
+        assert_eq!((&item["reason"], &item["links"][0]["path"]), (&json!("No APNs key and no relay key: Loft drops every alert for your phone."), &json!("/settings#push")));
+        assert_eq!(item["actions"].as_array().unwrap().last().unwrap()["kind"], "dismiss");
+        // One id and age for the whole time it's off.
+        let again = crate::needs_you::snapshot(&st).unwrap()["items"].as_array().unwrap().iter().find(|i| i["type"] == "push_off").unwrap().clone();
+        assert!(item["id"].as_str().unwrap().starts_with("push_off:"));
+        assert_eq!((&again["id"], &again["created_at"]), (&item["id"], &item["created_at"]));
+
+        // The pusher says once that it drops alerts, and again only after push was back on.
+        let dev = agent(&st, "Dev");
+        let mut p = Pusher::default();
+        permission(&st, "off1", &dev.id);
+        tick(&st, &mut p).await;
+        assert!(p.off_logged);
+        crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
+        assert_eq!(off(&st), 0, "a relay key turns push on");
+        permission(&st, "off2", &dev.id);
+        tick(&st, &mut p).await;
+        assert!(!p.off_logged);
+
+        // A Dismiss hides it for that off period only: off again later, it's back with a new id.
+        crate::apns::remove_relay_key().unwrap();
+        let id = collect(&st).unwrap().into_iter().find(|i| i.kind == "push_off").map(|i| to_push(&i).id).unwrap();
+        crate::needs_you::dismiss_item(axum::extract::State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        assert_eq!(off(&st), 0, "dismissed");
+        crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
+        assert_eq!(off(&st), 0);
+        crate::apns::remove_relay_key().unwrap();
+        let back = collect(&st).unwrap().into_iter().find(|i| i.kind == "push_off").map(|i| to_push(&i).id);
+        assert!(back.is_some_and(|b| b != id), "a new off period is a new item");
     }
 
     /// A state with no key of its own but the test relay key: its pushes go through the (fake) relay.

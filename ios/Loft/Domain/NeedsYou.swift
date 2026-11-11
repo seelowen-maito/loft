@@ -5,10 +5,23 @@ import Foundation
 
 struct NeedsYouList: Codable, Hashable {
     var version: Int
+    /// The whole list, and how many of it are urgent.
     var count: Int
     var urgent: Int
+    /// What the user hasn't seen on any client (the badge), and how many of those are urgent. Older servers send none.
+    var new: Int?
+    var newUrgent: Int?
     var generatedAt: Date?
     var items: [NeedsYouItem]
+
+    /// The badge: what hasn't been seen, or everything from an older server.
+    var unseen: Int { new ?? count }
+
+    /// The card's header: how many are new, and how many in all.
+    var headline: String {
+        let n = new ?? 0
+        return n > 0 ? "Needs you · \(n) new of \(count)" : "Needs you · \(count)"
+    }
 }
 
 struct NeedsYouItem: Codable, Hashable, Identifiable {
@@ -32,6 +45,8 @@ struct NeedsYouItem: Codable, Hashable, Identifiable {
     var project: String?
     /// The pull request, on PR items (`pr_ready`, `pr_review`, …).
     var pr: PullRequestRef?
+    /// Seen on some client (the list was opened there, web or iPhone). Seen items stay listed, less prominent.
+    var seen: Bool?
 
     struct PullRequestRef: Codable, Hashable {
         /// "owner/name"
@@ -47,6 +62,24 @@ struct NeedsYouItem: Codable, Hashable, Identifiable {
     var answerAction: NeedsYouAction? { actions.first { $0.kind == "answer" } }
     var openAction: NeedsYouAction? { actions.first { $0.kind == "open" } }
     var canDismiss: Bool { actions.contains { $0.kind == "dismiss" } }
+    /// The Done check: takes the item off the list (the `dismiss` action).
+    var doneAction: NeedsYouAction? { actions.first { $0.kind == "dismiss" && $0.isRequest } }
+}
+
+/// The seen mark (POST /api/needs-you/seen), shared with the web: opening the list marks what it shows.
+enum NeedsYouSeen {
+    /// The items shown that no client has seen yet: the ones to mark.
+    static func unseen(_ items: [NeedsYouItem]) -> [String] { items.filter { $0.seen != true }.map(\.id) }
+
+    /// The items shown as new while the list is open: those unseen when they appeared stay new until it closes, even
+    /// once marked; ids that left the list drop out.
+    static func fresh(after fresh: Set<String>, items: [NeedsYouItem]) -> Set<String> {
+        let ids = Set(items.map(\.id))
+        return fresh.intersection(ids).union(unseen(items))
+    }
+
+    /// The request body that marks `ids` seen.
+    static func body(_ ids: [String]) -> JSONValue { .object(["ids": .array(ids.map(JSONValue.string))]) }
 }
 
 struct NeedsYouAction: Codable, Hashable {

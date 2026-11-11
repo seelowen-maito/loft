@@ -2,13 +2,19 @@ import SwiftUI
 
 struct NeedsYouRoute: Hashable {}
 
+extension EnvironmentValues {
+    /// In the open list: the items new during this visit (they stay new once marked seen). Elsewhere nil, and an item
+    /// is new when no client has seen it.
+    @Entry var needsYouFresh: Set<String>? = nil
+}
+
 /// The Overview's "Needs you" card: the most urgent few, and the way to the full list.
 struct NeedsYouCard: View {
     @Environment(LoftStore.self) private var store
 
     var body: some View {
         if let list = store.needsYou, !list.items.isEmpty {
-            SectionHeader("Needs you · \(list.count)", trailing: list.items.count > 3 ? AnyView(
+            SectionHeader(list.headline, trailing: list.items.count > 3 ? AnyView(
                 NavigationLink(value: NeedsYouRoute()) { Text("See all").font(.subheadline) }.accessibilityIdentifier("needsYouSeeAll")
             ) : nil)
             VStack(spacing: 8) {
@@ -20,9 +26,12 @@ struct NeedsYouCard: View {
     }
 }
 
-/// Everything waiting on you, most urgent first (the server's order).
+/// Everything waiting on you, most urgent first (the server's order). Opening it marks what it shows seen, here and on
+/// the web; those stay shown as new until it closes.
 struct NeedsYouListView: View {
     @Environment(LoftStore.self) private var store
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var fresh: Set<String> = []
 
     var body: some View {
         ScrollView {
@@ -44,9 +53,22 @@ struct NeedsYouListView: View {
         }
         .background(Theme.background)
         .overlay(alignment: .top) { NeedsYouNotice() }
+        .environment(\.needsYouFresh, fresh)
         .navigationTitle("Needs you")
         .refreshable { await store.refreshNeedsYou() }
-        .task { await store.refreshNeedsYou() }
+        .task {
+            await store.refreshNeedsYou()
+            await markSeen()
+        }
+        .onChange(of: store.needsYou?.items.map(\.id)) { Task { await markSeen() } }
+        .onChange(of: scenePhase) { Task { await markSeen() } }
+    }
+
+    /// What's on screen counts as seen everywhere, but not while the app is in the background.
+    private func markSeen() async {
+        guard scenePhase == .active, let items = store.needsYou?.items else { return }
+        fresh = NeedsYouSeen.fresh(after: fresh, items: items)
+        await store.markNeedsYouSeen(NeedsYouSeen.unseen(items))
     }
 }
 
@@ -93,6 +115,7 @@ struct NeedsYouProjectGroup: View {
 /// send yourself. The on-device model may add a one-line summary and suggested replies (they only fill the box).
 struct NeedsYouRow: View {
     @Environment(LoftStore.self) private var store
+    @Environment(\.needsYouFresh) private var fresh
     let item: NeedsYouItem
     @State private var assist: NeedsYouAssist?
     @State private var answering: String?
@@ -108,11 +131,21 @@ struct NeedsYouRow: View {
         }
     }
 
+    /// Seen before (this visit, or anywhere when outside the list): less prominent.
+    private var isNew: Bool { fresh.map { $0.contains(item.id) } ?? (item.seen != true) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
-                Text(item.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                if isNew {
+                    Text("New").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Theme.accent.opacity(0.15), in: Capsule())
+                        .accessibilityIdentifier("needsYouNew")
+                }
+                Text(item.title).font(.subheadline.weight(isNew ? .semibold : .regular)).lineLimit(2)
+                    .foregroundStyle(isNew ? .primary : .secondary)
                 Spacer(minLength: 0)
                 if let age = item.createdAt { Text(age.shortAgo).font(.caption).foregroundStyle(.secondary) }
             }
@@ -131,9 +164,10 @@ struct NeedsYouRow: View {
         }
         .padding(12)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .opacity(isNew ? 1 : 0.7)
         .contextMenu {
-            if item.canDismiss, let d = item.actions.first(where: { $0.kind == "dismiss" }) {
-                Button("Dismiss", systemImage: "eye.slash") { run(d) }
+            if let d = item.doneAction {
+                Button(d.label, systemImage: "checkmark") { run(d) }
             }
         }
         .accessibilityElement(children: .contain)
@@ -153,6 +187,20 @@ struct NeedsYouRow: View {
 
     @ViewBuilder private var actions: some View {
         let visible = item.actions.filter { $0.kind != "dismiss" }
+        HStack(alignment: .top, spacing: 6) {
+            buttons(visible)
+            Spacer(minLength: 0)
+            // The Done check: takes it off the list, here and on the web.
+            if let d = item.doneAction {
+                Button { run(d) } label: { Label(d.label, systemImage: "checkmark") }
+                    .buttonStyle(.bordered).controlSize(.small).tint(Theme.working)
+                    .disabled(busy || !store.canWrite)
+                    .accessibilityIdentifier("needsYouDone")
+            }
+        }
+    }
+
+    @ViewBuilder private func buttons(_ visible: [NeedsYouAction]) -> some View {
         FlowLayout(spacing: 6) {
             ForEach(Array(visible.enumerated()), id: \.offset) { _, a in
                 switch a.kind {
@@ -172,7 +220,7 @@ struct NeedsYouRow: View {
                     Button(a.label, role: .destructive) { run(a) }.buttonStyle(.bordered).controlSize(.small).disabled(busy)
                 default:
                     Button(a.label) { run(a) }
-                        .buttonStyle(a.kind == "approve" || a.kind == "merge" ? AnyButtonStyle(.accent) : AnyButtonStyle(.bordered))
+                        .buttonStyle(a.kind == "approve" || a.kind == "merge" || a.kind == "reopen" ? AnyButtonStyle(.accent) : AnyButtonStyle(.bordered))
                         .controlSize(.small)
                         .disabled(busy || !store.canWrite)
                 }

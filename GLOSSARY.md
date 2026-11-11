@@ -29,7 +29,7 @@ What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom
 _Avoid_: Job, type, flag
 
 **Delivery**:
-Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers, closes it when they pass, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
+Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
 _Avoid_: Build, run, pipeline
 
 **Stalled**:

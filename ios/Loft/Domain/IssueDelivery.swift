@@ -24,7 +24,7 @@ struct IssueDelivery: Codable, Hashable {
 
     /// planned | running | final_review | final_fixes | needs_human | stalled | paused | ready | settled | merged
     var state: String
-    /// Why it stalled: run_failed, no_call or restart; nil unless stalled.
+    /// Why it stalled: run_failed, no_call, restart or ci_missing; nil unless stalled.
     var stallReason: String? = nil
     /// The server's state line; nil before it started, and from a backend older than `state_line`.
     var stateLine: StateLine? = nil
@@ -32,6 +32,8 @@ struct IssueDelivery: Codable, Hashable {
     var canPause: Bool? = nil
     /// Resume applies: it's stalled or paused, or a ticket or its final review waits for the user.
     var canResume: Bool? = nil
+    /// Reopen delivery applies: it's done, and tickets published into the spec since are open.
+    var canReopen: Bool? = nil
     /// A ticket, or the final review, waits for the user after too many change rounds.
     var needsHuman: Bool? = nil
     var started: Bool
@@ -80,6 +82,7 @@ struct IssueDelivery: Codable, Hashable {
     /// final review waits for the user: each only when the server says it applies, and only once it started.
     var showsPause: Bool { started && canPause == true }
     var showsResume: Bool { started && canResume == true }
+    var showsReopen: Bool { started && canReopen == true }
 
     var ticketsDone: Int { (tickets ?? []).filter { $0.state == "closed" }.count }
     var skippedTickets: [Ticket] { (tickets ?? []).filter { $0.state == "elsewhere" } }
@@ -105,7 +108,7 @@ struct IssueDelivery: Codable, Hashable {
 }
 
 /// A Delivery card button, as its endpoint names it (`POST /api/issues/{id}/<action>-delivery`).
-enum IssueDeliveryAction: String { case start, pause, resume }
+enum IssueDeliveryAction: String { case start, pause, resume, reopen }
 
 /// A Delivery card button's answer: the Delivery as the card shows it now, and what the button did.
 struct IssueDeliveryReply: Decodable {

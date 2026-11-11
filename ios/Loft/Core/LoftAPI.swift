@@ -73,6 +73,8 @@ protocol LoftAPI: Sendable {
     func cancelTask(id: String, stopRun: Bool) async throws -> CancelResponse
     /// Publish a Loft-only issue to its project's GitHub repo (spec #65); it comes back mirrored.
     func publishTask(id: String) async throws -> HBTask
+    /// The user opened the issue: a finished one's result leaves Needs you on every client.
+    func issueOpened(id: String) async throws
     /// A Loft issue's thread, oldest first.
     func taskComments(id: String) async throws -> [TaskComment]
     /// Comment on a Loft issue; it goes to the issue's agent. `github`: on a mirrored issue, whether it may go to
@@ -358,6 +360,10 @@ struct LiveLoftAPI: LoftAPI {
         try decode(HBTask.self, try await send("POST", "/tasks/\(id)/publish", body: [:]))
     }
 
+    func issueOpened(id: String) async throws {
+        _ = try await send("POST", "/issues/\(id)/opened", body: [:])
+    }
+
     func taskComments(id: String) async throws -> [TaskComment] { try await get("/tasks/\(id)/comments") }
 
     func addTaskComment(id: String, text: String, clientId: String, github: Bool?) async throws {
@@ -503,6 +509,7 @@ extension LoftAPI {
     func issueDelivery(taskId: String) async throws -> IssueDelivery? { nil }
     func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply { throw APIError.unsupported("Delivery") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
+    func issueOpened(id: String) async throws {}
     func mergeDelivery(repo: String, spec: Int) async throws -> String { throw APIError.unsupported("Delivery") }
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent { throw APIError.unsupported("Agent settings") }
     func workspaceSize(agentId: String) async throws -> Int64 { throw APIError.unsupported("Workspace size") }

@@ -1,3 +1,5 @@
+import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+
 export type Avatar = { svg: string };
 
 /** A weekly window with no autonomous wake-ups, in the Mac's local time. Days: 0 = Monday … 6 = Sunday. */
@@ -31,7 +33,7 @@ export type Agent = {
   max_subagents: number | null;
   /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
-  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default), "above_100k" … "above_200k" or "always". */
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (agents saved before the setting), "above_100k" … "above_200k" or "always" (a new agent's). */
   fresh_context?: string;
   /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
   fresh_context_applies?: boolean;
@@ -106,7 +108,7 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
-  /** Why it stalled: "run_failed", "no_call" or "restart"; null unless stalled. */
+  /** Why it stalled: "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
   stall_reason?: string | null;
   /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
   state_line?: { tone: string; text: string } | null;
@@ -114,6 +116,8 @@ export type IssueDelivery = {
   can_pause?: boolean;
   /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
   can_resume?: boolean;
+  /** Reopen delivery applies: it's done, and tickets published into the spec since are open. */
+  can_reopen?: boolean;
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
@@ -673,6 +677,13 @@ export const api = {
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
   needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
+  /** The whole Needs you list, for its page and the top bar's counter. */
+  needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
+  /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
+  needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
+  /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
+  needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
+    req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
@@ -741,6 +752,8 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** The user opened the issue: a finished one's result to look at leaves Needs you, on every client. */
+  issueOpened: (id: string) => req<{ ok: boolean; cleared: number }>("POST", `/issues/${id}/opened`, {}),
   /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
   /** Every spec's Delivery in one read, for the Issues page's spec views. */
   deliverySummaries: () => req<import("./specViews").DeliverySummary[]>("GET", "/deliveries/summary"),
@@ -751,6 +764,8 @@ export const api = {
   resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
   /** Pause on a running Delivery: Loft stops the run working on it and sends no more wakes until Resume. */
   pauseIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/pause-delivery`),
+  /** Reopen a done Delivery for tickets published since: its spec PR goes back to draft, and the Lead (or Dev) is woken. */
+  reopenIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/reopen-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

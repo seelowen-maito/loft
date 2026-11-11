@@ -18,6 +18,10 @@ struct TaskDetailView: View {
     var body: some View {
         if let task = store.task(taskId) {
             content(task)
+                // A finished issue's result was waiting in Needs you: opening it is looking at it.
+                .task(id: task.state == .done) {
+                    if task.state == .done { await store.issueOpened(task.id) }
+                }
         } else if !lookedUp {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -115,11 +119,23 @@ struct TaskDetailView: View {
             if !t.summary.isEmpty {
                 Section("Summary") { CollapsibleText(text: t.summary).font(.subheadline) }
             }
-            if !t.error.isEmpty {
+            if t.state.canSendAgain {
+                // Why it stopped, up front, with Send to… beside it.
+                Section(t.state == .failed ? "Failed" : "Blocked") {
+                    Label(t.error.isEmpty ? "No reason given." : t.error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(t.state == .failed ? Theme.failure : Theme.attention)
+                    if !SpecViews.isSpec(t) {
+                        Button { pickAgent = true } label: { Label("Send to…", systemImage: "person.badge.plus") }
+                            .disabled(!store.canWrite || busy)
+                            .accessibilityIdentifier("sendAgain")
+                    }
+                }
+            } else if !t.error.isEmpty {
                 Section("Problem") {
                     Label(t.error, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline)
-                        .foregroundStyle(t.state == .failed ? Theme.failure : Theme.attention)
+                        .foregroundStyle(Theme.attention)
                 }
             }
 
@@ -231,7 +247,7 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $pickAgent) {
             NavigationStack {
-                AgentPickerList(title: "Run with…") { a in
+                AgentPickerList(title: t.state.canSendAgain ? "Send to…" : "Run with…") { a in
                     pickAgent = false
                     run(t, agentId: a.id)
                 }

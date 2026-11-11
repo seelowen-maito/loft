@@ -64,6 +64,17 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertTrue((old.showsPause, old.showsResume) == (false, false), "an older server says neither applies")
     }
 
+    func testReopenShowsOnlyOnADoneDeliveryTheServerSaysHasNewTickets() throws {
+        let reopen = try delivery(#"{"state":"ready","started":true,"can_pause":false,"can_resume":false,"can_reopen":true,"state_line":{"tone":"done","text":"Done, but tickets published since are open: Reopen delivery builds them."},"agent_id":null,"agent_name":null,"pr":500}"#)
+        XCTAssertTrue(reopen.showsReopen && !reopen.showsResume && !reopen.showsPause)
+        XCTAssertEqual(reopen.line?.text, "Done, but tickets published since are open: Reopen delivery builds them.")
+        let done = try delivery(#"{"state":"ready","started":true,"can_reopen":false,"agent_id":null,"agent_name":null,"pr":500}"#)
+        XCTAssertFalse(done.showsReopen)
+        let old = try delivery(#"{"state":"ready","started":true,"agent_id":null,"agent_name":null,"pr":500}"#)
+        XCTAssertFalse(old.showsReopen, "an older server says nothing")
+        XCTAssertEqual(IssueDeliveryAction.reopen.rawValue, "reopen", "POST /api/issues/{id}/reopen-delivery")
+    }
+
     func testAStandaloneTicketSaysWhoHasItOrThatTheyAreGone() throws {
         let with = try delivery(#"{"state":"running","started":true,"agent_id":"dev","agent_name":"Dev","pr":12}"#)
         XCTAssertEqual(with.progressLine(issue: 7), "With Dev on PR #12. Its reviewers look at it next; #7 closes when the PR merges.")

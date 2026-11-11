@@ -86,7 +86,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/task%3A9768b326-df66-4876-803e-41f8a4317202%3Ablocked/dismiss"
     }
@@ -133,7 +133,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/question%3A1/dismiss"
     }
@@ -212,7 +212,7 @@ enum FixtureNeedsYou {
     },
     {
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/stuck%3Abe%3A1/dismiss",
      "body": {}
@@ -242,7 +242,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/task%3Adbc521e2-042c-4485-a15d-956c162919ed%3Afailed/dismiss"
     }
@@ -285,7 +285,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/pr%3Apr1%3Aabc/dismiss"
     }
@@ -373,7 +373,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/done%3Ac835a7f2-343c-414d-8165-cf09eb16575b%3A2026-10-23T14%3A37%3A36.763574%2B00%3A00/dismiss"
     }
@@ -410,7 +410,7 @@ enum FixtureNeedsYou {
  "actions": [
   { "body": {}, "kind": "retry", "label": "Back up now", "method": "POST", "path": "/api/backups" },
   { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#backups" } },
-  { "body": {}, "kind": "dismiss", "label": "Dismiss", "method": "POST", "path": "/api/needs-you/backup%3A2026-11-07T03%3A00%3A00%2B00%3A00/dismiss" }
+  { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/backup%3A2026-11-07T03%3A00%3A00%2B00%3A00/dismiss" }
  ],
  "age_seconds": 0,
  "agent": null,
@@ -432,7 +432,7 @@ enum FixtureNeedsYou {
  "actions": [
   { "body": {}, "kind": "retry", "label": "Clean now", "method": "POST", "path": "/api/workspaces/clean" },
   { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#workspaces" } },
-  { "body": {}, "kind": "dismiss", "label": "Dismiss", "method": "POST", "path": "/api/needs-you/disk_low/dismiss" }
+  { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/disk_low/dismiss" }
  ],
  "age_seconds": 0,
  "agent": null,
