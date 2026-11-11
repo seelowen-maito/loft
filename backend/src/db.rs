@@ -1938,6 +1938,16 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_delivery_with_a_key_we_no_longer_have_still_loads() {
+        let db = Db::open(&crate::testdir::for_this_test("delivery-old-key").join("d.db")).unwrap();
+        // A Delivery saved when it had `tech_debt` (the field is gone): the key is ignored, not an error.
+        let json = serde_json::json!({ "repo": "o/r", "spec": 5, "state": "running", "created_at": "2026-01-01T00:00:00Z", "tech_debt": ["#77"] });
+        db.0.lock().unwrap().execute("INSERT INTO deliveries (repo, spec, state, data) VALUES ('o/r', 5, 'running', ?1)", params![json.to_string()]).unwrap();
+        let d = db.get_delivery("o/r", 5).unwrap().unwrap();
+        assert_eq!((d.spec, d.state.as_str()), (5, "running"));
+    }
+
+    #[test]
     fn stored_running_totals_become_per_run_costs_once() {
         let path = crate::testdir::for_this_test("costs").join("costs.db");
         {
