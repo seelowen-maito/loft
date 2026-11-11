@@ -335,9 +335,13 @@ fn refuse_spec(t: &Task) -> Result<(), ApiError> {
     Ok(())
 }
 
+///
+/// The user can send a blocked or failed issue again, to another agent or the same one: the agent gets why it
+/// stopped with the brief, and the history says it was sent again.
 pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: Option<&Agent>) -> Result<(Task, bool), ApiError> {
     let mut t = state.db.get_task(id)?.ok_or_else(not_found)?;
-    if is_active(&t) {
+    let again = by.is_none() && matches!(t.status.as_str(), "blocked" | "failed");
+    if is_active(&t) && !again {
         return Err(ApiError(StatusCode::CONFLICT, "This task is already running. Cancel it first to restart it.".into()));
     }
     if is_closed(&t) {
@@ -346,6 +350,7 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     refuse_spec(&t)?;
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
+    let before = t.clone();
     let ts = now();
     t.agent_id = Some(agent.id.clone());
     t.kind = "work".into();
@@ -357,12 +362,25 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     state.db.save_task(&t)?;
     emit(state, &t);
     let by_id = by.map_or("user", |a| a.id.as_str());
-    log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    let previous = before.agent_id.as_deref().and_then(|id| state.db.get_agent(id).ok().flatten());
+    let mut context = String::new();
+    if again {
+        log_status(state, &t, by_id, &format!("Sent again to {} by you: it was {}", agent.name, before.status));
+        let by_whom = previous.as_ref().map_or(String::new(), |p| if p.id == agent.id { " by you".to_string() } else { format!(" by {}", p.name) });
+        let why = before.error.trim();
+        context = format!("The user sends you this issue again: it was {}{by_whom}{}", before.status, if why.is_empty() { ".".to_string() } else { format!(", because: {why}") });
+        // A blocked issue's agent may still have it in mind: it's someone else's now.
+        if let Some(p) = previous.as_ref().filter(|p| p.id != agent.id && before.status == "blocked" && is_running(state, &p.id)) {
+            agents::enqueue(state, &p.id, Some(format!("[Task {}] {} was sent to {} by the user. Stop working on it.", t.id, t.title, agent.name)), "user");
+        }
+    } else {
+        log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    }
     if !note.trim().is_empty() {
         log(state, &t, by_id, "comment", note.trim(), json!({ "to_agent": agent.id, "handoff": true }));
     }
     let queued = is_running(state, &agent.id);
-    let text = brief(state, &t, note);
+    let text = brief(state, &t, &[context.as_str(), note.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n"));
     match by {
         // `task_role` lets apps show a compact task row instead of the full brief.
         Some(from) => agents::message_from_agent_with(state, from, &agent, &text, json!({ "task_id": t.id, "task_role": "brief" })),
@@ -1357,6 +1375,44 @@ pub(crate) mod tests {
         assert_eq!((r["task"]["status"].clone(), r["delivered_to"].clone()), (json!("in_progress"), json!(a.id)));
         assert!(queued(&st, &a).contains("Try with Xcode 26"), "the brief carries the answer");
         assert!(!needs_you(&st, &t.id));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_or_failed_issue_is_sent_again_to_another_agent_or_the_same_one_with_why_it_stopped() {
+        let st = state();
+        let (a, b) = (agent(&st, "Reviewer"), agent(&st, "Builder"));
+        busy(&st, &a);
+        busy(&st, &b);
+        for status in ["blocked", "failed"] {
+            let (t, _) = create(&st, &json!({ "title": "Fix login", "description": "The login button does nothing.", "agent_id": a.id }), "user").unwrap();
+            execute(&st, &t.id, None, "", None).unwrap();
+            stuck(&st, &t.id, status);
+            st.rt.lock().unwrap().queued.clear();
+
+            // To another agent: it takes the issue, in progress again, with the description and the reason.
+            let Json(r) = execute_task(State(st.clone()), Path(t.id.clone()), Some(Json(ExecuteBody { agent_id: Some(b.id.clone()), note: "You can touch code.".into() }))).await.unwrap();
+            assert_eq!((r["task"]["status"].clone(), r["task"]["agent_id"].clone(), r["task"]["error"].clone()), (json!("in_progress"), json!(b.id), json!("")), "{status}");
+            let q = queued(&st, &b);
+            assert!(q.contains("The login button does nothing.") && q.contains(&format!("it was {status} by Reviewer, because: Need the API key")) && q.contains("You can touch code."), "{status}: {q}");
+            assert!(!needs_you(&st, &t.id), "{status}: the item clears");
+            let texts: Vec<String> = st.db.list_task_comments(&t.id, 50, None).unwrap().into_iter().map(|c| c.text).collect();
+            assert!(texts.contains(&format!("Sent again to Builder by you: it was {status}")), "{status}: {texts:?}");
+            // The agent that blocked it is told it's someone else's now; one that failed it ended already.
+            assert_eq!(queued(&st, &a).contains("was sent to Builder by the user"), status == "blocked", "{status}");
+
+            // Blocked again, back to the same agent.
+            stuck(&st, &t.id, status);
+            execute(&st, &t.id, None, "", None).unwrap();
+            assert_eq!(status_of(&st, &t.id), "in_progress");
+            assert!(queued(&st, &b).contains(&format!("it was {status} by you, because: Need the API key")), "{status}");
+            st.rt.lock().unwrap().queued.clear();
+        }
+        // An agent can't take over another agent's blocked issue this way, and an issue in progress isn't sent again.
+        let (t, _) = create(&st, &json!({ "title": "Other", "agent_id": a.id }), "user").unwrap();
+        execute(&st, &t.id, None, "", None).unwrap();
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", None).unwrap_err().0, StatusCode::CONFLICT);
+        stuck(&st, &t.id, "blocked");
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", Some(&b)).unwrap_err().0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
