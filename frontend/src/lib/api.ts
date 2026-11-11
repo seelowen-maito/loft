@@ -569,6 +569,8 @@ export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
   binary: string | null;
   adhoc_signed: boolean | null;
+  /** The identity Loft is signed with, like "loft"; null when ad-hoc or unknown. */
+  signed_by?: string | null;
   host: string | null;
 };
 

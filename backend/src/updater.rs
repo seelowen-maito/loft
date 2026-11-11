@@ -198,11 +198,11 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
-/// Replace this process with the binary on disk (same path, args and env): after an update, the new build.
-/// If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
+/// Replace this process with the build on disk (same args and env): after an update, the new build, which
+/// signs its own copy again. If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
 pub fn restart() -> ! {
     if let Ok(exe) = std::env::current_exe() {
-        let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+        let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
         tracing::error!("restart: exec failed: {err}");
     }
     std::process::exit(0)

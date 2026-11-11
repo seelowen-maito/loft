@@ -1,12 +1,19 @@
 //! macOS keys privacy permissions (e.g. Full Disk Access) to a binary's code signature.
 //! Cargo builds are ad-hoc signed, so every rebuild would lose them. When the keychain has a code-signing
-//! identity named "loft", sign our own executable with it at startup, so permissions survive updates.
+//! identity named "loft", Loft runs as a copy of its build signed with it, so permissions survive updates.
+//!
+//! A copy, not the build itself: an update builds over the build while Loft keeps running until its agents are
+//! idle, and macOS can't check a running binary whose file changed ("the code on disk does not match what is
+//! running"), so meanwhile it would ask again for everything Loft was allowed.
 
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const IDENTITY: &str = "loft";
 const IDENTIFIER: &str = "dev.loft";
+/// The signed copy is the build's name with this, beside it.
+const SIGNED: &str = "-signed";
 
 /// SHA-1 of the "loft" signing certificate, if the keychain has one.
 fn identity_hash() -> Option<String> {
@@ -39,25 +46,56 @@ fn codesign(path: &std::path::Path, hash: &str) -> bool {
     false
 }
 
-/// Sign the running executable if needed, then restart into the signed copy. Returns if nothing to do.
+/// The signed copy of the build at `exe`.
+fn signed_copy(exe: &Path) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_os_string();
+    name.push(SIGNED);
+    exe.with_file_name(name)
+}
+
+/// The build `exe` runs: itself, or the build it's the signed copy of. A restart runs it, so an update lands.
+pub fn build_of(exe: &Path) -> PathBuf {
+    let name = exe.file_name().unwrap_or_default().to_string_lossy();
+    match name.strip_suffix(SIGNED) {
+        Some(build) if !build.is_empty() => exe.with_file_name(build),
+        _ => exe.to_path_buf(),
+    }
+}
+
+/// Copies the build to its signed copy, signs it, and runs it in this process's place. Returns when there's no
+/// "loft" identity (Loft stays ad-hoc signed), when this is the signed copy, or when signing fails.
 pub fn ensure() {
     if !cfg!(target_os = "macos") {
         return;
     }
-    let Some(hash) = identity_hash() else { return };
     let Ok(exe) = std::env::current_exe() else { return };
-    if signed_with(&exe, &hash) {
+    if build_of(&exe) != exe {
         return;
     }
-    // Sign a copy and swap it in: rewriting the running binary in place would crash this process.
-    let tmp = exe.with_extension("signing");
+    let Some(hash) = identity_hash() else { return };
+    // Signed beside it under another name, then moved into place: a copy still running keeps its file.
+    let (copy, tmp) = (signed_copy(&exe), exe.with_extension("signing"));
     let signed = std::fs::copy(&exe, &tmp).is_ok() && codesign(&tmp, &hash) && signed_with(&tmp, &hash);
-    if !signed || std::fs::rename(&tmp, &exe).is_err() {
+    if !signed || std::fs::rename(&tmp, &copy).is_err() {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("signing: couldn't sign with the \"{IDENTITY}\" identity; macOS permissions won't survive rebuilds");
         return;
     }
-    println!("signed with the \"{IDENTITY}\" identity, restarting");
-    let err = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
-    eprintln!("signing: restart failed: {err}");
+    println!("signed a copy with the \"{IDENTITY}\" identity, running it");
+    let err = Command::new(&copy).args(std::env::args_os().skip(1)).exec();
+    eprintln!("signing: running the signed copy failed: {err}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_signed_copy_sits_beside_its_build_and_restarts_into_it() {
+        let build = Path::new("/x/target/release/loft");
+        let copy = signed_copy(build);
+        assert_eq!(copy, Path::new("/x/target/release/loft-signed"));
+        assert_eq!((build_of(&copy), build_of(build)), (build.to_path_buf(), build.to_path_buf()));
+        assert_eq!(build_of(Path::new("/x/-signed")), Path::new("/x/-signed"));
+    }
 }
