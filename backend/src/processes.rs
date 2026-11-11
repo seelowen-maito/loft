@@ -9,7 +9,9 @@
 //!
 //! A daemon (`pg_ctl start`, `redis-server --daemonize yes`, `celery --detach`) leaves the session for one of its
 //! own, so a process of the user's in no agent's session is also the agent's whose workspace holds its working
-//! folder. Not one with a terminal: that's the user's own shell, or what they run in it.
+//! folder. Not one with a terminal: that's the user's own shell, or what they run in it. Nor one under Loft (its git
+//! checks and size scans in a clone) or under a GUI app (an editor's language servers, when the user opens a clone):
+//! a daemon leaves its parent and runs under launchd.
 //!
 //! The same script makes `kill`, `pkill` and `killall` shell functions, and puts commands of those names first on
 //! PATH (for `xargs kill`, `find -exec kill`), that run `loft kill-as <tool> <args>`. That asks Loft
@@ -103,14 +105,14 @@ impl Owners {
         Owners { sessions: session_owners(storage), workspaces, uid: unsafe { libc::getuid() } }
     }
 
-    /// The agent `p` is: the one of its session, else, for a process of the user's with no terminal, the one whose
-    /// workspace holds its working folder.
+    /// The agent `p` is: the one of its session, else, for a process of the user's with no terminal that runs under
+    /// neither Loft nor a GUI app, the one whose workspace holds its working folder.
     fn of(&self, p: &Proc) -> Option<&String> {
         let sid = session_of(p.pid)?;
         if let Some(id) = self.sessions.get(&sid) {
             return Some(id);
         }
-        if self.workspaces.is_empty() || p.uid != self.uid || p.tty {
+        if self.workspaces.is_empty() || p.uid != self.uid || p.tty || p.under_app {
             return None;
         }
         let cwd = cwd_of(p.pid)?;
@@ -401,6 +403,8 @@ struct Proc {
     helper: bool,
     /// It has a terminal: the user's shell, or something run in it.
     tty: bool,
+    /// It, or a process it runs under, is Loft or a GUI app: never an agent's by its working folder.
+    under_app: bool,
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
@@ -416,12 +420,21 @@ fn table() -> Vec<Proc> {
         return vec![];
     };
     // The executable on its own: `command` mixes it with arguments the agent chooses.
-    let helpers: HashSet<i32> = std::process::Command::new("/bin/ps")
-        .args(["-axww", "-o", "pid=,comm="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| { let (pid, comm) = field(l); is_helper(comm).then(|| pid.parse().ok()).flatten() }).collect())
-        .unwrap_or_default();
-    String::from_utf8_lossy(&out.stdout)
+    let (mut helpers, mut apps) = (HashSet::new(), HashSet::new());
+    if let Ok(o) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,comm="]).output() {
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            let (pid, comm) = field(l);
+            let Ok(pid) = pid.parse::<i32>() else { continue };
+            if is_helper(comm) {
+                helpers.insert(pid);
+            }
+            if is_gui_app(comm) {
+                apps.insert(pid);
+            }
+        }
+    }
+    apps.insert(std::process::id() as i32);
+    let mut procs: Vec<Proc> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let (pid, rest) = field(line);
@@ -431,9 +444,32 @@ fn table() -> Vec<Proc> {
             let (tty, command) = field(rest);
             let pid: i32 = pid.parse().ok()?;
             let tty = !matches!(tty, "??" | "?" | "-");
-            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty })
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false })
         })
-        .collect()
+        .collect();
+    mark_under_app(&mut procs, &apps);
+    procs
+}
+
+/// Whether `comm`, a process's executable path, is a GUI app's (the app's own or a helper app's, like VS Code's
+/// `Code Helper (Plugin)`), installed in /Applications. Postgres.app's `postgres` isn't: it's in `bin`, not `MacOS`.
+fn is_gui_app(comm: &str) -> bool {
+    comm.starts_with("/Applications/") && comm.contains(".app/Contents/MacOS/")
+}
+
+/// Marks the processes that are, or run under, one of `apps` (Loft and the GUI apps).
+fn mark_under_app(procs: &mut [Proc], apps: &HashSet<i32>) {
+    let parents: HashMap<i32, i32> = procs.iter().map(|p| (p.pid, p.ppid)).collect();
+    for p in procs.iter_mut() {
+        let (mut pid, mut seen) = (p.pid, HashSet::new());
+        while pid > 1 && seen.insert(pid) {
+            if apps.contains(&pid) {
+                p.under_app = true;
+                break;
+            }
+            pid = parents.get(&pid).copied().unwrap_or(0);
+        }
+    }
 }
 
 /// The first whitespace-separated field of `s`, and the rest.
@@ -832,7 +868,8 @@ mod tests {
     // Every process these tests signal is one they start themselves, by PID.
 
     /// A `sleep` the test starts in a process session of its own, stopped by PID when dropped.
-    struct Sleeper(std::sync::Mutex<std::process::Child>);
+    /// A sleep the test started: its child, or an orphan (a daemon) the test only knows by PID.
+    struct Sleeper(Option<std::sync::Mutex<std::process::Child>>, i32);
 
     impl Sleeper {
         fn start(own_session: bool) -> Self {
@@ -844,10 +881,23 @@ mod tests {
             Self::spawn(path, None, own_session)
         }
 
-        /// A daemon: a session of its own that no run recorded, working in `dir`.
+        /// A daemon: a session of its own that no run recorded, working in `dir`, left by the shell that started
+        /// it, so it runs under launchd and not under Loft (here the test).
         fn daemon_in(dir: &Path) -> Self {
             std::fs::create_dir_all(dir).unwrap();
-            Self::spawn(Path::new("/bin/sleep"), Some(dir), true)
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"]).current_dir(dir);
+            unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            let out = cmd.output().unwrap();
+            let pid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            // Until the shell's exit reaches the table, the sleep still runs under it.
+            for _ in 0..100 {
+                if table().iter().any(|p| p.pid == pid && !p.under_app) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Sleeper(None, pid)
         }
 
         fn spawn(path: &Path, dir: Option<&Path>, own_session: bool) -> Self {
@@ -859,21 +909,34 @@ mod tests {
             if own_session {
                 unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
             }
-            Sleeper(std::sync::Mutex::new(cmd.spawn().unwrap()))
+            let child = cmd.spawn().unwrap();
+            let pid = child.id() as i32;
+            Sleeper(Some(std::sync::Mutex::new(child)), pid)
         }
 
         fn pid(&self) -> i32 {
-            self.0.lock().unwrap().id() as i32
+            self.1
         }
 
         fn alive(&self) -> bool {
-            self.0.lock().unwrap().try_wait().unwrap().is_none()
+            match &self.0 {
+                Some(child) => child.lock().unwrap().try_wait().unwrap().is_none(),
+                None => alive(self.1),
+            }
         }
 
         fn stop(&self) {
-            let mut child = self.0.lock().unwrap();
-            let _ = child.kill();
-            let _ = child.wait();
+            match &self.0 {
+                Some(child) => {
+                    let mut child = child.lock().unwrap();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                None if self.alive() => unsafe {
+                    libc::kill(self.1, libc::SIGKILL);
+                },
+                None => {}
+            }
         }
     }
 
@@ -931,7 +994,7 @@ mod tests {
         let outside = Sleeper::daemon_in(&crate::testdir::for_this_test("outside"));
         // In the other agent's session, though it works in this one's workspace: the session's agent owns it.
         let borrowed = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id));
-        record(&st.cfg.storage_dir, &b.id, borrowed.pid() as u32).unwrap();
+        record(&st.cfg.storage_dir, &b.id, session_of(borrowed.pid()).unwrap() as u32).unwrap();
         let ago = |h: i64| Some((chrono::Utc::now() - chrono::Duration::hours(h)).to_rfc3339());
 
         // Clean lists it as the idle agent's, and the other agent's process as the other's.
@@ -973,6 +1036,50 @@ mod tests {
         let p = table().into_iter().find(|p| p.pid == daemon.pid()).unwrap();
         assert_eq!(owners.of(&p), Some(&a.id));
         assert_eq!(owners.of(&Proc { tty: true, ..p }), None, "the user's shell, cd'ed into the workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_s_own_child_in_the_workspace_is_not_the_agent_s_but_a_daemon_the_agent_started_is() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let ws = crate::agents::workspace(&st, &a.id);
+        std::fs::create_dir_all(&ws).unwrap();
+        // A git check or size scan: Loft's child (here the test's), in a session of its own, working in the clone.
+        let check = Sleeper::spawn(Path::new("/bin/sleep"), Some(&ws), true);
+        let daemon = Sleeper::daemon_in(&ws);
+        let live = live_processes(&st.cfg.storage_dir, std::slice::from_ref(&a.id));
+        let pids: Vec<i32> = live.get(&a.id).into_iter().flatten().map(|l| l.pid).collect();
+        assert_eq!(pids, vec![daemon.pid()]);
+        assert!(check.alive());
+    }
+
+    #[test]
+    fn a_process_under_loft_or_a_gui_app_runs_under_an_app() {
+        use super::{is_gui_app, mark_under_app};
+        let code = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
+        let plugin = "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)";
+        assert!(is_gui_app(code) && is_gui_app(plugin) && is_gui_app("/Applications/Cursor.app/Contents/MacOS/Cursor"));
+        assert!(!is_gui_app("/Applications/Postgres.app/Contents/Versions/16/bin/postgres"), "a daemon from an app bundle");
+        assert!(!is_gui_app("/usr/local/bin/node") && !is_gui_app("/opt/homebrew/bin/redis-server"));
+
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false };
+        // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
+        // daemon 300 runs under launchd and has a child 301.
+        let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
+        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]));
+        let under: Vec<i32> = procs.iter().filter(|p| p.under_app).map(|p| p.pid).collect();
+        assert_eq!(under, vec![100, 101, 200, 201, 202]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_editor_helper_working_in_the_workspace_is_not_the_agent_s() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let daemon = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id));
+        let owners = Owners::load(&st.cfg.storage_dir, std::slice::from_ref(&a.id));
+        let p = table().into_iter().find(|p| p.pid == daemon.pid()).unwrap();
+        assert_eq!(owners.of(&p), Some(&a.id));
+        assert_eq!(owners.of(&Proc { under_app: true, ..p }), None, "a language server VS Code runs in the clone");
     }
 
     #[tokio::test(flavor = "multi_thread")]
