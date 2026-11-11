@@ -111,6 +111,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/deliveries/summary", get(delivery::summary_route))
         .route("/deliveries/merge", post(delivery::merge_route))
         .route("/deliveries/resume", post(delivery::resume_route))
+        .route("/deliveries/reopen", post(delivery::reopen_route))
         .route("/agents/{id}/uploads", post(uploads::upload))
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))

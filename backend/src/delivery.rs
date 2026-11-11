@@ -71,6 +71,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             current: None,
             dev: String::new(),
             final_rounds: 0,
+            reviewed_to: String::new(),
             last_notes: String::new(),
             migrated: false,
             standalone: false,
@@ -2443,6 +2444,7 @@ fn state_line(d: &Delivery) -> Value {
         "needs_human" => ("needs_you", "Needs you: too many rounds of changes in the final review."),
         "final_review" => ("final", "Final review: the Code reviewer is reviewing the whole PR."),
         "final_fixes" => ("final", "Final review: the Dev is fixing what the Code reviewer found."),
+        "ready" | "settled" if reopenable(d) => ("done", "Done, but tickets published since are open: Reopen delivery builds them."),
         "ready" | "settled" | "merged" => ("done", "Done: every review passed."),
         _ if d.tickets.iter().any(|t| t.state == "needs_human") => ("needs_you", "Needs you: a ticket had too many rounds of changes."),
         _ => ("running", "Running."),
@@ -2461,6 +2463,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "state_line": state_line(d),
         "can_pause": pausable(d),
         "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
+        "can_reopen": can_reopen(state, d),
         "needs_human": d.state == "needs_human" || d.tickets.iter().any(|t| t.state == "needs_human"),
         "started": d.state != "planned",
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
@@ -2580,6 +2583,17 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
     let tickets = d.tickets.iter().map(|t| format!("#{}", t.number)).collect::<Vec<_>>().join(", ");
     let done = if d.standalone { format!("ticket #{} passed QA and Security", d.spec) } else { format!("every ticket of spec #{} is closed ({tickets})", d.spec) };
     let again = if d.final_rounds > 0 { "\n- The Dev pushed fixes for your last notes: look again, at those fixes first." } else { "" };
+    // Reopened for new tickets: what came before passed this review already.
+    let scope = if d.reviewed_to.is_empty() {
+        "Pull the branch and review its whole diff against the default branch".to_string()
+    } else {
+        format!(
+            "The Delivery was reopened for new tickets: the commits up to `{short}` passed your review already, so review only what came after it, `git diff {sha}...origin/{branch}` (https://github.com/{repo}/compare/{sha}...{branch}), with the rest of the branch as context",
+            short = short(&d.reviewed_to),
+            sha = d.reviewed_to,
+            branch = d.branch,
+        )
+    };
     if d.local {
         return format!(
             "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: every ticket of the spec (Loft issue {spec_id}) is done, and you review the whole spec branch `{branch}` once, in the project's own repo `{dir}`, against `{base}` (`git diff {base}...{branch}`).\n\
@@ -2597,7 +2611,7 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
     }
     format!(
         "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: {done}, and you review the whole {pname} https://github.com/{repo}/pull/{pr} once, on the {bname} `{branch}`.\n\
-         - Pull the branch and review its whole diff against the default branch: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
+         - {scope}: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
          - Don't fix the work yourself.\n\
          - {own}\n\
          - When you're done, call `mcp__loft__review_ticket` with {pr}: `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` issue.",
@@ -2607,6 +2621,88 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
         branch = d.branch,
         own = own_rules("review it"),
     )
+}
+
+/// Whether Reopen delivery applies to `d`: a spec's Delivery on GitHub that is done (its spec PR marked or found
+/// ready) and has a ticket still open, published after it was done.
+pub(crate) fn reopenable(d: &Delivery) -> bool {
+    !d.local && !d.standalone && d.pr.is_some() && matches!(d.state.as_str(), "ready" | "settled") && d.tickets.iter().any(|t| t.state == "open")
+}
+
+/// [`reopenable`], and its spec PR isn't known to be merged or closed.
+pub(crate) fn can_reopen(state: &AppState, d: &Delivery) -> bool {
+    reopenable(d) && tracked_pr(state, d).is_none_or(|p| p.state == "open" && !p.gone)
+}
+
+/// Reopen delivery: a done spec Delivery with new open tickets runs again. Its spec PR goes back to draft, the
+/// Lead (or, with none, the Dev) is woken with the ready tickets, and once they close, the Code reviewer's final
+/// review covers only the commits after the branch's head now (`reviewed_to`) before the PR is ready again.
+pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
+    let _held = state.publish_locks.of(repo).lock_owned().await;
+    let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or("Nothing was reopened: the Delivery record is gone.")?;
+    if !reopenable(&d) {
+        let why = match d.state.as_str() {
+            _ if d.local || d.standalone => "only a spec's Delivery on GitHub reopens",
+            "ready" | "settled" => "no ticket of the spec is open",
+            _ => "it isn't done",
+        };
+        return Err(format!("Nothing was reopened: {why}."));
+    }
+    let pr = d.pr.expect("reopenable");
+    // Who takes the new tickets, before anything changes on GitHub.
+    let lead = lead_of(state, &d);
+    let next = next_ticket(&d).map(|t| t.number);
+    let ready: Vec<String> = ready_tickets(&d).iter().map(|t| tag(&d, t)).collect();
+    let agent = builder(state, &d, &d.planner);
+    if lead.is_none() && agent.is_none() {
+        return Err("Nothing was reopened: nobody can build the tickets, the team has no Dev and the agent that planned the spec is gone.".into());
+    }
+    if ready.is_empty() || (lead.is_none() && next.is_none()) {
+        return Err("Nothing was reopened: every open ticket of the spec is blocked.".into());
+    }
+    let p = crate::github::get(state, &format!("/repos/{repo}/pulls/{pr}")).await.map_err(|e| format!("Nothing was reopened: couldn't read spec PR #{pr}: {e}"))?;
+    if p["state"] != "open" {
+        let how = if p["merged"] == true { "merged" } else { "closed" };
+        return Err(format!("Nothing was reopened: spec PR #{pr} is {how}, so publish the new tickets in a new spec."));
+    }
+    let head = branch_head(state, &d).await.map_err(|e| format!("Nothing was reopened: {e}"))?;
+    if p["draft"] != true {
+        let query = "mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
+        let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
+            .await
+            .map_err(|e| format!("Nothing was reopened: couldn't put spec PR #{pr} back to draft: {e}"))?;
+        if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
+            return Err(format!("Nothing was reopened: couldn't put spec PR #{pr} back to draft: {}", e["message"].as_str().unwrap_or("GitHub refused")));
+        }
+    }
+    let d = update(state, repo, spec, |d| {
+        d.state = "running".into();
+        (d.done_at, d.ready_retry, d.final_rounds, d.current) = (String::new(), false, 0, None);
+        d.reviewed_to = head.clone();
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    track_pr(state, &d).await;
+    tracing::info!("delivery {repo}#{spec}: reopened at {}", short(&head));
+    if let Some(lead) = lead {
+        wake_lead(state, &d, &lead, &format!("The user reopened this Delivery for tickets published after it was done: hand them out. Ready now: {}.", ready.join(", ")));
+        return Ok(format!("Reopened: spec PR #{pr} is a draft again, and {} hands out {}.", lead.name, list_of(&ready)));
+    }
+    let (n, agent) = (next.expect("checked"), agent.expect("checked"));
+    begin(state, &d, n, &agent).await.map_err(|e| format!("Reopened, but {e}: the mirror's next poll starts it."))?;
+    Ok(format!("Reopened: spec PR #{pr} is a draft again, and {} is building #{n}.", agent.name))
+}
+
+/// `POST /api/issues/{id}/reopen-delivery`: Reopen delivery on a spec's Delivery card.
+pub async fn reopen_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let d = delivery_of_issue(&state, &id)?;
+    let message = reopen(&state, &d.repo, d.spec).await.map_err(bad)?;
+    card_reply(&state, &d, message)
+}
+
+/// `POST /api/deliveries/reopen` with `{ repo, spec }`: Reopen on the Needs you item for new tickets on a done Delivery.
+pub async fn reopen_route(State(state): State<AppState>, Json(w): Json<Which>) -> ApiResult<Value> {
+    let message = reopen(&state, &w.repo, w.spec).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "message": message })))
 }
 
 /// The Delivery whose spec PR (or spec) is #n on `slug`, or in a plan kept in Loft whose spec is the Loft
@@ -2869,8 +2965,8 @@ async fn file_tech_debt(state: &AppState, d: &Delivery, by: &str, items: Vec<Val
 
 #[derive(serde::Deserialize)]
 pub struct Which {
-    repo: String,
-    spec: i64,
+    pub(crate) repo: String,
+    pub(crate) spec: i64,
 }
 
 /// `GET /api/deliveries/state?repo=&spec=`: where a Delivery stands, for the end-of-planning card's Merge.

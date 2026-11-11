@@ -116,6 +116,8 @@ export type IssueDelivery = {
   can_pause?: boolean;
   /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
   can_resume?: boolean;
+  /** Reopen delivery applies: it's done, and tickets published into the spec since are open. */
+  can_reopen?: boolean;
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
@@ -780,6 +782,8 @@ export const api = {
   resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
   /** Pause on a running Delivery: Loft stops the run working on it and sends no more wakes until Resume. */
   pauseIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/pause-delivery`),
+  /** Reopen a done Delivery for tickets published since: its spec PR goes back to draft, and the Lead (or Dev) is woken. */
+  reopenIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/reopen-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

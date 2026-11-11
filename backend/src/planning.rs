@@ -4286,6 +4286,125 @@ pub(crate) mod tests {
         assert!(item["title"].as_str().unwrap().starts_with("octo/cr-flow#500"), "{item}");
     }
 
+    /// A spec PR in GitHub's pulls API, open, as a draft or not.
+    fn spec_pr(slug: &str, draft: bool) -> Value {
+        json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": draft, "mergeable": true, "mergeable_state": "clean", "title": "Rounds", "head": { "ref": "spec/40-rounds", "sha": CI_HEAD }, "base": { "ref": "main" }, "user": { "login": "octo-me" }, "html_url": format!("https://github.com/{slug}/pull/500") })
+    }
+
+    /// Runs `name`'s Delivery (tickets #41 and #42, a Code reviewer) to done: the spec PR marked ready.
+    async fn done_delivery(st: &AppState, fake: &Fake, name: &str) -> (Agent, Agent) {
+        let slug = format!("octo/{name}");
+        let (dev, team) = building_both(st, fake, name, &["code_reviewer"]).await;
+        let cr = team[0].clone();
+        tool(st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, spec_pr(&slug, true)), (200, spec_pr(&slug, false))]);
+        tool(st, &cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(st.db.get_delivery(&slug, 40).unwrap().unwrap().state, "ready");
+        (dev, cr)
+    }
+
+    #[tokio::test]
+    async fn a_done_delivery_reopens_for_a_new_ticket_and_reviews_only_the_new_commits() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/reopen";
+        let (dev, cr) = done_delivery(&st, &fake, "reopen").await;
+        let shown = |st: &AppState| crate::delivery::delivery_json(st, &delivery(st, slug));
+        assert_eq!(shown(&st)["can_reopen"], json!(false), "nothing new to build");
+        let items = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"].as_str().is_some_and(|k| k.starts_with("delivery_"))).cloned().collect::<Vec<_>>();
+        assert_eq!(items(&st).iter().map(|i| i["type"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["delivery_done"]);
+
+        // #43 is published into the spec after it was done: the card and Needs you offer Reopen.
+        crate::delivery::record_ticket(&st, slug, 40, 43, "Docs", vec![]);
+        for p in ["issues/43/labels", "issues/43/comments"] {
+            fake.route("POST", &format!("/repos/{slug}/{p}"), 201, json!({}));
+        }
+        fake.route("GET", &format!("/repos/{slug}/issues/43"), 200, gh_ticket(slug, 43, "open", "## What to build\n\nDocs."));
+        fake.route("PATCH", &format!("/repos/{slug}/issues/43"), 200, gh_ticket(slug, 43, "closed", "## What to build\n\nDocs."));
+        let v = shown(&st);
+        assert_eq!((&v["can_reopen"], &v["state_line"]["text"]), (&json!(true), &json!("Done, but tickets published since are open: Reopen delivery builds them.")));
+        let its = items(&st);
+        assert_eq!(its.len(), 1, "the done item gives way: {its:?}");
+        assert_eq!(its[0]["type"], "delivery_reopen");
+        assert!(its[0]["reason"].as_str().unwrap().starts_with("#43 is open, published after the Delivery was done. Reopen delivery builds it; spec PR #500 goes back to draft"), "{}", its[0]["reason"]);
+        let reopen = its[0]["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "reopen").unwrap();
+        assert_eq!((&reopen["path"], &reopen["body"]), (&json!("/api/deliveries/reopen"), &json!({ "repo": slug, "spec": 40 })));
+
+        // Reopen: the spec PR goes back to draft, and the team's Dev builds #43.
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, false));
+        let before = woken(&st, &dev).len();
+        let Json(r) = crate::delivery::reopen_route(State(st.clone()), Json(crate::delivery::Which { repo: slug.into(), spec: 40 })).await.unwrap();
+        assert_eq!(r["message"], "Reopened: spec PR #500 is a draft again, and Builder is building #43.");
+        let draft = fake.seen("/graphql").into_iter().filter(|c| c.body["query"].as_str().is_some_and(|q| q.contains("convertPullRequestToDraft"))).collect::<Vec<_>>();
+        assert_eq!(draft.len(), 1);
+        assert_eq!(draft[0].body["variables"]["id"], "PR_500");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.done_at.as_str(), d.reviewed_to.as_str(), d.final_rounds), ("running", "", CI_HEAD, 0));
+        assert!(woken(&st, &dev)[before..].iter().any(|w| w.contains("build ticket #43 \"Docs\"")));
+        assert!(items(&st).is_empty(), "nothing waits on the user now");
+        assert!(crate::delivery::reopen_route(State(st.clone()), Json(crate::delivery::Which { repo: slug.into(), spec: 40 })).await.is_err(), "it's running");
+
+        // #43 closes like any ticket; the final review covers only what came after the reopen.
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 43, "commits": ["1234567abc"] })).await.unwrap();
+        assert!(out.contains("Code reviewer) is reviewing the whole spec PR #500 now."), "{out}");
+        let brief = woken(&st, &cr).last().cloned().unwrap();
+        assert!(brief.contains(&format!("The Delivery was reopened for new tickets: the commits up to `c1c1c1c` passed your review already, so review only what came after it, `git diff {CI_HEAD}...origin/spec/40-rounds` (https://github.com/{slug}/compare/{CI_HEAD}...spec/40-rounds)")), "{brief}");
+
+        // Its pass marks the PR ready again.
+        let readies = || fake.seen("/graphql").into_iter().filter(|c| c.body["query"].as_str().is_some_and(|q| q.contains("markPullRequestReadyForReview"))).count();
+        let marked = readies();
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, true));
+        let out = tool(&st, &cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Docs only." })).await.unwrap();
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
+        assert_eq!(readies(), marked + 1);
+        let d = delivery(&st, slug);
+        assert_eq!(d.state, "ready");
+        assert!(!d.done_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reopening_with_a_lead_wakes_it_with_the_new_tickets_to_hand_out() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/reopen-lead";
+        let (dev, _) = done_delivery(&st, &fake, "reopen-lead").await;
+        let lead = busy(&st, "Lofty", "reopen-lead", "lead");
+        crate::delivery::record_ticket(&st, slug, 40, 43, "Docs", vec![]);
+        crate::delivery::record_ticket(&st, slug, 40, 44, "Changelog", vec![43]);
+        fake.route("POST", &format!("/repos/{slug}/issues/43/labels"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, true));
+        let out = crate::delivery::reopen(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Reopened: spec PR #500 is a draft again, and Lofty hands out #43.");
+        assert!(fake.seen("/graphql").iter().all(|c| !c.body["query"].as_str().unwrap_or("").contains("convertPullRequestToDraft")), "already a draft");
+        let w = woken(&st, &lead);
+        assert!(w.last().is_some_and(|p| p.contains("The user reopened this Delivery for tickets published after it was done: hand them out. Ready now: #43.") && p.contains("#44 \"Changelog\" (https://github.com/octo/reopen-lead/issues/44): blocked by #43")), "{w:?}");
+        // The Lead hands it out like any ticket.
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 43, "dev": "Builder" })).await.unwrap();
+        assert!(woken(&st, &dev).last().is_some_and(|p| p.contains("build ticket #43 \"Docs\"")));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_whose_spec_pr_merged_doesnt_reopen() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/reopen-merged";
+        let (dev, _) = done_delivery(&st, &fake, "reopen-merged").await;
+        crate::delivery::record_ticket(&st, slug, 40, 43, "Docs", vec![]);
+        let mut merged = spec_pr(slug, false);
+        (merged["state"], merged["merged"]) = (json!("closed"), json!(true));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, merged);
+        let before = woken(&st, &dev).len();
+        let err = crate::delivery::reopen(&st, slug, 40).await.unwrap_err();
+        assert_eq!(err, "Nothing was reopened: spec PR #500 is merged, so publish the new tickets in a new spec.");
+        assert_eq!(delivery(&st, slug).state, "ready");
+        assert!(fake.seen("/graphql").iter().all(|c| !c.body["query"].as_str().unwrap_or("").contains("convertPullRequestToDraft")));
+        assert_eq!(woken(&st, &dev).len(), before);
+        // Nothing open: nothing to reopen.
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(43).unwrap().state = "closed".into());
+        assert_eq!(crate::delivery::reopen(&st, slug, 40).await.unwrap_err(), "Nothing was reopened: no ticket of the spec is open.");
+    }
+
     #[tokio::test]
     async fn the_third_round_of_final_changes_waits_for_the_user() {
         let st = state();
@@ -4461,7 +4580,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);

@@ -545,7 +545,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     let prs = state.db.list_pull_requests(None).map_err(e)?;
     for d in state.db.deliveries_in_state("ready").map_err(e)?.into_iter().filter(|d| !d.done_at.is_empty()) {
         let tracked = d.pr.and_then(|n| prs.iter().find(|p| p.slug.eq_ignore_ascii_case(&d.repo) && p.number == n));
-        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) {
+        // Tickets published since it was done: the Reopen item below says so instead.
+        if !d.local && tracked.is_some_and(|p| p.state != "open" || p.gone) || crate::delivery::can_reopen(state, &d) {
             continue;
         }
         let id = format!("done:{}:{}", d.repo, d.spec);
@@ -579,6 +580,39 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             // The issue first: it's where the push opens.
             actions: vec![open_delivery(&d, issue), act, dismiss(&id)],
             push: ("Delivery done".to_string(), title),
+            project: Some(d.project.clone()).filter(|p| !p.is_empty()),
+            pr: None,
+            id,
+        });
+    }
+
+    // A done spec Delivery with tickets published since: Reopen delivery builds them (its spec PR goes back to draft).
+    // A new ticket is a new item.
+    let mut done = state.db.deliveries_in_state("ready").map_err(e)?;
+    done.extend(state.db.deliveries_in_state("settled").map_err(e)?);
+    for d in done.into_iter().filter(|d| crate::delivery::can_reopen(state, d)) {
+        let open: Vec<&crate::db::DeliveryTicket> = d.tickets.iter().filter(|t| t.state == "open").collect();
+        let id = format!("reopen:{}:{}:{}", d.repo, d.spec, open.iter().map(|t| t.number.to_string()).collect::<Vec<_>>().join(","));
+        let issue = delivery_issue(&tasks, &d);
+        let title = crate::delivery::title_of(&d, issue.map(|t| t.title.as_str()));
+        let names = open.iter().map(|t| format!("#{}", t.number)).collect::<Vec<_>>();
+        let (pr, many) = (d.pr.unwrap_or_default(), open.len() > 1);
+        items.push(Item {
+            kind: "delivery_reopen",
+            urgency: 1,
+            agent: None,
+            task_id: issue.map(|t| t.id.clone()),
+            title: text(&format!("New tickets on a done Delivery: {title}"), MAX_TITLE),
+            reason: text(&format!("{} {} open, published after the Delivery was done. Reopen delivery builds {}; spec PR #{pr} goes back to draft until the final review passes again.", names.join(", "), if many { "are" } else { "is" }, if many { "them" } else { "it" }), MAX_REASON),
+            text: open.iter().map(|t| format!("#{} {}", t.number, t.title)).collect::<Vec<_>>().join("\n"),
+            created_at: if d.done_at.is_empty() { d.created_at.clone() } else { d.done_at.clone() },
+            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            actions: vec![
+                action("reopen", "Reopen delivery", "POST", "/api/deliveries/reopen".into(), json!({ "repo": d.repo, "spec": d.spec })),
+                open_delivery(&d, issue),
+                dismiss(&id),
+            ],
+            push: ("New tickets on a done Delivery".to_string(), title),
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,

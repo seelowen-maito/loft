@@ -77,6 +77,10 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// After Reopen delivery: the spec branch's newest commit when it reopened. Its commits passed a final
+    /// review already, so the next one reviews only what came after. Empty before any reopen.
+    #[serde(default)]
+    pub reviewed_to: String,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -1601,6 +1605,7 @@ impl Db {
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                reviewed_to: String::new(),
                 last_notes: String::new(),
                 migrated: true,
                 standalone: false,

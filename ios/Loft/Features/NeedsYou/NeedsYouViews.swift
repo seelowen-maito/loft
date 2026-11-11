@@ -220,7 +220,7 @@ struct NeedsYouRow: View {
                     Button(a.label, role: .destructive) { run(a) }.buttonStyle(.bordered).controlSize(.small).disabled(busy)
                 default:
                     Button(a.label) { run(a) }
-                        .buttonStyle(a.kind == "approve" || a.kind == "merge" ? AnyButtonStyle(.accent) : AnyButtonStyle(.bordered))
+                        .buttonStyle(a.kind == "approve" || a.kind == "merge" || a.kind == "reopen" ? AnyButtonStyle(.accent) : AnyButtonStyle(.bordered))
                         .controlSize(.small)
                         .disabled(busy || !store.canWrite)
                 }

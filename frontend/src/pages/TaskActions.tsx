@@ -206,13 +206,14 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
  *  many changes rounds, checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
  *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
 function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
-  const [busy, setBusy] = useState<"pause" | "resume" | null>(null);
+  const [busy, setBusy] = useState<"pause" | "resume" | "reopen" | null>(null);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
-  const run = async (what: "pause" | "resume") => {
+  const run = async (what: "pause" | "resume" | "reopen") => {
     setBusy(what);
     setSaid(null);
     try {
-      const r = await (what === "pause" ? api.pauseIssueDelivery(t.id) : api.resumeIssueDelivery(t.id));
+      const call = { pause: api.pauseIssueDelivery, resume: api.resumeIssueDelivery, reopen: api.reopenIssueDelivery }[what];
+      const r = await call(t.id);
       setD(r);
       setSaid({ ok: true, text: r.message });
     } catch (e) {
@@ -221,7 +222,7 @@ function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
       setBusy(null);
     }
   };
-  return { pause: () => run("pause"), resume: () => run("resume"), busy, said };
+  return { pause: () => run("pause"), resume: () => run("resume"), reopen: () => run("reopen"), busy, said };
 }
 
 function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<typeof useDeliveryActions> }) {
@@ -236,6 +237,11 @@ function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<type
       {show.resume && (
         <button className={cx("btn-primary", a.busy === "resume" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "resume"} onClick={a.resume}>
           {a.busy === "resume" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {a.busy === "resume" ? "Resuming…" : "Resume"}
+        </button>
+      )}
+      {show.reopen && (
+        <button className={cx("btn-primary", a.busy === "reopen" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "reopen"} onClick={a.reopen} title="Build the tickets published since; the spec PR goes back to draft">
+          {a.busy === "reopen" ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />} {a.busy === "reopen" ? "Reopening…" : "Reopen delivery"}
         </button>
       )}
     </>
