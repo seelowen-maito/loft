@@ -428,9 +428,9 @@ mod tests {
         std::fs::create_dir_all(base.join(".git")).unwrap();
         let s = run(&st).await;
         assert!(s.error.as_ref().is_some_and(|e| e.message.contains("git repository")), "{s:?}");
-        let body = serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "claude_bin": "claude-other", "backup_dir": st.settings.get().backup_dir });
+        let body = serde_json::json!({ "projects_dir": st.settings.get().projects_dir, "claude_bin": "sh", "backup_dir": st.settings.get().backup_dir });
         assert!(crate::api::put_settings(State(st.clone()), Json(body)).await.is_ok(), "other settings still save");
-        assert_eq!(st.settings.get().claude_bin, "claude-other");
+        assert_eq!(st.settings.get().claude_bin, "sh");
 
         // A database that isn't there fails without leaving a half-made folder.
         let root = base.join("missing-db");
