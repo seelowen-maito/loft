@@ -3052,6 +3052,168 @@ pub(crate) mod tests {
         assert_eq!((a.state.as_str(), a.rounds, b.state.as_str(), b.rounds, b.verdicts["ci"].as_str()), ("started", 1, "review", 0, "pending"));
     }
 
+    /// A started Delivery on `name` with three tickets, #41 "Store", #42 "API" and #43 "UI" (blocked by #41
+    /// when `ui_waits`), #41 with the Dev, and the team's other `roles`, all busy. Reviewing and closing #41
+    /// and #42 is routed, and the branch has no CI.
+    async fn pipelined(st: &AppState, fake: &Fake, name: &str, roles: &[&str], ui_waits: bool) -> (Agent, Vec<Agent>) {
+        let slug = format!("octo/{name}");
+        let ui = ticket("UI", if ui_waits { &["Store"] } else { &[] });
+        let (a, m) = planned(st, fake, name, vec![ticket("Store", &[]), ticket("API", &[]), ui]).await;
+        let dev = busy(st, "Builder", name, "dev");
+        let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
+        press(st, &a, &m).await.unwrap();
+        for p in ["issues/500/comments", "issues/500/labels", "labels", "issues/41/comments", "issues/42/comments"] {
+            fake.route("POST", &format!("/repos/{slug}/{p}"), 201, json!({}));
+        }
+        fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/changes-requested"), 200, json!([]));
+        for (n, what) in [(41, "Store"), (42, "API")] {
+            let body = format!("## What to build\n\n{what}.");
+            fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(&slug, n, "open", &body));
+            fake.route("PATCH", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(&slug, n, "closed", &body));
+        }
+        ci_on(fake, &slug, "spec/40-rounds", json!([]));
+        (dev, team)
+    }
+
+    fn submit_42() -> Value {
+        json!({ "number": 42, "commits": ["0123abcd"] })
+    }
+
+    /// Each ticket's state on the Delivery of spec #40, in order, and the ticket the Dev builds.
+    fn tickets_of(st: &AppState, slug: &str) -> (Vec<String>, Option<i64>) {
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        (d.tickets.iter().map(|t| t.state.clone()).collect(), d.current)
+    }
+
+    fn states(s: &[&str]) -> Vec<String> {
+        s.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn the_dev_builds_the_next_unblocked_ticket_while_one_is_in_review() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-next";
+        let (dev, _) = pipelined(&st, &fake, "pl-next", &["qa"], true).await;
+        always_fresh(&st, &dev);
+        assert!(cleared_at_next_run(&st, &dev));
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.ends_with("\nNext: #42 is with Builder. Loft wakes you with it once this run ends."), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["review", "started", "open"]), Some(42)), "#43 waits for #41 to close");
+        assert_eq!(posts(&fake, slug, "issues/42/labels"), [json!({ "labels": ["in-progress"] })]);
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 2);
+        assert!(w[1].contains("build ticket #42 \"API\""), "{w:?}");
+        assert!(cleared_at_next_run(&st, &dev), "a new ticket clears the context");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_blocked_by_the_one_in_review_doesnt_start() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-blocked";
+        let (dev, team) = building(&st, &fake, "pl-blocked", &["qa"]).await;
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(!out.contains("Next"), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["review", "open"]), Some(41)));
+        assert_eq!(woken(&st, &dev).len(), 1, "the Dev waits");
+        // #42 starts once #41 closes.
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(tickets_of(&st, slug), (states(&["closed", "started"]), Some(42)));
+    }
+
+    #[tokio::test]
+    async fn nothing_new_starts_with_one_ticket_in_review_and_another_being_built() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/pl-limit";
+        let (dev, team) = pipelined(&st, &fake, "pl-limit", &["qa"], false).await;
+        fake.route("GET", &format!("/repos/{slug}/issues"), 200, json!([]));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [run("in_progress", None)] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(tickets_of(&st, slug), (states(&["review", "started", "open"]), Some(42)));
+
+        // #41 in review and #42 being built: neither the mirror's catch-up nor the CI tick starts #43.
+        crate::mirror::sync_project(&st, "pl-limit", false).await.unwrap();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(tickets_of(&st, slug), (states(&["review", "started", "open"]), Some(42)));
+        assert_eq!(woken(&st, &dev).len(), 2);
+
+        // Both in review: still nothing new.
+        let out = tool(&st, &dev, "submit_ticket", submit_42()).await.unwrap();
+        assert!(!out.contains("Next"), "{out}");
+        crate::mirror::sync_project(&st, "pl-limit", false).await.unwrap();
+        assert_eq!(tickets_of(&st, slug).0, states(&["review", "review", "open"]));
+        assert_eq!(woken(&st, &dev).len(), 2);
+
+        // #41 closes: one in review again, so #43 starts.
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("Closed #41") && out.contains("\nNext: #43 is with Builder.\n"), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["closed", "review", "started"]), Some(43)));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 3);
+        assert!(w[2].contains("build ticket #43 \"UI\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn changes_asked_while_the_dev_builds_the_next_ticket_wait_for_its_submit_and_come_first() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-fix";
+        let (dev, team) = pipelined(&st, &fake, "pl-fix", &["qa"], false).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        always_fresh(&st, &dev);
+        cleared_at_next_run(&st, &dev);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(cleared_at_next_run(&st, &dev), "#42 is a new ticket");
+
+        // QA asks for changes on #41 during #42's run: nothing reaches the Dev yet.
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "changes", "notes": "The total is off by one." })).await.unwrap();
+        assert!(out.ends_with("The Dev is building #42 now: it fixes #41 (round 1 of 3) once it submits that one, before any new ticket."), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["changes", "started", "open"]), Some(42)));
+        assert_eq!(woken(&st, &dev).len(), 2, "the run on #42 isn't interrupted, and nothing waits behind it");
+        assert!(tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err().contains("it has changes waiting"));
+
+        // #42 is in: the fix runs next, before #43, and stands on its own after the cleared context.
+        let out = tool(&st, &dev, "submit_ticket", submit_42()).await.unwrap();
+        assert!(out.ends_with("\nNext: the Dev fixes #41 (round 1 of 3). Loft wakes you with it once this run ends."), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["started", "review", "open"]), Some(41)));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 3);
+        assert!(w[2].contains("qa agent (QA) asked for changes on ticket #41 \"Store\" (round 1 of 3), submitted as `abc1234`, `fed4321`:\n\nThe total is off by one."), "{}", w[2]);
+        assert!(cleared_at_next_run(&st, &dev), "back to #41 from #42");
+
+        // The fix is in with #42 still in review: nothing new.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(tickets_of(&st, slug).0, states(&["review", "review", "open"]));
+        assert_eq!(woken(&st, &dev).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_red_ci_while_the_dev_builds_the_next_ticket_waits_for_its_submit() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-ci";
+        let (dev, _) = pipelined(&st, &fake, "pl-ci", &["qa"], false).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked: off by one"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(tickets_of(&st, slug), (states(&["changes", "started", "open"]), Some(42)));
+        assert_eq!(woken(&st, &dev).len(), 2);
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().ticket(41).unwrap().rounds, 1);
+        // The next tick has nothing new to say about #41.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(woken(&st, &dev).len(), 2);
+
+        tool(&st, &dev, "submit_ticket", submit_42()).await.unwrap();
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 3);
+        assert!(w[2].contains("The CI asked for changes on ticket #41 \"Store\" (round 1 of 3)") && w[2].contains("panicked: off by one"), "{}", w[2]);
+        assert_eq!(tickets_of(&st, slug), (states(&["started", "review", "open"]), Some(41)));
+        // #42's CI is red on the same commit, but the fix of #41 comes first.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().ticket(42).unwrap().rounds, 0);
+    }
+
     /// `building` for both tickets: closing #42 is routed too.
     async fn building_both(st: &AppState, fake: &Fake, name: &str, roles: &[&str]) -> (Agent, Vec<Agent>) {
         let out = building(st, fake, name, roles).await;

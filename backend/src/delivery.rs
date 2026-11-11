@@ -1,7 +1,8 @@
-//! Deliveries: Loft running a spec's tickets from published to merged, one ticket at a time, with no
-//! agent coordinating it. The record (`db::Delivery`) is written when the spec is published and its
-//! tickets added as they are; "Start delivery" on the end-of-planning card, or on a spec's or a standalone
-//! ticket's issue page, starts the first one. A spec published earlier gets its record from GitHub there.
+//! Deliveries: Loft running a spec's tickets from published to merged, with no agent coordinating it. The
+//! Dev builds one ticket at a time, and starts the next unblocked one while its last is in review. The
+//! record (`db::Delivery`) is written when the spec is published and its tickets added as they are; "Start
+//! delivery" on the end-of-planning card, or on a spec's or a standalone ticket's issue page, starts the
+//! first one. A spec published earlier gets its record from GitHub there.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -93,7 +94,7 @@ pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: id.into(), skipped: String::new() });
+        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: id.into(), skipped: String::new(), changes: String::new() });
     });
 }
 
@@ -109,7 +110,7 @@ pub fn update(state: &AppState, repo: &str, spec: i64, f: impl FnOnce(&mut Deliv
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
     update(state, repo, spec, |d| {
         if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: String::new() });
+            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: String::new(), changes: String::new() });
         }
     });
 }
@@ -352,11 +353,27 @@ async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent)
     Ok(())
 }
 
-/// After a ticket closed: starts the next unblocked one on the team's Dev. A line for the reply.
-async fn start_next(state: &AppState, repo: &str, spec: i64) -> String {
+/// What the Dev does next, once it isn't building a ticket (it submitted it, or the ticket closed or went
+/// back for changes): a fix waiting in its queue first, then the next unblocked ticket while at most one
+/// of its tickets is in review. Nothing while it builds or fixes one, so a run is never interrupted, and
+/// no new ticket while one waits for the user. The caller holds the repo's publish lock. A line for the reply.
+async fn advance(state: &AppState, repo: &str, spec: i64) -> String {
     let Some(d) = state.db.get_delivery(repo, spec).ok().flatten() else { return String::new() };
+    if d.tickets.iter().any(|t| t.state == "started") {
+        return String::new();
+    }
+    if let Some(t) = d.tickets.iter().find(|t| t.state == "changes") {
+        return fix(state, &d, t.number);
+    }
+    if let Some(t) = d.tickets.iter().find(|t| t.state == "needs_human") {
+        return format!("\n{} waits for the user, so no new ticket starts.", tag(&d, t));
+    }
+    let in_review = d.tickets.iter().filter(|t| t.state == "review").count();
+    if in_review > 1 {
+        return String::new();
+    }
     let Some(t) = next_ticket(&d).cloned() else {
-        return format!("\nThe {} has no ticket left to start.", subject(&d));
+        return if in_review > 0 { String::new() } else { format!("\nThe {} has no ticket left to start.", subject(&d)) };
     };
     let (n, name) = (t.number, tag(&d, &t));
     let Some(agent) = builder(state, &d, &d.dev) else {
@@ -369,6 +386,43 @@ async fn start_next(state: &AppState, repo: &str, spec: i64) -> String {
             format!("\n{name} is next, but {e}: the mirror's next poll starts it.")
         }
     }
+}
+
+/// Hands the Dev the fix waiting for ticket #n: the ticket is being built again, with the changes brief
+/// queued when it went back. A line for the reply.
+fn fix(state: &AppState, d: &Delivery, n: i64) -> String {
+    let mut brief = String::new();
+    let Some(d) = update(state, &d.repo, d.spec, |d| {
+        d.current = Some(n);
+        if let Some(t) = d.ticket_mut(n) {
+            t.state = "started".into();
+            brief = std::mem::take(&mut t.changes);
+        }
+    }) else {
+        return String::new();
+    };
+    let Some(t) = d.ticket(n) else { return String::new() };
+    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, Some(n)), true, brief);
+    format!("\nNext: the Dev fixes {} (round {} of {MAX_ROUNDS}).", tag(&d, t), t.rounds)
+}
+
+/// Sends ticket #n back to the Dev with `brief`, for changes round `rounds`: at once when the Dev isn't
+/// building another ticket, otherwise once it submits that one, before any new ticket. The line for the reply.
+async fn send_back(state: &AppState, d: &Delivery, n: i64, rounds: u32, brief: String) -> Result<String, String> {
+    let d = update(state, &d.repo, d.spec, |d| {
+        if let Some(t) = d.ticket_mut(n) {
+            t.rounds = rounds;
+            t.verdicts.clear();
+            (t.state, t.changes) = ("changes".into(), brief);
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    let name = d.ticket(n).map(|t| tag(&d, t)).unwrap_or_default();
+    if let Some(other) = d.tickets.iter().find(|t| t.state == "started") {
+        return Ok(format!(" The Dev is building {} now: it fixes {name} (round {rounds} of {MAX_ROUNDS}) once it submits that one, before any new ticket.", tag(&d, other)));
+    }
+    advance(state, &d.repo, d.spec).await;
+    Ok(format!(" The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
 }
 
 /// The roles that review each ticket, in the order they are woken.
@@ -412,7 +466,7 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "submit_ticket",
-        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, and closes the ticket and starts the next one when they pass and the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
+        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, hands you the next unblocked ticket meanwhile, and closes the ticket when they pass and the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log, after you submit the ticket you're building: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for final Code Review fixes, the spec PR's number, or the spec's Loft issue id." },
             "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of all the ticket's commits, oldest first." }
@@ -495,6 +549,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     if d.current != Some(n) || t.state != "started" {
         let why = match t.state.as_str() {
             "review" => "it's already submitted and waiting for its reviewers",
+            "changes" => "it has changes waiting, and Loft sends them to you once you submit the ticket you're building",
             "closed" | "closing" => "it has passed review already",
             "needs_human" => "it's waiting for the user after too many changes rounds",
             _ => "it isn't the ticket being built",
@@ -524,13 +579,18 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted.{closed}"));
     }
+    // Free of #n: the Dev moves on while it's reviewed, in a run of its own.
+    let mut next = advance(state, &slug, d.spec).await;
+    if !next.is_empty() && state.db.get_delivery(&slug, d.spec).ok().flatten().is_some_and(|d| d.tickets.iter().any(|t| t.state == "started")) {
+        next += " Loft wakes you with it once this run ends.";
+    }
     if reviewers.is_empty() {
         let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
             tracing::warn!("delivery {slug}#{}: CI: {e}", d.spec);
             String::new()
         });
         let waits = if followed.is_empty() { " Loft closes it when the CI is green, and wakes you if it fails." } else { "" };
-        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{waits}{followed}"));
+        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{waits}{followed}{next}"));
     }
     let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
@@ -538,7 +598,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
     let (and_ci, fails, green) = if ci { (", and Loft follows its CI", " or the CI fails", " and the CI is green") } else { ("", "", "") };
-    Ok(format!("Submitted {name}: {names} are reviewing it{and_ci}. Loft wakes you if they ask for changes{fails}, and closes it when they pass{green}."))
+    Ok(format!("Submitted {name}: {names} are reviewing it{and_ci}. Loft wakes you if they ask for changes{fails}, and closes it when they pass{green}.{next}"))
 }
 
 /// Changes rounds after which a ticket waits for the user instead of going back to the Dev.
@@ -616,22 +676,20 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
 
     let rounds = t.rounds + 1;
-    let stuck = rounds >= MAX_ROUNDS;
-    update(state, &slug, d.spec, |d| {
-        if let Some(t) = d.ticket_mut(n) {
-            t.rounds = rounds;
-            t.verdicts.clear();
-            t.state = if stuck { "needs_human" } else { "started" }.into();
-        }
-    })
-    .ok_or("The Delivery record couldn't be saved.")?;
-    if stuck {
+    if rounds >= MAX_ROUNDS {
+        update(state, &slug, d.spec, |d| {
+            if let Some(t) = d.ticket_mut(n) {
+                (t.rounds, t.state) = (rounds, "needs_human".into());
+                t.verdicts.clear();
+            }
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
         let why = needs_human(state, &d, Some(&t), rounds, notes).await;
         return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on {name}, so it waits for the user now{why}."));
     }
     let brief = changes_brief(&d, &t, rounds, &format!("{} ({label})", me.name), notes);
-    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, Some(n)), true, brief);
-    Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
+    let back = send_back(state, &d, n, rounds, brief).await?;
+    Ok(format!("Posted your changes on {on}.{labelled}{back}"))
 }
 
 /// The wake that sends ticket `t` back to the Dev for changes round `rounds`, asked for by `who` (a reviewer,
@@ -721,11 +779,13 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
             if let Some(t) = d.ticket_mut(n) {
                 t.state = "closed".into();
             }
-            d.current = None;
+            if d.current == Some(n) {
+                d.current = None;
+            }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
         let after = crate::planning::after_tickets(state, &d).await.unwrap_or_default().unwrap_or_default();
-        let next = start_next(state, &d.repo, d.spec).await;
+        let next = advance(state, &d.repo, d.spec).await;
         return Ok(format!("\n{} is done.{after}{next}", tag(&d, t)));
     }
     if d.standalone {
@@ -734,7 +794,9 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
             if let Some(t) = d.ticket_mut(n) {
                 t.state = "closed".into();
             }
-            d.current = None;
+            if d.current == Some(n) {
+                d.current = None;
+            }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
         if let Some(pr) = d.pr {
@@ -763,7 +825,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
         // A pass after a changes round: the PR no longer waits for changes on this ticket.
         let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{}/issues/{pr}/labels/changes-requested", d.repo), None).await;
     }
-    let next = start_next(state, &d.repo, d.spec).await;
+    let next = advance(state, &d.repo, d.spec).await;
     Ok(format!("\n{closed}{next}"))
 }
 
@@ -806,7 +868,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     let head = head["object"]["sha"].as_str().ok_or_else(|| format!("GitHub gave the branch `{}` no commit", d.branch))?.to_string();
     // The tickets still open that the commit includes, oldest first.
     let mut included = vec![];
-    for t in d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "needs_human")) {
+    for t in d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "needs_human")) {
         let Some(last) = t.commits.last() else { continue };
         if includes(state, &d.repo, &head, last).await.map_err(err)? {
             included.push(t);
@@ -834,7 +896,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
             // A ticket whose CI already passed on an earlier commit isn't what broke it.
             match included.iter().find(|t| t.verdicts.get("ci").is_none_or(|v| v != "pass")) {
                 Some(t) if waits_for_ci(t) => ci_failed(state, d, t, &head, &names, &log).await,
-                // Being fixed, or waiting for the user: its next commit runs the CI again.
+                // Being fixed, waiting for its fix, or waiting for the user: its next commit runs the CI again.
                 _ => Ok(String::new()),
             }
         }
@@ -962,22 +1024,20 @@ async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &st
         };
     }
     let rounds = t.rounds + 1;
-    let stuck = rounds >= MAX_ROUNDS;
-    update(state, &d.repo, d.spec, |d| {
-        if let Some(t) = d.ticket_mut(n) {
-            t.rounds = rounds;
-            t.verdicts.clear();
-            t.state = if stuck { "needs_human" } else { "started" }.into();
-        }
-    })
-    .ok_or("The Delivery record couldn't be saved.")?;
-    if stuck {
+    if rounds >= MAX_ROUNDS {
+        update(state, &d.repo, d.spec, |d| {
+            if let Some(t) = d.ticket_mut(n) {
+                (t.rounds, t.state) = (rounds, "needs_human".into());
+                t.verdicts.clear();
+            }
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
         let why = needs_human(state, d, Some(t), rounds, &format!("the CI failed: {checks}")).await;
         return Ok(format!("\nThe CI failed on {name} ({checks}).{posted} That's round {rounds} of changes, so it waits for the user now{why}."));
     }
     let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, which includes the ticket. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch);
-    crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(d, Some(n)), true, changes_brief(d, t, rounds, "The CI", &notes));
-    Ok(format!("\nThe CI failed on {name} ({checks}).{posted} The Dev is fixing it (round {rounds} of {MAX_ROUNDS})."))
+    let back = send_back(state, d, n, rounds, changes_brief(d, t, rounds, "The CI", &notes)).await?;
+    Ok(format!("\nThe CI failed on {name} ({checks}).{posted}{back}"))
 }
 
 /// Follows the CI of every running Delivery's tickets that wait for it, on a tick of its own: a ticket
@@ -1012,8 +1072,8 @@ pub(crate) async fn follow_all(state: &AppState) {
     }
 }
 
-/// The mirror's catch-up: closes the tickets whose close failed after they passed, then starts the next
-/// ticket of a running Delivery that has none (its start failed).
+/// The mirror's catch-up: closes the tickets whose close failed after they passed, then moves the Dev of a
+/// running Delivery on when it builds nothing (a start that failed).
 pub(crate) async fn retry(state: &AppState, repo: &str) {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     for d in state.db.deliveries_in(repo, "running").unwrap_or_default() {
@@ -1024,9 +1084,10 @@ pub(crate) async fn retry(state: &AppState, repo: &str) {
             }
         }
         let d = state.db.get_delivery(repo, d.spec).ok().flatten().unwrap_or(d);
-        let busy = d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review" | "closing" | "needs_human"));
-        if d.current.is_none() && !busy && next_ticket(&d).is_some() {
-            let line = start_next(state, repo, d.spec).await;
+        let waits = |s: &str| d.tickets.iter().any(|t| t.state == s);
+        let due = waits("changes") || !waits("needs_human") && next_ticket(&d).is_some();
+        if due && !waits("started") {
+            let line = advance(state, repo, d.spec).await;
             tracing::info!("delivery {repo}#{}: {}", d.spec, line.trim());
         }
     }
@@ -1142,7 +1203,7 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                 let title = x["title"].as_str().unwrap_or_default().to_string();
                 match d.ticket_mut(n) {
                     Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
-                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: skipped.unwrap_or_default() }),
+                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: skipped.unwrap_or_default(), changes: String::new() }),
                 }
             }
             // A ticket taken off the spec on GitHub isn't the Delivery's any more.
@@ -1615,7 +1676,7 @@ mod tests {
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
-        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: "loft-issue-1".into(), skipped: String::new() });
+        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: "loft-issue-1".into(), skipped: String::new(), changes: String::new() });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 
