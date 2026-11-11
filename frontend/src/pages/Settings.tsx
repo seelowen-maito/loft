@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronRight, Loader2, RotateCw } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronRight, Loader2, RotateCw } from "lucide-react";
+import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanItem, type CleanLog, type CleanSkip, type GitCheck, type GithubBudget, type LeftProcess, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { PairedClients } from "./PairedClients";
 import { MacAccess } from "./MacAccess";
 import { HerdrSetup } from "./HerdrSetup";
-import { canCheck, canTick, cleanLineText, cx, fmtBytes, gitCheckText, oneLine, shownCommand, timeAgo } from "../lib/format";
+import { canCheck, cleanLineText, cleanStatus, cleanType, cx, fmtBytes, gitCheckText, oneLine, sortClean, timeAgo, type CleanSort } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -189,22 +189,23 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   );
 }
 
-/** Disk: each agent's workspace size and the free space. Clean (one agent) and Clean all list each workspace's
- * top-level items for the user to tick, then log each removal; the last run's log, the daily sweep's included, stays here. */
+/** Disk: the free space, and Clean. Check space lists every agent's workspace items in one table to tick and
+ * delete, and logs each removal; the last run's log, the daily sweep's included, stays here. */
 function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours: (v: number) => void }) {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
   const [devices, setDevices] = useState<AgentDevice[] | null>(null);
-  // The open list: whose (an agent's id, or "all"), its items, and the paths ticked.
-  const [preview, setPreview] = useState<Picker | null>(null);
+  // What idle agents left running, by agent id, and the agent whose Stop them is working.
+  const [left, setLeft] = useState<Record<string, LeftProcess[]>>({});
+  const [stopping, setStopping] = useState<string | null>(null);
+  // The table: every agent's items and the paths ticked; null until Check space.
+  const [table, setTable] = useState<Picker | null>(null);
   // The log on screen: live while cleaning, then the summary.
   const [shown, setShown] = useState<CleanLog | null>(null);
   const [last, setLast] = useState<CleanLog | null>(null);
-  const [loading, setLoading] = useState<string | null>(null);
-  // Agents whose sizes are measured again after a clean.
-  const [remeasuring, setRemeasuring] = useState<Set<string>>(new Set());
+  const [checking, setChecking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const card = useRef<HTMLDivElement>(null);
-  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices))]);
+  const load = () => Promise.all([api.workspaces().then(setS), api.cleanLog().then(setLast), api.agentDevices().then((d) => setDevices(d.devices)), api.leftRunning().then(setLeft)]);
   useEffect(() => {
     load().then(() => {
       // Needs you links here when the disk is almost full.
@@ -212,34 +213,46 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
     }).catch((e) => setErr((e as Error).message));
   }, []);
   const name = (id: string) => s?.agents.find((a) => a.id === id)?.name ?? `Deleted agent ${id.slice(0, 8)}`;
-  const open = async (who: string) => {
-    setLoading(who);
+  const checkSpace = async () => {
+    setChecking(true);
     setErr(null);
     try {
-      const { items } = await api.cleanPreview(who === "all" ? undefined : who);
-      setPreview({ who, items, ticked: new Set(items.filter((i) => i.ticked).map((i) => i.path)) });
+      const [{ items }, l] = await Promise.all([api.cleanPreview(), api.leftRunning()]);
+      setLeft(l);
+      setTable({ items, ticked: new Set() });
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setLoading(null);
+      setChecking(false);
+    }
+  };
+  const stopThem = async (id: string) => {
+    setStopping(id);
+    setErr(null);
+    try {
+      await api.stopLeftRunning(id);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setStopping(null);
     }
   };
   const confirm = async () => {
-    if (!preview) return;
-    const paths = [...preview.ticked];
-    setPreview(null);
-    const title = preview.who === "all" ? "Cleaning all agents…" : `Cleaning ${name(preview.who)}…`;
-    setShown({ at: null, what: "", title, running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
+    if (!table) return;
+    const paths = [...table.ticked];
+    setShown({ at: null, what: "", title: "Cleaning…", running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
     // The log fills in as Loft removes each folder.
     let done = false;
     const poll = setInterval(() => api.cleanLog().then((l) => l.running && !done && setShown(l)).catch(() => {}), 500);
     try {
-      const l = await api.clean(preview.who === "all" ? undefined : preview.who, paths);
+      const l = await api.clean(undefined, paths);
       done = true;
       setShown(l);
       setLast(l);
-      setRemeasuring(new Set(l.lines.map((x) => x.agent)));
-      await load().finally(() => setRemeasuring(new Set()));
+      // The table shows what is left.
+      setTable(null);
+      await Promise.all([load(), checkSpace()]);
     } catch (e) {
       done = true;
       setShown(null);
@@ -249,10 +262,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
     }
   };
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
-  const rows = [...(s?.agents ?? [])].sort((a, b) => b.bytes - a.bytes);
-  // Sizes are measured on the first load and for a preview; Clean waits for them.
-  const measuring = !s || loading !== null;
-  const busy = measuring || remeasuring.size > 0 || shown?.running === true;
+  const busy = !s || checking || shown?.running === true;
   return (
     <div ref={card} id="workspaces">
       <Section title="Disk">
@@ -260,32 +270,17 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
           <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
           </p>
-          <button type="button" className="btn shrink-0" disabled={busy || rows.every((r) => r.busy)} onClick={() => open("all")}>
-            Clean all
+          <button type="button" className="btn shrink-0" disabled={busy} onClick={checkSpace}>
+            {checking ? "Checking…" : "Check space"}
           </button>
         </div>
         {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
-        {measuring ? (
+        {checking && !table && (
           <p className="flex items-center gap-2 py-2 text-[13px] text-fg-2">
             <Loader2 className="size-4 animate-spin" /> Measuring workspaces…
           </p>
-        ) : (
-          <ul className="space-y-1.5 text-[13px]">
-            {rows.map((r) => (
-              <li key={r.id} className="flex items-center gap-3">
-                <span className="min-w-0 flex-1 truncate text-fg-2">{r.name}</span>
-                {remeasuring.has(r.id) ? (
-                  <Loader2 className="size-4 shrink-0 animate-spin text-fg-3" aria-label="Measuring" />
-                ) : (
-                  <span className="shrink-0 tabular-nums text-fg">{fmtBytes(r.bytes)}</span>
-                )}
-                <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={r.busy || busy} onClick={() => open(r.id)}>
-                  {r.busy ? "Working" : "Clean"}
-                </button>
-              </li>
-            ))}
-          </ul>
         )}
+        {table && <CleanTable table={table} name={name} left={left} stopping={stopping} busy={busy} onChange={setTable} onStop={stopThem} onConfirm={confirm} />}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
@@ -321,10 +316,9 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
           />
         </Field>
         <p className="text-[12px] text-fg-3">
-          Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
+          Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily.
         </p>
       </Section>
-      {preview && <CleanPreview preview={preview} name={name} onChange={setPreview} onCancel={() => setPreview(null)} onConfirm={confirm} />}
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
     </div>
   );
@@ -388,16 +382,19 @@ function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) =
   );
 }
 
-/** An open Clean: whose (an agent's id, or "all"), the items listed, and the paths ticked. */
-type Picker = { who: string; items: CleanItem[]; ticked: Set<string> };
+/** The Clean table: the items listed and the paths ticked. */
+type Picker = { items: CleanItem[]; ticked: Set<string> };
 
-/** Every workspace's top-level items, by agent, with size, last change, kind and command; tick what to remove. A main
- * clone opens up to its folders, loaded one level at a time. */
-function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
-  preview: Picker;
+/** Every agent's top-level items in one table: agent, item, type, size, last change and status. Sort by size, agent or
+ * last change; tick what to delete. A main clone opens up to its folders, loaded one level at a time. */
+function CleanTable({ table, name, left, stopping, busy, onChange, onStop, onConfirm }: {
+  table: Picker;
   name: (id: string) => string;
+  left: Record<string, LeftProcess[]>;
+  stopping: string | null;
+  busy: boolean;
   onChange: (p: Picker) => void;
-  onCancel: () => void;
+  onStop: (agent: string) => void;
   onConfirm: () => void;
 }) {
   // Folders listed inside opened items, by path; null while loading.
@@ -405,16 +402,16 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
   const [err, setErr] = useState<string | null>(null);
   // Check results by path; null while checking. Git runs only when the user clicks, and nothing gets ticked.
   const [checks, setChecks] = useState<Map<string, GitCheck | null>>(new Map());
-  const { items, ticked } = preview;
+  const [sort, setSort] = useState<CleanSort>({ by: "size", desc: true });
+  const { items, ticked } = table;
   const known = [...items, ...[...inside.values()].flatMap((xs) => xs ?? [])];
   const chosen = known.filter((i) => ticked.has(i.path));
   const total = chosen.reduce((n, i) => n + i.bytes, 0);
-  const kept = items.reduce((n, i) => n + i.bytes, 0) - total;
   const toggle = (path: string, on: boolean) => {
     const t = new Set(ticked);
     if (on) t.add(path);
     else t.delete(path);
-    onChange({ ...preview, ticked: t });
+    onChange({ ...table, ticked: t });
   };
   const open = async (i: CleanItem) => {
     const m = new Map(inside);
@@ -441,102 +438,153 @@ function CleanPreview({ preview, name, onChange, onCancel, onConfirm }: {
     }
     setChecks((cur) => new Map(cur).set(i.path, c));
   };
-  const checkAll = async (xs: CleanItem[]) => {
-    for (const i of xs.filter((i) => canCheck(i, 0))) await check(i);
-  };
+  const sortBy = (by: CleanSort["by"]) => setSort((s) => (s.by === by ? { by, desc: !s.desc } : { by, desc: by !== "agent" }));
+  const head = (by: CleanSort["by"], label: string, cls = "") => (
+    <th className={cx("px-2 py-1.5 font-medium", cls)} aria-sort={sort.by === by ? (sort.desc ? "descending" : "ascending") : "none"}>
+      <button type="button" className="inline-flex items-center gap-1 hover:text-fg" onClick={() => sortBy(by)}>
+        {label}
+        {sort.by === by && (sort.desc ? <ArrowDown className="size-3" /> : <ArrowUp className="size-3" />)}
+      </button>
+    </th>
+  );
   const row = (i: CleanItem, depth: number): React.ReactNode => {
     const sub = inside.get(i.path);
     const checked = checks.get(i.path);
     const on = ticked.has(i.path);
+    const status = cleanStatus(i, depth);
     return (
-      <li key={i.path}>
-        <div className="flex items-start gap-2" style={{ paddingLeft: depth * 18 }}>
-          {i.opens ? (
-            <button type="button" className="mt-0.5 shrink-0 text-fg-3 hover:text-fg" aria-label={sub !== undefined ? `Close ${i.name}` : `Open ${i.name}`} onClick={() => open(i)}>
-              <ChevronRight className={cx("size-4 transition-transform", sub !== undefined && "rotate-90")} />
-            </button>
-          ) : (
-            <span className="w-4 shrink-0" />
-          )}
-          <input type="checkbox" className="mt-1" aria-label={`Remove ${i.rel}`} checked={on} disabled={!canTick(i, depth)} onChange={(e) => toggle(i.path, e.target.checked)} />
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-x-2">
-              <span className="min-w-0 truncate font-mono text-fg">{i.name}</span>
-              <span className="text-[11.5px] text-fg-3">{i.kind === "clone" ? "git clone" : i.kind}</span>
-              {i.label && <span className="text-[11.5px] text-accent">{i.label}</span>}
-              {i.blocked && <span className="text-[11.5px] text-warn">{i.blocked}</span>}
-              {on && i.warning && !checked && <span className="text-[11.5px] text-warn">{i.warning}</span>}
-              {canCheck(i, depth) && checked !== null && (
-                <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => check(i)}>
-                  {checked ? "Check again" : "Check"}
-                </button>
-              )}
-              <span className="flex-1" />
-              <span className="shrink-0 text-[11.5px] text-fg-3">{timeAgo(i.changed)}</span>
-              <span className="w-16 shrink-0 text-right tabular-nums">{fmtBytes(i.bytes)}</span>
-            </span>
-            {checked === null && (
-              <span className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
-                <Loader2 className="size-3 animate-spin" /> Checking git…
+      <Fragment key={i.path}>
+        <tr className="border-t border-line align-top">
+          <td className="hidden px-2 py-1.5 text-fg-2 min-[400px]:table-cell">{depth === 0 ? name(i.agent) : ""}</td>
+          <td className="px-2 py-1.5">
+            <div className="flex items-start gap-2" style={{ paddingLeft: depth * 18 }}>
+              <input type="checkbox" className="mt-1 shrink-0" aria-label={`Select ${name(i.agent)} ${i.rel}`} checked={on} disabled={status.locked || busy} onChange={(e) => toggle(i.path, e.target.checked)} />
+              <span className="min-w-0">
+                <span className="flex items-center gap-1">
+                  {i.opens && (
+                    <button type="button" className="shrink-0 text-fg-3 hover:text-fg" aria-label={sub !== undefined ? `Close ${i.name}` : `Open ${i.name}`} onClick={() => open(i)}>
+                      <ChevronRight className={cx("size-4 transition-transform", sub !== undefined && "rotate-90")} />
+                    </button>
+                  )}
+                  <span className="break-all font-mono text-fg">{i.name}</span>
+                </span>
+                {on && i.warning && !checked && <span className="block text-[11.5px] text-warn">{i.warning}</span>}
+                {checked === null && (
+                  <span className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+                    <Loader2 className="size-3 animate-spin" /> Checking git…
+                  </span>
+                )}
+                {checked && <span className={cx("block text-[11.5px]", checked.state === "safe" ? "text-good" : checked.state === "unsafe" ? "text-warn" : "text-fg-3")}>{gitCheckText(checked)}</span>}
+                {canCheck(i, depth) && checked !== null && (
+                  <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => check(i)}>
+                    {checked ? "Check again" : "Check git"}
+                  </button>
+                )}
+                {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
+                <span className="block text-[11.5px] text-fg-3 sm:hidden">{depth === 0 && <span className="min-[400px]:hidden">{name(i.agent)} · </span>}{cleanType(i)} · {timeAgo(i.changed)}</span>
               </span>
-            )}
-            {checked && <span className={cx("block text-[11.5px]", checked.state === "safe" ? "text-good" : checked.state === "unsafe" ? "text-warn" : "text-fg-3")}>{gitCheckText(checked)}</span>}
-            {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
-            {shownCommand(i, depth) && <span className="block break-all font-mono text-[11.5px] text-fg-3">{i.command}</span>}
-          </span>
-        </div>
+            </div>
+          </td>
+          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{cleanType(i)}</td>
+          <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{fmtBytes(i.bytes)}</td>
+          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{timeAgo(i.changed)}</td>
+          <td className={cx("px-2 py-1.5", status.locked ? "text-warn" : "text-good")}>
+            {status.text}
+            {!status.locked && i.label && <span className="block text-[11.5px] text-fg-3">{i.label}</span>}
+          </td>
+        </tr>
         {sub === null && (
-          <p className="flex items-center gap-2 py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 24 }}>
-            <Loader2 className="size-3.5 animate-spin" /> Measuring…
-          </p>
+          <tr><td colSpan={6} className="px-2 py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 40 }}><Loader2 className="mr-2 inline size-3.5 animate-spin" />Measuring…</td></tr>
         )}
-        {sub && (sub.length === 0 ? (
-          <p className="py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 24 }}>No folders inside.</p>
-        ) : (
-          <ul className="space-y-1.5 pt-1.5">{sub.map((c) => row(c, depth + 1))}</ul>
-        ))}
-      </li>
+        {sub && sub.length === 0 && (
+          <tr><td colSpan={6} className="px-2 py-1 text-[12px] text-fg-3" style={{ paddingLeft: (depth + 1) * 18 + 40 }}>No folders inside.</td></tr>
+        )}
+        {sub?.map((c) => row(c, depth + 1))}
+      </Fragment>
+    );
+  };
+  // An idle agent's leftover processes sit in the table before its first row.
+  const shownAgents = new Set<string>();
+  const sorted = sortClean(items, sort, name);
+  const processes = (agent: string): React.ReactNode => {
+    const ps = left[agent];
+    if (shownAgents.has(agent) || !ps?.length || items.find((i) => i.agent === agent)?.blocked === "Working") return null;
+    shownAgents.add(agent);
+    return (
+      <tr key={`ps-${agent}`} className="border-t border-line bg-ink-800/40">
+        <td colSpan={6} className="px-2 py-1.5 text-[12.5px]">
+         <div className="w-0 min-w-full space-y-1">
+          <div className="flex items-center gap-3">
+            <span className="min-w-0 flex-1 text-fg-2">
+              {name(agent)}: {ps.length} process{ps.length === 1 ? "" : "es"} still running
+            </span>
+            <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={stopping !== null || busy} onClick={() => onStop(agent)}>
+              {stopping === agent ? "Stopping…" : "Stop them"}
+            </button>
+          </div>
+          <ul className="space-y-0.5 text-fg-3">
+            {ps.map((p) => (
+              <li key={p.pid} className="flex gap-3">
+                <span className="min-w-0 flex-1 truncate font-mono" title={p.command}>{p.command}</span>
+                <span className="shrink-0 tabular-nums">{timeAgo(Date.now() / 1000 - p.age_secs).replace(" ago", "")}</span>
+              </li>
+            ))}
+          </ul>
+         </div>
+        </td>
+      </tr>
     );
   };
   return (
-    <Modal onClose={onCancel}>
-      <div>
-        <h3 className="text-[15px] font-medium">{preview.who === "all" ? "Clean all?" : `Clean ${name(preview.who)}?`}</h3>
-        <p className="mt-1 text-[13px] text-fg-2">
-          {items.length === 0
-            ? "Nothing to remove."
-            : `Removes ${chosen.length} item${chosen.length === 1 ? "" : "s"} (${fmtBytes(total)}) · keeps ${fmtBytes(Math.max(0, kept))}.`}
-        </p>
-      </div>
+    <div className="space-y-2">
       {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
-        {byAgent(items).map(([agent, xs]) => (
-          <div key={agent} className="space-y-1.5">
-            <p className="flex items-center gap-2 text-[13px] font-medium">
-              <span className="min-w-0 flex-1 truncate">{name(agent)}</span>
-              {xs.some((i) => canCheck(i, 0)) && (
-                <button type="button" className="shrink-0 text-[11.5px] font-normal text-accent hover:underline" onClick={() => checkAll(xs)}>
-                  Check all
-                </button>
-              )}
-              <span className="shrink-0 tabular-nums">{fmtBytes(xs.reduce((n, i) => n + i.bytes, 0))}</span>
-            </p>
-            <ul className="space-y-1.5 text-[12.5px]">{xs.map((i) => row(i, 0))}</ul>
-          </div>
-        ))}
-      </div>
+      {items.length === 0 ? (
+        <p className="text-[13px] text-fg-3">Nothing in any workspace.</p>
+      ) : (
+        <>
+        <label className="flex items-center gap-2 text-[12.5px] text-fg-2 sm:hidden">
+          Sort by
+          <select className="input flex-1" aria-label="Sort by" value={sort.by} onChange={(e) => setSort({ by: e.target.value as CleanSort["by"], desc: e.target.value !== "agent" })}>
+            <option value="size">Size</option>
+            <option value="agent">Agent</option>
+            <option value="changed">Last change</option>
+          </select>
+        </label>
+        <div className="overflow-x-auto rounded-xl border border-line">
+          <table className="w-full text-left sm:min-w-[600px] text-[12.5px]">
+            <thead className="text-[11.5px] uppercase tracking-wide text-fg-3">
+              <tr>
+                {head("agent", "Agent", "hidden min-[400px]:table-cell")}
+                <th className="px-2 py-1.5 font-medium">Item</th>
+                <th className="hidden px-2 py-1.5 font-medium sm:table-cell">Type</th>
+                {head("size", "Size", "text-right")}
+                {head("changed", "Last change", "hidden sm:table-cell")}
+                <th className="px-2 py-1.5 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((i) => (
+                <Fragment key={i.path}>
+                  {processes(i.agent)}
+                  {row(i, 0)}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        </>
+      )}
       {items.length > 0 && <p className="text-[12px] text-fg-3">{EQUIVALENT}</p>}
-      <div className="flex flex-wrap justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="min-w-0 flex-1 text-[13px] text-fg-2">
+          {chosen.length === 0 ? "Nothing selected" : `${chosen.length} selected · ${fmtBytes(total)}`}
+        </span>
         <CopyCommands items={chosen} name={name} />
-        <span className="flex-1" />
-        <button className="btn-ghost" onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="btn-primary" disabled={chosen.length === 0} onClick={onConfirm}>
-          Remove {fmtBytes(total)}
+        <button className="btn-primary" disabled={chosen.length === 0 || busy} onClick={onConfirm}>
+          Delete selected
         </button>
       </div>
-    </Modal>
+    </div>
   );
 }
 

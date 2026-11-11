@@ -96,6 +96,9 @@ protocol LoftAPI: Sendable {
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog
     /// The running or last clean's log, the daily sweep's included.
     func cleanLog() async throws -> CleanLog
+    /// What each idle agent left running, by agent id; Stop them stops one agent's.
+    func leftRunning() async throws -> [String: [LeftProcess]]
+    func stopLeftRunning(agentId: String) async throws
     /// Agents' Simulator devices, biggest first.
     func agentDevices() async throws -> [AgentDevice]
     /// A comment waiting for GitHub: post it (with `text` when edited), or keep it in Loft.
@@ -405,6 +408,8 @@ struct LiveLoftAPI: LoftAPI {
         return try decode(CleanLog.self, try await send("POST", "/workspaces/clean", body: body, timeout: 600))
     }
     func cleanLog() async throws -> CleanLog { try await get("/workspaces/log") }
+    func leftRunning() async throws -> [String: [LeftProcess]] { try await get("/workspaces/processes") }
+    func stopLeftRunning(agentId: String) async throws { _ = try await send("POST", "/workspaces/\(agentId)/stop-processes", body: .object([:]), timeout: 30) }
     func agentDevices() async throws -> [AgentDevice] {
         let l: AgentDevices = try await get("/simulator/devices")
         return l.devices
@@ -545,6 +550,8 @@ extension LoftAPI {
     func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { throw APIError.unsupported("Disk usage") }
     func clean(agentId: String?, paths: [String]) async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
     func cleanLog() async throws -> CleanLog { throw APIError.unsupported("Disk usage") }
+    func leftRunning() async throws -> [String: [LeftProcess]] { throw APIError.unsupported("Disk usage") }
+    func stopLeftRunning(agentId: String) async throws { throw APIError.unsupported("Disk usage") }
     func agentDevices() async throws -> [AgentDevice] { throw APIError.unsupported("Disk usage") }
     func approveComment(taskId: String, commentId: Int64, text: String?) async throws { throw APIError.unsupported("Comments") }
     func keepComment(taskId: String, commentId: Int64) async throws { throw APIError.unsupported("Comments") }

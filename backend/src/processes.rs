@@ -84,10 +84,39 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
     owners
 }
 
-/// The agents with a process still alive, like a detached dev server.
-pub fn with_live_processes(storage: &Path) -> HashSet<String> {
+/// Xcode's helper daemons, which `xcrun` and `xcodebuild` start and which never exit. They run in the agent's
+/// session but aren't its processes: Clean doesn't list them, and the idle stop and Stop them leave them alone.
+const HELPERS: [&str; 4] = ["DTServiceHub", "DTDeviceKit", "XCBBuildService", "SWBBuildService"];
+
+fn is_helper(command: &str) -> bool {
+    let exe = command.split_whitespace().next().unwrap_or_default();
+    HELPERS.contains(&exe.rsplit('/').next().unwrap_or_default())
+}
+
+/// A process an agent left alive, for Clean to list.
+#[derive(Debug, PartialEq)]
+pub struct Live {
+    pub pid: i32,
+    pub command: String,
+    pub age_secs: u64,
+}
+
+/// Each agent's live processes, like a detached dev server, by agent id (Xcode's helpers aside).
+pub fn live_processes(storage: &Path) -> HashMap<String, Vec<Live>> {
     let owners = owners(storage);
-    table().iter().filter_map(|p| owners.get(&session_of(p.pid)?).cloned()).collect()
+    let me = std::process::id() as i32;
+    let mut live: HashMap<String, Vec<Live>> = HashMap::new();
+    for p in table().into_iter().filter(|p| p.pid != me && !is_helper(&p.command)) {
+        if let Some(id) = session_of(p.pid).and_then(|s| owners.get(&s)) {
+            live.entry(id.clone()).or_default().push(Live { pid: p.pid, command: p.command, age_secs: p.age_secs });
+        }
+    }
+    live
+}
+
+/// The agents with a process still alive.
+pub fn with_live_processes(storage: &Path) -> HashSet<String> {
+    live_processes(storage).into_keys().collect()
 }
 
 /// The process session of `pid`, if it is alive.
@@ -205,7 +234,7 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me)
+            .filter(|p| p.pid != me && !is_helper(&p.command))
             .filter_map(|p| Some((p.pid, session_of(p.pid).filter(|s| mine.contains(s))?, p.command)))
             .collect();
         for (pid, _, _) in &targets {
@@ -266,18 +295,64 @@ pub async fn idle_stopper(state: AppState) {
     }
 }
 
+/// `GET /api/workspaces/processes`: what each idle agent left running, `{ <agent id>: [{ pid, command, age_secs }] }`,
+/// for Clean to list. An agent in a run has none listed: its processes are its own.
+pub async fn left_running(State(state): State<AppState>) -> Json<Value> {
+    let storage = state.cfg.storage_dir.clone();
+    let live = tokio::task::spawn_blocking(move || live_processes(&storage)).await.unwrap_or_default();
+    let running = state.rt.lock().unwrap().running.clone();
+    let list: serde_json::Map<String, Value> = live
+        .into_iter()
+        .filter(|(id, _)| !running.contains_key(id))
+        .map(|(id, ps)| (id, json!(ps.iter().map(|p| json!({ "pid": p.pid, "command": clip(&p.command, 200), "age_secs": p.age_secs })).collect::<Vec<_>>())))
+        .collect();
+    Json(Value::Object(list))
+}
+
+/// `POST /api/workspaces/{id}/stop-processes`: Clean's Stop them, which stops what an agent not in a run left
+/// running, the way the idle stop does (see [`stop`]). A run that starts meanwhile keeps its processes. The stops
+/// are the clean log's. 409 for an agent in a run.
+pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPath<String>) -> crate::api::ApiResult<Value> {
+    // The id names a real agent: a path like `./<id>` must not reach its sessions.
+    let id = state.db.get_agent(&id)?.ok_or_else(crate::api::not_found)?.id;
+    let st = state.clone();
+    let agent = id.clone();
+    let not_running = move || !st.rt.lock().unwrap().running.contains_key(&agent);
+    if !not_running() {
+        return Err(crate::api::ApiError(axum::http::StatusCode::CONFLICT, "the agent is working".into()));
+    }
+    let stopped = stop(&state.cfg.storage_dir, &id, not_running).await;
+    let lines: Vec<crate::sweep::Line> = stopped
+        .iter()
+        .map(|(pid, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
+        .collect();
+    if !lines.is_empty() {
+        crate::sweep::record(&state, "Stopped processes", lines).await;
+    }
+    Ok(Json(json!({ "stopped": stopped.len() })))
+}
+
 // ---- the process table ------------------------------------------------
 
 struct Proc {
     pid: i32,
     ppid: i32,
     uid: u32,
+    /// Seconds since it started.
+    age_secs: u64,
     command: String,
+}
+
+/// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn etime(s: &str) -> Option<u64> {
+    let (days, rest) = s.split_once('-').map_or((0, s), |(d, r)| (d.parse().unwrap_or(0), r));
+    let parts: Vec<u64> = rest.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    Some(days * 86400 + parts.iter().fold(0, |t, x| t * 60 + x))
 }
 
 /// Every process on the Mac, from `ps`.
 fn table() -> Vec<Proc> {
-    let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,command="]).output() else {
+    let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,etime=,command="]).output() else {
         return vec![];
     };
     String::from_utf8_lossy(&out.stdout)
@@ -285,8 +360,9 @@ fn table() -> Vec<Proc> {
         .filter_map(|line| {
             let (pid, rest) = field(line);
             let (ppid, rest) = field(rest);
-            let (uid, command) = field(rest);
-            Some(Proc { pid: pid.parse().ok()?, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, command: command.to_string() })
+            let (uid, rest) = field(rest);
+            let (age, command) = field(rest);
+            Some(Proc { pid: pid.parse().ok()?, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string() })
         })
         .collect()
 }
@@ -771,6 +847,62 @@ mod tests {
         assert!(server.alive());
         assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true).await.len(), 1);
         until("the server stops", 5, || !server.alive()).await;
+    }
+
+    #[test]
+    fn ps_elapsed_time_is_read_in_seconds() {
+        assert_eq!([etime("00:07"), etime("12:34"), etime("3:04:05"), etime("2-03:04:05"), etime("x")], [Some(7), Some(754), Some(11045), Some(183845), None]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clean_locks_only_an_agent_in_a_run_lists_what_an_idle_one_left_and_stops_it_but_never_xcode_s_helpers() {
+        let st = crate::tasks::tests::state();
+        let storage = st.cfg.storage_dir.clone();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let server = Sleeper::start(true);
+        record(&storage, &a.id, server.pid() as u32).unwrap();
+        // Xcode's DTServiceHub, in the agent's session too.
+        let dir = crate::testdir::for_this_test("helpers");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("/bin/sleep", dir.join("DTServiceHub")).unwrap();
+        let helper = Sleeper::start_as(&dir.join("DTServiceHub"), true);
+        record(&storage, &a.id, helper.pid() as u32).unwrap();
+        let row = |v: &Value| v["agents"].as_array().unwrap().iter().find(|r| r["id"] == json!(a.id)).unwrap().clone();
+        let sizes = || async { crate::sweep::sizes(State(st.clone())).await.unwrap().0 };
+
+        // Idle, with a server and a helper: not busy, and only the server counts.
+        let r = row(&sizes().await);
+        assert_eq!((&r["busy"], &r["processes"]), (&json!(false), &json!(1)));
+        let Json(list) = left_running(State(st.clone())).await;
+        let ps = list[&a.id].as_array().unwrap();
+        assert_eq!((ps.len(), &ps[0]["pid"], ps[0]["command"].as_str().unwrap().contains("sleep 60")), (1, &json!(server.pid()), true));
+
+        // In a run: busy, nothing listed, and Stop them is refused.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        let r = row(&sizes().await);
+        assert_eq!((&r["busy"], &r["processes"]), (&json!(true), &json!(0)));
+        assert!(left_running(State(st.clone())).await.0.as_object().unwrap().is_empty());
+        let err = stop_left_running(State(st.clone()), UrlPath(a.id.clone())).await.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::CONFLICT);
+        assert!(server.alive());
+        // A path that only resolves to the agent's id is no agent: 404, and nothing stops.
+        for odd in [format!("./{}", a.id), format!("bin/../{}", a.id)] {
+            st.rt.lock().unwrap().running.remove(&a.id);
+            let err = stop_left_running(State(st.clone()), UrlPath(odd)).await.unwrap_err();
+            assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+            st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        }
+        assert!(server.alive());
+
+        // Idle again: Stop them stops the server, logs it, and leaves the helper.
+        st.rt.lock().unwrap().running.remove(&a.id);
+        let Json(done) = stop_left_running(State(st.clone()), UrlPath(a.id.clone())).await.unwrap();
+        assert_eq!(done, json!({ "stopped": 1 }));
+        until("the server stops", 5, || !server.alive()).await;
+        assert!(helper.alive(), "Xcode's helper stays");
+        let axum::Json(log) = crate::sweep::log(State(st.clone())).await;
+        assert_eq!((log.what.as_str(), log.removed), ("Stopped processes", 1));
+        assert!(row(&sizes().await)["processes"] == json!(0));
     }
 
     /// A kill from a command in one of the agent's sessions, as `loft kill-as` sends it.
