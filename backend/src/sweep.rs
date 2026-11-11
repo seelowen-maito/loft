@@ -15,7 +15,8 @@
 //! once together they pass 2 GB, and once it passes 8 GB the `*/deps` files no build wrote for a day go, oldest
 //! first, until it's under (cargo keeps every old build's set there, and rebuilds what it still needs). It
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
-//! files kept, and skips running agents.
+//! files kept, and skips agents in a run. A process an idle agent left running (a dev server) doesn't keep its
+//! build output: the idle timeout (4 h by default) stops such processes long before output is 3 days old.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
 //! so Loft's own checkout stays. Each run writes a log of what it removed, skipped and why, and the last one
@@ -403,8 +404,8 @@ pub async fn log(axum::extract::State(state): axum::extract::State<AppState>) ->
 /// One sweep or clean at a time.
 static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Removes the build output untouched for `idle` from every workspace but those of running agents and agents
-/// with a live process, or just from `only`'s. With `what`, the run's log is the one Settings shows, live and
+/// Removes the build output untouched for `idle` from every workspace but those of agents in a run, or just
+/// from `only`'s. With `what`, the run's log is the one Settings shows, live and
 /// saved; without, it is only returned.
 pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str>, idle: Duration) -> Log {
     let _one = RUNNING.lock().await;

@@ -497,8 +497,7 @@ export type BackupStatus = {
   icloud: string | null;
 };
 
-/** Every agent's workspace size and whether it is busy (running or a live dev server: Clean skips it), and the disk's
- * free space. */
+/** Every agent's workspace size, whether it is busy, how many processes it left running, and the disk's free space. */
 export type WorkspaceSizes = {
   /** `busy`: in a run, so Clean can't remove its items. `processes`: how many an idle agent left running. */
   agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
