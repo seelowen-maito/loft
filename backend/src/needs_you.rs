@@ -180,7 +180,7 @@ pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String 
 }
 
 fn dismiss(id: &str) -> Value {
-    action("dismiss", "Dismiss", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
+    action("dismiss", "Done", "POST", format!("/api/needs-you/{}/dismiss", urlencode(id)), json!({}))
 }
 
 fn urlencode(s: &str) -> String {
@@ -894,16 +894,30 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
 
 /// The whole list, as `GET /api/needs-you` returns it.
 pub fn snapshot(state: &AppState) -> Result<Value, String> {
-    collect(state).map(|items| snapshot_of(&items))
+    let items = collect(state)?;
+    Ok(snapshot_of(&items, &seen(state)?))
 }
 
-fn snapshot_of(items: &[Item]) -> Value {
+/// The items the user has seen, on any client.
+fn seen(state: &AppState) -> Result<HashSet<String>, String> {
+    Ok(state.db.seen_needs_you().map_err(|e| e.to_string())?.into_iter().collect())
+}
+
+/// `count` and `urgent` are the whole list; `new` and `new_urgent` only what the user hasn't seen (the counter).
+fn snapshot_of(items: &[Item], seen: &HashSet<String>) -> Value {
+    let new: Vec<&Item> = items.iter().filter(|i| !seen.contains(&i.id)).collect();
     json!({
         "version": 1,
         "count": items.len(),
         "urgent": items.iter().filter(|i| i.urgency >= 2).count(),
+        "new": new.len(),
+        "new_urgent": new.iter().filter(|i| i.urgency >= 2).count(),
         "generated_at": crate::db::now(),
-        "items": items.iter().map(to_json).collect::<Vec<_>>(),
+        "items": items.iter().map(|i| {
+            let mut v = to_json(i);
+            v["seen"] = json!(seen.contains(&i.id));
+            v
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -938,13 +952,35 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The ids and count last sent, so the watcher only emits on a change.
+/// `POST /api/needs-you/seen` with `{ "ids": [...] }`: the user saw these items (the list was opened on some client),
+/// so the counter stops counting them everywhere. Ids not in the list are ignored. Answers with the new counts.
+pub async fn mark_seen(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let ids: HashSet<&str> = body["ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let shown: Vec<String> = items.iter().filter(|i| ids.contains(i.id.as_str())).map(|i| i.id.clone()).collect();
+    state.db.mark_needs_you_seen(&shown)?;
+    let v = snapshot_of(&items, &seen(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?);
+    emit(&state, &v);
+    Ok(Json(json!({ "ok": true, "new": v["new"], "new_urgent": v["new_urgent"] })))
+}
+
+/// The ids, and which are seen, last sent, so the watcher only emits on a change.
 fn fingerprint(v: &Value) -> String {
-    v["items"].as_array().map(|a| a.iter().filter_map(|i| i["id"].as_str()).collect::<Vec<_>>().join("|")).unwrap_or_default()
+    v["items"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|i| Some(format!("{}{}", i["id"].as_str()?, if i["seen"] == true { "+" } else { "" }))).collect::<Vec<_>>().join("|"))
+        .unwrap_or_default()
 }
 
 fn emit(state: &AppState, v: &Value) {
-    state.emit(Event::NeedsYou { count: v["count"].as_u64().unwrap_or(0), urgent: v["urgent"].as_u64().unwrap_or(0), ids: v["items"].as_array().map(|a| a.iter().map(|i| i["id"].clone()).collect()).unwrap_or_default() });
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    state.emit(Event::NeedsYou {
+        count: n("count"),
+        urgent: n("urgent"),
+        new: n("new"),
+        new_urgent: n("new_urgent"),
+        ids: v["items"].as_array().map(|a| a.iter().map(|i| i["id"].clone()).collect()).unwrap_or_default(),
+    });
 }
 
 fn emit_now(state: &AppState) {
@@ -956,7 +992,7 @@ fn emit_now(state: &AppState) {
 /// One tick's push items and snapshot, from a single read of everything.
 fn tick_lists(state: &AppState) -> Result<(Vec<PushItem>, Value), String> {
     let items = collect(state)?;
-    Ok((items.iter().map(to_push).collect(), snapshot_of(&items)))
+    Ok((items.iter().map(to_push).collect(), snapshot_of(&items, &seen(state)?)))
 }
 
 /// Tells clients when the list changes (`needs_you` event with the count and ids). Checks every few
@@ -1009,6 +1045,52 @@ mod tests {
         }
         assert!(r.contains("password=[redacted]") && r.contains("--api-key=[redacted]") && r.ends_with(" ok"), "{r}");
         assert_eq!(redact("Monthly pricing, 8 dollars? Yes."), "Monthly pricing, 8 dollars? Yes.");
+    }
+
+    #[tokio::test]
+    async fn the_counter_counts_only_what_the_user_has_not_seen_on_any_client() {
+        let st = state();
+        let qa = agent(&st, "QA");
+        let mk = |status: &str| {
+            let t: Task = serde_json::from_value(json!({ "id": uuid::Uuid::new_v4().to_string(), "title": status, "status": status, "created_by": "user",
+                "agent_id": qa.id, "created_at": now(), "updated_at": now() })).unwrap();
+            st.db.save_task(&t).unwrap();
+            t
+        };
+        let blocked = mk("blocked"); // urgency 2
+        let failed = mk("failed"); // urgency 1
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["urgent"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(1), json!(2), json!(1)), "nothing is seen yet");
+        assert!(v["items"].as_array().unwrap().iter().all(|i| i["seen"] == false));
+        let (blocked_id, failed_id) = (format!("task:{}:blocked", blocked.id), format!("task:{}:failed", failed.id));
+        assert_eq!(item(&v, "task_failed")["actions"].as_array().unwrap().last().unwrap()["label"], "Done", "Dismiss is the Done check");
+
+        // Opening the list on one client marks what it showed; ids not in the list are ignored.
+        let r = mark_seen(State(st.clone()), Json(json!({ "ids": [blocked_id, failed_id, "question:gone"] }))).await.unwrap().0;
+        assert_eq!((r["new"].clone(), r["new_urgent"].clone()), (json!(0), json!(0)));
+        assert!(!st.db.seen_needs_you().unwrap().contains(&"question:gone".to_string()));
+        // Every client reads the same marks: seen items stay in the list, the counter is empty.
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(0), json!(0)));
+        assert!(v["items"].as_array().unwrap().iter().all(|i| i["seen"] == true));
+
+        // A new item counts again; it is urgent only if it is.
+        mk("failed");
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["count"].clone(), v["new"].clone(), v["new_urgent"].clone()), (json!(3), json!(1), json!(0)));
+        // A changed item has a new id, so it counts again: an issue failed, then blocked.
+        let mut failed2 = failed.clone();
+        failed2.status = "blocked".into();
+        st.db.save_task(&failed2).unwrap();
+        let v = snapshot(&st).unwrap();
+        assert_eq!((v["new"].clone(), v["new_urgent"].clone()), (json!(2), json!(1)), "the changed one is new and urgent");
+        assert_eq!(v["items"].as_array().unwrap().iter().find(|i| i["id"] == format!("task:{}:blocked", failed.id)).unwrap()["seen"], false);
+
+        // Done (dismiss) still takes an item out of the list, and out of the counts.
+        assert!(dismiss_item(State(st.clone()), Path(blocked_id.clone())).await.is_ok());
+        let v = snapshot(&st).unwrap();
+        assert!(!ids(&v).contains(&blocked_id));
+        assert_eq!(v["count"], json!(2));
     }
 
     #[tokio::test]

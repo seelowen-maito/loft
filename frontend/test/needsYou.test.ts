@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerBody, badgeText, badgeTitle, closeTarget, countAfter, escCloses, iconAction, idsChanged, itemView, placeOf, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
+import { answerBody, badgeText, badgeTitle, badgeTone, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
 
 const HOST = "mac.tail1234.ts.net";
 
@@ -82,20 +82,54 @@ test("urgency in words", () => {
   assert.deepEqual([3, 2, 1, 0].map((u) => urgencyOf(u).label), ["Blocks an agent", "Waiting for you", "Worth a look", "To review"]);
 });
 
-test("the counter follows needs_you events and ignores the others", () => {
-  let c = { count: 2, urgent: 0 };
+test("the counter counts only what hasn't been seen, from the list and then from needs_you events", () => {
+  assert.deepEqual(countsOf({ new: 0, new_urgent: 0 }), { count: 0, urgent: 0 }, "12 items, all seen: no counter");
+  let c = countsOf({ new: 2, new_urgent: 0 });
   c = countAfter(c, { type: "agent_updated" });
   assert.deepEqual(c, { count: 2, urgent: 0 });
-  c = countAfter(c, { type: "needs_you", count: 5, urgent: 1 });
-  assert.deepEqual(c, { count: 5, urgent: 1 });
-  assert.deepEqual(countAfter(c, { type: "needs_you", count: 0, urgent: 0 }), { count: 0, urgent: 0 });
+  // The list was opened (here or on the iPhone): nothing new, so the counter goes.
+  c = countAfter(c, { type: "needs_you", new: 0, new_urgent: 0 });
+  assert.deepEqual(c, { count: 0, urgent: 0 });
+  assert.equal(badgeText(c.count), "");
+  // A new (or changed) item brings it back.
+  c = countAfter(c, { type: "needs_you", new: 1, new_urgent: 1 });
+  assert.deepEqual(c, { count: 1, urgent: 1 });
+});
+
+test("the counter is amber only when something unseen is urgent", () => {
+  assert.equal(badgeTone({ count: 1, urgent: 1 }), "warn");
+  assert.equal(badgeTone({ count: 3, urgent: 0 }), "accent", "seen urgent items don't make it amber");
 });
 
 test("the counter's number and title", () => {
   assert.deepEqual([0, 1, 99, 100].map(badgeText), ["", "1", "99", "99+"]);
-  assert.equal(badgeTitle({ count: 0, urgent: 0 }), "Nothing needs you");
-  assert.equal(badgeTitle({ count: 1, urgent: 0 }), "1 thing needs you");
-  assert.equal(badgeTitle({ count: 3, urgent: 2 }), "3 things need you, 2 urgent");
+  assert.equal(badgeTitle({ count: 0, urgent: 0 }), "Nothing new needs you");
+  assert.equal(badgeTitle({ count: 1, urgent: 0 }), "1 new thing needs you");
+  assert.equal(badgeTitle({ count: 3, urgent: 2 }), "3 new things need you, 2 urgent");
+});
+
+test("opening the list marks what it shows unseen as seen, and keeps it new for this visit", () => {
+  const list = [item({ id: "a", seen: true }), item({ id: "b", seen: false }), item({ id: "c" })];
+  assert.deepEqual(unseenIds(list), ["b", "c"]);
+  let fresh = freshAfter(new Set(), list);
+  assert.deepEqual([...fresh], ["b", "c"]);
+  // Reloaded after they were marked: still new here; a new item joins; one that left the list drops out.
+  fresh = freshAfter(fresh, [item({ id: "a", seen: true }), item({ id: "b", seen: true }), item({ id: "d", seen: false })]);
+  assert.deepEqual([...fresh].sort(), ["b", "d"]);
+});
+
+test("the header says how many are new and how many in all", () => {
+  assert.equal(headline(12, 2), "2 new · 12 in all");
+  assert.equal(headline(12, 0), "12 waiting, none new");
+  assert.equal(headline(0, 0), "");
+});
+
+test("each item that can go has a Done check; ones that need an answer don't", () => {
+  const done = { kind: "dismiss", label: "Done", method: "POST", path: "/api/needs-you/task%3At1%3Afailed/dismiss", body: {} };
+  assert.deepEqual(itemView(item({ type: "task_failed", actions: [done] }), HOST).dismiss, done);
+  const perm = itemView(item({ type: "permission", urgency: 3, actions: [{ kind: "approve", label: "Allow once", method: "POST", path: "/api/permissions/p1", body: {} }] }), HOST);
+  assert.equal(perm.dismiss, null);
+  assert.deepEqual(perm.calls.map((a) => a.label), ["Allow once"]);
 });
 
 test("the page reloads only when the ids change", () => {

@@ -684,6 +684,8 @@ export const api = {
   needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
   /** The whole Needs you list, for its page and the top bar's counter. */
   needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
+  /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
+  needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
   /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
   needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
     req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),

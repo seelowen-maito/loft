@@ -5886,7 +5886,7 @@ pub(crate) mod tests {
         let item = &items[0];
         assert_eq!((&item["title"], &item["reason"], &item["urgency"]), (&json!("Delivery done: Rounds"), &json!("Every ticket is closed and its reviews passed: spec PR #500 is ready for review."), &json!(1)));
         let acts = item["actions"].as_array().unwrap();
-        assert_eq!(acts.iter().map(|a| a["label"].clone()).collect::<Vec<_>>(), [json!("Open issue"), json!("Open PR"), json!("Dismiss")]);
+        assert_eq!(acts.iter().map(|a| a["label"].clone()).collect::<Vec<_>>(), [json!("Open issue"), json!("Open PR"), json!("Done")]);
         assert_eq!(acts[1]["target"], json!({ "url": format!("https://github.com/{slug}/pull/500") }));
         let v = crate::needs_you::snapshot(&st).unwrap();
         assert!(!v["items"].as_array().unwrap().iter().any(|i| i["type"] == "pr_ready"), "pr_ready waits for GitHub, the done item doesn't");

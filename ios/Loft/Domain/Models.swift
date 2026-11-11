@@ -439,8 +439,9 @@ enum ServerEvent {
     case taskDeleted(String)
     case system(SystemReading)
     case grill(GrillSession)
-    /// The "Needs you" list changed: refetch when `ids` differ from what's shown.
-    case needsYou(count: Int, ids: [String])
+    /// The "Needs you" list changed: refetch when `ids` differ from what's shown, or `new` (what hasn't been seen,
+    /// the badge) from the list's.
+    case needsYou(count: Int, new: Int? = nil, ids: [String])
     /// The Delivery of spec (or standalone ticket) `repo#spec` changed: a card showing it reloads.
     case delivery(repo: String, spec: Int)
     case other(String)
@@ -455,7 +456,7 @@ enum ServerEvent {
     private struct TaskDeletedBody: Decodable { let taskId: String }
     private struct SystemBody: Decodable { let system: SystemReading }
     private struct GrillBody: Decodable { let session: GrillSession }
-    private struct NeedsYouBody: Decodable { let count: Int; let ids: [String] }
+    private struct NeedsYouBody: Decodable { let count: Int; let new: Int?; let ids: [String] }
     private struct DeliveryBody: Decodable { let repo: String; let spec: Int }
 
     static func decode(_ data: Data) throws -> ServerEvent {
@@ -473,7 +474,7 @@ enum ServerEvent {
         case "grill": return .grill(try d.decode(GrillBody.self, from: data).session)
         case "needs_you":
             let b = try d.decode(NeedsYouBody.self, from: data)
-            return .needsYou(count: b.count, ids: b.ids)
+            return .needsYou(count: b.count, new: b.new, ids: b.ids)
         case "delivery":
             let b = try d.decode(DeliveryBody.self, from: data)
             return .delivery(repo: b.repo, spec: b.spec)

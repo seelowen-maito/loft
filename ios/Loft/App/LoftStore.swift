@@ -131,8 +131,16 @@ final class LoftStore {
         needsYou = list
         // The app icon's badge follows what needs you. Not awaited: refresh() runs this before the app counts
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
-        let count = list.count
+        // Only what hasn't been seen, here or on the web.
+        let count = list.unseen
         Task.detached { try? await UNUserNotificationCenter.current().setBadgeCount(count) }
+    }
+
+    /// Marks the Needs you items shown as seen, for every client (the web's counter too), then refreshes the badge.
+    func markNeedsYouSeen(_ ids: [String]) async {
+        guard let api, supportsNeedsYou, !ids.isEmpty else { return }
+        try? await api.needsYouRequest(method: "POST", path: "/api/needs-you/seen", body: NeedsYouSeen.body(ids))
+        await refreshNeedsYou()
     }
 
     /// Runs a "Needs you" action (approve, deny, answer, retry, merge, restart, dismiss, skip), then refreshes.
@@ -563,8 +571,9 @@ final class LoftStore {
             system = r
         case .grill(let s):
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
-        case .needsYou(_, let ids):
-            if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+        case .needsYou(_, let new, let ids):
+            // Seen on the web: the same ids, fewer new.
+            if ids != needsYou?.items.map(\.id) || (new != nil && new != needsYou?.new) { Task { await refreshNeedsYou() } }
             if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .delivery(let repo, let spec):
             for id in deliveryCards.keys {

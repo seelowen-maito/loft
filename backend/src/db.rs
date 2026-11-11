@@ -659,6 +659,10 @@ CREATE TABLE IF NOT EXISTS needs_you_dismissed (
     item_id TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS needs_you_seen (
+    item_id TEXT PRIMARY KEY,
+    seen_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS published_issues (
     slug TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -1415,6 +1419,26 @@ impl Db {
     pub fn dismiss_needs_you(&self, item_id: &str) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute("INSERT OR REPLACE INTO needs_you_dismissed (item_id, dismissed_at) VALUES (?1, ?2)", params![item_id, now()])?;
+        Ok(())
+    }
+
+    /// The Needs you items the user has seen (on any client). Kept 30 days, like dismissals: a changed item has a new id.
+    pub fn seen_needs_you(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        c.execute("DELETE FROM needs_you_seen WHERE seen_at < ?1", [&cutoff])?;
+        let mut st = c.prepare("SELECT item_id FROM needs_you_seen")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    /// Marks these items seen; one already seen keeps its first time.
+    pub fn mark_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let at = now();
+        for id in item_ids {
+            c.execute("INSERT OR IGNORE INTO needs_you_seen (item_id, seen_at) VALUES (?1, ?2)", params![id, at])?;
+        }
         Ok(())
     }
 

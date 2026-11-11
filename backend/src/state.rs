@@ -28,8 +28,9 @@ pub enum Event {
     Issues { project: String },
     /// A Delivery changed: its state, its tickets or who has them.
     Delivery { repo: String, spec: i64 },
-    /// The "needs you" list changed: its size, how many are urgent, and the item ids.
-    NeedsYou { count: u64, urgent: u64, ids: Vec<serde_json::Value> },
+    /// The "needs you" list changed: its size, how many are urgent, how many of each the user hasn't seen
+    /// (`new`, `new_urgent`: the counter), and the item ids.
+    NeedsYou { count: u64, urgent: u64, new: u64, new_urgent: u64, ids: Vec<serde_json::Value> },
 }
 
 /// Decision sent back to a blocked permission prompt.

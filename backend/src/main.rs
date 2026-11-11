@@ -142,6 +142,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .nest("/tasks", tasks::routes())
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
+        .route("/needs-you/seen", post(needs_you::mark_seen))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))

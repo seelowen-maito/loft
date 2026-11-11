@@ -7,7 +7,7 @@ import { cx } from "./lib/format";
 import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import { pendingItems, type PendingItem } from "./lib/pending";
-import { badgeText, badgeTitle, countAfter, iconAction, type Counts } from "./lib/needsYou";
+import { badgeText, badgeTitle, badgeTone, countAfter, countsOf, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
@@ -109,7 +109,7 @@ function PendingBadge() {
   );
 }
 
-/** The Needs you counter, on every page: the count from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost.
+/** The Needs you counter, on every page: what the user hasn't seen (on any client), from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost.
  * It opens Needs you, and closes it when it's open. */
 function NeedsYouBadge({ live }: { live: boolean }) {
   const { pathname } = useLocation();
@@ -117,7 +117,7 @@ function NeedsYouBadge({ live }: { live: boolean }) {
   const [c, setC] = useState<Counts>({ count: 0, urgent: 0 });
   useEffect(() => {
     if (!live) return;
-    api.needsYouList().then((l) => setC({ count: l.count, urgent: l.urgent })).catch(() => {});
+    api.needsYouList().then((l) => setC(countsOf(l))).catch(() => {});
   }, [live]);
   useServerEvents(useCallback((e: ServerEvent) => setC((c) => countAfter(c, e)), []));
   const n = badgeText(c.count);
@@ -136,7 +136,7 @@ function NeedsYouBadge({ live }: { live: boolean }) {
     >
       <Inbox className="size-4" />
       {n && (
-        <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", c.urgent > 0 ? "bg-warn" : "bg-accent")}>
+        <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", badgeTone(c) === "warn" ? "bg-warn" : "bg-accent")}>
           {n}
         </span>
       )}

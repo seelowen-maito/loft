@@ -11,8 +11,10 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 ```jsonc
 {
   "version": 1,
-  "count": 7,             // badge: all items
+  "count": 7,             // all items
   "urgent": 4,            // items with urgency >= 2
+  "new": 2,               // badge: items the user hasn't seen (on any client)
+  "new_urgent": 1,        // of those, urgency >= 2
   "generated_at": "2026-10-23T14:37:36Z",
   "items": [ Item, … ]    // most urgent first, then longest waiting first
 }
@@ -36,6 +38,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 | `actions` | `[Action]` | What the user can do, in display order |
 | `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the issue's or agent's project |
 | `repo` | string \| null | PR items: the GitHub slug (`acme/shop`), the same as `pr.repo` |
+| `seen` | bool | The user has seen it, on any client (`POST /api/needs-you/seen`). Seen items stay listed, less prominent; a changed item has a new id, so it's unseen again |
 | `pr` | object \| null | PR items only: `{repo: "owner/name", project, number, title, url, author, draft: false, checks: "passing"\|"none", checks_green: true, review_requested}` |
 
 **All text is plain text.** Never render it as HTML. Anything that looks like a credential (known token
@@ -94,9 +97,15 @@ Besides the PRs agents opened here (tracked and polled every 30 s), the server s
 
 Teammates' PRs only appear when they request the user's review. A PR already tracked here is listed once, with its Merge action. Group PR items by `pr.repo` or `project`.
 
+## `POST /api/needs-you/seen`
+
+`{ "ids": ["permission:p1", …] }`: the items a client showed when the user opened Needs you. They count as seen on
+every client (web and iPhone), like the chat's read mark, until they change (a new id). Ids not in the list are
+ignored. Answers `{ "ok": true, "new": 0, "new_urgent": 0 }` and sends a `needs_you` event. Push doesn't change.
+
 ## `POST /api/needs-you/{id}/dismiss`
 
-Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
+The item's Done check (the action's label is "Done"). Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
 `permission`, `grill_round` and `pairing` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
 
 ## Live updates
@@ -104,12 +113,15 @@ Hides an item until it changes, so a changed item comes back with a new id. Dism
 SSE event on `/api/events` when the list changes (checked every 5 s, sent only on a change):
 
 ```json
-{ "type": "needs_you", "count": 7, "urgent": 4, "ids": ["permission:p1", "task:…:blocked", …] }
+{ "type": "needs_you", "count": 7, "urgent": 4, "new": 2, "new_urgent": 1, "ids": ["permission:p1", "task:…:blocked", …] }
 ```
 
-Refetch `GET /api/needs-you` when `ids` differ from what you show. The count alone is enough for a badge.
+Refetch `GET /api/needs-you` when `ids` differ from what you show. `new` and `new_urgent` alone are enough for a badge;
+the event is also sent when items are marked seen.
 
-The web app's Needs you page (`/needs-you`) and its top-bar counter work this way: the page lists the items with their actions and reloads on a change, and the counter follows `count`.
+The web app's Needs you page (`/needs-you`) and its top-bar counter work this way: the page lists the items with their
+actions, marks the ones it shows seen, and reloads on a change; the counter follows `new`, amber when `new_urgent` > 0,
+and is hidden at 0. The iPhone's Needs you list marks what it shows the same way, and the app icon's badge is `new`.
 
 ## Safety
 

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
-import { ExternalLink, Inbox, Send, X } from "lucide-react";
+import { Check, ExternalLink, Inbox, Send, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { isTyping } from "../lib/shortcuts";
-import { answerBody, closeTarget, escCloses, idsChanged, itemView, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { answerBody, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
 
-/** One item: why it waits, its text, where to act and what can be sent from here. */
-function ItemCard({ item, onDone }: { item: NeedsYouItem; onDone: () => void }) {
+/** One item: why it waits, its text, where to act and what can be sent from here. One seen before this visit is less
+ * prominent; its Done check takes it out of the list. */
+function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean; onDone: () => void }) {
   const view = itemView(item, window.location.hostname);
   const urgency = urgencyOf(item.urgency);
   const [busy, setBusy] = useState(false);
@@ -37,11 +38,16 @@ function ItemCard({ item, onDone }: { item: NeedsYouItem; onDone: () => void }) 
   };
 
   return (
-    <li className="panel flex gap-3 p-4" data-needs-you={item.type}>
+    <li
+      className={cx("panel flex gap-3 p-4 transition-opacity", !fresh && "opacity-60 hover:opacity-100 focus-within:opacity-100")}
+      data-needs-you={item.type}
+      data-seen={!fresh}
+    >
       <span className={cx("mt-1.5 size-2 shrink-0 rounded-full", TONE[urgency.tone])} title={urgency.label} />
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <h2 className="min-w-0 text-[14px] font-medium [overflow-wrap:anywhere]">{item.title}</h2>
+          {fresh && <span className="self-center rounded-full bg-accent/15 px-1.5 py-px font-mono text-[10px] font-medium uppercase tracking-wide text-accent">New</span>}
+          <h2 className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{item.title}</h2>
           <span className="font-mono text-[11px] text-fg-3">
             {[item.agent?.name, item.project, timeAgo(item.created_at)].filter(Boolean).join(" · ")}
           </span>
@@ -76,8 +82,15 @@ function ItemCard({ item, onDone }: { item: NeedsYouItem; onDone: () => void }) 
             ),
           )}
           {view.dismiss && (
-            <button type="button" className="btn-ghost ml-auto text-[12px] text-fg-3" disabled={busy} onClick={() => send(view.dismiss!)}>
-              {view.dismiss.label}
+            <button
+              type="button"
+              className="btn ml-auto inline-flex items-center gap-1.5 text-[12.5px] hover:border-good/50 hover:text-good"
+              title="Done: take it off the list"
+              data-needs-you-done
+              disabled={busy}
+              onClick={() => send(view.dismiss!)}
+            >
+              <Check className="size-3.5" /> {view.dismiss.label}
             </button>
           )}
         </div>
@@ -140,17 +153,34 @@ export default function NeedsYouPage() {
   }, []);
   const [list, setList] = useState<NeedsYouList | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Unseen when they appeared during this visit: shown as new until the page closes, though marked seen at once.
+  const [fresh, setFresh] = useState<Set<string>>(new Set());
   const shown = useRef<string[]>([]);
+  const toMark = useRef<string[]>([]);
+  // What's on screen counts as seen everywhere, but not while the tab is in the background.
+  const markSeen = useCallback(() => {
+    if (document.visibilityState !== "visible" || toMark.current.length === 0) return;
+    const ids = toMark.current;
+    toMark.current = [];
+    api.needsYouSeen(ids).catch(() => (toMark.current = [...ids, ...toMark.current]));
+  }, []);
   const load = useCallback(() => {
     api
       .needsYouList()
       .then((l) => {
         shown.current = l.items.map((i) => i.id);
         setList(l);
+        setFresh((f) => freshAfter(f, l.items));
+        toMark.current = unseenIds(l.items);
+        markSeen();
         setErr(null);
       })
       .catch((e) => setErr((e as Error).message));
-  }, []);
+  }, [markSeen]);
+  useEffect(() => {
+    document.addEventListener("visibilitychange", markSeen);
+    return () => document.removeEventListener("visibilitychange", markSeen);
+  }, [markSeen]);
   // Events sent while offline are lost: reload on each (re)connect.
   useEffect(() => {
     if (live) load();
@@ -171,8 +201,8 @@ export default function NeedsYouPage() {
         <div className="flex items-baseline gap-3">
           <h1 className="text-[20px] font-medium tracking-tight">Needs you</h1>
           {list && list.count > 0 && (
-            <span className="font-mono text-[12px] text-fg-3">
-              {list.count} waiting{list.urgent > 0 && `, ${list.urgent} urgent`}
+            <span className="font-mono text-[12px] text-fg-3" data-needs-you-headline>
+              {headline(list.count, list.items.filter((i) => fresh.has(i.id)).length)}
             </span>
           )}
           <button type="button" onClick={close} title="Close (Esc)" aria-label="Close Needs you" className="ml-auto self-center rounded-full p-1.5 text-fg-3 transition-colors hover:bg-white/[0.06] hover:text-fg">
@@ -190,7 +220,7 @@ export default function NeedsYouPage() {
         {list && list.items.length > 0 && (
           <ul className="flex flex-col gap-2.5">
             {list.items.map((i) => (
-              <ItemCard key={i.id} item={i} onDone={load} />
+              <ItemCard key={i.id} item={i} fresh={fresh.has(i.id)} onDone={load} />
             ))}
           </ul>
         )}

@@ -27,9 +27,12 @@ export type NeedsYouItem = {
   links: { label: string; url?: string; path?: string }[];
   actions: NeedsYouAction[];
   project: string | null;
+  /** Seen on some client (the list was opened there). Seen items stay listed, less prominent. */
+  seen?: boolean;
 };
 
-export type NeedsYouList = { version: number; count: number; urgent: number; generated_at: string; items: NeedsYouItem[] };
+/** `count`/`urgent`: the whole list. `new`/`new_urgent`: what the user hasn't seen, which the counter shows. */
+export type NeedsYouList = { version: number; count: number; urgent: number; new: number; new_urgent: number; generated_at: string; items: NeedsYouItem[] };
 
 /** A page of this web app (`to`), or another site (`href`). */
 export type Place = { to: string } | { href: string };
@@ -56,8 +59,8 @@ export function placeOf(t: NeedsYouTarget | undefined, host: string): Place | nu
 }
 
 /** What an item card shows besides its text: the places to go (open actions, then links, each place once, never this
- * page), the
- * requests it can send, its answer box and its Dismiss. */
+ * page), the requests it can send, its answer box and its Done check (the `dismiss` action: it takes the item out of
+ * the list). */
 export type ItemView = {
   open: { label: string; place: Place }[];
   calls: NeedsYouAction[];
@@ -99,12 +102,23 @@ export function urgencyOf(u: number): { label: string; tone: "bad" | "warn" | "a
   return { label: "To review", tone: "muted" };
 }
 
+/** The counter's numbers: the items the user hasn't seen, and how many of those are urgent. */
 export type Counts = { count: number; urgent: number };
 
-/** The counter after a live event: a `needs_you` event carries the new count; any other leaves it. */
-export function countAfter(c: Counts, e: { type: string; count?: number; urgent?: number }): Counts {
-  if (e.type !== "needs_you" || typeof e.count !== "number") return c;
-  return { count: e.count, urgent: e.urgent ?? 0 };
+/** The counter from the list: only what hasn't been seen. */
+export function countsOf(l: Pick<NeedsYouList, "new" | "new_urgent">): Counts {
+  return { count: l.new ?? 0, urgent: l.new_urgent ?? 0 };
+}
+
+/** The counter after a live event: a `needs_you` event carries the new unseen counts; any other leaves it. */
+export function countAfter(c: Counts, e: { type: string; new?: number; new_urgent?: number }): Counts {
+  if (e.type !== "needs_you" || typeof e.new !== "number") return c;
+  return { count: e.new, urgent: e.new_urgent ?? 0 };
+}
+
+/** Amber only when something unseen is urgent. */
+export function badgeTone(c: Counts): "warn" | "accent" {
+  return c.urgent > 0 ? "warn" : "accent";
 }
 
 /** The counter's number: nothing at zero, "99+" past 99. */
@@ -114,9 +128,27 @@ export function badgeText(count: number): string {
 }
 
 export function badgeTitle(c: Counts): string {
-  if (c.count <= 0) return "Nothing needs you";
-  const things = `${c.count} ${c.count === 1 ? "thing needs" : "things need"} you`;
+  if (c.count <= 0) return "Nothing new needs you";
+  const things = `${c.count} new ${c.count === 1 ? "thing needs" : "things need"} you`;
   return c.urgent > 0 ? `${things}, ${c.urgent} urgent` : things;
+}
+
+/** The items to mark seen: the ones shown that no client has seen yet. */
+export function unseenIds(items: Pick<NeedsYouItem, "id" | "seen">[]): string[] {
+  return items.filter((i) => !i.seen).map((i) => i.id);
+}
+
+/** The items shown as new during this visit: those unseen when they appeared here stay new until the page closes, even
+ * once marked seen; ids that left the list drop out. */
+export function freshAfter(fresh: Set<string>, items: Pick<NeedsYouItem, "id" | "seen">[]): Set<string> {
+  const ids = new Set(items.map((i) => i.id));
+  return new Set([...[...fresh].filter((id) => ids.has(id)), ...unseenIds(items)]);
+}
+
+/** The header's counts: how many are new, and how many in all. */
+export function headline(total: number, fresh: number): string {
+  if (total <= 0) return "";
+  return fresh > 0 ? `${fresh} new · ${total} in all` : `${total} waiting, none new`;
 }
 
 /** Whether a `needs_you` event's ids differ from the items shown, so the page reloads. */
