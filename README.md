@@ -47,7 +47,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 ## Requirements
 
 - [Rust](https://rustup.rs) (`cargo`)
-- Node 22 or newer. The web app builds with [pnpm](https://pnpm.io), which the scripts get through corepack (shipped with Node) when it isn't installed, and `npm` when neither works.
+- Node 22 or newer. The web app builds with [pnpm](https://pnpm.io), which the scripts get through corepack (shipped with Node) when it isn't installed, or through `npm exec`.
 - git
 - [Claude Code](https://claude.com/claude-code) (`claude`), installed and logged in. Agents use your login.
 - Optional: [`gh`](https://cli.github.com), logged in, for GitHub pull requests and issues.
@@ -72,7 +72,7 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
-- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (with pnpm, corepack or npm) on `PATH`.
+- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
 
 ### Use it from other devices
 

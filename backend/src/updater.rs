@@ -88,21 +88,27 @@ async fn check(root: &Path, running: &str) -> Result<Option<String>> {
     Ok(Some(upstream))
 }
 
-/// pnpm (pinned by `packageManager` in frontend/package.json), else pnpm through corepack, else npm: the clone may
-/// have none of them set up. Keep in step with scripts/frontend-pm.sh.
-async fn package_manager(dir: &Path) -> (&'static str, &'static [&'static str]) {
+/// The pinned pnpm (`packageManager` in frontend/package.json): an installed pnpm, else corepack's, else fetched
+/// through `npm exec`. Never plain `npm install`: that would resolve the dependencies fresh, with no lockfile.
+/// Keep in step with scripts/frontend-pm.sh.
+async fn pnpm(dir: &Path) -> Result<(&'static str, Vec<String>)> {
     for (program, pre) in [("pnpm", &[][..]), ("corepack", &["pnpm"][..])] {
         if run(dir, program, &[pre, &["--version"]].concat()).await.is_ok() {
-            return (program, pre);
+            return Ok((program, pre.iter().map(|s| s.to_string()).collect()));
         }
     }
-    ("npm", &[])
+    let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json"))?)?;
+    let version = pkg["packageManager"].as_str().and_then(|p| p.strip_prefix("pnpm@")).and_then(|p| p.split('+').next());
+    let Some(version) = version.filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.')) else {
+        bail!("frontend/package.json has no pinned pnpm in `packageManager`");
+    };
+    Ok(("npm", ["exec", "--yes", &format!("pnpm@{version}"), "--"].map(String::from).to_vec()))
 }
 
-/// node_modules made by the other package manager: pnpm leaves a `.modules.yaml` there, npm doesn't. pnpm won't reuse
-/// npm's without a terminal, and the updater has none, so it starts over.
-fn stale_modules(has_modules_yaml: bool, pm: &str) -> bool {
-    has_modules_yaml == (pm == "npm")
+/// node_modules made by npm: pnpm leaves a `.modules.yaml` there, npm doesn't. pnpm won't reuse npm's without a
+/// terminal, and the updater has none, so it starts over.
+fn stale_modules(has_modules_yaml: bool) -> bool {
+    !has_modules_yaml
 }
 
 async fn install(root: &Path) -> Result<()> {
@@ -114,14 +120,14 @@ async fn install(root: &Path) -> Result<()> {
     }
     run(&root.join("backend"), "cargo", &cargo).await?;
     let frontend = root.join("frontend");
-    let (pm, pre) = package_manager(&frontend).await;
+    let (pm, pre) = pnpm(&frontend).await?;
+    let pre: Vec<&str> = pre.iter().map(String::as_str).collect();
     let modules = frontend.join("node_modules");
-    if modules.is_dir() && stale_modules(modules.join(".modules.yaml").is_file(), pm) {
+    if modules.is_dir() && stale_modules(modules.join(".modules.yaml").is_file()) {
         std::fs::remove_dir_all(&modules)?;
     }
-    let install: &[&str] = if pm == "npm" { &["install", "--no-audit", "--no-fund"] } else { &["install", "--frozen-lockfile"] };
-    run(&frontend, pm, &[pre, install].concat()).await?;
-    run(&frontend, pm, &[pre, &["run", "build"]].concat()).await?;
+    run(&frontend, pm, &[&pre[..], &["install", "--frozen-lockfile", "--ignore-workspace"]].concat()).await?;
+    run(&frontend, pm, &[&pre[..], &["run", "build"]].concat()).await?;
     // The Herdr UI client, once it was set up: rebuilt so new chat tabs run the new version.
     let herdr = root.join("herdr");
     if herdr.join("target").join("release").join("loft-herdr").is_file()
@@ -234,12 +240,9 @@ pub fn restart() -> ! {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn node_modules_from_the_other_package_manager_is_stale() {
-        assert!(super::stale_modules(false, "pnpm"), "npm's node_modules under pnpm");
-        assert!(super::stale_modules(false, "corepack"));
-        assert!(super::stale_modules(true, "npm"), "pnpm's node_modules under npm");
-        assert!(!super::stale_modules(true, "pnpm"));
-        assert!(!super::stale_modules(false, "npm"));
+    fn node_modules_made_by_npm_is_stale() {
+        assert!(super::stale_modules(false));
+        assert!(!super::stale_modules(true));
     }
 
     use std::time::{Duration, SystemTime};
