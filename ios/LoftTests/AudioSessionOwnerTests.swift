@@ -128,6 +128,26 @@ final class AudioSessionOwnerTests: XCTestCase {
         XCTAssertTrue(log().contains("interrupted; read-aloud (speaking) ends"))
     }
 
+    /// Every start, stop and hand-over in the voice log says the route, the session category and who holds it.
+    func testTheLogShowsRouteCategoryAndHolderAtEachStep() async throws {
+        _ = try await owner.acquire(.listening, by: "dictation") { _ in }
+        let reading = try await owner.acquire(.speaking, by: "read-aloud") { _ in }
+        owner.release(reading)
+        try await Task.sleep(for: .milliseconds(60))
+        _ = try await owner.acquire(.listening, by: "Talk") { _ in }
+        owner.interrupted(began: true)
+        let lines = log().split(separator: "\n").filter { $0.contains("audio:") }
+        XCTAssertGreaterThanOrEqual(lines.count, 6)
+        for line in lines {
+            XCTAssertTrue(line.contains("route in MicrophoneBuiltIn, out Speaker"), "no route: \(line)")
+            XCTAssertTrue(line.contains("category "), "no category: \(line)")
+            XCTAssertTrue(line.contains("held by "), "no holder: \(line)")
+        }
+        XCTAssertTrue(log().contains("handing over from dictation (listening) to read-aloud (speaking) [route in MicrophoneBuiltIn, out Speaker, category PlayAndRecord, held by dictation (listening)]"))
+        XCTAssertTrue(log().contains("read-aloud let go [route in MicrophoneBuiltIn, out Speaker, category PlayAndRecord, held by nobody]"))
+        XCTAssertTrue(log().contains("session off"))
+    }
+
     func testAReleaseFromAnEarlierHolderDoesNotEndTheNewOne() async throws {
         let old = try await owner.acquire(.listening, by: "dictation") { _ in }
         _ = try await owner.acquire(.speaking, by: "read-aloud") { _ in }

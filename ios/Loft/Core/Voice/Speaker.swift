@@ -30,7 +30,7 @@ final class Speaker: NSObject {
     @ObservationIgnored var phrases: GrillPhrases?
 
     /// How long a reply must stop changing before it's read: the one setting for "the whole reply is in".
-    static let settle: TimeInterval = 0.8
+    nonisolated static let settle: TimeInterval = 0.8
 
     @ObservationIgnored private let synth = AVSpeechSynthesizer()
     @ObservationIgnored private let turns = ReadingTurns()

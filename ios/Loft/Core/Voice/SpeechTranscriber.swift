@@ -92,13 +92,10 @@ final class SpeechTranscriber {
         // `-no-speech` (UI tests): recording at once, with no prompts, microphone or recognizer.
         if TestMode.noSpeech { send(.began); return }
 
-        let auth = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
-        guard auth == .authorized else {
-            send(.denied("Speech recognition is off for Loft. Turn it on in Settings › Privacy & Security › Speech Recognition."))
-            return
-        }
-        guard await AVAudioApplication.requestRecordPermission() else {
-            send(.denied("Microphone access is off for Loft. Turn it on in Settings › Privacy & Security › Microphone."))
+        do {
+            try await VoiceSession.requestPermissions()
+        } catch {
+            send(.denied(error.localizedDescription))
             return
         }
         // Stopped (or stopped and started again) while the permission prompts were up.

@@ -73,7 +73,7 @@ final class AudioSessionOwner {
         deactivation?.cancel()
         deactivation = nil
         if let old = holder {
-            VoiceLog.shared.add("audio: handing over from \(old.name) (\(old.use.rawValue)) to \(name) (\(use.rawValue))")
+            log("handing over from \(old.name) (\(old.use.rawValue)) to \(name) (\(use.rawValue))")
             holder = nil
             old.onLost(.handedOver)
         }
@@ -88,19 +88,18 @@ final class AudioSessionOwner {
                 try session.setActive(true)
                 if use.needsMic && !session.isInputAvailable {
                     holder = nil
-                    VoiceLog.shared.add("audio: refused \(name): no microphone on \(session.route)")
+                    log("refused \(name): no microphone on this route")
                     scheduleDeactivation()
                     throw VoiceError("No microphone is available.")
                 }
                 holder?.route = session.route
-                VoiceLog.shared.add("audio: \(name) holds it (\(use.rawValue), \(session.category.rawValue), \(session.route))"
-                    + (attempt > 0 ? " after \(attempt) retries" : ""))
+                log("\(name) holds it (\(use.rawValue))" + (attempt > 0 ? " after \(attempt) retries" : ""))
                 return id
             } catch let e as VoiceError {
                 throw e
             } catch {
                 last = error.localizedDescription
-                VoiceLog.shared.add("audio: refused for \(name) (\(last))"
+                log("refused for \(name) (\(last))"
                     + (session.isOtherAudioPlaying ? ", another app is playing" : "") + (attempt + 1 < attempts ? "; retrying" : ""))
                 if attempt + 1 < attempts { try? await Task.sleep(for: retryWait) }
             }
@@ -113,21 +112,21 @@ final class AudioSessionOwner {
     func release(_ id: UUID) {
         guard let h = holder, h.id == id else { return }
         holder = nil
-        VoiceLog.shared.add("audio: \(h.name) let go")
+        log("\(h.name) let go")
         scheduleDeactivation()
     }
 
     /// The system's interruption (a call, Siri, another app): whoever holds the audio ends; nothing resumes by
     /// itself, and the next request activates the session again.
     func interrupted(began: Bool) {
-        guard began else { return VoiceLog.shared.add("audio: interruption ended") }
+        guard began else { return log("interruption ended") }
         deactivation?.cancel()
         deactivation = nil
         routeSettling?.cancel()
         routeSettling = nil
-        guard let h = holder else { return VoiceLog.shared.add("audio: interrupted while nobody held it") }
+        guard let h = holder else { return log("interrupted while nobody held it") }
         holder = nil
-        VoiceLog.shared.add("audio: interrupted; \(h.name) (\(h.use.rawValue)) ends")
+        log("interrupted; \(h.name) (\(h.use.rawValue)) ends")
         h.onLost(.interrupted)
     }
 
@@ -135,7 +134,7 @@ final class AudioSessionOwner {
     /// without a microphone ends (`.noMicrophone`); a listener whose route is now different restarts its mic;
     /// a route that came back to where it was changes nothing.
     func routeChanged(reason: String) {
-        VoiceLog.shared.add("audio: route changed (\(reason)): \(session.route)" + (holder.map { ", \($0.name) holds it" } ?? ""))
+        log("route changed (\(reason))")
         routeSettling?.cancel()
         routeSettling = Task { [weak self, settle] in
             try? await Task.sleep(for: settle)
@@ -150,16 +149,24 @@ final class AudioSessionOwner {
         let route = session.route
         if !session.isInputAvailable {
             holder = nil
-            VoiceLog.shared.add("audio: no microphone on \(route); \(h.name) ends")
+            log("no microphone on \(route); \(h.name) ends")
             scheduleDeactivation()
             h.onLost(.noMicrophone)
         } else if route == h.route {
-            VoiceLog.shared.add("audio: route settled back on \(route); \(h.name) carries on")
+            log("route settled back on \(route); \(h.name) carries on")
         } else {
             holder?.route = route
-            VoiceLog.shared.add("audio: route settled on \(route); \(h.name) restarts the mic")
+            log("route settled on \(route); \(h.name) restarts the mic")
             h.onRouteChange?()
         }
+    }
+
+    /// Every line says the route, the session category and who holds the audio, so a voice bug can be read
+    /// back from the log.
+    private func log(_ text: String) {
+        let category = session.category.rawValue.replacingOccurrences(of: "AVAudioSessionCategory", with: "")
+        let held = holder.map { "\($0.name) (\($0.use.rawValue))" } ?? "nobody"
+        VoiceLog.shared.add("audio: \(text) [route \(session.route), category \(category), held by \(held)]")
     }
 
     private func configure(for use: Use) throws {
@@ -185,9 +192,9 @@ final class AudioSessionOwner {
             self.deactivation = nil
             do {
                 try self.session.setActive(false)
-                VoiceLog.shared.add("audio: session off")
+                self.log("session off")
             } catch {
-                VoiceLog.shared.add("audio: couldn't turn the session off (\(error.localizedDescription))")
+                self.log("couldn't turn the session off (\(error.localizedDescription))")
             }
         }
     }

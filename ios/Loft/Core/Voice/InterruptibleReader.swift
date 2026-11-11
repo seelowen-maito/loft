@@ -113,7 +113,6 @@ final class InterruptibleReader {
                 engine.prepare()
                 try engine.start()
             } catch {
-                Log.speech.info("read-aloud engine didn't start: \(error.localizedDescription, privacy: .public)")
                 failure = "engine didn't start: \(error.localizedDescription)"
                 stop()
                 return
