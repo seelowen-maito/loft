@@ -24,7 +24,7 @@ struct IssueDelivery: Codable, Hashable {
 
     /// planned | running | final_review | final_fixes | needs_human | stalled | paused | ready | settled | merged
     var state: String
-    /// Why it stalled: run_failed, no_call or restart; nil unless stalled.
+    /// Why it stalled: run_failed, no_call, restart or ci_missing; nil unless stalled.
     var stallReason: String? = nil
     /// The server's state line; nil before it started, and from a backend older than `state_line`.
     var stateLine: StateLine? = nil

@@ -3677,6 +3677,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_submit_whose_last_commit_isnt_on_the_branch_is_refused() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-unpushed";
+        let (dev, _) = building(&st, &fake, "ci-unpushed", &[]).await;
+        // `dead999` was never pushed: GitHub's compare doesn't know it.
+        let err = tool(&st, &dev, "submit_ticket", json!({ "number": 41, "commits": ["abc1234", "dead999"] })).await.unwrap_err();
+        assert!(err.contains("`dead999` isn't on the spec branch `spec/40-rounds` on GitHub, so Loft took nothing in"), "{err}");
+        assert_eq!(standing(&st, slug, 41).0, "started");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "closed", "no reviewers and no CI: it passes as pushed");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_whose_commits_left_the_branch_stalls_instead_of_waiting_for_its_ci_forever() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-gone";
+        let (dev, _) = building(&st, &fake, "ci-gone", &[]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "review");
+
+        // A force-push drops #41's commits; the CI of the new head finishes.
+        fake.route("GET", &format!("/repos/{slug}/compare/fed4321abc...{CI_HEAD}"), 200, json!({ "status": "diverged" }));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).state, "running", "within the grace it still waits");
+
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "ci_missing", vec![41]));
+        assert_eq!(d.ticket(41).unwrap().state, "review", "not passed on a CI that doesn't include it");
+        let why = crate::delivery::stalled_reason(&st, &d);
+        assert!(why.starts_with("Its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume."), "{why}");
+
+        // Pushed again: Resume follows the CI, which now includes it.
+        fake.route("GET", &format!("/repos/{slug}/compare/fed4321abc...{CI_HEAD}"), 200, json!({ "status": "ahead" }));
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+    }
+
+    #[tokio::test]
     async fn a_ticket_its_reviewers_passed_closes_only_when_its_ci_is_green() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-green";

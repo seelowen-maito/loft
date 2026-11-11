@@ -501,6 +501,7 @@ fn stall_why(reason: &str) -> &'static str {
     match reason {
         "run_failed" => "the run Loft woke for its step failed",
         "restart" => "its run was lost when Loft restarted",
+        "ci_missing" => "its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume",
         _ => "the run Loft woke for its step ended without its call",
     }
 }
@@ -1115,6 +1116,35 @@ async fn refuse_behind(state: &AppState, d: &Delivery) -> Result<(), String> {
     ))
 }
 
+/// Refuses a submission whose last commit isn't on the branch on GitHub (never pushed, rebased away, or
+/// mistyped): Loft would wait for its CI forever. When Loft can't tell (GitHub didn't answer) it lets it through.
+async fn refuse_unpushed(state: &AppState, d: &Delivery, commits: &[String]) -> Result<(), String> {
+    let Some(last) = commits.last().filter(|_| !d.local && !d.branch.is_empty()) else { return Ok(()) };
+    let on = match branch_head(state, d).await {
+        Ok(head) => includes(state, &d.repo, &head, last).await.map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+    match on {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "`{}` isn't on the {} `{}` on GitHub, so Loft took nothing in: push it (`git push origin {2}`), check the commits are the ones GitHub has, then submit again.",
+            short(last),
+            branch_name(d),
+            d.branch,
+        )),
+        Err(e) => {
+            tracing::warn!("delivery {}#{}: couldn't check `{}` is on `{}`: {e}", d.repo, d.spec, short(last), d.branch);
+            Ok(())
+        }
+    }
+}
+
+/// The newest commit of `d`'s branch on GitHub.
+async fn branch_head(state: &AppState, d: &Delivery) -> Result<String, String> {
+    let head = crate::github::get(state, &format!("/repos/{}/git/ref/heads/{}", d.repo, d.branch)).await.map_err(|e| e.to_string())?;
+    head["object"]["sha"].as_str().map(String::from).ok_or_else(|| format!("GitHub gave the branch `{}` no commit", d.branch))
+}
+
 /// The tickets being built or in review on `slug`, for a refusal.
 fn in_progress(state: &AppState, slug: &str) -> String {
     let ds = state.db.deliveries(slug, true).unwrap_or_default();
@@ -1148,6 +1178,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         return Err(format!("{name} is with {who}: only the agent building it submits it."));
     }
     refuse_behind(state, &d).await?;
+    refuse_unpushed(state, &d, &commits).await?;
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
     // A plan kept in Loft has no GitHub CI to follow.
     let ci = !d.local;
@@ -1458,6 +1489,11 @@ const CI_GRACE_MINUTES: i64 = 10;
 /// The last lines of a failed job's log a changes round carries; the whole log is at the check's link.
 const LOG_LINES: usize = 300;
 
+/// Whether `since` (RFC 3339, or nothing) is more than `CI_GRACE_MINUTES` ago.
+fn past_grace(since: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(CI_GRACE_MINUTES))
+}
+
 /// Whether ticket `t` is submitted and waits for its CI.
 fn waits_for_ci(t: &DeliveryTicket) -> bool {
     t.state == "review" && t.verdicts.get("ci").is_some_and(|v| v == "pending")
@@ -1483,8 +1519,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
         return Ok(String::new());
     }
     let err = |e: anyhow::Error| e.to_string();
-    let head = crate::github::get(state, &format!("/repos/{}/git/ref/heads/{}", d.repo, d.branch)).await.map_err(err)?;
-    let head = head["object"]["sha"].as_str().ok_or_else(|| format!("GitHub gave the branch `{}` no commit", d.branch))?.to_string();
+    let head = branch_head(state, d).await?;
     // The tickets still open that the commit includes, oldest first.
     let mut included = vec![];
     for t in d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "needs_human")) {
@@ -1494,6 +1529,13 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
         }
     }
     let ready: Vec<&DeliveryTicket> = included.iter().copied().filter(|t| waits_for_ci(t)).collect();
+    // Submitted a while ago and still not on the branch (rebased away, say): its CI will never show up.
+    let lost: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| waits_for_ci(t) && !ready.iter().any(|r| r.number == t.number) && past_grace(&t.submitted_at)).collect();
+    if !lost.is_empty() {
+        let names = list_of(&lost.iter().map(|t| format!("{} (`{}`)", tag(d, t), t.commits.last().map_or("", |c| short(c)))).collect::<Vec<_>>());
+        stall(state, d, "ci_missing", lost.iter().map(|t| t.number).collect(), None, None);
+        return Ok(format!("\nThe {} `{}` doesn't have the commits of {names}, so Loft can't follow their CI: the Delivery stalled.", branch_name(d), d.branch));
+    }
     if ready.is_empty() {
         return Ok(String::new());
     }
@@ -1550,8 +1592,7 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::
             Err(e) => return Err(e),
         };
         let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
-        let waited = chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(CI_GRACE_MINUTES));
-        return Ok(if active && !waited { Ci::Running } else { Ci::Absent });
+        return Ok(if active && !past_grace(since) { Ci::Running } else { Ci::Absent });
     }
     if runs.iter().any(|c| c["status"] != "completed") || statuses.iter().any(|s| s["state"] == "pending") {
         return Ok(Ci::Running);
