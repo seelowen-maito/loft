@@ -416,7 +416,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes"] + (grill ? ["grill"] : []))
     }
 
     func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -623,8 +623,10 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         try check()
         await measure()
         let low = ProcessInfo.processInfo.arguments.contains("-fixture-disk-low")
-        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000, busy: true), .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000, busy: false),
-                                       .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false)],
+        let left = locked { leftProcesses }
+        return WorkspaceSizes(agents: [.init(id: "a1", name: "Loft Dev", bytes: 38_400_000_000, busy: true, processes: 0),
+                                       .init(id: "a2", name: "Loft Reviewer", bytes: 9_100_000_000, busy: false, processes: left["a2"]?.count ?? 0),
+                                       .init(id: "a3", name: "Loft Lead", bytes: 410_000_000, busy: false, processes: 0)],
                               freeBytes: low ? 14_300_000_000 : 212_000_000_000, lowDiskBytes: 20_000_000_000)
     }
     /// One of the fixture's Clean items, in `/Users/me/loft/agent-local-storage`.
@@ -641,14 +643,14 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         await measure()
         let items: [CleanItem] = [
             cleanItem("a2", "loft", "clone", 4_800_000_000, hoursAgo: 0.2, label: "main clone of loft", note: Self.kept, ticked: false, opens: true),
-            cleanItem("a2", ".cargo-build", "folder", 2_200_000_000, hoursAgo: 2.7),
+            cleanItem("a2", ".cargo-build", "build", 2_200_000_000, hoursAgo: 2.7),
             cleanItem("a2", "loft-review", "clone", 1_900_000_000, hoursAgo: 216),
             cleanItem("a2", "wt-253", "worktree", 730_000_000, hoursAgo: 216),
             cleanItem("a2", "test-run.log", "file", 12_000_000, hoursAgo: 50),
             cleanItem("a2", "notes", "folder", 1_200_000, hoursAgo: 1, label: "reports and notes", ticked: false),
             cleanItem("a2", "uploads", "folder", 3_100_000, hoursAgo: 30, label: "chat attachments", ticked: false),
             cleanItem("a1", "loft", "clone", 9_400_000_000, hoursAgo: 0.1, label: "main clone of loft", note: Self.kept, ticked: false, blocked: "Working", opens: true),
-            cleanItem("a1", ".cargo-build", "folder", 3_600_000_000, hoursAgo: 0.1, ticked: false, blocked: "Working"),
+            cleanItem("a1", ".cargo-build", "build", 3_600_000_000, hoursAgo: 0.1, ticked: false, blocked: "Working"),
         ]
         return items.filter { agentId == nil || $0.agent == agentId }
     }
@@ -695,6 +697,19 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                                  lines: [.init(agent: "a3", path: "/Users/me/loft/agent-local-storage/a3/old/target", rel: "old/target", bytes: 2_300_000_000, error: nil,
                                                                command: "rm -rf /Users/me/loft/agent-local-storage/a3/old/target")],
                                                  skipped: [], freedBytes: 2_300_000_000, removed: 1, failed: 0)
+    }
+    /// What Loft Reviewer left running, until Stop them.
+    private var leftProcesses: [String: [LeftProcess]] = [
+        "a2": [LeftProcess(pid: 41872, command: "node /Users/me/loft/agent-local-storage/a2/loft/frontend/node_modules/.bin/vite --host --port 20020", ageSecs: 6 * 3600),
+               LeftProcess(pid: 42210, command: "tail -f qa310/in", ageSecs: 42 * 60)],
+    ]
+    func leftRunning() async throws -> [String: [LeftProcess]] {
+        try check()
+        return locked { leftProcesses }
+    }
+    func stopLeftRunning(agentId: String) async throws {
+        try check()
+        locked { leftProcesses[agentId] = nil }
     }
     func agentDevices() async throws -> [AgentDevice] {
         try check()

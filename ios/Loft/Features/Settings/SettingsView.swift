@@ -70,8 +70,6 @@ struct SettingsView: View {
     @State private var lastClean: CleanLog?
     /// Agents' Simulator devices, nil on a Mac that doesn't list them.
     @State private var devices: [AgentDevice]?
-    /// Agents whose sizes are measured again after a clean.
-    @State private var remeasuring: Set<String> = []
     @State private var measuringDisk = true
     /// The idle timeout in hours as the stepper shows it, and as the server last saved it; nil on a Mac without it.
     @State private var idleHours: Int?
@@ -385,11 +383,9 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { aiStatus = OnDeviceModel.status }
         }
-        .sheet(item: $cleanSheet) { start in
-            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) { cleaned in
-                remeasuring = cleaned
+        .fullScreenCover(item: $cleanSheet) { start in
+            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) {
                 await loadDisk()
-                remeasuring = []
             }
         }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
@@ -442,19 +438,7 @@ struct SettingsView: View {
             .accessibilityIdentifier("diskFree")
             ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
                 LabeledContent {
-                    HStack(spacing: 10) {
-                        if remeasuring.contains(r.id) {
-                            ProgressView().accessibilityLabel("Measuring")
-                        } else {
-                            Text(bytesText(r.bytes))
-                        }
-                        if canClean, let busy = r.busy {
-                            Button(busy ? "Working" : "Clean") { cleanSheet = .preview(agentId: r.id) }
-                                .buttonStyle(.bordered).controlSize(.small)
-                                .disabled(busy || !remeasuring.isEmpty)
-                                .accessibilityIdentifier("clean-\(r.id)")
-                        }
-                    }
+                    Text(bytesText(r.bytes))
                 } label: {
                     Text(r.name)
                 }
@@ -480,9 +464,8 @@ struct SettingsView: View {
                 .accessibilityIdentifier("idleTimeout")
             }
             if canClean {
-                Button("Clean all") { cleanSheet = .preview(agentId: nil) }
-                    .disabled(d.idleCount == 0 || !remeasuring.isEmpty)
-                    .accessibilityIdentifier("cleanAll")
+                Button("Check space") { cleanSheet = .check }
+                    .accessibilityIdentifier("checkSpace")
             }
             if let last = lastClean, let at = last.at {
                 Button {
@@ -500,7 +483,7 @@ struct SettingsView: View {
         } header: {
             Text("Disk")
         } footer: {
-            Text("Clean lists what's in an agent's workspace and removes what you tick. Each project's main clone, notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
+            Text("Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
         }
     }
 
