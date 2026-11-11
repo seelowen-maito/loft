@@ -1,0 +1,30 @@
+{
+  "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/Sources/LoftKit/Core/AI/GrillUnderstanding.swift" : {
+    "const-values" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/GrillUnderstanding.swiftconstvalues",
+    "dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/GrillUnderstanding.d",
+    "diagnostics" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/GrillUnderstanding.dia",
+    "object" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/GrillUnderstanding.o",
+    "swift-dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/GrillUnderstanding.swiftdeps"
+  },
+  "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/Sources/LoftKit/Core/AI/OnDeviceFeatures.swift" : {
+    "const-values" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceFeatures.swiftconstvalues",
+    "dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceFeatures.d",
+    "diagnostics" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceFeatures.dia",
+    "object" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceFeatures.o",
+    "swift-dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceFeatures.swiftdeps"
+  },
+  "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/Sources/LoftKit/Core/AI/OnDeviceJobs.swift" : {
+    "const-values" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceJobs.swiftconstvalues",
+    "dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceJobs.d",
+    "diagnostics" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceJobs.dia",
+    "object" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceJobs.o",
+    "swift-dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceJobs.swiftdeps"
+  },
+  "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/Sources/LoftKit/Core/AI/OnDeviceModel.swift" : {
+    "const-values" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceModel.swiftconstvalues",
+    "dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceModel.d",
+    "diagnostics" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceModel.dia",
+    "object" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceModel.o",
+    "swift-dependencies" : "/Users/gustavo/dev/loft/agent-local-storage/ce1f22dc-a6ee-4262-b694-c00efd6cd50a/repo/ios/LoftKit/.build/out/Intermediates.noindex/LoftKit.build/Debug/LoftKit-t.build/Objects-normal/arm64/OnDeviceModel.swiftdeps"
+  }
+}

@@ -214,11 +214,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
-        let mut actions = vec![
-            action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" })),
-            action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })),
-            action("deny", "Deny", "POST", base, json!({ "decision": "deny" })),
-        ];
+        // A kill with no program to name has no rule to save, so no Always.
+        let always = p.tool_name != "Kill" || crate::processes::kill_spec(&p.rule).is_some();
+        let mut actions = vec![action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" }))];
+        if always {
+            actions.push(action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })));
+        }
+        actions.push(action("deny", "Deny", "POST", base, json!({ "decision": "deny" })));
         actions.push(open_chat(&p.agent_id));
         items.push(Item {
             id: format!("permission:{}", p.id),
@@ -959,6 +961,22 @@ mod tests {
         }
         assert!(r.contains("password=[redacted]") && r.contains("--api-key=[redacted]") && r.ends_with(" ok"), "{r}");
         assert_eq!(redact("Monthly pricing, 8 dollars? Yes."), "Monthly pricing, 8 dollars? Yes.");
+    }
+
+    #[tokio::test]
+    async fn a_kill_with_no_rule_offers_no_always_allow() {
+        let st = state();
+        let dev = agent(&st, "Dev");
+        for (id, rule) in [("k1", "Kill(/bin/sleep)"), ("k2", "")] {
+            st.db.save_permission(&PermissionRequest {
+                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: "Kill".into(), input: json!({ "command": "pkill sleep" }),
+                reason: String::new(), rule: rule.into(), status: "pending".into(), created_at: now(),
+            }).unwrap();
+        }
+        let items = collect(&st).unwrap();
+        let kinds = |id: &str| items.iter().find(|i| i.id == format!("permission:{id}")).unwrap().actions.iter().map(|a| a["kind"].as_str().unwrap()).collect::<Vec<_>>();
+        assert!(kinds("k1").contains(&"approve_always"));
+        assert_eq!(kinds("k2"), vec!["approve", "deny", "open"]);
     }
 
     #[tokio::test]

@@ -1,0 +1,977 @@
+[
+  {
+    "isFramework" : true,
+    "moduleName" : "AVFAudio",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AVFAudio-OP057XX21MEL.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "AVFoundation",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AVFoundation-1YB6LOPJDIKO.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Accessibility",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Accessibility.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "ActivityKit",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ActivityKit.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "AppIntents",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/AppIntents.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "AppIntentsTypeSupport",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/AppIntentsTypeSupport.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "AppKit",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AppKit-2ET4IRX61XFGE.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "AudioToolbox",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AudioToolbox-11D3WKFBKT0UU.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "ColorSync",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ColorSync.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Combine",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Combine.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreAudio",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreAudio.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreData",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreData.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreFoundation",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreFoundation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreGraphics",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreGraphics.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreImage",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreImage.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreLocation",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreLocation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "CoreMIDI",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreMIDI.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreMedia",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreMedia.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreSpotlight",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreSpotlight.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreText",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreText.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreTransferable",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreTransferable.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "CoreVideo",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/CoreVideo.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Darwin",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Darwin.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "DataDetection",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/DataDetection.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "DeveloperToolsSupport",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/DeveloperToolsSupport.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Dispatch",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Dispatch.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Distributed",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Distributed.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "ExtensionFoundation",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ExtensionFoundation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Foundation",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Foundation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "FoundationModels",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/FoundationModels-3P3I4XKTVLIGT.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "IOKit",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/IOKit.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "ImageIO",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ImageIO.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Intents",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Intents.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "LightweightCodeRequirements",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/LightweightCodeRequirements.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "LoftKit",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Products\/Debug\/LoftKit.swiftmodule\/arm64-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "MediaToolbox",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/MediaToolbox-28VSTA3NAKPT4.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Metal",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Metal.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "NaturalLanguage",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/NaturalLanguage.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Network",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Network.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "OSLog",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/OSLog.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "ObjectiveC",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/ObjectiveC.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Observation",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Observation.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "QuartzCore",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/QuartzCore.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "RelevanceKit",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/RelevanceKit.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Spatial",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Spatial.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Speech",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Speech-3AO08L1K0RIG9.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Swift",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Swift.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "SwiftOnoneSupport",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/SwiftOnoneSupport.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "SwiftUI",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftUI-3DIU4YIFMGDJ4.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "SwiftUICore",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftUICore-1MB03P0OYLUGN.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Symbols",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Symbols.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "Synchronization",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/Synchronization.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "System",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/System.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "Testing",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Intermediates.noindex\/SwiftExplicitPrecompiledModules\/Testing-29S96CPX9TLIM.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "UniformTypeIdentifiers",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/UniformTypeIdentifiers.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "VideoToolbox",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/VideoToolbox.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "WidgetKit",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/WidgetKit-2QHHG1SVJPA8N.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "XCTest",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Intermediates.noindex\/SwiftExplicitPrecompiledModules\/XCTest-30KRI8SM3W5AL.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "XCUIAutomation",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Intermediates.noindex\/SwiftExplicitPrecompiledModules\/XCUIAutomation-24PBHGF0GKB2S.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "XPC",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/XPC.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : true,
+    "moduleName" : "_AppIntents_SwiftUI",
+    "modulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_AppIntents_SwiftUI-HEKZLQK4NSEE.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_Builtin_float",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_Builtin_float.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_Concurrency",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_Concurrency.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation1",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation1.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation2",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation2.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation3",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_DarwinFoundation3.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_StringProcessing",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/_StringProcessing.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "os",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/os.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "simd",
+    "modulePath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/swift\/macosx\/prebuilt-modules\/27.0\/simd.swiftmodule\/arm64e-apple-macos.swiftmodule"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AVFAudio.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AVFAudio-C15W6Z8KVTDGILEKHV2UM4CGY.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AVFAudio"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AVFoundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AVFoundation-RX4KFG9H1R5PDNQNJA7206TS.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AVFoundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Accessibility.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Accessibility-324IT7O7C497T86JF6HHWXGD6.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Accessibility"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/ActivityKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ActivityKit-2APHMDX8LPQBHVH0JLOKZODBW.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ActivityKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AppIntents.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AppIntents-73IE5135LZJQ3N0EHOWH69ZDS.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AppIntents"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AppIntentsTypeSupport.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AppIntentsTypeSupport-AE2U587B05L9E6OBUPHLSZNOX.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AppIntentsTypeSupport"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AppKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AppKit-E7T4NMVA9P86L378E9D17KU4M.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AppKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/ApplicationServices.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ApplicationServices-ECD8CCB1GJEO6OQL4ZOW2IRIV.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ApplicationServices"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/AudioToolbox.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/AudioToolbox-1MUT0ZWNLCH0N59NLROW5ENE7.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "AudioToolbox"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CFNetwork.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CFNetwork-302718F06E10DQ9SWE98QD0OK.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CFNetwork"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/cups.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CUPS-26GQUFDRTYNDA2QWESKLTH22U.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CUPS"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Carbon.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Carbon-3DMJGIJS9ZLY5XK2Y2BDDXN0G.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Carbon"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/ColorSync.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ColorSync-3H3NVMN2EI9XXUH7WF6RF9RBA.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ColorSync"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreAudio.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreAudio-38Q01Y7XE7Y2FF95P35B988QJ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreAudio"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreAudioTypes.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreAudioTypes-EQA7UE63505RZG3PAK0R8MH5J.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreAudioTypes"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreData.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreData-DQO7DDS4PQBXYTTP04VUO3NBT.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreData"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreFoundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreFoundation-EZSIZW1N0YZWEGQ7IVYQS27OP.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreFoundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreGraphics.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreGraphics-8MO8OW9FQJPQTMD0CX4M430XH.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreGraphics"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreImage.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreImage-E7BVJD0IIUS9EJ4K6ZLWQMS6O.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreImage"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreLocation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreLocation-5NBX551630G0PES0YYOLHZ7X8.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreLocation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreMIDI.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreMIDI-1V3KRGNK153EIM5YR2G88KXQB.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreMIDI"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreMedia.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreMedia-EJ1A89U8SW76901AJGRDG83Z4.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreMedia"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreServices.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreServices-5DKN29TE896C11SOWXXJDFMQV.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreServices"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreSpotlight.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreSpotlight-AMXEEGHQSPCLVVSRR1OKE9DL1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreSpotlight"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreText.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreText-3TIIKG9UVDUZKR9AP9MQUQTND.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreText"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreTransferable.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreTransferable-DX2TFYMC7SPK8P8T86L2E3GEN.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreTransferable"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/CoreVideo.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/CoreVideo-DIKF1DT7BN4Q8NFLISF24N36T.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "CoreVideo"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/Darwin.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Darwin-8J78GAGB5VC14I7COZ57D1YJI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Darwin"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/DataDetection.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/DataDetection-AFQR6QSQJGJM3A0VZQVAT58F7.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "DataDetection"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/DeveloperToolsSupport.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/DeveloperToolsSupport-DY1AWIYE5O7UJDZ1UXMN2KR25.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "DeveloperToolsSupport"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/DiskArbitration.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/DiskArbitration-9RJGRA8IQ7BRDR39HD9M4AS3S.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "DiskArbitration"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/dispatch.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Dispatch-CUCKURRQGNXZQVK1OMB1CJHPX.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Dispatch"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/ExtensionFoundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ExtensionFoundation-7YDW2E7KTH1LMM99FZ0093V32.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ExtensionFoundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Foundation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Foundation-2S5P35MSOTZ9M14SOJJQWS8QZ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Foundation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/IOKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/IOKit-8NZX3FYWY963ZOH17J13XS01P.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "IOKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/IOSurface.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/IOSurface-41HFGRFHAM1SBLR9ZRVR1YS3T.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "IOSurface"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/ImageIO.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ImageIO-A5U4GEQL7OB5CEERRL6F69366.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ImageIO"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Intents.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Intents-CXTDBR5HOMNY1MAJ2C3DYBGLO.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Intents"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinBasic.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/MachO-2MUHDIJWTAQFU394IBDPTEI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "MachO"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/MediaToolbox.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/MediaToolbox-DEEQDLSGIK79E60KA194N0WMG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "MediaToolbox"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Metal.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Metal-6OVRKVGO1DH2S0KAG3P72RQB8.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Metal"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/NaturalLanguage.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/NaturalLanguage-1YKHFN9Q9R0LPX0XSV0HN5YJ0.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "NaturalLanguage"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Network.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Network-2BJ21DX5YW4LL26ZI1AITYOVG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Network"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/OSLog.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/OSLog-ADDZUHLHQB8H438E5GBJDT3S8.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "OSLog"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/ObjectiveC.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ObjectiveC-74I7ZVCU977PF0WL06TPPPJEQ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ObjectiveC"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/OpenGL.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/OpenGL-5U52EN2LJVXJZ4JCHGMRQ75FV.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "OpenGL"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/QuartzCore.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/QuartzCore-1TCGYSC1FXE630854WA4FPWF4.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "QuartzCore"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/RelevanceKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/RelevanceKit-4634BLP8K0P2ER40KI2K1A3K5.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "RelevanceKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Security.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Security-7T37Y04FA34JE0QOQYJK5LQNV.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Security"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/Spatial\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Spatial-ADC3RN42Y2USPVWWNLIUMWG4C.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Spatial"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Speech.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Speech-3P7DPUTBRU8WEYOUN7CCE7V00.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Speech"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftShims-4JV9AKUMKDKD0UVG25K7PM120.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "SwiftShims"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/SwiftUI.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftUI-9OXVENDYFBII69R8JDKQ57M.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "SwiftUI"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/SwiftUICore.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftUICore-BP9A6OR4BT0PR83JY4BF68EYG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "SwiftUICore"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/Symbols.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/Symbols-2YBMGA02UTDBG2HVXYQLS9RFR.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "Symbols"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/UniformTypeIdentifiers.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/UniformTypeIdentifiers-855X3ES9TQJZXEP2QEGXWA4MC.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "UniformTypeIdentifiers"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/UserNotifications.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/UserNotifications-2OEWXJ5X6ENG3QNNI5BKUI6K1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "UserNotifications"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/VideoToolbox.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/VideoToolbox-DT66LK8RDE0XNXCHKO0F313LH.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "VideoToolbox"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/WidgetKit.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/WidgetKit-SON146MTHJ5QBR47BASQ2RT9.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "WidgetKit"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/Library\/Frameworks\/XCTest.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Intermediates.noindex\/SwiftExplicitPrecompiledModules\/XCTest-9KGS8OXOVVX4Q0WSMSJ4FZOXJ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "XCTest"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/Library\/Frameworks\/XCUIAutomation.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/Intermediates.noindex\/SwiftExplicitPrecompiledModules\/XCUIAutomation-BWMCWGMLQPGML31G4RF852VFL.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "XCUIAutomation"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/xpc.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/XPC-3DMF3GXKS2LY623O05QG65R8B.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "XPC"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation1.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_AvailabilityInternal-8V9ALHQLJH5ZM56C2OU3AUCQG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_AvailabilityInternal"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_float-7W762YD7RSHZK5P65U024I6VG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_float"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_intrinsics-5HTYLBFGH0BZWVLSPJLEHIZ6J.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_intrinsics"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_inttypes-V83VUP7PM1NQAWE8LJMF0IYS.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_inttypes"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_limits-BJXIZZVIZLFFVA4ZHOQNO7XRI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_limits"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdarg-5B02U2REVVMI1CF1BC1CQ11P1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdarg"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdatomic-68D53LW3NUVP2CJ0QKA6UKZZR.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdatomic"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdbool-BMBZI5PI1SS5MUED9UKRQPUOT.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdbool"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stddef-5899D1DNDTE0YEFUANRZ7PFMN.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stddef"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdint-4O18J4L61XZU11058E1CJAF5I.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_stdint"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_Builtin_tgmath-601AK237QP1FDT5WZLPFBO3OL.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_Builtin_tgmath"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation1.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation1-C7UXMDZXNZ9GLUDJ83MDYYEVA.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation1"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation2.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation2-6SUPV6RU82KKR8VG63ETDLEYG.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation2"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation3.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation3-EKRC39B6KT4EVG0CM480DUAIH.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_DarwinFoundation3"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/System\/Library\/Frameworks\/_LocationEssentials.framework\/Modules\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_LocationEssentials-4YN2Q92AYO5OY8YDWE1ALNGOI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_LocationEssentials"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/_SwiftConcurrencyShims-2DG1FOSULF05EAYP6NLCNP1IO.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_SwiftConcurrencyShims"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/dnssd.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/dnssd-69D0K3EQY3H9NZI6UCESJN6RN.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "dnssd"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/launch.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/launch-2920GXB9IJPKUXF547NV0SEEA.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "launch"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/libDER\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/libDER-EDVXIQMIXYF97T0P88FJ78P9G.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "libDER"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/libkern.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/libkern-6WVC2WL80GBOVJGX5719RHM7H.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "libkern"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/os.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/os-F1066WVAT1F711O2CNJVYC14L.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "os"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/os.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/os_object-431HPXYTY8274H7M2676CKSE7.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "os_object"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/os.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/os_workgroup-E75BHTAIPEVCR5JDZLONZEKS.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "os_workgroup"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ptrauth-7692V56CR28733EFJKDKBQ7KZ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ptrauth"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/ptrcheck-25ELLSA9UXCQQ3TRHY5TUJKRB.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "ptrcheck"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/simd\/module.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/simd-1IEMPIAHU5GTCFUBKUYGI4GZJ.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "simd"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/c_standard_library.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/string_h-KCRC0CMDMG0LKG4A5CNGYV5H.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "string_h"
+  },
+  {
+    "clangModuleMapPath" : "\/Volumes\/SSD 990 Evo Docking station\/xcode\/Xcode.app\/Contents\/Developer\/Platforms\/MacOSX.platform\/Developer\/SDKs\/MacOSX.sdk\/usr\/include\/DarwinFoundation2.modulemap",
+    "clangModulePath" : "\/Users\/gustavo\/dev\/loft\/agent-local-storage\/ce1f22dc-a6ee-4262-b694-c00efd6cd50a\/repo\/ios\/LoftKit\/.build\/out\/SDKExplicitPrecompiledModules\/sys_types-BASK4F3ROZ69KZ0Y695PFZDZ1.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "sys_types"
+  }
+]
