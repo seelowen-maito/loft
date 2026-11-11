@@ -42,8 +42,10 @@ final class Speaker: NSObject {
     @ObservationIgnored private var lease: UUID?
     /// How the current reading was cut short, returned by `speak`.
     @ObservationIgnored private var endedBy: ReadAloudCommand?
+    @ObservationIgnored private let audio: AudioSessionOwner
 
-    override init() {
+    init(audio: AudioSessionOwner = .shared) {
+        self.audio = audio
         super.init()
         synth.delegate = self
     }
@@ -115,11 +117,11 @@ final class Speaker: NSObject {
                 reader = nil
             }
         }
-        if let problem = await takeAudio() {
-            return failed(messageId, problem)
-        }
-        // Stopped while the audio was being handed over.
+        let problem = await takeAudio()
+        // Stopped while the audio was being handed over, or another request took it before this one held it:
+        // ended on purpose, not a failure to report.
         guard isSpeaking else { done(); return endedBy }
+        if let problem { return failed(messageId, problem) }
         synthStarted = false
         await withCheckedContinuation { c in
             finished = c
@@ -209,7 +211,7 @@ final class Speaker: NSObject {
         current = nil
         messageId = nil
         utterance = nil
-        if let lease { AudioSessionOwner.shared.release(lease) }
+        if let lease { audio.release(lease) }
         lease = nil
         finished?.resume()
         finished = nil
@@ -218,17 +220,21 @@ final class Speaker: NSObject {
     /// Takes the audio from the owner for reading aloud (the mic hands it over). Returns why it couldn't.
     private func takeAudio() async -> String? {
         do {
-            lease = try await AudioSessionOwner.shared.acquire(.speaking, by: "read-aloud") { [weak self] _ in self?.stopPlaying() }
+            lease = try await audio.acquire(.speaking, by: "read-aloud") { [weak self] _ in self?.stopPlaying() }
             return nil
         } catch {
             return (error as? VoiceError)?.message ?? error.localizedDescription
         }
     }
 
-    /// Reads a short sample in one voice, for the voice picker.
+    /// Reads a short sample in one voice, for the voice picker. A tap there is explicit, so it isn't queued
+    /// through `turns`: `stop()` drops the readings waiting and cuts the one playing.
     func preview(_ voice: AVSpeechSynthesisVoice) async {
         stop()
-        _ = await takeAudio()
+        if let problem = await takeAudio() {
+            VoiceLog.shared.add("read-aloud: couldn't preview the voice: \(problem)")
+            return
+        }
         isSpeaking = true
         let u = AVSpeechUtterance(string: VoiceChoice.sample(for: voice.language))
         u.voice = voice
