@@ -312,8 +312,10 @@ async fn other_repos(state: &AppState, project: &str, repo: &str, report: &mut R
                     if let Some(etag) = etag {
                         state.mirror.etags.lock().unwrap().insert(key, etag);
                     }
-                    // Transferred away: left as it is, like a link whose repo is gone.
-                    if same_repo(&i, &other) {
+                    // Transferred away: left as it is, like a link whose repo is gone. Unlinked or deleted
+                    // in Loft while it was read: dropped, so nothing of that repo is ever imported.
+                    let still_linked = i["number"].as_i64().is_some_and(|n| linked(state, &other).iter().any(|t| t.github.as_ref().is_some_and(|g| g.number == n)));
+                    if same_repo(&i, &other) && still_linked {
                         let mut r = Report::default();
                         apply(state, project, &other, &i, &mut r);
                         report.updated += r.updated;
@@ -656,7 +658,7 @@ pub async fn keep_working(State(state): State<AppState>, axum::extract::Path(id)
     };
     let path = format!("/repos/{}/issues/{}", g.repo, g.number);
     let v = crate::github::request(&state, reqwest::Method::PATCH, &path, Some(json!({ "state": "open" }))).await.map_err(|e| crate::api::bad(format!("Couldn't reopen #{} on GitHub: {e}", g.number)))?;
-    keep_link(&state, &g.repo, &v);
+    keep_link(&state, &g.repo, &v, true);
     let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
     crate::tasks::log_status(&state, &t, "user", &format!("Kept working; #{} reopened on GitHub", g.number));
     Ok(Json(json!(t)))
@@ -845,10 +847,14 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
     }
     let cursor = state.mirror.cursor(&g.repo);
     let _held = cursor.lock().await;
+    // What Loft knows of GitHub now, under the lock: an earlier write (or a refresh) may have moved it on
+    // since this edit was made.
+    let known = state.db.get_task(&after.id).ok().flatten().and_then(|t| t.github).filter(|k| k.repo == g.repo && k.number == g.number).unwrap_or_else(|| g.clone());
     let path = format!("/repos/{}/issues/{}", g.repo, g.number);
     let result = async {
         let now_there = crate::github::get(state, &path).await?;
-        if now_there["updated_at"].as_str().is_some_and(|u| u != g.updated_at) {
+        // A close the poll hasn't applied yet (its link still says open) is a change too: GitHub's reason isn't written over.
+        if now_there["updated_at"].as_str().is_some_and(|u| u != known.updated_at) || now_there["state"].as_str().is_some_and(|s| s != known.state) {
             apply(state, &after.project, &g.repo, &now_there, &mut Report::default());
             links_from_github(state, &g.repo, &now_there).await;
             if let Ok(Some(t)) = state.db.get_task(&after.id) {
@@ -861,7 +867,7 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
         // Remember what GitHub says now, so the next poll (or edit) doesn't take Loft's own write for a
         // change: the PATCH answer has it, unless a link written after it moved the issue on again.
         match patched.filter(|_| !links_changed(before, after)) {
-            Some(v) => keep_link(state, &g.repo, &v),
+            Some(v) => keep_link(state, &g.repo, &v, true),
             None => refresh_link(state, &g.repo, g.number).await,
         }
         for n in parents {
@@ -928,18 +934,20 @@ async fn links_to_github(state: &AppState, g: &GithubLink, now_there: &Value, be
 /// Reads issue #n again and keeps GitHub's `updated_at` (and state) on the Loft issue that mirrors it.
 async fn refresh_link(state: &AppState, repo: &str, n: i64) {
     if let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await {
-        keep_link(state, repo, &v);
+        keep_link(state, repo, &v, false);
     }
 }
 
-/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it. A state
-/// the Loft issue doesn't have yet (a spec read closed here before the poll got to it) stays as it was,
-/// so the poll's `apply` still sees GitHub move and moves the Loft issue with it.
-fn keep_link(state: &AppState, repo: &str, v: &Value) {
+/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it. `v` is
+/// GitHub's answer to Loft's own write (`own`), or a read. A state read that the Loft issue doesn't have
+/// yet (a spec read closed here before the poll got to it) stays as it was, so the poll's `apply` still
+/// sees GitHub move and moves the Loft issue with it. A state Loft wrote is kept as is, even when the
+/// Loft issue moved on again meanwhile: its own write is no GitHub change.
+fn keep_link(state: &AppState, repo: &str, v: &Value, own: bool) {
     let Some(n) = v["number"].as_i64() else { return };
     if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
         let mut l = link(repo, v);
-        if l.state != t.state() {
+        if !own && l.state != t.state() {
             l.state = t.github.as_ref().unwrap().state.clone();
         }
         t.github = Some(l);
@@ -1931,6 +1939,59 @@ pub(crate) mod tests {
             let asked = st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("#1 was closed on GitHub while it's being worked on"));
             assert_eq!(asked, worked, "{name}: only the worked-on one is asked about");
         }
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_another_repo_without_a_link_any_more_is_dropped() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "mir-drop", Some("https://github.com/octo/new2"));
+        fake.route("GET", "/repos/octo/new2/issues", 200, json!([]));
+        let t = Task { id: "drop-1".into(), title: "#1".into(), kind: "todo".into(), status: "ready".into(), project: "mir-drop".into(), github: Some(link("octo/old2", &gh("octo/old2", 1, "#1", "open", "2026-10-02T00:00:00Z"))), ..Default::default() };
+        st.db.save_task(&t).unwrap();
+        // The answer is for an issue no Loft issue links to any more (as when its link goes while the read is in flight).
+        fake.route("GET", "/repos/octo/old2/issues/1", 200, gh("octo/old2", 9, "Someone else's", "open", "2026-10-03T00:00:00Z"));
+        let r = sync_project(&st, "mir-drop", true).await.unwrap();
+        assert_eq!((r.created, r.updated, r.error), (0, 0, None));
+        assert_eq!(linked(&st, "octo/old2").len(), 1, "nothing of octo/old2 is imported");
+        assert_eq!(st.db.get_task("drop-1").unwrap().unwrap().github.unwrap().updated_at, "2026-10-02T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn done_in_loft_doesnt_write_over_a_github_close_the_poll_hasnt_applied() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/wt-reason";
+        let id = one_mirrored(&st, &fake, "wt-reason", repo, "2026-10-02T00:00:00Z").await;
+        // Closed as not planned on GitHub; a refresh read it, so the link has its updated_at but still says open.
+        let mut closed = gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+        closed["state_reason"] = json!("not_planned");
+        fake.route("GET", "/repos/octo/wt-reason/issues/1", 200, closed);
+        refresh_link(&st, repo, 1).await;
+        let Json(v) = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "status": "done" }))).await.unwrap();
+        assert!(patches(&fake, repo).is_empty(), "GitHub's not planned isn't written over with completed");
+        assert_eq!((&v["status"], &v["github"]["state"]), (&json!("done"), &json!("closed")));
+        assert!(st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text == "GitHub #1 changed meanwhile: its version wins"));
+    }
+
+    #[tokio::test]
+    async fn a_fast_close_then_reopen_in_loft_reopens_on_github() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/wt-flip";
+        let id = one_mirrored(&st, &fake, "wt-flip", repo, "2026-10-02T00:00:00Z").await;
+        let open = st.db.get_task(&id).unwrap().unwrap();
+        let done = Task { status: "done".into(), ..open.clone() };
+        // Done, then inbox again at once: both writes carry the link as it was at the edits. The close
+        // is written while the Loft issue is already open again.
+        fake.in_turn("GET", "/repos/octo/wt-flip/issues/1", vec![(200, gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z")), (200, gh(repo, 1, "Retry cap", "closed", "2026-10-03T00:00:00Z"))]);
+        fake.in_turn("PATCH", "/repos/octo/wt-flip/issues/1", vec![(200, gh(repo, 1, "Retry cap", "closed", "2026-10-03T00:00:00Z")), (200, gh(repo, 1, "Retry cap", "open", "2026-10-04T00:00:00Z"))]);
+        write_through(&st, &open, &done).await;
+        write_through(&st, &done, &open).await;
+        assert_eq!(patches(&fake, repo).len(), 2);
+        assert_eq!(patches(&fake, repo)[1], json!({ "state": "open" }), "Loft's reopen reaches GitHub");
+        let t = st.db.get_task(&id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.github.unwrap().state.as_str()), ("inbox", "open"), "not undone as closed on GitHub");
     }
 
     #[tokio::test]
