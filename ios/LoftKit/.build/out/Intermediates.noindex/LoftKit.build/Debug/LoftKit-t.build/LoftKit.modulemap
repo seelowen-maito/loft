@@ -1,4 +1,0 @@
-module LoftKit {
-header "LoftKit-Swift.h"
-export *
-}
