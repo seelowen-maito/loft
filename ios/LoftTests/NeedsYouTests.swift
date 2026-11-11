@@ -6,6 +6,16 @@ final class NeedsYouTests: XCTestCase {
         try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
     }
 
+    func testAKillOffersAlwaysAllowOnlyWithARule() {
+        func request(_ tool: String, _ rule: String?) -> PermissionRequest {
+            PermissionRequest(id: "p", agentId: "a", source: "prompt", toolName: tool, input: nil, reason: nil, rule: rule, status: "pending", createdAt: Date())
+        }
+        XCTAssertTrue(request("Kill", "Kill(/d/*/App)").canAlwaysAllow)
+        for rule in [nil, ""] { XCTAssertFalse(request("Kill", rule).canAlwaysAllow, rule ?? "nil") }
+        XCTAssertTrue(request("Bash", "Bash(git *)").canAlwaysAllow)
+        XCTAssertTrue(request("Bash", nil).canAlwaysAllow)
+    }
+
     func testTheBackendsFixtureDecodes() throws {
         let l = try fixture()
         XCTAssertEqual(l.version, 1)

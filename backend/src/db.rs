@@ -59,9 +59,6 @@ pub struct Delivery {
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
     pub done_at: String,
-    /// The tech-debt issues its final Code Review filed ("#77", or "Loft issue <id>"), for the done summary.
-    #[serde(default)]
-    pub tech_debt: Vec<String>,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -1564,7 +1561,6 @@ impl Db {
                 stalled_on: vec![],
                 stall_ask: None,
                 done_at: String::new(),
-                tech_debt: vec![],
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
@@ -1976,6 +1972,16 @@ mod tests {
             "session_id": null, "last_run_at": null, "last_run_ended_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_stored_delivery_with_a_key_we_no_longer_have_still_loads() {
+        let db = Db::open(&crate::testdir::for_this_test("delivery-old-key").join("d.db")).unwrap();
+        // A Delivery saved when it had `tech_debt` (the field is gone): the key is ignored, not an error.
+        let json = serde_json::json!({ "repo": "o/r", "spec": 5, "state": "running", "created_at": "2026-01-01T00:00:00Z", "tech_debt": ["#77"] });
+        db.0.lock().unwrap().execute("INSERT INTO deliveries (repo, spec, state, data) VALUES ('o/r', 5, 'running', ?1)", params![json.to_string()]).unwrap();
+        let d = db.get_delivery("o/r", 5).unwrap().unwrap();
+        assert_eq!((d.spec, d.state.as_str()), (5, "running"));
     }
 
     #[test]

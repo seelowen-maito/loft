@@ -1,3 +1,4 @@
+import { canAlwaysAllow } from "../../lib/permission";
 import { useState } from "react";
 import { Check, CheckCheck, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
 import { api, type PermissionRequest } from "../../lib/api";
@@ -21,6 +22,8 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
 
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
   const [rule, setRule] = useState(req.rule);
+  // A kill with no program to name has no rule to save: Allow once or Deny only. Its rule is Loft's, not editable.
+  const noRule = !canAlwaysAllow(req);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const pending = req.status === "pending";
@@ -60,19 +63,23 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
       )}
       {pending ? (
         <div className="mt-3 space-y-2.5">
-          <label className="flex items-center gap-2">
-            <span className="eyebrow shrink-0">Rule</span>
-            <input className="input py-1 font-mono text-[12px]" value={rule} onChange={(e) => setRule(e.target.value)} />
-          </label>
+          {!noRule && (
+            <label className="flex items-center gap-2">
+              <span className="eyebrow shrink-0">Rule</span>
+              <input className="input py-1 font-mono text-[12px]" value={rule} readOnly={req.tool_name === "Kill"} onChange={(e) => setRule(e.target.value)} />
+            </label>
+          )}
           <div className="flex flex-wrap gap-2">
             {req.source === "prompt" && (
               <button className="btn" disabled={busy} onClick={() => act("allow_once")}>
                 <Check className="size-3.5" /> Allow once
               </button>
             )}
-            <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
-              <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
-            </button>
+            {!noRule && (
+              <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
+                <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
+              </button>
+            )}
             <button className="btn-ghost text-bad hover:text-bad" disabled={busy} onClick={() => act("deny")}>
               <X className="size-3.5" /> Deny
             </button>
@@ -81,9 +88,9 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
         </div>
       ) : (
         res && (
-          <div className={cx("mt-2 flex items-center gap-1.5 font-mono text-[11.5px]", res.cls)}>
-            {res.icon} {res.label}
-            {req.status === "allowed_always" && <code className="ml-1 text-fg-2">{req.rule}</code>}
+          <div className={cx("mt-2 flex min-w-0 flex-wrap items-center gap-x-1.5 font-mono text-[11.5px]", res.cls)}>
+            {res.icon} <span className="shrink-0">{res.label}</span>
+            {req.status === "allowed_always" && <code className="max-w-full min-w-0 truncate text-fg-2" title={req.rule}>{req.rule}</code>}
           </div>
         )
       )}

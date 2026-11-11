@@ -601,6 +601,71 @@ fn post(url: &str, body: &str) -> anyhow::Result<Value> {
     Ok(serde_json::from_str(body)?)
 }
 
+// ---- Kill rules -------------------------------------------------------
+
+/// The real executable path of `pid` from the kernel, not `ps`'s argv[0], which a process can set to anything.
+#[cfg(target_os = "macos")]
+fn exe_of(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+#[cfg(not(target_os = "macos"))]
+fn exe_of(_pid: i32) -> Option<String> {
+    None
+}
+
+/// A folder Xcode names `<Name>-<hash>` in DerivedData: 28 lowercase letters after the dash.
+fn is_build_folder(part: &str) -> bool {
+    part.rsplit_once('-').is_some_and(|(name, hash)| !name.is_empty() && hash.len() == 28 && hash.bytes().all(|b| b.is_ascii_lowercase()))
+}
+
+/// Programs that run whatever script they are given: a rule for one would allow stopping anything they run.
+const INTERPRETERS: &[&str] = &["node", "python", "ruby", "perl", "php", "bash", "sh", "zsh", "fish", "deno", "bun", "java", "osascript"];
+
+/// The `Kill(...)` rule for stopping the program at `exe`: its path, with each per-build folder as `*` so a rebuild
+/// still matches. `None` for a path that can't make a rule that names one program.
+fn kill_rule(exe: &str) -> Option<String> {
+    if !exe.starts_with('/') || exe.contains(['*', '(', ')', '\n']) {
+        return None;
+    }
+    let spec = exe.split('/').map(|p| if is_build_folder(p) { "*" } else { p }).collect::<Vec<_>>().join("/");
+    kill_spec_ok(&spec).then(|| format!("Kill({spec})"))
+}
+
+fn is_interpreter(file: &str) -> bool {
+    INTERPRETERS.contains(&file.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
+/// A path pattern names a program only if it ends in a literal file name that isn't an interpreter (`python3.12` and
+/// `node22` count), so `*` and `*/` never match everything.
+fn kill_spec_ok(spec: &str) -> bool {
+    let file = spec.rsplit('/').next().unwrap_or_default();
+    spec.starts_with('/') && !file.is_empty() && !file.contains('*') && !spec.contains(')') && !is_interpreter(file)
+}
+
+/// The pattern inside a saved `Kill(...)` rule. A bare `Kill` or a rule that would match every program has none.
+pub fn kill_spec(rule: &str) -> Option<&str> {
+    let spec = rule.trim().strip_prefix("Kill(")?.strip_suffix(')')?;
+    kill_spec_ok(spec).then_some(spec)
+}
+
+/// `*` matches any run of characters inside one path folder or file name, never a `/`.
+fn glob(pat: &str, s: &str) -> bool {
+    match pat.split_once('*') {
+        None => pat == s,
+        Some((head, rest)) => {
+            let Some(s) = s.strip_prefix(head) else { return false };
+            let reach = s.find('/').unwrap_or(s.len());
+            (0..=reach).filter(|&i| s.is_char_boundary(i)).any(|i| glob(rest, &s[i..]))
+        }
+    }
+}
+
+fn rule_allows(rules: &[String], exe: &str) -> bool {
+    rules.iter().filter_map(|r| kill_spec(r)).any(|spec| glob(spec, exe))
+}
+
 // ---- Loft's side: `POST /kill/<agent id>` -----------------------------
 
 #[derive(Deserialize)]
@@ -699,6 +764,17 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     if foreign.len() > SHOWN {
         list.push(format!("and {} more", foreign.len() - SHOWN));
     }
+    // Their programs, unless one is another agent's live process, Loft's own, or not asked about as this agent's run.
+    let exes: Option<Vec<String>> = (inside && foreign.iter().all(|&pid| pid != me && owner(pid).is_none())).then(|| foreign.iter().filter_map(|&pid| exe_of(pid)).collect()).filter(|e: &Vec<String>| e.len() == foreign.len());
+    if exes.as_ref().is_some_and(|e| e.iter().all(|x| rule_allows(&a.allowed_tools, x))) {
+        send(&foreign, signal, &tool, &mut out);
+        return out;
+    }
+    // Offered only when saving it would stop the question: one program, a path that makes a rule.
+    let rule = exes
+        .and_then(|e| e.iter().map(|x| kill_rule(x)).collect::<Option<HashSet<_>>>())
+        .and_then(|r| if r.len() == 1 { r.into_iter().next() } else { None })
+        .unwrap_or_default();
     let n = foreign.len();
     let es = if n == 1 { "" } else { "es" };
     let reason = if inside {
@@ -707,7 +783,7 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
         format!("A command outside {}'s runs (PID {caller}) asks to stop {n} process{es}: {}.", a.name, list.join(", "))
     };
     let input = json!({ "command": command, "pids": foreign });
-    let d = crate::agents::ask_permission_for(state, &a.id, "prompt", "Kill", input, &reason, "Kill".into(), ASK_TIMEOUT).await;
+    let d = crate::agents::ask_permission_for(state, &a.id, "prompt", "Kill", input, &reason, rule, ASK_TIMEOUT).await;
     if d.allow {
         send(&foreign, signal, &tool, &mut out);
     } else {
@@ -1369,13 +1445,98 @@ mod tests {
         assert_eq!(req.input["command"], format!("kill {pid}"));
         assert!(req.reason.contains(&format!("{pid} (not an agent's: /bin/sleep 60)")), "{}", req.reason);
         assert!(other.alive(), "it was stopped before the user answered");
-        // "Always allow" is about these processes only: no rule is saved.
+        // "Always allow" saves the program, not these processes.
+        assert_eq!(req.rule, "Kill(/bin/sleep)");
         crate::agents::decide(&st, &req.id, "allow_always", None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 0, "{v}");
         until("the process to stop", 5, || !other.alive()).await;
-        assert_eq!(st.db.get_permission(&req.id).unwrap().unwrap().status, "allowed_once");
-        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.is_empty());
+        assert_eq!(st.db.get_permission(&req.id).unwrap().unwrap().status, "allowed_always");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, vec!["Kill(/bin/sleep)".to_string()]);
+        // The same program, a new process: no question.
+        let again = Sleeper::start(false);
+        let v = ask(&st, &a.id, "kill", &[&again.pid().to_string()]).await;
+        assert_eq!(v["code"], 0, "{v}");
+        until("the second process to stop", 5, || !again.alive()).await;
+        assert!(pending(&st, &a.id).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_kill_rule_does_not_cover_another_program_or_another_agents_live_process() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Reviewer");
+        st.db.update_agent(&a.id, |a| a.allowed_tools = vec!["Kill(/usr/bin/cat)".into(), "Kill".into(), "Kill(*)".into()]).unwrap();
+        // /bin/sleep isn't in the rules, and a bare `Kill` or `Kill(*)` covers nothing.
+        let other = Sleeper::start(false);
+        let pid = other.pid().to_string();
+        let asking = tokio::spawn({
+            let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
+            async move { ask(&st, &id, "kill", &[&pid]).await }
+        });
+        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        assert!(other.alive());
+        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["code"], 1);
+        // A process another agent runs right now asks even when the rule matches it.
+        st.db.update_agent(&a.id, |a| a.allowed_tools = vec!["Kill(/bin/sleep)".into()]).unwrap();
+        let theirs = Sleeper::start(true);
+        record(&st.cfg.storage_dir, &b.id, theirs.pid() as u32).unwrap();
+        let asking = tokio::spawn({
+            let (st, id, pid) = (st.clone(), a.id.clone(), theirs.pid().to_string());
+            async move { ask(&st, &id, "kill", &[&pid]).await }
+        });
+        until("a second permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        let req = pending(&st, &a.id).remove(0);
+        assert!(theirs.alive());
+        // It offers no Always: saving the rule wouldn't stop the question.
+        assert_eq!(req.rule, "");
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None).is_err());
+        // A rule posted with the answer doesn't give it one.
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None).is_err());
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools == vec!["Kill(/bin/sleep)".to_string()], "nothing was added");
+        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["code"], 1);
+    }
+
+    #[test]
+    fn a_kill_rule_names_the_program_with_the_build_folder_wildcarded() {
+        let exe = "/Users/me/Library/Developer/Xcode/DerivedData/Loft-bfxjtqwnvmpyeoaksvduhzgrlcnk/Build/Products/Debug/Loft.app/Contents/MacOS/Loft";
+        let rule = kill_rule(exe).unwrap();
+        assert_eq!(rule, "Kill(/Users/me/Library/Developer/Xcode/DerivedData/*/Build/Products/Debug/Loft.app/Contents/MacOS/Loft)");
+        let rules = vec![rule];
+        // A rebuild is another folder; a different program or build type is not covered.
+        assert!(rule_allows(&rules, &exe.replace("bfxjtqwnvmpyeoaksvduhzgrlcnk", "zzzzzzzzzzzzzzzzzzzzzzzzzzzz")));
+        assert!(rule_allows(&rules, exe));
+        assert!(!rule_allows(&rules, &exe.replace("Debug", "Release")));
+        // `*` is one folder: it doesn't reach across `/`.
+        assert!(!rule_allows(&rules, &exe.replace("Loft-bfxjtqwnvmpyeoaksvduhzgrlcnk", "x/y")));
+        assert!(rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/c") && !rule_allows(&["Kill(/a/*/c)".to_string()], "/a/b/b/c"));
+        assert!(!rule_allows(&rules, "/Applications/Loft.app/Contents/MacOS/Loft"));
+        assert_eq!(kill_rule("/bin/sleep").unwrap(), "Kill(/bin/sleep)");
+        // No rule for an interpreter, which runs whatever it is given.
+        assert_eq!(kill_rule(&exe.replace("MacOS/Loft", "MacOS/node")), None);
+        assert_eq!(kill_rule("/usr/local/bin/node"), None);
+        assert!(!rule_allows(&["Kill(/a/*/node)".to_string()], "/a/b/node"));
+        for v in ["python3.12", "node22", "ruby3.3", "python3"] {
+            assert_eq!(kill_rule(&format!("/usr/bin/{v}")), None, "{v}");
+        }
+        assert!(kill_rule("/usr/bin/nodemon").is_some());
+        // A folder is a build folder with exactly 28 lowercase letters after the dash.
+        let l28 = "abcdefghijklmnopqrstuvwxyz".to_string() + "ab";
+        assert_eq!(l28.len(), 28);
+        assert_eq!(kill_rule(&format!("/d/Loft-{l28}/x")).unwrap(), "Kill(/d/*/x)");
+        for hash in [&l28[..27], &(l28.clone() + "a"), &(l28[..27].to_string() + "1")] {
+            let p = format!("/d/Loft-{hash}/x");
+            assert_eq!(kill_rule(&p).unwrap(), format!("Kill({p})"), "{hash}");
+        }
+        // No rule from a path that isn't absolute or holds rule syntax.
+        for bad in ["", "sleep", "/tmp/a*b", "/tmp/a)b", "/tmp/"] {
+            assert_eq!(kill_rule(bad), None, "{bad}");
+        }
+        // Rules that would match every program match none.
+        for bad in ["Kill", "Kill()", "Kill(*)", "Kill(*/*)", "Kill(/bin/*)", "Bash(/bin/sleep)"] {
+            assert!(!rule_allows(&[bad.to_string()], "/bin/sleep"), "{bad}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
