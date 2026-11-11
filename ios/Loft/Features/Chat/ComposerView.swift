@@ -207,6 +207,10 @@ struct ComposerView: View {
                             .foregroundStyle(speech.state.isRecording ? Theme.failure : .secondary)
                     }
                 }
+                // A 44 × 44 pt hit area around the 32 pt circle, without taking more room in the row.
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+                .padding(-6)
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in
                     guard startVoice != nil, !speech.state.isRecording, !micOn else { return }
                     longPressed = true
