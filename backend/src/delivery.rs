@@ -928,6 +928,21 @@ fn fix(state: &AppState, d: &Delivery, n: i64) -> String {
     format!("\nNext: the Dev fixes {} (round {} of {MAX_ROUNDS}).", tag(&d, t), t.rounds)
 }
 
+/// Changes round `rounds` on ticket `t` is the last: the ticket waits for the user, with `notes` (what a
+/// reassigned Dev starts from) and `why` on its Loft issue. The note for the reply, from [`needs_human`].
+async fn to_user(state: &AppState, d: &Delivery, t: &DeliveryTicket, rounds: u32, notes: &str, why: &str) -> Result<String, String> {
+    update(state, &d.repo, d.spec, |d| {
+        if let Some(t) = d.ticket_mut(t.number) {
+            (t.rounds, t.state) = (rounds, "needs_human".into());
+            t.notes = notes.into();
+            t.verdicts.clear();
+        }
+        d.last_notes = notes.into();
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    Ok(needs_human(state, d, Some(t), rounds, why).await)
+}
+
 /// Sends ticket #n back to its Dev with `brief` and `notes` (what a reassigned Dev starts from), for changes
 /// round `rounds`: at once when that Dev isn't building another ticket, otherwise once it submits that one,
 /// before any new ticket. The line for the reply.
@@ -1205,12 +1220,8 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         next += " Loft wakes you with it once this run ends.";
     }
     if reviewers.is_empty() {
-        let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
-            tracing::warn!("delivery {slug}#{}: CI: {e}", d.spec);
-            String::new()
-        });
-        let waits = if followed.is_empty() { " Loft closes it when the CI is green, and wakes you if it fails." } else { "" };
-        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{waits}{followed}{next}"));
+        let followed = follow_ci_or(state, &d, " Loft closes it when the CI is green, and wakes you if it fails.").await;
+        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{followed}{next}"));
     }
     let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
@@ -1306,12 +1317,8 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let d = unstalled(state, d, n);
         if d.ticket(n).is_some_and(|t| t.verdicts.get("ci").is_some_and(|v| v != "pass")) {
             // The CI may well be done by now, so it's read at once.
-            let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
-                tracing::warn!("delivery {slug}#{}: CI: {e}", d.spec);
-                String::new()
-            });
-            let waits = if followed.is_empty() { format!(" {name} waits for its CI: Loft closes it when the CI is green.") } else { String::new() };
-            return Ok(format!("Posted your pass on {on}.{labelled}{waits}{followed}"));
+            let followed = follow_ci_or(state, &d, &format!(" {name} waits for its CI: Loft closes it when the CI is green.")).await;
+            return Ok(format!("Posted your pass on {on}.{labelled}{followed}"));
         }
         let closed = finish(state, &d, n).await?;
         return Ok(format!("Posted your pass on {on}.{labelled}{closed}"));
@@ -1321,16 +1328,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let d = unstalled(state, d, n);
     let rounds = t.rounds + 1;
     if rounds >= MAX_ROUNDS {
-        update(state, &slug, d.spec, |d| {
-            if let Some(t) = d.ticket_mut(n) {
-                (t.rounds, t.state) = (rounds, "needs_human".into());
-                t.notes = notes.into();
-                t.verdicts.clear();
-            }
-            d.last_notes = notes.into();
-        })
-        .ok_or("The Delivery record couldn't be saved.")?;
-        let why = needs_human(state, &d, Some(&t), rounds, notes).await;
+        let why = to_user(state, &d, &t, rounds, notes, notes).await?;
         return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on {name}, so it waits for the user now{why}."));
     }
     let brief = changes_brief(&d, &t, rounds, &format!("{} ({label})", me.name), notes);
@@ -1506,8 +1504,8 @@ enum Ci {
     Green,
     /// The repo has no CI, or none runs on the branch.
     Absent,
-    /// The failed checks' names, and each one's failure with its log.
-    Red(Vec<String>, String),
+    /// The failed check runs and commit statuses.
+    Red(Vec<Value>, Vec<Value>),
 }
 
 /// Follows the CI of `d`'s tickets that wait for it, on the newest commit of its branch on GitHub. For the
@@ -1515,11 +1513,18 @@ enum Ci {
 /// changes round with the failure's log for the oldest open ticket it includes. The caller holds the
 /// repo's publish lock. The lines for the reply, empty when nothing changed.
 async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
-    if d.local || !d.tickets.iter().any(waits_for_ci) {
+    let waiting: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| waits_for_ci(t)).collect();
+    if d.local || waiting.is_empty() {
         return Ok(String::new());
     }
     let err = |e: anyhow::Error| e.to_string();
     let head = branch_head(state, d).await?;
+    // The CI first: which tickets the commit includes only matters once it's done.
+    let since = waiting.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
+    let ci = ci_of(state, &d.repo, &head, since).await.map_err(err)?;
+    if matches!(ci, Ci::Running) {
+        return Ok(String::new());
+    }
     // The tickets still open that the commit includes, oldest first.
     let mut included = vec![];
     for t in d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "needs_human")) {
@@ -1539,8 +1544,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     if ready.is_empty() {
         return Ok(String::new());
     }
-    let since = ready.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
-    match ci_of(state, &d.repo, &head, since).await.map_err(err)? {
+    match ci {
         Ci::Running => Ok(String::new()),
         ci @ (Ci::Green | Ci::Absent) => {
             let why = match ci {
@@ -1553,15 +1557,28 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
             }
             Ok(out)
         }
-        Ci::Red(names, log) => {
+        Ci::Red(runs, statuses) => {
             // A ticket whose CI already passed on an earlier commit isn't what broke it.
             match included.iter().find(|t| t.verdicts.get("ci").is_none_or(|v| v != "pass")) {
-                Some(t) if waits_for_ci(t) => ci_failed(state, d, t, &head, &names, &log).await,
+                Some(t) if waits_for_ci(t) => {
+                    let (names, log) = failure_of(state, &d.repo, &runs, &statuses).await;
+                    ci_failed(state, d, t, &head, &names, &log).await
+                }
                 // Being fixed, waiting for its fix, or waiting for the user: its next commit runs the CI again.
                 _ => Ok(String::new()),
             }
         }
     }
+}
+
+/// [`follow_ci`] for a reply: its lines, or `waiting` when nothing changed. A GitHub error is logged and counts
+/// as nothing: the poller tries again.
+async fn follow_ci_or(state: &AppState, d: &Delivery, waiting: &str) -> String {
+    let followed = follow_ci(state, d).await.unwrap_or_else(|e| {
+        tracing::warn!("delivery {}#{}: CI: {e}", d.repo, d.spec);
+        String::new()
+    });
+    if followed.is_empty() { waiting.to_string() } else { followed }
 }
 
 /// Whether commit `sha` (full or short) is `head` or one of its ancestors.
@@ -1581,10 +1598,9 @@ async fn includes(state: &AppState, repo: &str, head: &str, sha: &str) -> anyhow
 /// The checks on commit `sha` of `repo`: its check runs and commit statuses. With none at all, a repo
 /// with active workflows waits for them until `CI_GRACE_MINUTES` after `since`, the ticket's submit.
 async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::Result<Ci> {
-    let runs = crate::github::get(state, &format!("/repos/{repo}/commits/{sha}/check-runs?per_page=100")).await?;
-    let statuses = crate::github::get(state, &format!("/repos/{repo}/commits/{sha}/status")).await?;
-    let runs = runs["check_runs"].as_array().cloned().unwrap_or_default();
-    let statuses = statuses["statuses"].as_array().cloned().unwrap_or_default();
+    use crate::prs::Check;
+    let (runs, statuses) = crate::prs::commit_checks(state, repo, sha).await;
+    let (runs, statuses) = (runs?, statuses?);
     if runs.is_empty() && statuses.is_empty() {
         let workflows = match crate::github::get(state, &format!("/repos/{repo}/actions/workflows")).await {
             Ok(v) => v,
@@ -1594,14 +1610,20 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::
         let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
         return Ok(if active && !past_grace(since) { Ci::Running } else { Ci::Absent });
     }
-    if runs.iter().any(|c| c["status"] != "completed") || statuses.iter().any(|s| s["state"] == "pending") {
+    if runs.iter().any(|c| Check::of_run(c) == Check::Pending) || statuses.iter().any(|s| Check::of_status(s) == Check::Pending) {
         return Ok(Ci::Running);
     }
-    let failed_runs: Vec<&Value> = runs.iter().filter(|c| !matches!(c["conclusion"].as_str(), Some("success" | "neutral" | "skipped"))).collect();
-    let failed_statuses: Vec<&Value> = statuses.iter().filter(|s| s["state"] != "success").collect();
+    let failed_runs: Vec<Value> = runs.into_iter().filter(|c| Check::of_run(c) == Check::Failed).collect();
+    let failed_statuses: Vec<Value> = statuses.into_iter().filter(|s| Check::of_status(s) == Check::Failed).collect();
     if failed_runs.is_empty() && failed_statuses.is_empty() {
         return Ok(Ci::Green);
     }
+    Ok(Ci::Red(failed_runs, failed_statuses))
+}
+
+/// The names of the failed check runs and commit statuses, and each one's failure with its log: read only when
+/// a ticket goes back for it.
+async fn failure_of(state: &AppState, repo: &str, failed_runs: &[Value], failed_statuses: &[Value]) -> (Vec<String>, String) {
     let (mut names, mut log) = (vec![], String::new());
     for c in failed_runs {
         let name = c["name"].as_str().unwrap_or("a check");
@@ -1636,7 +1658,7 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::
         }
         log.push('\n');
     }
-    Ok(Ci::Red(names, log.trim_end().to_string()))
+    (names, log.trim_end().to_string())
 }
 
 /// The last `LOG_LINES` lines of a GitHub Actions job log, without the timestamp GitHub starts each with.
@@ -1686,16 +1708,7 @@ async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &st
     let rounds = t.rounds + 1;
     let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, which includes the ticket. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch);
     if rounds >= MAX_ROUNDS {
-        update(state, &d.repo, d.spec, |d| {
-            if let Some(t) = d.ticket_mut(n) {
-                (t.rounds, t.state) = (rounds, "needs_human".into());
-                t.notes = notes.clone();
-                t.verdicts.clear();
-            }
-            d.last_notes = notes.clone();
-        })
-        .ok_or("The Delivery record couldn't be saved.")?;
-        let why = needs_human(state, d, Some(t), rounds, &format!("the CI failed: {checks}")).await;
+        let why = to_user(state, d, t, rounds, &notes, &format!("the CI failed: {checks}")).await?;
         return Ok(format!("\nThe CI failed on {name} ({checks}).{posted} That's round {rounds} of changes, so it waits for the user now{why}."));
     }
     let back = send_back(state, d, n, rounds, &notes, changes_brief(d, t, rounds, "The CI", &notes)).await?;
@@ -2111,11 +2124,7 @@ async fn resume_ticket(state: &AppState, repo: &str, spec: i64, t: &DeliveryTick
                 let d = unstall(&|_| {})?;
                 if reviewers.is_empty() && t.verdicts.get("ci").is_some_and(|v| v != "pass") {
                     // Every reviewer passed it: its CI may be done by now, else Loft keeps following it.
-                    let followed = follow_ci(state, &d).await.unwrap_or_else(|e| {
-                        tracing::warn!("delivery {repo}#{spec}: CI: {e}");
-                        String::new()
-                    });
-                    if followed.is_empty() { format!(" {} waits for its CI.", tag(&d, &t)) } else { followed }
+                    follow_ci_or(state, &d, &format!(" {} waits for its CI.", tag(&d, &t))).await
                 } else if reviewers.is_empty() {
                     // Every verdict is in: it only had to close.
                     finish(state, &d, t.number).await?

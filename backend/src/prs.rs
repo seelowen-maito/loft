@@ -164,30 +164,48 @@ fn apply(pr: &mut PullRequest, v: &Value) {
         .collect();
 }
 
-/// Summarise check runs + legacy commit statuses for a commit.
-async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
+/// What one check of a commit says: a check run, by its status and conclusion, or a legacy commit status, by its state.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Check {
+    Passed,
+    Failed,
+    Pending,
+}
+
+impl Check {
+    pub(crate) fn of_run(c: &Value) -> Self {
+        match (c["status"].as_str(), c["conclusion"].as_str()) {
+            (Some("completed"), Some("success" | "neutral" | "skipped")) => Check::Passed,
+            (Some("completed"), _) => Check::Failed,
+            _ => Check::Pending,
+        }
+    }
+
+    pub(crate) fn of_status(s: &Value) -> Self {
+        match s["state"].as_str() {
+            Some("success") => Check::Passed,
+            Some("pending") => Check::Pending,
+            _ => Check::Failed,
+        }
+    }
+}
+
+/// A commit's check runs and its legacy commit statuses, as GitHub lists them, each read on its own.
+pub(crate) async fn commit_checks(state: &AppState, slug: &str, sha: &str) -> (Result<Vec<Value>>, Result<Vec<Value>>) {
     let runs_path = format!("/repos/{slug}/commits/{sha}/check-runs?per_page=100");
     let status_path = format!("/repos/{slug}/commits/{sha}/status");
     let (runs, statuses) = tokio::join!(github::get(state, &runs_path), github::get(state, &status_path));
-    let (mut passed, mut failed, mut pending) = (0, 0, 0);
-    if let Ok(r) = runs {
-        for c in r["check_runs"].as_array().into_iter().flatten() {
-            match (c["status"].as_str(), c["conclusion"].as_str()) {
-                (Some("completed"), Some("success" | "neutral" | "skipped")) => passed += 1,
-                (Some("completed"), _) => failed += 1,
-                _ => pending += 1,
-            }
-        }
-    }
-    if let Ok(s) = statuses {
-        for c in s["statuses"].as_array().into_iter().flatten() {
-            match c["state"].as_str() {
-                Some("success") => passed += 1,
-                Some("pending") => pending += 1,
-                _ => failed += 1,
-            }
-        }
-    }
+    let list = |v: Value, key: &str| v[key].as_array().cloned().unwrap_or_default();
+    (runs.map(|v| list(v, "check_runs")), statuses.map(|v| list(v, "statuses")))
+}
+
+/// Summarise check runs + legacy commit statuses for a commit.
+async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
+    let (runs, statuses) = commit_checks(state, slug, sha).await;
+    let (runs, statuses) = (runs.unwrap_or_default(), statuses.unwrap_or_default());
+    let all: Vec<Check> = runs.iter().map(Check::of_run).chain(statuses.iter().map(Check::of_status)).collect();
+    let count = |c: Check| all.iter().filter(|x| **x == c).count();
+    let (passed, failed, pending) = (count(Check::Passed), count(Check::Failed), count(Check::Pending));
     Ok(json!({ "total": passed + failed + pending, "passed": passed, "failed": failed, "pending": pending }))
 }
 

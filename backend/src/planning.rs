@@ -3739,12 +3739,16 @@ pub(crate) mod tests {
         assert_eq!(standing(&st, slug, 41), ("review".into(), Some(41), None));
         assert!(posts(&fake, slug, "issues/41/comments").is_empty(), "not closed while the CI runs");
 
-        // The Delivery's own tick: still running, then green.
+        // The Delivery's own tick: still running, then green. Which tickets the commit includes is asked only once
+        // the CI is done (the one compare before is submit's check that the commit is on the branch).
+        let compares = || fake.seen(&format!("/repos/{slug}/compare/")).len();
         crate::delivery::follow_all(&st).await;
         assert_eq!(standing(&st, slug, 41).0, "review");
+        assert_eq!(compares(), 1, "no compare while the CI runs");
         let dev_wakes = woken(&st, &dev).len();
         crate::delivery::follow_all(&st).await;
         assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(compares(), 2);
         assert!(woken(&st, &dev)[dev_wakes..].iter().any(|w| w.contains("build ticket #42")), "the next ticket starts");
         assert_eq!(fake.seen(&runs).len(), 3);
         // Nothing waits for a CI now: the tick reads nothing.

@@ -204,6 +204,12 @@ pub fn is_gone(e: &anyhow::Error) -> bool {
 }
 
 async fn exchange(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, etag: Option<&str>) -> Result<Option<(Value, Option<String>)>> {
+    let answer = exchange_text(state, method, path, body, etag).await?;
+    Ok(answer.map(|(text, tag)| (serde_json::from_str(&text).unwrap_or(Value::Null), tag)))
+}
+
+/// [`exchange`] with the body as GitHub sent it, JSON or not (a job's log).
+async fn exchange_text(state: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, etag: Option<&str>) -> Result<Option<(String, Option<String>)>> {
     let resource = if path == "/graphql" { "graphql" } else { "core" };
     if let Err(why) = state.gh_budget.allow(resource, source()) {
         bail!(why);
@@ -236,11 +242,12 @@ async fn exchange(state: &AppState, method: reqwest::Method, path: &str, body: O
             return Ok(None);
         }
         let headers = resp.headers().clone();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let text = resp.text().await.unwrap_or_default();
         if status.is_success() {
             let tag = headers.get("etag").and_then(|v| v.to_str().ok()).map(String::from);
-            return Ok(Some((body, tag)));
+            return Ok(Some((text, tag)));
         }
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         let msg = body["message"].as_str().unwrap_or("request failed");
         // Rate limited: wait as long as GitHub asks and try once more.
         if let Some(wait) = rate_limit_wait(status, &headers, msg) {
@@ -270,22 +277,7 @@ pub async fn get(state: &AppState, path: &str) -> Result<Value> {
 /// A GET whose answer is text, not JSON, like a job's log. GitHub redirects that one to a signed URL,
 /// which reqwest follows without the token.
 pub async fn get_text(state: &AppState, path: &str) -> Result<String> {
-    if let Err(why) = state.gh_budget.allow("core", source()) {
-        bail!(why);
-    }
-    let mut req = state.http.get(format!("{}{path}", api_base())).header("User-Agent", "loft").header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(t) = token(state) {
-        req = req.bearer_auth(t);
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    state.gh_budget.record(resp.headers(), false);
-    let text = resp.text().await?;
-    if !status.is_success() {
-        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(String::from)).unwrap_or_else(|| "request failed".into());
-        bail!("GitHub {}: {msg}", status.as_u16());
-    }
-    Ok(text)
+    Ok(exchange_text(state, reqwest::Method::GET, path, None, None).await?.map(|(text, _)| text).unwrap_or_default())
 }
 
 /// Every `owner/repo#number` PR link in a blob of text, in order, deduplicated.
