@@ -864,7 +864,7 @@ mod tests {
         // Security's probes: the helper's name and `.app/` only after the executable.
         let mut kids: Vec<_> = ["x.app/DTServiceHub", "--tag=.app/DTServiceHub"]
             .iter()
-            .map(|probe| std::process::Command::new("/bin/sh").args(["-c", "sleep 30", probe]).spawn().unwrap())
+            .map(|probe| std::process::Command::new("/bin/sh").args(["-c", "sleep 30; :", probe]).spawn().unwrap())
             .collect();
         let t = super::table();
         for k in &kids {
