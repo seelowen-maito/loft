@@ -892,6 +892,9 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        // Needs you seen marks are forgotten when their item leaves the list, but only while Loft watches: the marks
+        // of items that went while it was off go here, at start-up, after 30 days.
+        conn.execute("DELETE FROM needs_you_seen WHERE seen_at < ?1", [(Utc::now() - chrono::Duration::days(30)).to_rfc3339()])?;
         conn.execute(
             "DELETE FROM run_ledger WHERE ended_at < ?1",
             [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
@@ -1422,11 +1425,10 @@ impl Db {
         Ok(())
     }
 
-    /// The Needs you items the user has seen (on any client). Kept 30 days, like dismissals: a changed item has a new id.
+    /// The Needs you items the user has seen (on any client). A read only: a mark goes when its item leaves the list
+    /// (`forget_needs_you_seen`), or at start-up after 30 days (`open`), so one that waits longer stays seen.
     pub fn seen_needs_you(&self) -> Result<Vec<String>> {
         let c = self.0.lock().unwrap();
-        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-        c.execute("DELETE FROM needs_you_seen WHERE seen_at < ?1", [&cutoff])?;
         let mut st = c.prepare("SELECT item_id FROM needs_you_seen")?;
         let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
         Ok(rows)
@@ -2008,6 +2010,18 @@ mod tests {
             "session_id": null, "last_run_at": null, "last_run_ended_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_seen_mark_outlives_30_days_while_loft_runs_and_goes_at_the_next_start() {
+        let path = crate::testdir::for_this_test("seen").join("seen.db");
+        let db = Db::open(&path).unwrap();
+        db.mark_needs_you_seen(&["task:t:blocked".to_string(), "disk_low".to_string()]).unwrap();
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        db.0.lock().unwrap().execute("UPDATE needs_you_seen SET seen_at = ?1 WHERE item_id = 'task:t:blocked'", [&old]).unwrap();
+        assert_eq!(db.seen_needs_you().unwrap().len(), 2, "a look prunes nothing");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().seen_needs_you().unwrap(), vec!["disk_low".to_string()]);
     }
 
     #[test]

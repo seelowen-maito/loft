@@ -190,6 +190,8 @@ impl Log {
 
 /// Under this much free disk, Needs you says the disk is almost full.
 pub const LOW_DISK: u64 = 20_000_000_000;
+/// It keeps saying so until this much more is free: builds move free space by GBs, and an item that comes back is new.
+pub const LOW_DISK_MARGIN: u64 = 2_000_000_000;
 
 #[cfg(test)]
 thread_local!(pub(crate) static FAKE_FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
@@ -1696,12 +1698,24 @@ mod tests {
         let items = |st: &AppState| crate::needs_you::snapshot(st).unwrap()["items"].as_array().unwrap().iter().filter(|i| i["type"] == "disk_low").cloned().collect::<Vec<_>>();
         FAKE_FREE.with(|f| f.set(Some(19_000_000_000)));
         let low = items(&st);
-        FAKE_FREE.with(|f| f.set(Some(21_000_000_000)));
+        FAKE_FREE.with(|f| f.set(Some(23_000_000_000)));
         let ok = items(&st);
         FAKE_FREE.with(|f| f.set(None));
         assert_eq!(low.len(), 1);
         assert_eq!(low[0]["title"], "Disk almost full");
         assert!(ok.is_empty());
+    }
+
+    #[test]
+    fn disk_almost_full_stays_until_2_gb_over_the_line() {
+        let st = crate::tasks::tests::state();
+        let shown = |free: u64| {
+            FAKE_FREE.with(|f| f.set(Some(free)));
+            crate::needs_you::snapshot(&st).unwrap()["items"].as_array().unwrap().iter().any(|i| i["type"] == "disk_low")
+        };
+        let seen = [21_000_000_000, 19_000_000_000, 21_000_000_000, 21_900_000_000, 22_100_000_000, 21_000_000_000, 19_900_000_000].map(shown);
+        FAKE_FREE.with(|f| f.set(None));
+        assert_eq!(seen, [false, true, true, true, false, false, true]);
     }
 
     #[test]

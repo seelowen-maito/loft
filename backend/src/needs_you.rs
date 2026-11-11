@@ -796,9 +796,17 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
-    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low.
-    if let Some(free) = crate::sweep::free_bytes(&state.cfg.storage_dir)
-        && free < crate::sweep::LOW_DISK
+    // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low, and until 2 GB more are
+    // free: near the line it would come and go, new each time.
+    let free = crate::sweep::free_bytes(&state.cfg.storage_dir);
+    let disk_low = {
+        let mut rt = state.rt.lock().unwrap();
+        let line = crate::sweep::LOW_DISK + if rt.disk_low { crate::sweep::LOW_DISK_MARGIN } else { 0 };
+        rt.disk_low = free.is_some_and(|f| f < line);
+        rt.disk_low
+    };
+    if let Some(free) = free
+        && disk_low
     {
         let id = "disk_low".to_string();
         let gb = free as f64 / 1e9;

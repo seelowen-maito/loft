@@ -134,6 +134,8 @@ pub struct Runtime {
     /// When push was found off with a phone registered (RFC 3339), until it's back on: the `push_off` item's id
     /// and age, so a Dismiss lasts for that off period only
     pub push_off_since: Option<String>,
+    /// The disk is almost full: Needs you shows `disk_low`, until free space is back over LOW_DISK + LOW_DISK_MARGIN
+    pub disk_low: bool,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
