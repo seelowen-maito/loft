@@ -268,9 +268,14 @@ pub struct Agent {
     pub read_at: Option<String>,
 }
 
+/// The Fresh context of an agent saved before the setting existed: it keeps the old default.
 pub fn default_fresh_context() -> String {
     "above_80k".into()
 }
+
+/// The Fresh context a new agent starts with, from the dialog, a template or an agent: rereading the code each
+/// ticket costs less than carrying ~96k tokens of context through every call (measured on a 12-ticket spec).
+pub const NEW_AGENT_FRESH_CONTEXT: &str = "always";
 
 impl Agent {
     /// Its team's name: its group. Empty: it has no team.
