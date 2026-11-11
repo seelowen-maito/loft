@@ -82,6 +82,52 @@ final class MicrophoneTests: XCTestCase {
         XCTAssertEqual(engine.installs, 0)
     }
 
+    private func startWhenSettled(stillWanted: @escaping () -> Bool = { true }) async throws {
+        try await Microphone.startWhenSettled(engine, bufferSize: 1024, wait: .milliseconds(30), stillWanted: stillWanted) { _, _ in }
+    }
+
+    /// #371: the first start on a car's Bluetooth route catches it switching to call quality.
+    func testAFirstStartWaitsForTheRouteToFinishSwitching() async throws {
+        engine.hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let start = Task { try await startWhenSettled() }
+        try await Task.sleep(for: .milliseconds(15))
+        engine.micFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)! // it settles
+        try await start.value
+        XCTAssertEqual(engine.installs, 1)
+        XCTAssertTrue(engine.isRunning)
+        XCTAssertEqual(engine.crashes, [])
+    }
+
+    func testARouteThatNeverSettlesFailsAfterAFewTries() async {
+        VoiceLog.shared.clear()
+        engine.hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        do {
+            try await startWhenSettled()
+            XCTFail("started on mismatched formats")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("still switching audio route"))
+        }
+        XCTAssertEqual(VoiceLog.shared.lines.filter { $0.text.hasPrefix("mic: the route is still switching") }.count, 2)
+        XCTAssertEqual(engine.installs, 0)
+    }
+
+    func testAStartStoppedWhileWaitingForTheRouteGivesUp() async {
+        engine.hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        var wanted = true
+        let start = Task { try await startWhenSettled(stillWanted: { wanted }) }
+        try? await Task.sleep(for: .milliseconds(10))
+        wanted = false // the mic button pressed off
+        engine.micFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        do {
+            try await start.value
+            XCTFail("started after the stop")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(engine.installs, 0)
+        XCTAssertFalse(engine.isRunning)
+    }
+
     func testARestartOnTheNewRouteReplacesTheTap() throws {
         try start()
         engine.isRunning = false // the engine stops when the route changes

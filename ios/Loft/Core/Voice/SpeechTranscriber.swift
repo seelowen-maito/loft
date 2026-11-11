@@ -140,7 +140,10 @@ final class SpeechTranscriber {
                 return
             }
             self.lease = lease
-            try startMic()
+            let feed = self.feed
+            try await Microphone.startWhenSettled(engine, bufferSize: 1024, stillWanted: { [weak self] in
+                self.map { $0.gate.isCurrent(attempt) && $0.state == .requestingPermission } ?? false
+            }) { buffer, _ in feed.append(buffer) }
         } catch {
             // A start that was overtaken leaves the newer one alone.
             guard gate.isCurrent(attempt) else { return }

@@ -692,7 +692,10 @@ final class VoiceSession {
             lease = id
         }
         feeding = r
-        try startMic()
+        try await Microphone.startWhenSettled(engine, bufferSize: 2048, stillWanted: { [weak self] in
+            guard let self, self.lease != nil, self.feeding === r else { return false }
+            return attempt.map { self.gate.isCurrent($0) } ?? true
+        }, block: tap(feeding: r))
     }
 
     /// The recognizer the microphone feeds, kept to start the mic again after a route change.
@@ -700,7 +703,11 @@ final class VoiceSession {
 
     private func startMic() throws {
         guard let r = feeding else { return }
-        try Microphone.start(engine, bufferSize: 2048) { [weak self] buffer, _ in
+        try Microphone.start(engine, bufferSize: 2048, block: tap(feeding: r))
+    }
+
+    private func tap(feeding r: SegmentRecognizer) -> AVAudioNodeTapBlock {
+        { [weak self] buffer, _ in
             r.append(buffer)
             let level = Self.rms(buffer)
             DispatchQueue.main.async { self?.setLevel(level) }
