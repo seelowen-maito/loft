@@ -51,6 +51,14 @@ struct VoiceSessionView: View {
                 dismiss()
             }
         }
+        .onChange(of: voice.handOff) { _, h in
+            // Sent after the countdown: straight to the chat, which shows it and reads the reply.
+            guard let h else { return }
+            voice.handOff = nil
+            VoicePresentation.shared.replyAfter = h
+            VoicePresentation.shared.closeThenOpen(h.agentId)
+            dismiss()
+        }
         .sensoryFeedback(.selection, trigger: voice.phase)
         .task(id: agentId) {
             // Opened from the Overview the chat may not have loaded yet: fetch the interview and its question.
@@ -215,6 +223,8 @@ struct VoiceSessionView: View {
     var statusAgentId: String?
     /// Talk: text Undo sends back to that chat's message box.
     var returnedText: String?
+    /// Talk: a message it sent; that agent's chat waits for the reply and reads it aloud.
+    var replyAfter: VoiceSession.HandOff?
 
     /// The chat to open once the Talk screen is gone. Opening it while the screen closes switched tabs under the
     /// closing cover, and SwiftUI then dropped the close: the screen stayed up until you tapped Close.
