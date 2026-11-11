@@ -354,12 +354,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     }
 
     // Tasks you created that finished recently: a result to look at, until you open the issue (`issue_opened`).
-    for t in tasks.iter().filter(|t| t.status == "done" && t.created_by == "user") {
-        let done_at = t.completed_at.clone().unwrap_or_else(|| t.updated_at.clone());
-        if !within(&done_at, chrono::Duration::hours(REVIEW_HOURS)) {
-            continue;
-        }
-        let id = format!("done:{}:{}", t.id, done_at);
+    for t in &tasks {
+        let Some((id, done_at)) = done_item(t) else { continue };
         items.push(Item {
             kind: "task_done",
             urgency: 0,
@@ -1030,22 +1026,30 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The `task_done` item of `t`, its id and when it finished: an issue the user created that finished in the last
+/// `REVIEW_HOURS`.
+fn done_item(t: &Task) -> Option<(String, String)> {
+    if t.status != "done" || t.created_by != "user" {
+        return None;
+    }
+    let done_at = t.completed_at.clone().unwrap_or_else(|| t.updated_at.clone());
+    within(&done_at, chrono::Duration::hours(REVIEW_HOURS)).then(|| (format!("done:{}:{}", t.id, done_at), done_at))
+}
+
 /// `POST /api/issues/{id}/opened`: the user opened the issue on some client. A finished issue's result was there to
-/// look at, so its `task_done` item goes, everywhere.
+/// look at, so its `task_done` item goes, everywhere. Clients call it on every view of a done issue, so it reads the
+/// whole list only when that item is there to clear.
 pub async fn issue_opened(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    state.db.get_task(&id)?.ok_or_else(not_found)?;
-    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let looked: Vec<String> = items.iter().filter(|i| i.kind == "task_done" && i.task_id.as_deref() == Some(id.as_str())).map(|i| i.id.clone()).collect();
-    for item in &looked {
-        state.db.dismiss_needs_you(item)?;
+    let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
+    let Some((item, _)) = done_item(&t) else { return Ok(Json(json!({ "ok": true, "cleared": 0 }))) };
+    if state.db.needs_you_dismissed(&item)? {
+        return Ok(Json(json!({ "ok": true, "cleared": 0 })));
     }
-    if !looked.is_empty() {
-        items.retain(|i| !looked.contains(&i.id));
-        if let Ok(v) = look(&state, &items) {
-            emit_if_changed(&state, &v);
-        }
+    state.db.dismiss_needs_you(&item)?;
+    if let Ok(v) = collect(&state).and_then(|items| look(&state, &items)) {
+        emit_if_changed(&state, &v);
     }
-    Ok(Json(json!({ "ok": true, "cleared": looked.len() })))
+    Ok(Json(json!({ "ok": true, "cleared": 1 })))
 }
 
 /// `POST /api/needs-you/seen` with `{ "ids": [...] }`: the user saw these items (the list was opened on some client),
@@ -1388,7 +1392,7 @@ mod tests {
             t
         };
         let results = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "task_done").map(|i| i.title).collect::<Vec<_>>();
-        let (fresh, _day_old, other) = (done("Fresh", 1), done("Day old", 25), done("Other", 2));
+        let (fresh, day_old, other) = (done("Fresh", 1), done("Day old", 25), done("Other", 2));
         assert_eq!(results(&st), ["Other", "Fresh"], "a day later it's gone");
 
         let Json(r) = issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap();
@@ -1398,6 +1402,15 @@ mod tests {
         assert_eq!(issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap().0["cleared"], json!(0));
         assert!(issue_opened(State(st.clone()), Path("nope".into())).await.is_err());
         assert_eq!(other.status, "done");
+        // Nor does opening an issue with no item: not done, an agent's, or done over 24 hours ago.
+        let (open, _) = crate::tasks::create(&st, &json!({ "title": "Open" }), "user").unwrap();
+        let (mut agents, _) = crate::tasks::create(&st, &json!({ "title": "An agent's" }), "agent").unwrap();
+        agents.status = "done".into();
+        st.db.save_task(&agents).unwrap();
+        for t in [&open.id, &agents.id, &day_old.id] {
+            assert_eq!(issue_opened(State(st.clone()), Path(t.clone())).await.unwrap().0["cleared"], json!(0));
+        }
+        assert_eq!(results(&st), ["Other"]);
     }
 
     #[test]

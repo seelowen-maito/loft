@@ -1430,6 +1430,12 @@ impl Db {
         Ok(rows)
     }
 
+    /// Whether the user dismissed Needs you item `item_id`.
+    pub fn needs_you_dismissed(&self, item_id: &str) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT 1 FROM needs_you_dismissed WHERE item_id = ?1", [item_id], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn dismiss_needs_you(&self, item_id: &str) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute("INSERT OR REPLACE INTO needs_you_dismissed (item_id, dismissed_at) VALUES (?1, ?2)", params![item_id, now()])?;
