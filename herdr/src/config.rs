@@ -36,6 +36,19 @@ pub fn save(url: &str) -> std::io::Result<()> {
     std::fs::write(dir().join("config.json"), serde_json::to_string_pretty(&serde_json::json!({ "url": url }))? + "\n")
 }
 
+/// Drops the `token` key an older `config.json` holds from the pairing Loft no longer has. The rest stays.
+pub fn forget_token() {
+    forget_token_in(&dir().join("config.json"));
+}
+
+fn forget_token_in(file: &std::path::Path) {
+    let Ok(raw) = std::fs::read_to_string(file) else { return };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    if v.as_object_mut().and_then(|o| o.remove("token")).is_some() {
+        let _ = std::fs::write(file, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n");
+    }
+}
+
 /// Trims spaces and trailing slashes, and adds `http://` to a bare host.
 pub fn normalize(url: &str) -> String {
     let u = url.trim().trim_end_matches('/');
@@ -45,6 +58,18 @@ pub fn normalize(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_token_is_dropped_and_the_address_kept() {
+        let file = std::env::temp_dir().join(format!("loft-herdr-config-{}.json", std::process::id()));
+        std::fs::write(&file, r#"{ "url": "http://x:1", "token": "abc" }"#).unwrap();
+        forget_token_in(&file);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({ "url": "http://x:1" }));
+        forget_token_in(&file);
+        forget_token_in(&file.with_extension("missing"));
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn normalizes_addresses() {

@@ -30,6 +30,7 @@ use loft::{Live, Loft};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    config::forget_token();
     let r = match args.first().map(String::as_str) {
         Some("chat") | None => chat(args.get(1).cloned()),
         Some("sync") => run_sync(),

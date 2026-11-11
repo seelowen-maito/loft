@@ -11,6 +11,8 @@ export default defineConfig({
     port: Number(process.env.LOFT_WEB_PORT ?? 7421),
     strictPort: true,
     proxy: {
+      // changeOrigin sends the backend its own Host, so the Host check passes here; Vite's own allowedHosts
+      // check on the dev server is what stops DNS rebinding in dev.
       "/api": { target: backend, changeOrigin: true },
     },
   },
