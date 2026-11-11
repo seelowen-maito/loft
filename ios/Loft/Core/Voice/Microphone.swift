@@ -6,6 +6,7 @@ import Foundation
 /// the input has no usable format (no microphone on the route), when its format no longer matches the hardware
 /// (a Bluetooth route switching to call quality changes the sample rate), or when the bus already has a tap.
 /// These are checked first and become a `VoiceError` instead.
+@MainActor
 enum Microphone {
     /// Starts `engine` with one tap on its input, replacing any tap already there, so starting twice never
     /// leaves two listeners.
@@ -29,11 +30,16 @@ enum Microphone {
         guard format.channelCount > 0, format.sampleRate > 0, hardware.sampleRate > 0 else {
             throw VoiceError("No microphone is available on this audio route.")
         }
-        guard format.sampleRate == hardware.sampleRate else {
+        VoiceLog.shared.add("mic formats: tap \(describe(format)), hardware \(describe(hardware)), voice processing \(engine.isVoiceProcessing ? "on" : "off")")
+        // With voice processing on (the listening reader), the input delivers its processed format, which can
+        // differ from the hardware's, so only a usable format is required there.
+        guard engine.isVoiceProcessing || format.sampleRate == hardware.sampleRate else {
             throw VoiceError("The microphone is still switching audio route (\(Int(format.sampleRate)) Hz, hardware \(Int(hardware.sampleRate)) Hz). Try again.")
         }
         engine.installMicTap(bufferSize: bufferSize, format: format, block: block)
     }
+
+    private static func describe(_ f: AVAudioFormat) -> String { "\(Int(f.sampleRate)) Hz \(f.channelCount) ch" }
 
     /// Stops the engine and removes its tap. Safe to call when nothing is running.
     static func stop(_ engine: MicEngine) {
@@ -69,6 +75,8 @@ protocol MicEngine: AnyObject {
     var micFormat: AVAudioFormat { get }
     /// The microphone hardware's format on the current route.
     var hardwareFormat: AVAudioFormat { get }
+    /// Whether the input runs Apple's voice processing (echo cancellation), as the listening reader's does.
+    var isVoiceProcessing: Bool { get }
     func installMicTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock)
     func removeMicTap()
     func prepare()
@@ -79,6 +87,7 @@ protocol MicEngine: AnyObject {
 extension AVAudioEngine: MicEngine {
     var micFormat: AVAudioFormat { inputNode.outputFormat(forBus: 0) }
     var hardwareFormat: AVAudioFormat { inputNode.inputFormat(forBus: 0) }
+    var isVoiceProcessing: Bool { inputNode.isVoiceProcessingEnabled }
     func installMicTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock) {
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
     }
