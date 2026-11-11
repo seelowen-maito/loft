@@ -63,7 +63,6 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             stalled_at: String::new(),
             stalled_on: vec![],
             done_at: String::new(),
-            tech_debt: vec![],
             ready_retry: false,
             tickets: vec![],
             current: None,
@@ -853,12 +852,8 @@ pub fn mcp_tools() -> Vec<Value> {
         "description": "As QA or Security on a Delivery: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for the Code reviewer, the spec PR's number, or the spec's Loft issue id." },
-            "verdict": { "type": "string", "enum": ["pass", "changes"], "description": "\"changes\" only for problems that must be fixed first." },
-            "notes": { "type": "string", "description": "What you checked; for changes, each problem and how to see it." },
-            "tech_debt": { "type": "array", "description": "Code reviewer only: findings that can wait. Loft files each as a `tech-debt` issue assigned to the user.", "items": { "type": "object", "properties": {
-                "title": { "type": "string" },
-                "body": { "type": "string", "description": "Where it is, what's wrong, the suggested fix." }
-            }, "required": ["title", "body"] } }
+            "verdict": { "type": "string", "enum": ["pass", "changes"], "description": "\"changes\" for any finding; \"pass\" only when nothing is left to fix." },
+            "notes": { "type": "string", "description": "What you checked; for changes, each problem and how to see it." }
         }, "required": ["number", "verdict", "notes"] }
     })]
 }
@@ -1026,11 +1021,11 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     if verdict == "changes" && notes.is_empty() {
         return Err("notes are required with changes: say what's wrong and how to see it, for the Dev.".into());
     }
+    if args["tech_debt"].as_array().is_some_and(|a| !a.is_empty()) {
+        return Err("tech_debt is gone: put every finding in `notes`, each with its file, line and fix, with verdict \"changes\". The Dev fixes them on the same PR.".into());
+    }
     if me.role == "code_reviewer" {
         return final_review(state, me, args, verdict, notes).await;
-    }
-    if args["tech_debt"].as_array().is_some_and(|a| !a.is_empty()) {
-        return Err("Only the Code reviewer files tech_debt, in its review of the whole spec PR.".into());
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "review_ticket").await?;
     refuse_paused(&d)?;
@@ -2064,7 +2059,7 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
              - Review the whole diff: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
              - Don't fix the work yourself.\n\
              - {own}\n\
-             - When you're done, call `mcp__loft__review_ticket` with \"{spec_id}\": `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` Loft issue.",
+             - When you're done, call `mcp__loft__review_ticket` with \"{spec_id}\": `verdict` \"changes\" if you found anything, however small (every finding in `notes`, each with its file, line and fix: the Dev fixes them all on this PR), otherwise \"pass\", which means nothing is left to fix, and `notes` saying what you checked.",
             about = subject(d),
             spec_id = d.spec_id,
             branch = d.branch,
@@ -2078,7 +2073,7 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
          - Pull the branch and review its whole diff against the default branch: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
          - Don't fix the work yourself.\n\
          - {own}\n\
-         - When you're done, call `mcp__loft__review_ticket` with {pr}: `verdict` \"changes\" only for problems that must be fixed before merging (in `notes`, each with its file, line and fix), otherwise \"pass\", and `notes` saying what you checked. Put findings that can wait in `tech_debt`: Loft files each as a `tech-debt` issue.",
+         - When you're done, call `mcp__loft__review_ticket` with {pr}: `verdict` \"changes\" if you found anything, however small (every finding in `notes`, each with its file, line and fix: the Dev fixes them all on this PR), otherwise \"pass\", which means nothing is left to fix, and `notes` saying what you checked.",
         about = subject(d),
         pname = pr_name(d),
         bname = branch_name(d),
@@ -2134,8 +2129,8 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     Some(Ok(format!("Submitted the fixes for {}: {} (Code reviewer) is looking again.", final_tag(&d), cr.name)))
 }
 
-/// `review_ticket` from the Code reviewer: its verdict on the whole spec PR. Findings that can wait become
-/// `tech-debt` issues; changes go back to the Dev (or, on the third round, to the user); a pass marks the
+/// `review_ticket` from the Code reviewer: its verdict on the whole spec PR. Any finding is changes, which go
+/// back to the Dev (or, on the third round, to the user); a pass marks the
 /// spec PR ready to merge.
 async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, verdict: &str, notes: &str) -> Result<String, String> {
     let (slug, n, d, _held) = final_of(state, me, args).await?;
@@ -2145,21 +2140,13 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     if !d.local && pr == 0 {
         return Err("The Delivery has no spec PR.".into());
     }
-    let filed = file_tech_debt(state, &d, &me.id, args["tech_debt"].as_array().cloned().unwrap_or_default()).await;
-    // Kept for the done summary, across rounds.
-    let d = if filed.0.is_empty() {
-        d
-    } else {
-        update(state, &slug, d.spec, |d| d.tech_debt.extend(filed.0.iter().filter(|n| !d.tech_debt.contains(n)).cloned().collect::<Vec<_>>())).unwrap_or(d)
-    };
     let what = if d.local { "spec branch".to_string() } else { pr_name(&d).to_string() };
     let head = if verdict == "pass" {
         format!("**Code reviewer** ({}) passed the {what}.", me.name)
     } else {
         format!("**Code reviewer** ({}) asks for changes on the {what}.", me.name)
     };
-    let debt = if filed.0.is_empty() { String::new() } else { format!("\n\nFiled as tech debt: {}.", filed.0.join(", ")) };
-    let body = format!("{head}{}{debt}", if notes.is_empty() { String::new() } else { format!("\n\n{notes}") });
+    let body = format!("{head}{}", if notes.is_empty() { String::new() } else { format!("\n\n{notes}") });
     let on = if d.local {
         note(state, &d.spec_id, &me.id, &body);
         "the spec's Loft issue".to_string()
@@ -2170,14 +2157,10 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         format!("#{pr}")
     };
     let d = if d.state == "stalled" { update(state, &slug, d.spec, Delivery::unstall).unwrap_or(d) } else { d };
-    let filed_line = match (filed.0.is_empty(), filed.1.is_empty()) {
-        (true, true) => String::new(),
-        _ => format!(" Tech debt: {}{}.", filed.0.join(", "), filed.1),
-    };
     if verdict == "pass" {
         if d.local {
             let ready = local_ready(state, &d);
-            return Ok(format!("Posted your pass on {on}.{filed_line}{ready}"));
+            return Ok(format!("Posted your pass on {on}.{ready}"));
         }
         let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{slug}/issues/{pr}/labels/changes-requested"), None).await;
         let ready = match crate::planning::ready_if_done(state, &d).await {
@@ -2185,7 +2168,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
             Ok(None) => format!(" Spec PR #{pr} was no longer a draft, so it was left as it is."),
             Err(e) => format!(" But {e}: Loft tries again on its next poll."),
         };
-        return Ok(format!("Posted your pass on {on}.{filed_line}{ready}"));
+        return Ok(format!("Posted your pass on {on}.{ready}"));
     }
     let labelled = if d.local { String::new() } else { label_issue(state, &slug, pr, "changes-requested").await.err().map(|e| format!(" The comment is posted, but {e}.")).unwrap_or_default() };
     let rounds = d.final_rounds + 1;
@@ -2198,7 +2181,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     .ok_or("The Delivery record couldn't be saved.")?;
     if stuck {
         let why = needs_human(state, &d, None, rounds, notes).await;
-        return Ok(format!("Posted your changes on {on}.{labelled}{filed_line} That's round {rounds} of changes on the {what}, so it waits for the user now{why}."));
+        return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on the {what}, so it waits for the user now{why}."));
     }
     let brief = if d.local {
         format!(
@@ -2224,7 +2207,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         )
     };
     crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, None), true, brief, wake_for(&d, Step::FinalFixes { round: rounds }));
-    Ok(format!("Posted your changes on {on}.{labelled}{filed_line} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the {what} {}.", if d.local { "isn't merged" } else { "stays a draft" }))
+    Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the {what} {}.", if d.local { "isn't merged" } else { "stays a draft" }))
 }
 
 /// A plan kept in Loft whose last review passed: ready for the user's Merge, which Needs you and the
@@ -2261,7 +2244,7 @@ pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
     crate::agents::wake_with_reply(state, &to.id, done_brief(state, &d, lead));
 }
 
-/// The summary the done wake carries: the spec, its PR (or branch), the tickets closed and the tech debt filed.
+/// The summary the done wake carries: the spec, its PR (or branch), and the tickets closed.
 fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
     let issue = if d.local {
         state.db.get_task(&d.spec_id).ok().flatten()
@@ -2280,69 +2263,10 @@ fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
     };
     let closed: Vec<String> = d.tickets.iter().filter(|t| t.state == "closed").map(|t| if d.local { format!("\"{}\"", t.title) } else { format!("#{} \"{}\"", t.number, t.title) }).collect();
     let closed = if d.standalone || closed.is_empty() { String::new() } else { format!("\n- Tickets closed: {}.", closed.join(", ")) };
-    let debt = if d.tech_debt.is_empty() { "none".to_string() } else { d.tech_debt.join(", ") };
     format!(
-        "[Loft Delivery: {about}] This is not a message from the user. The Delivery of {named} is done.{lead}\n- {ready}{closed}\n- Tech debt filed: {debt}.\n\
+        "[Loft Delivery: {about}] This is not a message from the user. The Delivery of {named} is done.{lead}\n- {ready}{closed}\n\
          Nothing is left to build: tell the user in a line or two."
     )
-}
-
-/// Files the Code reviewer's findings that can wait as `tech-debt` issues assigned to the user (Loft
-/// issues in a plan kept in Loft), once each: a retry finds the one already filed. How each is named
-/// ("#77", or "Loft issue <id>"), and a note on any that failed.
-async fn file_tech_debt(state: &AppState, d: &Delivery, by: &str, items: Vec<Value>) -> (Vec<String>, String) {
-    let (slug, mut out, mut failed) = (&d.repo, vec![], vec![]);
-    if items.is_empty() {
-        return (out, String::new());
-    }
-    if d.local {
-        for i in items {
-            let (title, body) = (i["title"].as_str().unwrap_or("").trim(), i["body"].as_str().unwrap_or("").trim());
-            if title.is_empty() {
-                continue;
-            }
-            let k = crate::planning::key(title);
-            let there = state.db.list_tasks().unwrap_or_default().into_iter().find(|t| t.project == d.project && t.labels.iter().any(|l| l == "tech-debt") && crate::planning::key(&t.title) == k);
-            let p = json!({ "title": title, "description": format!("Found in the Code Review of the spec branch `{}` ({}).\n\n{body}", d.branch, subject(d)), "labels": ["tech-debt"], "project": d.project, "status": "inbox" });
-            match there.map(Ok).unwrap_or_else(|| crate::tasks::create(state, &p, by).map(|(t, _)| t)) {
-                Ok(t) => out.push(format!("Loft issue {}", t.id)),
-                Err(_) => failed.push(format!("\"{title}\"")),
-            }
-        }
-        let note = if failed.is_empty() { String::new() } else { format!(" (not filed: {}; send them again)", failed.join(", ")) };
-        return (out, note);
-    }
-    let ready = async {
-        crate::planning::ensure_label(state, slug, "tech-debt", "fbca04", "Can wait: found in a Code Review").await?;
-        crate::planning::login(state).await
-    };
-    let login = match ready.await {
-        Ok(l) => l,
-        Err(e) => return (out, format!(" (none filed: {e})")),
-    };
-    for i in items {
-        let (title, body) = (i["title"].as_str().unwrap_or("").trim(), i["body"].as_str().unwrap_or("").trim());
-        if title.is_empty() {
-            continue;
-        }
-        let k = format!("{}/{}", d.spec, crate::planning::key(title));
-        if let Ok(Some(n)) = state.db.published_issue(slug, "tech_debt", &k) {
-            out.push(format!("#{n}"));
-            continue;
-        }
-        let pr = d.pr.map(|pr| format!("{} #{pr}, ", pr_name(d))).unwrap_or_default();
-        let body = format!("Found in the Code Review of {pr}{}.\n\n{body}", subject(d));
-        let made = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}/issues"), Some(json!({ "title": title, "body": body, "labels": ["tech-debt"], "assignees": [login] }))).await;
-        match made.ok().and_then(|v| v["number"].as_i64()) {
-            Some(n) => {
-                let _ = state.db.record_published_issue(slug, "tech_debt", &k, n);
-                out.push(format!("#{n}"));
-            }
-            None => failed.push(format!("\"{title}\"")),
-        }
-    }
-    let note = if failed.is_empty() { String::new() } else { format!(" (not filed: {}; send them again)", failed.join(", ")) };
-    (out, note)
 }
 
 #[derive(serde::Deserialize)]

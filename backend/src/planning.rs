@@ -3544,10 +3544,11 @@ pub(crate) mod tests {
         for want in [
             "You are the Code reviewer on this Delivery: every ticket of spec #40 is closed (#41, #42), and you review the whole spec PR https://github.com/octo/cr-wake/pull/500 once, on the spec branch `spec/40-rounds`.",
             "call `mcp__loft__review_ticket` with 500",
-            "Put findings that can wait in `tech_debt`",
+            "`verdict` \"changes\" if you found anything, however small (every finding in `notes`, each with its file, line and fix: the Dev fixes them all on this PR)",
         ] {
             assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
         }
+        assert!(!w[0].contains("tech_debt") && !w[0].contains("tech-debt"), "{}", w[0]);
         assert!(fake.seen("/graphql").is_empty(), "the spec PR stays a draft until the Code Review passes");
         assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "final_review");
         // A catch-up poll doesn't wake it again or mark the PR ready.
@@ -3565,24 +3566,27 @@ pub(crate) mod tests {
         let cr = &team[0];
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
-        fake.in_turn("POST", &format!("/repos/{slug}/issues"), vec![(201, json!({ "number": 77 })), (201, json!({ "number": 78 }))]);
         let debt = json!([{ "title": "Split delivery.rs", "body": "It grew past 600 lines." }]);
         assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
 
-        // Blocking: back to the Dev, the PR stays a draft, and what can wait is filed.
+        // tech_debt is refused, with nothing posted or filed, and the review still waits.
+        let issues = posts(&fake, slug, "issues").len();
+        let err = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error.", "tech_debt": debt })).await.unwrap_err();
+        assert!(err.starts_with("tech_debt is gone: put every finding in `notes`") && err.contains("verdict \"changes\""), "{err}");
+        assert_eq!(posts(&fake, slug, "issues").len(), issues, "nothing is filed");
+        assert!(!posts(&fake, slug, "issues/500/comments").iter().any(|c| c["body"].as_str().unwrap().contains("Code reviewer")), "nothing is posted");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "final_review");
+
+        // Any finding is changes: back to the Dev, round 1 of 3, and the PR stays a draft.
         let before = woken(&st, &dev).len();
-        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error.", "tech_debt": debt })).await.unwrap();
-        assert!(out.contains("Tech debt: #77.") && out.ends_with("The Dev is fixing them (round 1 of 3); the spec PR stays a draft."), "{out}");
-        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) asks for changes on the spec PR.\n\nstore.rs:12 drops the error.\n\nFiled as tech debt: #77.");
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "store.rs:12 drops the error. split.rs:1 is long." })).await.unwrap();
+        assert!(out.ends_with("The Dev is fixing them (round 1 of 3); the spec PR stays a draft."), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) asks for changes on the spec PR.\n\nstore.rs:12 drops the error. split.rs:1 is long.");
         assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
-        let filed = posts(&fake, slug, "issues");
-        let issue = filed.last().unwrap();
-        assert_eq!((&issue["title"], &issue["labels"], &issue["assignees"]), (&json!("Split delivery.rs"), &json!(["tech-debt"]), &json!(["octo-me"])));
-        assert_eq!(issue["body"], "Found in the Code Review of spec PR #500, spec #40.\n\nIt grew past 600 lines.");
-        assert!(posts(&fake, slug, "labels").iter().any(|l| l["name"] == "tech-debt"), "the label is created");
+        assert_eq!(posts(&fake, slug, "issues").len(), issues, "no tech-debt issue is filed");
         let w = woken(&st, &dev);
         assert_eq!(w.len(), before + 1);
-        assert!(w.last().unwrap().contains("asked for changes on the spec PR https://github.com/octo/cr-flow/pull/500 (round 1 of 3):\n\nstore.rs:12 drops the error."), "{w:?}");
+        assert!(w.last().unwrap().contains("asked for changes on the spec PR https://github.com/octo/cr-flow/pull/500 (round 1 of 3):\n\nstore.rs:12 drops the error. split.rs:1 is long."), "{w:?}");
         assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` with 500"));
         assert!(fake.seen("/graphql").is_empty());
 
@@ -3599,9 +3603,8 @@ pub(crate) mod tests {
             (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true })),
             (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean", "title": "Rounds", "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } })),
         ]);
-        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Fixed.", "tech_debt": debt })).await.unwrap();
-        assert!(out.contains("Tech debt: #77.") && out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
-        assert_eq!(posts(&fake, slug, "issues").len(), filed.len(), "the same finding isn't filed twice");
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
         assert_eq!(fake.seen("/graphql").len(), 1);
         assert_eq!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len(), sub_reads, "the tickets aren't read again from GitHub");
         assert!(fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().any(|s| s.method == "DELETE"));
@@ -3663,8 +3666,8 @@ pub(crate) mod tests {
         assert_eq!(fake.seen("/graphql").len(), 1);
         assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
         assert!(st.db.list_pull_requests(None).unwrap().iter().any(|p| p.slug == slug && p.number == 500), "watched for Needs you");
-        // QA can't file tech debt: that's the Code reviewer's.
-        assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok", "tech_debt": [{ "title": "x", "body": "y" }] })).await.unwrap_err().starts_with("Only the Code reviewer files tech_debt"));
+        // Nobody files tech debt any more.
+        assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok", "tech_debt": [{ "title": "x", "body": "y" }] })).await.unwrap_err().starts_with("tech_debt is gone"));
     }
 
     /// A grill on `name` that published the standalone ticket #41 "Store" and ended with its card, with
@@ -4029,10 +4032,11 @@ pub(crate) mod tests {
         assert!(w.len() == 1 && w[0].contains("against `main` (`git diff main...spec/1-offline-mode`)") && w[0].contains(&format!("`mcp__loft__review_ticket` with \"{}\"", spec.id)), "{w:?}");
 
         let debt = json!([{ "title": "Index the store", "body": "Lookups scan." }]);
-        let out = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap();
-        assert!(out.contains("Tech debt: Loft issue ") && out.ends_with("The spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge."), "{out}");
-        let filed = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == project && t.labels == ["tech-debt"]).unwrap();
-        assert_eq!(filed.title, "Index the store");
+        let err = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap_err();
+        assert!(err.starts_with("tech_debt is gone"), "{err}");
+        assert!(!st.db.list_tasks().unwrap().iter().any(|t| t.labels == ["tech-debt"]), "no tech-debt issue is filed");
+        let out = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean." })).await.unwrap();
+        assert!(out.ends_with("The spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge."), "{out}");
         assert!(notes_on(&st, &spec.id).iter().any(|n| n.starts_with("**Code reviewer** (code_reviewer agent) passed the spec branch.")));
         let v = crate::needs_you::snapshot(&st).unwrap();
         let item = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "delivery_merge").unwrap_or_else(|| panic!("{v:#}"));
@@ -4045,9 +4049,10 @@ pub(crate) mod tests {
         assert_eq!((&acts[0]["target"], &acts[1]["kind"], &acts[1]["path"]), (&json!({ "screen": "task", "task_id": spec.id }), &json!("merge"), &json!("/api/deliveries/merge")));
         let w: Vec<String> = woken(&st, &a).into_iter().filter(|p| p.contains("is done.")).collect();
         assert_eq!(w.len(), 1, "{w:?}");
-        for want in ["The Delivery of spec \"Offline mode\" is done.", "- Its spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge.", "\"Store\"", "\"API\"", &format!("- Tech debt filed: Loft issue {}.", filed.id)] {
+        for want in ["The Delivery of spec \"Offline mode\" is done.", "- Its spec branch `spec/1-offline-mode` is ready to merge into `main`: the user is offered Merge.", "\"Store\"", "\"API\""] {
             assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
         }
+        assert!(!w[0].contains("Tech debt"), "{}", w[0]);
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
@@ -5344,7 +5349,6 @@ pub(crate) mod tests {
         let spec = spec_issue(&st, &fake, "done-flow", slug);
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
-        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 77 }));
         let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true });
         // Ready, but with conflicts and checks still running: GitHub won't call it mergeable.
         let conflicted = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": false, "mergeable_state": "dirty", "title": "Rounds", "html_url": format!("https://github.com/{slug}/pull/500"), "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } });
@@ -5352,8 +5356,7 @@ pub(crate) mod tests {
         fake.in_turn("POST", "/graphql", vec![(200, json!({ "errors": [{ "message": "Something went wrong" }] })), (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }))]);
 
         // The pass whose ready call fails: not done yet.
-        let debt = json!([{ "title": "Split delivery.rs", "body": "It grew." }]);
-        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap();
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Clean." })).await.unwrap();
         assert!(out.ends_with("Loft tries again on its next poll."), "{out}");
         assert!(done_items(&st).is_empty() && woken(&st, &planner).is_empty());
         assert_eq!(delivery(&st, slug).done_at, "");
@@ -5386,10 +5389,10 @@ pub(crate) mod tests {
             "[Loft Delivery: spec #40] This is not a message from the user. The Delivery of spec #40 \"Rounds\" is done.\n",
             "- Loft marked its spec PR https://github.com/octo/done-flow/pull/500 ready for review: the user merges it.",
             "- Tickets closed: #41 \"Store\", #42 \"API\".",
-            "- Tech debt filed: #77.",
         ] {
             assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
         }
+        assert!(!w[0].contains("Tech debt"), "{}", w[0]);
         assert!(!w[0].contains("team's Lead"));
         assert!(st.rt.lock().unwrap().queued_for_user.contains(&planner.id), "its reply is an Unread reply");
 
@@ -5477,7 +5480,7 @@ pub(crate) mod tests {
             match lead {
                 Some(l) => {
                     let w = woken(&st, &l);
-                    assert!(wakes.len() == 1 && w.len() == 1 && w[0].contains("is done. You get this as the team's Lead: the agent that planned it is gone.") && w[0].contains("- Tech debt filed: none."), "{w:?}");
+                    assert!(wakes.len() == 1 && w.len() == 1 && w[0].contains("is done. You get this as the team's Lead: the agent that planned it is gone.") && !w[0].contains("Tech debt"), "{w:?}");
                     assert!(st.rt.lock().unwrap().queued_for_user.contains(&l.id));
                 }
                 None => assert!(wakes.is_empty(), "{wakes:?}"),
