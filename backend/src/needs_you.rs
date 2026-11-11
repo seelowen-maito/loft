@@ -940,7 +940,7 @@ mod tests {
     async fn a_kill_with_no_rule_offers_no_always_allow() {
         let st = state();
         let dev = agent(&st, "Dev");
-        for (id, rule) in [("k1", "Kill(/bin/sleep)"), ("k2", "")] {
+        for (id, rule) in [("k1", "Kill(/d/*/App)"), ("k2", "")] {
             st.db.save_permission(&PermissionRequest {
                 id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: "Kill".into(), input: json!({ "command": "pkill sleep" }),
                 reason: String::new(), rule: rule.into(), status: "pending".into(), created_at: now(),
