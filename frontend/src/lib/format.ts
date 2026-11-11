@@ -135,3 +135,15 @@ export function sortClean(items: CleanItem[], sort: CleanSort, agentName: (id: s
     return (ka < kb ? -dir : ka > kb ? dir : 0) || b.bytes - a.bytes || a.name.localeCompare(b.name);
   });
 }
+
+/** A locked reason is the git check's lines joined with " · ": the first one, and how many more there are. */
+export function reasonLines(blocked: string): string[] {
+  return blocked.split(" · ").filter(Boolean);
+}
+
+export type CleanFilter = { agent: string; type: string; deletable: boolean };
+
+/** The Clean table's filters: one agent, one type ("" is all), and only what can be ticked. */
+export function filterClean(items: CleanItem[], f: CleanFilter): CleanItem[] {
+  return items.filter((i) => (!f.agent || i.agent === f.agent) && (!f.type || cleanType(i) === f.type) && (!f.deletable || !cleanStatus(i, 0).locked));
+}
