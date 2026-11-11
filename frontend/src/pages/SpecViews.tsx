@@ -87,7 +87,9 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
       <div className="flex flex-wrap items-center gap-2">
         <div className="eyebrow">Delivery</div><Badge stage={stage} d={d} />
         {url && <a href={url} target="_blank" rel="noreferrer" className="chip gap-1 text-[11px] hover:text-fg"><GitPullRequest className="size-3" /> Spec PR #{d!.pr} <ExternalLink className="size-3" /></a>}
-        {stage === "ready" && <span className="text-[12px] text-warn">Marked ready: waiting for you to merge.</span>}
+        {stage === "ready" && (d?.can_reopen
+          ? <span className="text-[12px] text-warn">Done, but tickets published since are open: Reopen delivery builds them.</span>
+          : <span className="text-[12px] text-warn">Marked ready: waiting for you to merge.</span>)}
       </div>
       {p && <Bar {...p} stage={stage} />}
       {!d || d.state === "planned" ? (

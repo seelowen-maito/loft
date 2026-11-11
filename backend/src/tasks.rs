@@ -326,8 +326,15 @@ fn brief(state: &AppState, t: &Task, note: &str) -> String {
     s
 }
 
-/// Hand a task to an agent and start it (or queue it behind the agent's current run).
-/// `by` is the agent delegating it, or None when the user started it.
+/// Who hands an issue to an agent with [`execute`].
+#[derive(Clone, Copy)]
+pub enum By<'a> {
+    /// The user, from a client: the only one who can send a blocked or failed issue again.
+    User,
+    /// An agent: delegating it, or starting an issue it created for itself.
+    Agent(&'a Agent),
+}
+
 fn refuse_spec(t: &Task) -> Result<(), ApiError> {
     if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
         return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
@@ -335,9 +342,17 @@ fn refuse_spec(t: &Task) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: Option<&Agent>) -> Result<(Task, bool), ApiError> {
+/// Hand a task to an agent and start it (or queue it behind the agent's current run).
+///
+/// The user (`By::User`) can send a blocked or failed issue again, to another agent or the same one: the agent gets
+/// why it stopped with the brief, and the history says it was sent again. An agent can't.
+pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: By) -> Result<(Task, bool), ApiError> {
     let mut t = state.db.get_task(id)?.ok_or_else(not_found)?;
-    if is_active(&t) {
+    let again = matches!(t.status.as_str(), "blocked" | "failed");
+    if again && !matches!(by, By::User) {
+        return Err(ApiError(StatusCode::CONFLICT, format!("This issue is {}: only the user can send it again.", t.status)));
+    }
+    if is_active(&t) && !again {
         return Err(ApiError(StatusCode::CONFLICT, "This task is already running. Cancel it first to restart it.".into()));
     }
     if is_closed(&t) {
@@ -346,6 +361,7 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     refuse_spec(&t)?;
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
+    let before = t.clone();
     let ts = now();
     t.agent_id = Some(agent.id.clone());
     t.kind = "work".into();
@@ -356,17 +372,33 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     t.updated_at = ts;
     state.db.save_task(&t)?;
     emit(state, &t);
-    let by_id = by.map_or("user", |a| a.id.as_str());
-    log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    let by_id = match by {
+        By::User => "user",
+        By::Agent(a) => a.id.as_str(),
+    };
+    let previous = before.agent_id.as_deref().and_then(|id| state.db.get_agent(id).ok().flatten());
+    let mut context = String::new();
+    if again {
+        log_status(state, &t, by_id, &format!("Sent again to {} by you: it was {}", agent.name, before.status));
+        let by_whom = previous.as_ref().map_or(String::new(), |p| if p.id == agent.id { " by you".to_string() } else { format!(" by {}", p.name) });
+        let why = before.error.trim();
+        context = format!("The user sends you this issue again: it was {}{by_whom}{}", before.status, if why.is_empty() { ".".to_string() } else { format!(", because: {why}") });
+        // A blocked issue's agent may still have it in mind: it's someone else's now.
+        if let Some(p) = previous.as_ref().filter(|p| p.id != agent.id && before.status == "blocked" && is_running(state, &p.id)) {
+            agents::enqueue(state, &p.id, Some(format!("[Task {}] {} was sent to {} by the user. Stop working on it.", t.id, t.title, agent.name)), "user");
+        }
+    } else {
+        log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    }
     if !note.trim().is_empty() {
         log(state, &t, by_id, "comment", note.trim(), json!({ "to_agent": agent.id, "handoff": true }));
     }
     let queued = is_running(state, &agent.id);
-    let text = brief(state, &t, note);
+    let text = brief(state, &t, &[context.as_str(), note.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n"));
     match by {
         // `task_role` lets apps show a compact task row instead of the full brief.
-        Some(from) => agents::message_from_agent_with(state, from, &agent, &text, json!({ "task_id": t.id, "task_role": "brief" })),
-        None => {
+        By::Agent(from) if from.id != agent.id => agents::message_from_agent_with(state, from, &agent, &text, json!({ "task_id": t.id, "task_role": "brief" })),
+        _ => {
             agents::enqueue_with(state, &agent.id, Some(text), json!({ "task_id": t.id, "task_role": "brief" }), "user");
         }
     }
@@ -409,9 +441,11 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
         .route("/{id}/keep-working", post(crate::mirror::keep_working))
+        .route("/{id}/opened", post(crate::needs_you::issue_opened))
         .route("/{id}/start-delivery", post(crate::delivery::start_from_issue))
         .route("/{id}/resume-delivery", post(crate::delivery::resume_from_issue))
         .route("/{id}/pause-delivery", post(crate::delivery::pause_from_issue))
+        .route("/{id}/reopen-delivery", post(crate::delivery::reopen_from_issue))
         .route("/{id}/delivery", at_get(crate::delivery::issue_delivery))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
@@ -710,7 +744,7 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         state.db.save_task(&reopened)?;
         log_status(&state, &reopened, "user", "Reopened by you");
         crate::mirror::write_through(&state, &t, &reopened).await;
-        let (t, queued) = execute(&state, &t.id, agent.as_ref().map(|a| a.id.as_str()), text, None)?;
+        let (t, queued) = execute(&state, &t.id, agent.as_ref().map(|a| a.id.as_str()), text, By::User)?;
         let c = state.db.list_task_comments(&t.id, 1, None)?.pop();
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
     }
@@ -774,7 +808,7 @@ pub struct ExecuteBody {
 
 pub async fn execute_task(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ExecuteBody>>) -> Result<Json<Value>, ApiError> {
     let b = body.map(|b| b.0).unwrap_or_default();
-    let (t, queued) = execute(&state, &id, b.agent_id.as_deref(), &b.note, None)?;
+    let (t, queued) = execute(&state, &id, b.agent_id.as_deref(), &b.note, By::User)?;
     Ok(Json(json!({ "task": t, "queued": queued })))
 }
 
@@ -1100,8 +1134,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             match assignee {
                 Some(a) if args["start"].as_bool() == Some(true) => {
-                    let by = (a.id != me.id).then_some(me);
-                    let (t, queued) = execute(state, &t.id, Some(&a.id), "", by).map_err(|e| e.1)?;
+                    let (t, queued) = execute(state, &t.id, Some(&a.id), "", By::Agent(me)).map_err(|e| e.1)?;
                     Ok(format!("Created and started task {}. {} {}.", t.id, a.name, if queued { "will pick it up after its current run" } else { "is on it now" }))
                 }
                 _ => Ok(format!("Created task {}.", t.id)),
@@ -1240,6 +1273,7 @@ pub(crate) mod tests {
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
             xcode: Arc::new(Default::default()),
+            needs_you: Arc::new(Default::default()),
         }
     }
 
@@ -1265,7 +1299,7 @@ pub(crate) mod tests {
         // Busy, so the brief is queued instead of starting a real claude run.
         st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
         // Run it with a note: the instruction is kept as your comment.
-        execute(&st, &t.id, Some(&a.id), "Start with the login screen", None).unwrap();
+        execute(&st, &t.id, Some(&a.id), "Start with the login screen", By::User).unwrap();
         let find = |k: &str| Err::<Agent, _>(k.to_string());
         for note in ["looked at it", "halfway"] {
             mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "note": note }), find).unwrap().unwrap();
@@ -1327,7 +1361,7 @@ pub(crate) mod tests {
         busy(&st, &a);
         for status in ["blocked", "waiting_approval"] {
             let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
-            execute(&st, &t.id, None, "", None).unwrap();
+            execute(&st, &t.id, None, "", By::User).unwrap();
             stuck(&st, &t.id, status);
             assert!(needs_you(&st, &t.id));
             let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Use the staging key", true, false)).await.unwrap();
@@ -1348,13 +1382,63 @@ pub(crate) mod tests {
         let a = agent(&st, "Worker");
         busy(&st, &a);
         let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
-        execute(&st, &t.id, None, "", None).unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
         stuck(&st, &t.id, "failed");
         st.rt.lock().unwrap().queued.remove(&a.id);
         let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Try with Xcode 26", true, false)).await.unwrap();
         assert_eq!((r["task"]["status"].clone(), r["delivered_to"].clone()), (json!("in_progress"), json!(a.id)));
         assert!(queued(&st, &a).contains("Try with Xcode 26"), "the brief carries the answer");
         assert!(!needs_you(&st, &t.id));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_or_failed_issue_is_sent_again_to_another_agent_or_the_same_one_with_why_it_stopped() {
+        let st = state();
+        let (a, b) = (agent(&st, "Reviewer"), agent(&st, "Builder"));
+        busy(&st, &a);
+        busy(&st, &b);
+        for status in ["blocked", "failed"] {
+            let (t, _) = create(&st, &json!({ "title": "Fix login", "description": "The login button does nothing.", "agent_id": a.id }), "user").unwrap();
+            execute(&st, &t.id, None, "", By::User).unwrap();
+            stuck(&st, &t.id, status);
+            st.rt.lock().unwrap().queued.clear();
+
+            // To another agent: it takes the issue, in progress again, with the description and the reason.
+            let Json(r) = execute_task(State(st.clone()), Path(t.id.clone()), Some(Json(ExecuteBody { agent_id: Some(b.id.clone()), note: "You can touch code.".into() }))).await.unwrap();
+            assert_eq!((r["task"]["status"].clone(), r["task"]["agent_id"].clone(), r["task"]["error"].clone()), (json!("in_progress"), json!(b.id), json!("")), "{status}");
+            let q = queued(&st, &b);
+            assert!(q.contains("The login button does nothing.") && q.contains(&format!("it was {status} by Reviewer, because: Need the API key")) && q.contains("You can touch code."), "{status}: {q}");
+            assert!(!needs_you(&st, &t.id), "{status}: the item clears");
+            let texts: Vec<String> = st.db.list_task_comments(&t.id, 50, None).unwrap().into_iter().map(|c| c.text).collect();
+            assert!(texts.contains(&format!("Sent again to Builder by you: it was {status}")), "{status}: {texts:?}");
+            // The agent that blocked it is told it's someone else's now; one that failed it ended already.
+            assert_eq!(queued(&st, &a).contains("was sent to Builder by the user"), status == "blocked", "{status}");
+
+            // Blocked again, back to the same agent.
+            stuck(&st, &t.id, status);
+            execute(&st, &t.id, None, "", By::User).unwrap();
+            assert_eq!(status_of(&st, &t.id), "in_progress");
+            assert!(queued(&st, &b).contains(&format!("it was {status} by you, because: Need the API key")), "{status}");
+            st.rt.lock().unwrap().queued.clear();
+        }
+        // An agent can't take over another agent's blocked issue this way, and an issue in progress isn't sent again.
+        let (t, _) = create(&st, &json!({ "title": "Other", "agent_id": a.id }), "user").unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", By::User).unwrap_err().0, StatusCode::CONFLICT);
+        stuck(&st, &t.id, "blocked");
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", By::Agent(&b)).unwrap_err().0, StatusCode::CONFLICT);
+        // Nor send its own blocked or failed issue again: only the user does.
+        for status in ["blocked", "failed"] {
+            stuck(&st, &t.id, status);
+            assert_eq!(execute(&st, &t.id, Some(&a.id), "", By::Agent(&a)).unwrap_err().0, StatusCode::CONFLICT, "{status}");
+            assert_eq!(status_of(&st, &t.id), status);
+        }
+        // An agent still starts a new issue it created for itself: the brief is queued for it, not messaged.
+        st.rt.lock().unwrap().queued.clear();
+        let (own, _) = create(&st, &json!({ "title": "Own", "agent_id": a.id }), &a.id).unwrap();
+        execute(&st, &own.id, Some(&a.id), "", By::Agent(&a)).unwrap();
+        assert_eq!(status_of(&st, &own.id), "in_progress");
+        assert!(queued(&st, &a).contains("Own"), "{}", queued(&st, &a));
     }
 
     #[tokio::test]
@@ -1417,7 +1501,7 @@ pub(crate) mod tests {
         let a = agent(&st, "Worker");
         busy(&st, &a);
         let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
-        execute(&st, &t.id, None, "", None).unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
         st.rt.lock().unwrap().queued.remove(&a.id);
         let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Also check the iPad layout", true, false)).await.unwrap();
         assert_eq!((r["queued"].clone(), r["delivered_to"].clone()), (json!(true), json!(a.id)));

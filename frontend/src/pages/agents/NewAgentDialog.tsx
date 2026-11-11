@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { createPayload, EMPTY_FORM, offersFreshContext, TEMPLATES, withTeam } from "../../lib/newAgent";
-import { FRESH_CONTEXT, FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
+import { createPayload, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, TEMPLATES, withTeam } from "../../lib/newAgent";
+import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
 import { GroupInput, ProjectsField } from "./ProjectsField";
 import { teamOf } from "../../lib/team";
 

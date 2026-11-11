@@ -1080,6 +1080,25 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
     }
 
     #[tokio::test]
+    async fn new_agents_start_with_fresh_context_always_and_existing_ones_keep_theirs() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("homebase")).unwrap();
+        let old = agent(&st, "Old");
+        for tpl in ["dev", "tests", "security"] {
+            create_agent(&st, &me, &json!({ "template": tpl, "project": "homebase" })).await.unwrap();
+        }
+        create_agent(&st, &me, &json!({ "name": "Notes", "prompt": "Tidy my notes." })).await.unwrap();
+        // The New agent dialog's path.
+        crate::api::new_agent(&st, "a1".into(), &json!({ "name": "Web", "role": "dev" }), None).unwrap();
+        for a in st.db.list_agents().unwrap() {
+            let want = if [old.id.as_str(), me.id.as_str()].contains(&a.id.as_str()) { "above_80k" } else { "always" };
+            assert_eq!(a.fresh_context, want, "{} ({})", a.name, a.role);
+        }
+    }
+
+    #[tokio::test]
     async fn the_role_option_overrides_the_template_s() {
         let st = state();
         let mut me = agent(&st, "loft");

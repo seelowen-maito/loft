@@ -7,6 +7,12 @@
 //! session id is one of the agent's. The records are files, `.agent-files/<id>.sessions/<sid>`: pruned once no
 //! process of the session is left, and removed with the agent, whose processes are stopped then.
 //!
+//! A daemon (`pg_ctl start`, `redis-server --daemonize yes`, `celery --detach`) leaves the session for one of its
+//! own, so a process of the user's in no agent's session is also the agent's whose workspace holds its working
+//! folder. Not one with a terminal: that's the user's own shell, or what they run in it. Nor one under Loft (its git
+//! checks and size scans in a clone) or under a GUI app (an editor's language servers, when the user opens a clone):
+//! a daemon leaves its parent and runs under launchd.
+//!
 //! The same script makes `kill`, `pkill` and `killall` shell functions, and puts commands of those names first on
 //! PATH (for `xargs kill`, `find -exec kill`), that run `loft kill-as <tool> <args>`. That asks Loft
 //! (`POST /kill/<agent id>`), which finds the targets the way the tool would, signals the agent's own by PID and
@@ -72,7 +78,7 @@ pub fn sessions(storage: &Path, agent_id: &str) -> HashSet<i32> {
 }
 
 /// Every recorded session, and the agent it belongs to.
-fn owners(storage: &Path) -> HashMap<i32, String> {
+fn session_owners(storage: &Path) -> HashMap<i32, String> {
     let mut owners = HashMap::new();
     let Ok(dir) = std::fs::read_dir(storage.join(crate::agents::AGENT_FILES)) else { return owners };
     for e in dir.flatten() {
@@ -82,6 +88,58 @@ fn owners(storage: &Path) -> HashMap<i32, String> {
         }
     }
     owners
+}
+
+/// Who owns a process: the agent whose session it runs in, else the agent of the nearest process it runs under that
+/// is in an agent's session, else the agent whose workspace holds its working folder.
+struct Owners {
+    sessions: HashMap<i32, String>,
+    /// Each agent's workspace, resolved (a process's working folder comes resolved), and its id.
+    workspaces: Vec<(PathBuf, String)>,
+    uid: u32,
+}
+
+impl Owners {
+    /// The recorded sessions, and the workspaces of `agents`: every agent's, or only the one whose processes count.
+    fn load(storage: &Path, agents: &[String]) -> Self {
+        let workspaces = agents.iter().filter_map(|id| Some((storage.join(id).canonicalize().ok()?, id.clone()))).collect();
+        Owners { sessions: session_owners(storage), workspaces, uid: unsafe { libc::getuid() } }
+    }
+
+    /// The agent `p` is: the one of its session, else the one of the nearest session above it before Loft or a GUI
+    /// app (a child that left its parent's session, like node's `detached` or Python's `start_new_session`, while
+    /// that parent runs), else, for a process of the user's with no terminal that runs under neither Loft nor a GUI
+    /// app, the one whose workspace holds its working folder.
+    fn of(&self, p: &Proc) -> Option<&String> {
+        let sid = session_of(p.pid)?;
+        if let Some(id) = std::iter::once(&sid).chain(&p.sessions_above).find_map(|s| self.sessions.get(s)) {
+            return Some(id);
+        }
+        if self.workspaces.is_empty() || p.uid != self.uid || p.tty || p.under_app {
+            return None;
+        }
+        let cwd = cwd_of(p.pid)?;
+        self.workspaces.iter().find(|(w, _)| cwd.starts_with(w)).map(|(_, id)| id)
+    }
+}
+
+/// The working folder of `pid`, if Loft may read it (a process of the user's).
+#[cfg(target_os = "macos")]
+fn cwd_of(pid: i32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDVNODEPATHINFO, 0, (&raw mut info).cast(), size) };
+    if got != size {
+        return None;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+    (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cwd_of(pid: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
 /// Xcode's helper daemons, which `xcrun` and `xcodebuild` start and which never exit. They run in the agent's
@@ -103,22 +161,23 @@ pub struct Live {
     pub age_secs: u64,
 }
 
-/// Each agent's live processes, like a detached dev server, by agent id (Xcode's helpers aside).
-pub fn live_processes(storage: &Path) -> HashMap<String, Vec<Live>> {
-    let owners = owners(storage);
+/// The live processes of `agents`, like a detached dev server or a daemon in the workspace, by agent id (Xcode's
+/// helpers aside).
+pub fn live_processes(storage: &Path, agents: &[String]) -> HashMap<String, Vec<Live>> {
+    let owners = Owners::load(storage, agents);
     let me = std::process::id() as i32;
     let mut live: HashMap<String, Vec<Live>> = HashMap::new();
     for p in table().into_iter().filter(|p| p.pid != me && !p.helper) {
-        if let Some(id) = session_of(p.pid).and_then(|s| owners.get(&s)) {
+        if let Some(id) = owners.of(&p) {
             live.entry(id.clone()).or_default().push(Live { pid: p.pid, command: p.command, age_secs: p.age_secs });
         }
     }
     live
 }
 
-/// The agents with a process still alive.
-pub fn with_live_processes(storage: &Path) -> HashSet<String> {
-    live_processes(storage).into_keys().collect()
+/// The ids of every agent.
+fn agent_ids(state: &AppState) -> Vec<String> {
+    state.db.list_agents().unwrap_or_default().into_iter().map(|a| a.id).collect()
 }
 
 /// The process session of `pid`, if it is alive.
@@ -223,7 +282,7 @@ pub async fn stop_all(storage: &Path, agent_id: &str) {
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
-/// Stops every process the agent owns: SIGTERM, then SIGKILL for any still there after a grace period. Returns
+/// Stops every process the agent owns (see [`Owners`]): SIGTERM, then SIGKILL for any still there after a grace period. Returns
 /// each one's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
 /// when it says no.
 async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static) -> Vec<(i32, String)> {
@@ -232,12 +291,12 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         if !proceed() {
             return vec![];
         }
-        let mine = sessions(&storage, &id);
+        let owners = Owners::load(&storage, std::slice::from_ref(&id));
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me && !p.helper)
-            .filter_map(|p| Some((p.pid, session_of(p.pid).filter(|s| mine.contains(s))?, p.command)))
+            .filter(|p| p.pid != me && !p.helper && owners.of(p) == Some(&id))
+            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.command)))
             .collect();
         for (pid, _, _) in &targets {
             unsafe { libc::kill(*pid, libc::SIGTERM) };
@@ -267,8 +326,8 @@ const STOP_IDLE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// Stops the processes of agents idle past the timeout (see [`crate::agents::idle`]), like a dev server left
 /// running; the agent's next run can start them again. Returns a line per process, for the clean log.
 pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
-    let storage = state.cfg.storage_dir.clone();
-    let live = tokio::task::spawn_blocking(move || with_live_processes(&storage)).await.unwrap_or_default();
+    let (storage, agents) = (state.cfg.storage_dir.clone(), agent_ids(state));
+    let live: HashSet<String> = tokio::task::spawn_blocking(move || live_processes(&storage, &agents).into_keys().collect()).await.unwrap_or_default();
     let mut lines = vec![];
     for a in state.db.list_agents().unwrap_or_default().into_iter().filter(|a| live.contains(&a.id)) {
         if !crate::agents::idle(state, &a, std::time::SystemTime::now()) {
@@ -300,8 +359,8 @@ pub async fn idle_stopper(state: AppState) {
 /// `GET /api/workspaces/processes`: what each idle agent left running, `{ <agent id>: [{ pid, command, age_secs }] }`,
 /// for Clean to list. An agent in a run has none listed: its processes are its own.
 pub async fn left_running(State(state): State<AppState>) -> Json<Value> {
-    let storage = state.cfg.storage_dir.clone();
-    let live = tokio::task::spawn_blocking(move || live_processes(&storage)).await.unwrap_or_default();
+    let (storage, agents) = (state.cfg.storage_dir.clone(), agent_ids(&state));
+    let live = tokio::task::spawn_blocking(move || live_processes(&storage, &agents)).await.unwrap_or_default();
     let running = state.rt.lock().unwrap().running.clone();
     let list: serde_json::Map<String, Value> = live
         .into_iter()
@@ -345,6 +404,12 @@ struct Proc {
     command: String,
     /// One of Xcode's helpers, by its executable.
     helper: bool,
+    /// It has a terminal: the user's shell, or something run in it.
+    tty: bool,
+    /// It, or a process it runs under, is Loft or a GUI app: never an agent's by its working folder.
+    under_app: bool,
+    /// The sessions of the processes it runs under, nearest first, up to Loft or a GUI app (or launchd).
+    sessions_above: Vec<i32>,
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
@@ -356,26 +421,70 @@ fn etime(s: &str) -> Option<u64> {
 
 /// Every process on the Mac, from `ps`.
 fn table() -> Vec<Proc> {
-    let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,etime=,command="]).output() else {
+    let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,etime=,tty=,command="]).output() else {
         return vec![];
     };
     // The executable on its own: `command` mixes it with arguments the agent chooses.
-    let helpers: HashSet<i32> = std::process::Command::new("/bin/ps")
-        .args(["-axww", "-o", "pid=,comm="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| { let (pid, comm) = field(l); is_helper(comm).then(|| pid.parse().ok()).flatten() }).collect())
-        .unwrap_or_default();
-    String::from_utf8_lossy(&out.stdout)
+    let (mut helpers, mut apps) = (HashSet::new(), HashSet::new());
+    if let Ok(o) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,comm="]).output() {
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            let (pid, comm) = field(l);
+            let Ok(pid) = pid.parse::<i32>() else { continue };
+            if is_helper(comm) {
+                helpers.insert(pid);
+            }
+            if is_gui_app(comm) {
+                apps.insert(pid);
+            }
+        }
+    }
+    apps.insert(std::process::id() as i32);
+    let mut procs: Vec<Proc> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let (pid, rest) = field(line);
             let (ppid, rest) = field(rest);
             let (uid, rest) = field(rest);
-            let (age, command) = field(rest);
+            let (age, rest) = field(rest);
+            let (tty, command) = field(rest);
             let pid: i32 = pid.parse().ok()?;
-            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid) })
+            let tty = !matches!(tty, "??" | "?" | "-");
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
         })
-        .collect()
+        .collect();
+    mark_under_app(&mut procs, &apps, session_of);
+    procs
+}
+
+/// Whether `comm`, a process's executable path, is a GUI app's (the app's own or a helper app's, like VS Code's
+/// `Code Helper (Plugin)`), installed in /Applications or ~/Applications (where JetBrains Toolbox puts its IDEs).
+/// Postgres.app's `postgres` isn't: it's in `bin`, not `MacOS`.
+fn is_gui_app(comm: &str) -> bool {
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(|h| format!("{}/Applications/", h.trim_end_matches('/')));
+    (comm.starts_with("/Applications/") || home.is_some_and(|h| comm.starts_with(&h))) && comm.contains(".app/Contents/MacOS/")
+}
+
+/// Marks the processes that are, or run under, one of `apps` (Loft and the GUI apps), and lists the sessions
+/// (`sid_of`) of the processes each one runs under, up to the first app.
+fn mark_under_app(procs: &mut [Proc], apps: &HashSet<i32>, sid_of: impl Fn(i32) -> Option<i32>) {
+    let parents: HashMap<i32, i32> = procs.iter().map(|p| (p.pid, p.ppid)).collect();
+    let mut sids: HashMap<i32, Option<i32>> = HashMap::new();
+    for p in procs.iter_mut() {
+        let (mut pid, mut seen) = (p.pid, HashSet::new());
+        while pid > 1 && seen.insert(pid) {
+            if apps.contains(&pid) {
+                p.under_app = true;
+                break;
+            }
+            if pid != p.pid {
+                let sid = *sids.entry(pid).or_insert_with(|| sid_of(pid));
+                if let Some(sid) = sid.filter(|s| p.sessions_above.last() != Some(s)) {
+                    p.sessions_above.push(sid);
+                }
+            }
+            pid = parents.get(&pid).copied().unwrap_or(0);
+        }
+    }
 }
 
 /// The first whitespace-separated field of `s`, and the rest.
@@ -603,13 +712,13 @@ enum Plan {
 }
 
 async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
-    let storage = state.cfg.storage_dir.clone();
+    let (storage, agents) = (state.cfg.storage_dir.clone(), agent_ids(state));
     let (tool, caller) = (req.tool.clone(), req.caller);
     // As the agent typed it, near enough: `pkill -f 'sleep 120'` mustn't read as a PID 120.
     let command = std::iter::once(req.tool.clone()).chain(req.args.iter().map(|a| shell_word(a))).collect::<Vec<_>>().join(" ");
     let Ok((plan, owners, procs)) = tokio::task::spawn_blocking(move || {
         let procs = table();
-        (plan(&req, &procs), owners(&storage), procs)
+        (plan(&req, &procs), Owners::load(&storage, &agents), procs)
     })
     .await
     else {
@@ -624,10 +733,12 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
         return out;
     }
     let me = std::process::id() as i32;
-    let owner = |pid: i32| session_of(pid).and_then(|sid| owners.get(&sid));
+    let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    let owner = |pid: i32| by_pid.get(&pid).and_then(|p| owners.of(p));
     // The URL names the agent, but only a caller in one of its sessions speaks for it: a command holding another
-    // agent's kill URL (a stale environment, a hand-written curl) gets none of that agent's processes as its own.
-    let inside = caller > 0 && owner(caller) == Some(&a.id);
+    // agent's kill URL (a stale environment, a hand-written curl, a shell in its workspace) gets none of that
+    // agent's processes as its own.
+    let inside = caller > 0 && session_of(caller).and_then(|sid| owners.sessions.get(&sid)) == Some(&a.id);
     // Signal 0 only checks the process exists. A PID with no process gets the tool's own error.
     let (own, foreign): (Vec<i32>, Vec<i32>) = pids
         .into_iter()
@@ -667,7 +778,7 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     let n = foreign.len();
     let es = if n == 1 { "" } else { "es" };
     let reason = if inside {
-        format!("Stops {n} process{es} {} didn't start: {}.", a.name, list.join(", "))
+        format!("Stops {n} process{es} {} didn't start and that run outside its workspace: {}.", a.name, list.join(", "))
     } else {
         format!("A command outside {}'s runs (PID {caller}) asks to stop {n} process{es}: {}.", a.name, list.join(", "))
     };
@@ -679,7 +790,7 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
         let pids = foreign.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
         let why = d.message.unwrap_or_else(|| "The user denied it.".into());
         let because = if inside {
-            format!("your runs didn't start {}", if n == 1 { "it" } else { "them" })
+            format!("your runs didn't start {} and {} outside your workspace", if n == 1 { "it" } else { "them" }, if n == 1 { "it runs" } else { "they run" })
         } else {
             "this command doesn't run in one of your runs".to_string()
         };
@@ -848,7 +959,8 @@ mod tests {
     // Every process these tests signal is one they start themselves, by PID.
 
     /// A `sleep` the test starts in a process session of its own, stopped by PID when dropped.
-    struct Sleeper(std::sync::Mutex<std::process::Child>);
+    /// A sleep the test started: its child, or an orphan (a daemon) the test only knows by PID.
+    struct Sleeper(Option<std::sync::Mutex<std::process::Child>>, i32);
 
     impl Sleeper {
         fn start(own_session: bool) -> Self {
@@ -857,26 +969,65 @@ mod tests {
 
         /// From `path`, a link to sleep: killall finds a process by that name.
         fn start_as(path: &Path, own_session: bool) -> Self {
+            Self::spawn(path, None, own_session)
+        }
+
+        /// A daemon: a session of its own that no run recorded, working in `dir`, left by the shell that started
+        /// it, so it runs under launchd and not under Loft (here the test).
+        fn daemon_in(dir: &Path) -> Self {
+            std::fs::create_dir_all(dir).unwrap();
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"]).current_dir(dir);
+            unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            let out = cmd.output().unwrap();
+            let pid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            // Until the shell's exit reaches the table, the sleep still runs under it.
+            for _ in 0..100 {
+                if table().iter().any(|p| p.pid == pid && !p.under_app) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Sleeper(None, pid)
+        }
+
+        fn spawn(path: &Path, dir: Option<&Path>, own_session: bool) -> Self {
             let mut cmd = std::process::Command::new(path);
             cmd.arg("60");
+            if let Some(dir) = dir {
+                cmd.current_dir(dir);
+            }
             if own_session {
                 unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
             }
-            Sleeper(std::sync::Mutex::new(cmd.spawn().unwrap()))
+            let child = cmd.spawn().unwrap();
+            let pid = child.id() as i32;
+            Sleeper(Some(std::sync::Mutex::new(child)), pid)
         }
 
         fn pid(&self) -> i32 {
-            self.0.lock().unwrap().id() as i32
+            self.1
         }
 
         fn alive(&self) -> bool {
-            self.0.lock().unwrap().try_wait().unwrap().is_none()
+            match &self.0 {
+                Some(child) => child.lock().unwrap().try_wait().unwrap().is_none(),
+                None => alive(self.1),
+            }
         }
 
         fn stop(&self) {
-            let mut child = self.0.lock().unwrap();
-            let _ = child.kill();
-            let _ = child.wait();
+            match &self.0 {
+                Some(child) => {
+                    let mut child = child.lock().unwrap();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                None if self.alive() => unsafe {
+                    libc::kill(self.1, libc::SIGKILL);
+                },
+                None => {}
+            }
         }
     }
 
@@ -922,6 +1073,164 @@ mod tests {
         crate::sweep::record(&st, "Idle processes", lines).await;
         let Json(log) = crate::sweep::log(State(st.clone())).await;
         assert_eq!((log.what.as_str(), log.removed, log.lines[0].done.as_str()), ("Idle processes", 1, "Stopped process"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_daemon_in_an_idle_agent_s_workspace_is_stopped_after_the_timeout_never_during_a_run_and_clean_lists_it() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let b = crate::tasks::tests::agent(&st, "Other");
+        // Deep in the workspace, like `pg_ctl -D data start` from a clone.
+        let daemon = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id).join("app/pgdata"));
+        let outside = Sleeper::daemon_in(&crate::testdir::for_this_test("outside"));
+        // In the other agent's session, though it works in this one's workspace: the session's agent owns it.
+        let borrowed = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id));
+        record(&st.cfg.storage_dir, &b.id, session_of(borrowed.pid()).unwrap() as u32).unwrap();
+        let ago = |h: i64| Some((chrono::Utc::now() - chrono::Duration::hours(h)).to_rfc3339());
+
+        // Clean lists it as the idle agent's, and the other agent's process as the other's.
+        let Json(list) = left_running(State(st.clone())).await;
+        let pids = |id: &str| list.get(id).and_then(Value::as_array).map(|ps| ps.iter().map(|p| p["pid"].as_i64().unwrap() as i32).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!((pids(&a.id), pids(&b.id)), (vec![daemon.pid()], vec![borrowed.pid()]));
+        let rows = crate::sweep::sizes(State(st.clone())).await.unwrap().0;
+        let row = rows["agents"].as_array().unwrap().iter().find(|r| r["id"] == json!(a.id)).unwrap().clone();
+        assert_eq!((&row["busy"], &row["processes"]), (&json!(false), &json!(1)));
+
+        // In a run past the timeout: busy, and nothing stops.
+        st.db.update_agent(&a.id, |x| x.last_run_at = ago(5)).unwrap();
+        st.db.update_agent(&b.id, |x| x.last_run_at = ago(1)).unwrap();
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Default::default());
+        let rows = crate::sweep::sizes(State(st.clone())).await.unwrap().0;
+        assert_eq!(rows["agents"].as_array().unwrap().iter().find(|r| r["id"] == json!(a.id)).unwrap()["busy"], json!(true));
+        assert!(stop_idle(&st).await.is_empty(), "never during a run");
+        assert!(daemon.alive());
+
+        // Idle past the timeout: stopped, and in the clean log.
+        st.rt.lock().unwrap().running.remove(&a.id);
+        let lines = stop_idle(&st).await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!((lines[0].agent.as_str(), lines[0].command.clone()), (a.id.as_str(), format!("kill {}", daemon.pid())));
+        until("the daemon stops", 5, || !daemon.alive()).await;
+        crate::sweep::record(&st, "Idle processes", lines).await;
+        let Json(log) = crate::sweep::log(State(st.clone())).await;
+        assert_eq!((log.what.as_str(), log.removed), ("Idle processes", 1));
+        assert!(outside.alive(), "a process outside every workspace isn't an agent's");
+        assert!(borrowed.alive(), "the other agent isn't idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_with_a_terminal_in_the_workspace_is_the_user_s() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let daemon = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id));
+        let owners = Owners::load(&st.cfg.storage_dir, std::slice::from_ref(&a.id));
+        let p = table().into_iter().find(|p| p.pid == daemon.pid()).unwrap();
+        assert_eq!(owners.of(&p), Some(&a.id));
+        assert_eq!(owners.of(&Proc { tty: true, ..p }), None, "the user's shell, cd'ed into the workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_s_own_child_in_the_workspace_is_not_the_agent_s_but_a_daemon_the_agent_started_is() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let ws = crate::agents::workspace(&st, &a.id);
+        std::fs::create_dir_all(&ws).unwrap();
+        // A git check or size scan: Loft's child (here the test's), in a session of its own, working in the clone.
+        let check = Sleeper::spawn(Path::new("/bin/sleep"), Some(&ws), true);
+        let daemon = Sleeper::daemon_in(&ws);
+        let live = live_processes(&st.cfg.storage_dir, std::slice::from_ref(&a.id));
+        let pids: Vec<i32> = live.get(&a.id).into_iter().flatten().map(|l| l.pid).collect();
+        assert_eq!(pids, vec![daemon.pid()]);
+        assert!(check.alive());
+    }
+
+    #[test]
+    fn a_process_under_loft_or_a_gui_app_runs_under_an_app() {
+        use super::{is_gui_app, mark_under_app};
+        let code = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
+        let plugin = "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)";
+        assert!(is_gui_app(code) && is_gui_app(plugin) && is_gui_app("/Applications/Cursor.app/Contents/MacOS/Cursor"));
+        assert!(!is_gui_app("/Applications/Postgres.app/Contents/Versions/16/bin/postgres"), "a daemon from an app bundle");
+        assert!(!is_gui_app("/usr/local/bin/node") && !is_gui_app("/opt/homebrew/bin/redis-server"));
+        let home = std::env::var("HOME").unwrap();
+        assert!(is_gui_app(&format!("{home}/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea")), "a JetBrains Toolbox IDE");
+        assert!(is_gui_app(&format!("{home}/Applications/RustRover.app/Contents/MacOS/fsnotifier")));
+        assert!(!is_gui_app(&format!("{home}/Documents/Applications/Fake.app/Contents/MacOS/x")), "only ~/Applications itself");
+
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
+        // daemon 300 runs under launchd and has a child 301.
+        let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
+        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]), |pid| Some(pid));
+        let under: Vec<i32> = procs.iter().filter(|p| p.under_app).map(|p| p.pid).collect();
+        assert_eq!(under, vec![100, 101, 200, 201, 202]);
+    }
+
+    #[test]
+    fn a_child_that_left_an_agent_s_session_is_the_agent_s() {
+        use super::mark_under_app;
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        // Loft 100 runs claude 110, whose Bash shell 120 (session 120, recorded) runs a dev server 121; the dev server
+        // starts a worker 130 in a session of its own (node `detached`), and the worker runs 131. Loft's git 101 is
+        // in Loft's session.
+        let mut procs = vec![p(100, 1), p(101, 100), p(110, 100), p(120, 110), p(121, 120), p(130, 121), p(131, 130)];
+        let sid = |pid| Some(match pid { 120 | 121 => 120, 130 | 131 => 130, _ => 100 });
+        mark_under_app(&mut procs, &HashSet::from([100]), sid);
+        let above = |pid| procs.iter().find(|p| p.pid == pid).unwrap().sessions_above.clone();
+        assert_eq!(above(131), vec![130, 120, 100], "nearest first, up to Loft");
+        assert_eq!(above(130), vec![120, 100]);
+        assert_eq!(above(101), Vec::<i32>::new());
+        assert!(procs.iter().all(|p| p.under_app), "all of them run under Loft");
+
+        // The live process (this test) stands in for the worker: its own session isn't recorded, one above is.
+        let me = std::process::id() as i32;
+        let owners = Owners { sessions: HashMap::from([(120, "a".to_string())]), workspaces: vec![], uid: unsafe { libc::getuid() } };
+        let worker = Proc { pid: me, under_app: true, sessions_above: above(130), ..p(me, 1) };
+        assert_eq!(owners.of(&worker), Some(&"a".to_string()), "the agent's, though it runs under Loft");
+        let git = Proc { pid: me, under_app: true, sessions_above: above(101), ..p(me, 1) };
+        assert_eq!(owners.of(&git), None, "Loft's own child is no one's");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_editor_helper_working_in_the_workspace_is_not_the_agent_s() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Builder");
+        let daemon = Sleeper::daemon_in(&crate::agents::workspace(&st, &a.id));
+        let owners = Owners::load(&st.cfg.storage_dir, std::slice::from_ref(&a.id));
+        let p = table().into_iter().find(|p| p.pid == daemon.pid()).unwrap();
+        assert_eq!(owners.of(&p), Some(&a.id));
+        assert_eq!(owners.of(&Proc { under_app: true, ..p }), None, "a language server VS Code runs in the clone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_stops_a_daemon_in_its_workspace_without_asking_and_deleting_it_stops_them() {
+        let (st, a) = fake_claude_state();
+        let ws = crate::agents::workspace(&st, &a.id);
+        let daemon = Sleeper::daemon_in(&ws.join("redis"));
+        let v = ask(&st, &a.id, "kill", &[&daemon.pid().to_string()]).await;
+        assert_eq!(v["code"], 0, "{v}");
+        until("the daemon to stop", 5, || !daemon.alive()).await;
+        assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "it asked the user");
+
+        // A shell in the workspace isn't in the agent's runs: it doesn't speak for the agent.
+        let daemon = Sleeper::daemon_in(&ws.join("redis"));
+        let shell = Sleeper::daemon_in(&ws);
+        let asking = tokio::spawn({
+            let (st, id, pid, caller) = (st.clone(), a.id.clone(), daemon.pid().to_string(), shell.pid());
+            async move { ask_as(&st, &id, caller, "kill", &[&pid]).await }
+        });
+        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        let req = pending(&st, &a.id).remove(0);
+        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["code"], 1);
+        assert!(daemon.alive());
+
+        let outside = Sleeper::daemon_in(&crate::testdir::for_this_test("outside"));
+        let uri: axum::http::Uri = "/?purge_files=false".parse().unwrap();
+        let opts = axum::extract::Query::try_from_uri(&uri).unwrap();
+        let _ = crate::api::delete_agent(State(st.clone()), UrlPath(a.id.clone()), opts).await.ok().unwrap();
+        until("its daemons to stop", 5, || !daemon.alive() && !shell.alive()).await;
+        assert!(outside.alive(), "it stopped a process outside the workspace");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -50,8 +50,9 @@ export function deliveryStateLine(
 }
 
 /** The buttons a started Delivery's card shows, each only when the server says it applies: Pause while it runs
- *  (final review included), Resume when it's stalled or paused, or a ticket or final review waits for the user. */
-export function deliveryButtons(d: Pick<IssueDelivery, "started" | "can_pause" | "can_resume"> | null): { pause: boolean; resume: boolean } {
+ *  (final review included), Resume when it's stalled or paused, or a ticket or final review waits for the user,
+ *  and Reopen delivery when it's done and tickets published since are open. */
+export function deliveryButtons(d: Pick<IssueDelivery, "started" | "can_pause" | "can_resume" | "can_reopen"> | null): { pause: boolean; resume: boolean; reopen: boolean } {
   const started = !!d?.started;
-  return { pause: started && !!d?.can_pause, resume: started && !!d?.can_resume };
+  return { pause: started && !!d?.can_pause, resume: started && !!d?.can_resume, reopen: started && !!d?.can_reopen };
 }

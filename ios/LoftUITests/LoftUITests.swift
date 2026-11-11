@@ -89,7 +89,7 @@ final class LoftUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Connected"].appears(timeout: 5))
         // Servers with `needs_you` (the fixture) show the "Needs you" card instead of "Needs your attention".
-        XCTAssertTrue(app.staticTexts["Needs you · 10"].appears(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Needs you · 10 new of 10"].appears(timeout: 5))
         XCTAssertTrue(app.staticTexts["Backend Agent wants to use Bash"].exists)
         XCTAssertTrue(app.staticTexts["Active work"].exists)
         let chip = any("macTemperature", app)
@@ -1204,7 +1204,7 @@ final class LoftUITests: XCTestCase {
 
     func testNeedsYouGroupsPullRequestsByProject() {
         let app = launch(["-fixture-needs-you-projects"])
-        XCTAssertTrue(app.staticTexts["Needs you · 13"].firstMatch.appears(timeout: 5), "10 items, with the one PR swapped for four")
+        XCTAssertTrue(app.staticTexts["Needs you · 13 new of 13"].firstMatch.appears(timeout: 5), "10 items, with the one PR swapped for four, none seen yet")
         app.buttons["needsYouSeeAll"].firstMatch.tap()
         let loft = app.buttons["needsYouProject-loft"]
         XCTAssertTrue(loft.appears(timeout: 5))
@@ -1247,6 +1247,26 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(item.staticTexts["Loft's backups are failing"].exists)
         item.buttons["Back up now"].tap()
         XCTAssertTrue(item.disappears(timeout: 5), "the item clears")
+    }
+
+    /// Opening the list marks what it shows seen (#395): the card stops saying they're new; Done takes an item off.
+    func testOpeningNeedsYouMarksItSeenAndDoneTakesAnItemOff() {
+        let app = launch()
+        XCTAssertTrue(text(containing: " new of ", app).appears(timeout: 5), "nothing seen yet")
+        app.buttons["needsYouSeeAll"].firstMatch.tap()
+        XCTAssertTrue(any("needsYou-permission", app).appears(timeout: 5))
+        XCTAssertTrue(any("needsYouNew", app).exists, "new during this visit, though marked seen")
+        let row = any("needsYou-task_done", app)
+        let done = row.buttons["needsYouDone"]
+        // Clear of the floating tab bar: under it the button still counts as hittable, and the tap goes to the bar.
+        let bar = app.tabBars.firstMatch
+        for _ in 0..<8 where !done.exists || done.frame.maxY > bar.frame.minY - 8 { app.swipeUp() }
+        done.tap()
+        XCTAssertTrue(row.disappears(timeout: 5), "Done takes it off the list")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(text(containing: "Needs you · ", app).appears(timeout: 5))
+        XCTAssertFalse(text(containing: " new of ", app).exists, "seen: the card has nothing new")
+        XCTAssertFalse(any("needsYouNew", app).exists)
     }
 
     /// A failed issue with nobody on it (#145): the reply sheet asks who gets it, then says where it went.

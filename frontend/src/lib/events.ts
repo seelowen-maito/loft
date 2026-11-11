@@ -15,7 +15,8 @@ export type ServerEvent =
   | { type: "task_deleted"; task_id: string }
   | { type: "task_comment"; comment: TaskComment }
   | { type: "issues"; project: string }
-  | { type: "delivery"; repo: string; spec: number };
+  | { type: "delivery"; repo: string; spec: number }
+  | { type: "needs_you"; count: number; urgent: number; new: number; new_urgent: number; ids: string[] };
 
 type Listener = (e: ServerEvent) => void;
 

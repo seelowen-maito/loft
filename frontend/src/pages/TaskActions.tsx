@@ -15,6 +15,8 @@ import { latestOnly } from "../lib/latest";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
+/** Stopped with a reason: Send to… hands it to an agent again, with the reason. */
+const STUCK = ["blocked", "failed"];
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   return (
@@ -204,13 +206,14 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
  *  many changes rounds, checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
  *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
 function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
-  const [busy, setBusy] = useState<"pause" | "resume" | null>(null);
+  const [busy, setBusy] = useState<"pause" | "resume" | "reopen" | null>(null);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
-  const run = async (what: "pause" | "resume") => {
+  const run = async (what: "pause" | "resume" | "reopen") => {
     setBusy(what);
     setSaid(null);
     try {
-      const r = await (what === "pause" ? api.pauseIssueDelivery(t.id) : api.resumeIssueDelivery(t.id));
+      const call = { pause: api.pauseIssueDelivery, resume: api.resumeIssueDelivery, reopen: api.reopenIssueDelivery }[what];
+      const r = await call(t.id);
       setD(r);
       setSaid({ ok: true, text: r.message });
     } catch (e) {
@@ -219,7 +222,7 @@ function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
       setBusy(null);
     }
   };
-  return { pause: () => run("pause"), resume: () => run("resume"), busy, said };
+  return { pause: () => run("pause"), resume: () => run("resume"), reopen: () => run("reopen"), busy, said };
 }
 
 function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<typeof useDeliveryActions> }) {
@@ -234,6 +237,11 @@ function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<type
       {show.resume && (
         <button className={cx("btn-primary", a.busy === "resume" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "resume"} onClick={a.resume}>
           {a.busy === "resume" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {a.busy === "resume" ? "Resuming…" : "Resume"}
+        </button>
+      )}
+      {show.reopen && (
+        <button className={cx("btn-primary", a.busy === "reopen" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "reopen"} onClick={a.reopen} title="Build the tickets published since; the spec PR goes back to draft">
+          {a.busy === "reopen" ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />} {a.busy === "reopen" ? "Reopening…" : "Reopen delivery"}
         </button>
       )}
     </>
@@ -435,6 +443,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
   const active = ACTIVE.includes(t.status);
   const spec = isSpec(t);
   const finished = FINISHED.includes(t.status);
+  const stuck = STUCK.includes(t.status);
   const agent = agents.find((a) => a.id === t.agent_id);
 
   const act = async (f: () => Promise<unknown>) => {
@@ -470,7 +479,8 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
             <Play className="size-3 fill-current" /> Run with {agent.name}
           </button>
         )}
-        {!spec && !active && (
+        {/* Blocked or failed: the card with the reason has Send to…. */}
+        {!spec && !active && !stuck && (
           <button className="btn" disabled={busy} onClick={() => setDialog("run")}>
             <UserRoundPlus className="size-3.5" /> {agent ? (finished ? "Run again with…" : "Run with another agent…") : "Run with an agent…"}
           </button>
@@ -545,8 +555,9 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
     setBusy(true);
     setError(null);
     try {
-      // A finished task goes back to ready first: the server only runs open tasks.
-      if (FINISHED.includes(t.status)) await api.updateTask(t.id, { status: "ready" });
+      // A done or cancelled task goes back to ready first: the server only runs open tasks. A blocked or failed
+      // one goes as it is, so the agent gets why it stopped.
+      if (t.status === "done" || t.status === "cancelled") await api.updateTask(t.id, { status: "ready" });
       await api.runTask(t.id, agentId, note);
       onClose();
     } catch (e) {
@@ -555,22 +566,50 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
       setBusy(false);
     }
   };
+  const again = STUCK.includes(t.status);
   return (
-    <Modal title={`Run “${t.title}”`} onClose={onClose}>
+    <Modal title={again ? `Send “${t.title}” to…` : `Run “${t.title}”`} onClose={onClose}>
       <AgentSelect agents={agents} value={agentId} onChange={setAgentId} placeholder="Pick an agent" />
       <textarea
         value={note}
         onChange={(e) => setNote(e.target.value)}
         rows={3}
-        placeholder="Anything to add for the agent (optional)"
+        placeholder={again ? "What changed, or how to get past it (optional)" : "Anything to add for the agent (optional)"}
         className="w-full resize-none rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13px] outline-none placeholder:text-fg-3"
       />
+      {again && <p className="text-[12px] text-fg-3">It goes back to in progress. The agent gets the description and why it was {t.status}.</p>}
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" disabled={!agentId || busy} onClick={run}><Play className="size-3 fill-current" /> Run</button>
+        <button className="btn-primary" disabled={!agentId || busy} onClick={run}>
+          {again ? <><UserRoundPlus className="size-3.5" /> Send</> : <><Play className="size-3 fill-current" /> Run</>}
+        </button>
       </div>
       {error && <div className="text-[12px] text-bad">{error}</div>}
     </Modal>
+  );
+}
+
+/** A blocked or failed issue: why it stopped, up front, and Send to… to hand it to an agent again (another one, or
+ *  the same one once the block is cleared). */
+export function StuckCard({ task: t, agents }: { task: Task; agents: Agent[] }) {
+  const [sending, setSending] = useState(false);
+  const agent = agents.find((a) => a.id === t.agent_id);
+  const failed = t.status === "failed";
+  return (
+    <section className={cx("rounded-2xl border p-4", failed ? "border-bad/30 bg-bad/[0.06]" : "border-warn/30 bg-warn/[0.06]")}>
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] text-fg">{failed ? "Failed" : "Blocked"}{agent ? ` · ${agent.name}` : ""}</div>
+          <div className="mt-1 whitespace-pre-wrap break-words text-[13px] text-fg-2">{t.error.trim() || "No reason given."}</div>
+        </div>
+        {!isSpec(t) && (
+          <button className="btn-primary" onClick={() => setSending(true)} title="Hand it to an agent again, with this reason">
+            <UserRoundPlus className="size-3.5" /> Send to…
+          </button>
+        )}
+      </div>
+      {sending && <RunDialog task={t} agents={agents} onClose={() => setSending(false)} />}
+    </section>
   );
 }
 

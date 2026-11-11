@@ -11,8 +11,10 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 ```jsonc
 {
   "version": 1,
-  "count": 7,             // badge: all items
+  "count": 7,             // all items
   "urgent": 4,            // items with urgency >= 2
+  "new": 2,               // badge: items the user hasn't seen (on any client)
+  "new_urgent": 1,        // of those, urgency >= 2
   "generated_at": "2026-10-23T14:37:36Z",
   "items": [ Item, … ]    // most urgent first, then longest waiting first
 }
@@ -36,6 +38,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
 | `actions` | `[Action]` | What the user can do, in display order |
 | `project` | string \| null | Grouping key: the GitHub repo's name for PR items (`pos`), else the issue's or agent's project |
 | `repo` | string \| null | PR items: the GitHub slug (`acme/shop`), the same as `pr.repo` |
+| `seen` | bool | The user has seen it, on any client (`POST /api/needs-you/seen`). Seen items stay listed, less prominent; a changed item has a new id, so it's unseen again, and an item that leaves the list and comes back (an issue blocked again) is unseen again too |
 | `pr` | object \| null | PR items only: `{repo: "owner/name", project, number, title, url, author, draft: false, checks: "passing"\|"none", checks_green: true, review_requested}` |
 
 **All text is plain text.** Never render it as HTML. Anything that looks like a credential (known token
@@ -51,12 +54,13 @@ prefixes, JWTs, `Bearer …`, `password=…`, `token: …`) is replaced with `[r
 | `question` | 2 | An idle agent's last reply ends with a question and you haven't written since (last 7 days). Like an Unread reply, only a reply in a run you started (your message, a schedule or Run now) counts, not one in a run another agent started; and only your own message answers it, not another agent's | answer, open, dismiss |
 | `grill_round` | 2 (1 if paused) | An interview round waits for your answers: one item per round, its questions in `text` | open |
 | `stuck` | 2 | A run waits on background work, or has had no output, for ≥ 10 min | restart, open, dismiss |
-| `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall | resume, open (the spec's or standalone ticket's issue), dismiss |
+| `delivery_stalled` | 2 | A Delivery is stalled: the run Loft woke for its step failed, ended without its call, or was lost to a restart (reason says which, and the step it stopped at). One item per stall. When that run's last reply ended with a question, the item names the agent (`agent`), `reason` is "<agent> asks: <question>", `text` holds the stall and the whole reply, and the push body says "<agent> asks you something". The team's Lead gets an FYI with the tickets and why | resume, answer + open (the agent's chat, when it asked something), open (the spec's or standalone ticket's issue), dismiss |
 | `delivery_done` | 1 | Loft marked a Delivery's spec PR (or standalone ticket's PR) ready, or set a plan kept in Loft to ready to Merge, whatever GitHub says of its checks or conflicts. Until the PR merges or closes, or the plan is merged. One item per Delivery | open (the spec's or standalone ticket's issue), Open PR (GitHub) or merge (a plan kept in Loft), dismiss |
 | `task_failed` | 1 | Issue `failed` | answer, retry (reopen and send), open, dismiss |
 | `pr_ready` | 1 | Open, not a draft, mergeable, checks green. PRs agents opened here, plus the user's own ready PRs on GitHub in known repos | merge (tracked PRs) or open (GitHub), dismiss |
 | `pr_review` | 1 | Someone else's open, non-draft PR with green checks, in a known repo, where the user's review is requested | open (GitHub), dismiss |
 | `backup_failed` | 1 | The last backup of Loft's database failed and the last good one is more than 2 days old (or there is none). One item until a good backup; not pushed | retry (Back up now: `POST /api/backups`), open (Settings → Backups, when the Mac has a tailnet name), dismiss |
+| `push_off` | 1 | A phone is registered but push is off (no APNs key, no relay key): every alert is dropped. One item per off period, aged from when it began: a Dismiss lasts until push is back on and off again (or Loft restarts) | open (Settings → Push, when the Mac has a tailnet name; `links` has the `/settings#push` path), dismiss |
 | `task_done` | 0 | An issue **you** created finished in the last 48 h | answer (follow up = reopen and send), open, dismiss |
 
 ### Action
@@ -92,9 +96,15 @@ Besides the PRs agents opened here (tracked and polled every 30 s), the server s
 
 Teammates' PRs only appear when they request the user's review. A PR already tracked here is listed once, with its Merge action. Group PR items by `pr.repo` or `project`.
 
+## `POST /api/needs-you/seen`
+
+`{ "ids": ["permission:p1", …] }`: the items a client showed when the user opened Needs you. They count as seen on
+every client (web and iPhone), like the chat's read mark, until they change (a new id). Ids not in the list are
+ignored. Answers `{ "ok": true, "new": 0, "new_urgent": 0 }` and sends a `needs_you` event. Push doesn't change.
+
 ## `POST /api/needs-you/{id}/dismiss`
 
-Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
+The item's Done check (the action's label is "Done"). Hides an item until it changes, so a changed item comes back with a new id. Dismissals are kept 30 days.
 `permission` and `grill_round` items can't be dismissed (400): they block an agent until answered. Unknown ids get 404.
 
 ## Live updates
@@ -102,10 +112,16 @@ Hides an item until it changes, so a changed item comes back with a new id. Dism
 SSE event on `/api/events` when the list changes (checked every 5 s, sent only on a change):
 
 ```json
-{ "type": "needs_you", "count": 7, "urgent": 4, "ids": ["permission:p1", "task:…:blocked", …] }
+{ "type": "needs_you", "count": 7, "urgent": 4, "new": 2, "new_urgent": 1, "ids": ["permission:p1", "task:…:blocked", …] }
 ```
 
-Refetch `GET /api/needs-you` when `ids` differ from what you show. The count alone is enough for a badge.
+Refetch `GET /api/needs-you` when `ids` differ from what you show. `new` and `new_urgent` alone are enough for a badge;
+the event is also sent when items are marked seen.
+
+The web app's Needs you page (`/needs-you`) and its top-bar counter work this way: the page lists the items with their
+actions, marks the ones it shows seen, and reloads on a change; the counter follows `new`, amber when `new_urgent` > 0,
+and is hidden at 0. It marks items seen only while its tab is visible and its window has focus. The iPhone's Needs you
+list marks what it shows the same way, and the app icon's badge is `new`, in pushes too.
 
 ## Safety
 
@@ -114,7 +130,7 @@ Refetch `GET /api/needs-you` when `ids` differ from what you show. The count alo
 
 ## Fixtures
 
-`docs/fixtures/needs-you.json` is a full response with one item of every type except `stuck`, generated by the backend's own test (`NEEDS_YOU_FIXTURE=<path> cargo test needs_you`). A `stuck` item looks like:
+`docs/fixtures/needs-you.json` is a full response with one item of every type except `stuck` and `push_off`, generated by the backend's own test (`NEEDS_YOU_FIXTURE=<path> cargo test needs_you`). A `stuck` item looks like:
 
 ```json
 {

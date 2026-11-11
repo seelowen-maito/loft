@@ -9,6 +9,7 @@ import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
 import { projectsOf } from "../../lib/team";
+import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 
 type Tab = "config" | "permissions" | "memory" | "workspace";
@@ -101,16 +102,6 @@ export const roleHint = (team: string) =>
 export const FRESH_CONTEXT_HINT =
   "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k (the smart zone) or a higher threshold only once its context reaches it. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
 
-export const FRESH_CONTEXT = [
-  { value: "above_80k", label: "Above 80k (default)" },
-  { value: "above_100k", label: "Above 100k" },
-  { value: "above_120k", label: "Above 120k" },
-  { value: "above_150k", label: "Above 150k" },
-  { value: "above_180k", label: "Above 180k" },
-  { value: "above_200k", label: "Above 200k" },
-  { value: "always", label: "Always" },
-  { value: "off", label: "Off" },
-];
 
 type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "title" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 

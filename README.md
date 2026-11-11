@@ -39,7 +39,7 @@ loft is built for engineers who already code with AI and want to try autonomous 
 - **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
 - **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.
 - **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.
-- **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone.
+- **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone. **Needs you** (the inbox icon in the top bar, with a live count of what you haven't seen yet on every page) lists everything waiting on you: questions, permissions, stalled Deliveries with the question the agent stopped on, tickets published into a spec whose Delivery is done (with Reopen delivery: the spec PR goes back to draft, the new tickets are built and reviewed, and the final review covers only the new commits), pull requests to merge, a nearly full disk, and push being off. Each item opens the agent's chat or the Delivery card with Resume. Close it with the icon, its X or Esc to get back to the page you were on. Opening it marks what it shows as seen, on the web and the iPhone alike: the counter only comes back for something new, and seen items stay listed, dimmed, until you tick Done. Items also leave by themselves once nothing waits on you: a finished issue's result when you open it (or after a day), an agent's question once you or its Lead answer it, a blocked issue once its GitHub issue closes, and a Delivery stalled on its Lead once the Lead hands the ticket out. A blocked or failed issue shows why it stopped, with Send to… to hand it to another agent, or the same one once the block is cleared: the agent gets the reason with the issue.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
 
 loft aims to support any and every coding agent: Claude Code, Codex, and whatever comes next.
@@ -86,7 +86,7 @@ tailscale serve --bg 7420
 
 With Tailscale, dev servers that agents start are linked by this machine's tailnet name instead of `localhost`.
 
-The `ios/` folder has a native iPhone app for agent status, approvals, tasks and chat, over the same address. See [ios/README.md](ios/README.md).
+The `ios/` folder has a native iPhone app for agent status, approvals, tasks and chat, over the same address. See [ios/README.md](ios/README.md). Its push alerts need a relay key (Settings → Push notifications → Sign in) or your own APNs key: with neither, the web app's Needs you and Settings say push is off, and the backend logs once that it's dropping alerts.
 
 ## How agents run
 
