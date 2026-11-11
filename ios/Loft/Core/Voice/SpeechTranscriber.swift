@@ -61,7 +61,8 @@ final class SpeechTranscriber {
     private(set) var state: SpeechState = .idle
     private(set) var transcript = ""
 
-    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let engine: MicEngine
+    @ObservationIgnored private let audio: AudioSessionOwner
     @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var task: SFSpeechRecognitionTask?
     /// The audio held from `AudioSessionOwner` while the mic is on.
@@ -77,6 +78,11 @@ final class SpeechTranscriber {
     @ObservationIgnored private var requestStarted = Date()
     /// A quick on/off/on of the mic button: the start that was overtaken gives up.
     @ObservationIgnored private var gate = StartGate()
+
+    init(audio: AudioSessionOwner? = nil, engine: MicEngine = AVAudioEngine()) {
+        self.audio = audio ?? .shared
+        self.engine = engine
+    }
 
     private func send(_ e: SpeechEvent) {
         let next = SpeechMachine.reduce(state, e)
@@ -117,26 +123,28 @@ final class SpeechTranscriber {
         }
 
         self.recognizer = recognizer
+        await listen(attempt)
+    }
+
+    /// `start` with the permission and recognizer checks skipped: takes the audio and turns the mic on. For
+    /// tests, which have no recognizer, so no request is made.
+    func startSkippingChecks() async {
+        send(.start)
+        guard state == .requestingPermission else { return }
+        await listen(gate.begin())
+    }
+
+    private func listen(_ attempt: Int) async {
         committed = ""
         startup = StartupFailureGuard()
 
         do {
-            // Losing the audio (read-aloud, a call, another app) ends the dictation, keeping what was heard.
-            let lease = try await AudioSessionOwner.shared.acquire(.listening, by: "dictation", onRouteChange: { [weak self] in
+            let lease = try await audio.acquire(.listening, by: "dictation", onRouteChange: { [weak self] in
                 self?.routeChanged()
-            }) { [weak self] loss in
-                guard let self, self.state.isRecording else { return }
-                self.lease = nil
-                self.cleanUp()
-                switch loss {
-                case .handedOver: self.send(.stop)
-                case .interrupted: self.send(.interrupted)
-                case .noMicrophone: self.send(.error("Dictation stopped: this audio route has no microphone."))
-                }
-            }
+            }) { [weak self] loss in self?.lost(loss) }
             // Stopped (or started again) while the audio was being handed over.
             guard gate.isCurrent(attempt), state == .requestingPermission else {
-                AudioSessionOwner.shared.release(lease)
+                audio.release(lease)
                 return
             }
             self.lease = lease
@@ -156,7 +164,19 @@ final class SpeechTranscriber {
 
         beginRequest()
         send(.began)
-        VoiceLog.shared.add("mic on (\(locale.identifier), on-device \(recognizer.supportsOnDeviceRecognition))")
+        VoiceLog.shared.add("mic on (\(recognizer?.locale.identifier ?? "no recognizer"), on-device \(recognizer?.supportsOnDeviceRecognition ?? false))")
+    }
+
+    /// Losing the audio (read-aloud, a call, another app) ends the dictation, keeping what was heard.
+    func lost(_ loss: AudioSessionOwner.Loss) {
+        guard state.isRecording else { return }
+        lease = nil
+        cleanUp()
+        switch loss {
+        case .handedOver: send(.stop)
+        case .interrupted: send(.interrupted)
+        case .noMicrophone: send(.error("Dictation stopped: this audio route has no microphone."))
+        }
     }
 
     private func startMic() throws {
@@ -166,7 +186,7 @@ final class SpeechTranscriber {
 
     /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
     /// with it, so start the mic again there, keeping the recognition request.
-    private func routeChanged() {
+    func routeChanged() {
         guard state == .recording || state == .requestingPermission, lease != nil else { return }
         do {
             try startMic()
@@ -235,7 +255,7 @@ final class SpeechTranscriber {
         task?.cancel()
         task = nil
         request = nil
-        if let lease { AudioSessionOwner.shared.release(lease) }
+        if let lease { audio.release(lease) }
         lease = nil
     }
 }
