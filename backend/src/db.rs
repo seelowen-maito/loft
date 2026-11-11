@@ -157,7 +157,7 @@ pub struct StallAsk {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryTicket {
     pub number: i64,
     #[serde(default)]
@@ -197,6 +197,13 @@ pub struct DeliveryTicket {
     /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
     #[serde(default)]
     pub notes: String,
+}
+
+impl DeliveryTicket {
+    /// A ticket in `state` with nothing submitted, reviewed or assigned yet.
+    pub fn new(number: i64, title: impl Into<String>, blocked_by: Vec<i64>, state: &str) -> Self {
+        DeliveryTicket { number, title: title.into(), blocked_by, state: state.into(), ..Default::default() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1569,20 +1576,9 @@ impl Db {
             let tickets = subs
                 .iter()
                 .filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(s, _)| s == spec.to_string()))
-                .map(|(_, _, n)| DeliveryTicket {
-                    number: *n,
-                    title: String::new(),
-                    blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
-                    state: "open".into(),
-                    rounds: 0,
-                    commits: vec![],
-                    verdicts: Default::default(),
-                    submitted_at: String::new(),
-                    id: String::new(),
-                    skipped: String::new(),
-                    changes: String::new(),
-                    agent: String::new(),
-                    notes: String::new(),
+                .map(|(_, _, n)| {
+                    let blocked_by = blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect();
+                    DeliveryTicket::new(*n, "", blocked_by, "open")
                 })
                 .collect();
             let d = Delivery {

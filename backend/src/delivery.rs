@@ -135,7 +135,7 @@ pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: id.into(), skipped: String::new(), changes: String::new(), agent: String::new(), notes: String::new() });
+        d.tickets.push(DeliveryTicket { id: id.into(), ..DeliveryTicket::new(number, title, blocked_by, "open") });
     });
 }
 
@@ -352,7 +352,7 @@ fn unstalled(state: &AppState, d: Delivery, n: i64) -> Delivery {
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
     update(state, repo, spec, |d| {
         if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket { number, title: title.into(), blocked_by, state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: String::new(), changes: String::new(), agent: String::new(), notes: String::new() });
+            d.tickets.push(DeliveryTicket::new(number, title, blocked_by, "open"));
         }
     });
 }
@@ -2328,7 +2328,7 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                 let title = x["title"].as_str().unwrap_or_default().to_string();
                 match d.ticket_mut(n) {
                     Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
-                    None => d.tickets.push(DeliveryTicket { number: n, title, blocked_by, state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: skipped.unwrap_or_default(), changes: String::new(), agent: String::new(), notes: String::new() }),
+                    None => d.tickets.push(DeliveryTicket { skipped: skipped.unwrap_or_default(), ..DeliveryTicket::new(n, title, blocked_by, state) }),
                 }
             }
             // A ticket taken off the spec on GitHub isn't the Delivery's any more.
@@ -2957,7 +2957,7 @@ mod tests {
         assert_eq!(ticket_key(&d, None), "o/r#9/final", "the final review is its own boundary");
         d.repo = local_repo("team");
         d.local = true;
-        d.tickets.push(DeliveryTicket { number: 1, title: "A".into(), blocked_by: vec![], state: "open".into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: "loft-issue-1".into(), skipped: String::new(), changes: String::new(), agent: String::new(), notes: String::new() });
+        d.tickets.push(DeliveryTicket { id: "loft-issue-1".into(), ..DeliveryTicket::new(1, "A", vec![], "open") });
         assert_eq!(ticket_key(&d, Some(1)), crate::agents::message_ticket_key("loft-issue-1", None).unwrap().unwrap());
     }
 
@@ -3071,7 +3071,7 @@ mod tests {
     }
 
     fn ticket(number: i64, id: &str, state: &str) -> DeliveryTicket {
-        DeliveryTicket { number, title: format!("T{number}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: id.into(), skipped: String::new(), changes: String::new(), agent: String::new(), notes: String::new() }
+        DeliveryTicket { id: id.into(), ..DeliveryTicket::new(number, format!("T{number}"), vec![], state) }
     }
 
     /// Agents often send a GitHub number as text ("85"): both tools take it like 85, a Loft issue id still

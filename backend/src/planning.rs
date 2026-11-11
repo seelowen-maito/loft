@@ -5137,7 +5137,7 @@ pub(crate) mod tests {
         let slug = "octo/st-restart";
         planner_on(&st, "st-restart", Some("git@github.com:octo/st-restart.git"));
         let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": slug, "spec": 40, "project": "st-restart", "state": "running", "created_at": "" })).unwrap();
-        let t = |n: i64, state: &str| crate::db::DeliveryTicket { number: n, title: format!("T{n}"), blocked_by: vec![], state: state.into(), rounds: 0, commits: vec![], verdicts: Default::default(), submitted_at: String::new(), id: String::new(), skipped: String::new(), changes: String::new(), agent: String::new(), notes: String::new() };
+        let t = |n: i64, state: &str| crate::db::DeliveryTicket::new(n, format!("T{n}"), vec![], state);
         let mut save = |spec: i64, state: &str, tickets: Vec<crate::db::DeliveryTicket>| {
             (d.spec, d.state, d.tickets) = (spec, state.into(), tickets);
             st.db.save_delivery(&d).unwrap();
