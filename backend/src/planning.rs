@@ -4349,7 +4349,8 @@ pub(crate) mod tests {
         let out = tool(&st, &dev, "submit_ticket", json!({ "number": 43, "commits": ["1234567abc"] })).await.unwrap();
         assert!(out.contains("Code reviewer) is reviewing the whole spec PR #500 now."), "{out}");
         let brief = woken(&st, &cr).last().cloned().unwrap();
-        assert!(brief.contains(&format!("The Delivery was reopened for new tickets: the commits up to `c1c1c1c` passed your review already, so review only what came after it, `git diff {CI_HEAD}...origin/spec/40-rounds` (https://github.com/{slug}/compare/{CI_HEAD}...spec/40-rounds)")), "{brief}");
+        assert!(brief.contains(&format!("The Delivery was reopened for new tickets: the commits up to `c1c1c1c` passed your review already, so review only the spec's own changes after it, `git fetch origin && git diff $(git merge-tree --write-tree origin/main {CI_HEAD} | head -1) origin/spec/40-rounds`")), "{brief}");
+        assert!(brief.contains("what the Devs merged in from `origin/main` since isn't in it"), "{brief}");
 
         // Its pass marks the PR ready again.
         let readies = || fake.seen("/graphql").into_iter().filter(|c| c.body["query"].as_str().is_some_and(|q| q.contains("markPullRequestReadyForReview"))).count();

@@ -2587,9 +2587,12 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
     let scope = if d.reviewed_to.is_empty() {
         "Pull the branch and review its whole diff against the default branch".to_string()
     } else {
+        // The spec PR's base; origin/HEAD (the default branch) until Loft has read the PR.
+        let base = tracked_pr(state, d).map(|p| p.base_ref).filter(|b| !b.is_empty()).unwrap_or_else(|| "HEAD".into());
         format!(
-            "The Delivery was reopened for new tickets: the commits up to `{short}` passed your review already, so review only what came after it, `git diff {sha}...origin/{branch}` (https://github.com/{repo}/compare/{sha}...{branch}), with the rest of the branch as context",
+            "The Delivery was reopened for new tickets: the commits up to `{short}` passed your review already, so review only the spec's own changes after it, `{diff}`, with the rest of the branch as context. That diff is against `{short}` merged with `origin/{base}` as it is now, so what the Devs merged in from `origin/{base}` since isn't in it, only their commits and how they resolved conflicts with it; don't review `git diff {sha}...origin/{branch}` or GitHub's compare, which include those merges",
             short = short(&d.reviewed_to),
+            diff = reopen_diff(&d.reviewed_to, &base, &d.branch),
             sha = d.reviewed_to,
             branch = d.branch,
         )
@@ -2621,6 +2624,12 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
         branch = d.branch,
         own = own_rules("review it"),
     )
+}
+
+/// The command that shows a reopened Delivery's own changes since `reviewed_to`: the branch against `reviewed_to`
+/// merged with the base as it is now, so the base's changes the Devs merged in since drop out.
+fn reopen_diff(reviewed_to: &str, base: &str, branch: &str) -> String {
+    format!("git fetch origin && git diff $(git merge-tree --write-tree origin/{base} {reviewed_to} | head -1) origin/{branch}")
 }
 
 /// Whether Reopen delivery applies to `d`: a spec's Delivery on GitHub that is done (its spec PR marked or found
@@ -3076,6 +3085,44 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reopened_review_leaves_out_what_came_from_the_base() {
+        let path = std::env::temp_dir().join(format!("loft-reopen-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = &path;
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let commit = |file: &str, text: &str| {
+            std::fs::write(dir.join(file), text).unwrap();
+            git(&["add", file]);
+            git(&["commit", "-qm", file]);
+        };
+        git(&["init", "-q", "-b", "develop"]);
+        commit("base.txt", "base\n");
+        git(&["switch", "-qc", "spec"]);
+        commit("spec.txt", "reviewed\n");
+        let reviewed_to = git(&["rev-parse", "HEAD"]);
+        // After the reopen: develop moves on, the Dev merges it in, then builds the new ticket.
+        git(&["switch", "-q", "develop"]);
+        commit("develop.txt", "from develop\n");
+        git(&["switch", "-q", "spec"]);
+        git(&["merge", "-q", "--no-edit", "develop"]);
+        commit("ticket.txt", "new ticket\n");
+        git(&["update-ref", "refs/remotes/origin/develop", "develop"]);
+        git(&["update-ref", "refs/remotes/origin/spec", "spec"]);
+
+        let cmd = reopen_diff(&reviewed_to, "develop", "spec");
+        let cmd = cmd.strip_prefix("git fetch origin && ").unwrap();
+        let out = std::process::Command::new("sh").args(["-c", &format!("{cmd} --name-only")]).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ticket.txt", "only the spec's own change");
+        assert!(git(&["diff", "--name-only", &format!("{reviewed_to}...origin/spec")]).contains("develop.txt"), "the old range had the merge");
+        std::fs::remove_dir_all(&path).unwrap();
+    }
 
     #[test]
     fn a_question_counts_only_at_the_end_of_the_last_runs_reply() {
