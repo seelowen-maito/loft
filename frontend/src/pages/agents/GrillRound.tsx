@@ -10,6 +10,7 @@ import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
 import { useAutoGrow } from "../../lib/autoGrow";
 import { useMention } from "../../components/MentionMenu";
+import { questionAnchor } from "../../lib/interview";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -82,7 +83,7 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
 
 /** One question of the open round: the recommendation with Accept or Decide for me, and a field for any
  * other answer, saved as a decision or as a comment to discuss. */
-function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
+export function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
   const written = (q.state === "answered" && !q.accepted) || q.state === "discuss";
   const saved = q.images ?? [];
   // A half-typed answer, with its pasted images, is this question's Draft, so it survives switching agents or tabs.
@@ -154,6 +155,7 @@ function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: Grill
   return (
     <div
       {...drop.handlers}
+      data-grill-question={questionAnchor(sessionId, round, q.id)}
       className={cx("rounded-xl border bg-ink-900/70 p-3 transition", drop.dragging ? "border-dashed border-accent/60" : "border-line")}
     >
       {q.from_round != null && <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Still open from round {q.from_round}</div>}

@@ -85,9 +85,8 @@ fn running_count(state: &AppState) -> usize {
 
 /// Settings for the UI. The GitHub token is write-only: only whether one is set comes back.
 fn settings_view(state: &AppState) -> Value {
-    let mut s = state.settings.get();
+    let s = state.settings.get();
     let token_set = !s.github_token.trim().is_empty();
-    s.github_token = String::new();
     json!({
         "settings": s,
         "github_token_set": token_set,
@@ -123,6 +122,10 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
         && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
     {
         return Err(bad(why));
+    }
+    // Agents run it: only a file that's there, never a relative path that depends on where a run starts.
+    if s.claude_bin != state.settings.get().claude_bin && !crate::settings::runnable(&s.claude_bin) {
+        return Err(bad("Claude command must be a full path to a file, or a command on PATH, like claude"));
     }
     s.github_token = match token {
         Some(Value::String(t)) => t.trim().to_string(),
@@ -1084,6 +1087,25 @@ pub(crate) mod tests {
     async fn summary(st: &crate::state::AppState) -> serde_json::Value {
         use axum::extract::{Query, State};
         super::agents_summary(State(st.clone()), Query(super::SummaryQuery { totals: Some(true) })).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn settings_never_return_the_github_token_and_only_accept_a_runnable_claude_command() {
+        use axum::{Json, extract::State};
+        let st = crate::tasks::tests::state();
+        let put = |body: serde_json::Value| super::put_settings(State(st.clone()), Json(body));
+        let Json(v) = put(serde_json::json!({ "github_token": "ghp_secret" })).await.ok().unwrap();
+        assert_eq!(st.settings.get().github_token, "ghp_secret");
+        assert!(!v.to_string().contains("ghp_secret") && v["settings"].get("github_token").is_none());
+        assert_eq!(v["github_token_set"], true);
+        for bad in ["/nonexistent/claude", "bin/claude", "./claude", "no-such-command-anywhere", "/tmp"] {
+            let err = put(serde_json::json!({ "claude_bin": bad })).await.unwrap_err();
+            assert!(err.1.contains("Claude command"), "{bad}: {}", err.1);
+        }
+        assert!(put(serde_json::json!({ "claude_bin": "/bin/sh" })).await.is_ok());
+        assert!(put(serde_json::json!({ "claude_bin": "sh" })).await.is_ok());
+        assert_eq!(st.settings.get().claude_bin, "sh");
+        assert_eq!(st.settings.get().github_token, "ghp_secret", "kept when not sent");
     }
 
     #[tokio::test]

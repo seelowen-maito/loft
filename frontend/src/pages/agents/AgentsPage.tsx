@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
@@ -11,6 +11,7 @@ import { Sticker } from "../../components/Sticker";
 import { RunTimer } from "../../components/RunTimer";
 import { Chat } from "./Chat";
 import { Inspector } from "./Inspector";
+import { InterviewView } from "./InterviewView";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
@@ -33,6 +34,8 @@ const onVisibilityChange = (cb: () => void) => {
 export default function AgentsPage() {
   const { id: routeId } = useParams();
   const navigate = useNavigate();
+  // `/agents/:id/interview`: the open interview full screen, in place of the chat.
+  const interview = useLocation().pathname.endsWith("/interview");
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
@@ -311,6 +314,8 @@ export default function AgentsPage() {
       <section className="min-h-0 min-w-0 border-r border-line max-xl:border-r-0">
         {agents && agents.length === 0 ? (
           <Empty onCreate={() => setCreating(true)} />
+        ) : selected && interview ? (
+          <InterviewView agent={selected} session={grill} />
         ) : selected ? (
           <Chat
             agent={selected}

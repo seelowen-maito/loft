@@ -1,4 +1,4 @@
-// Run with `npm test` (Node's own test runner; Node strips the types).
+// Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canCheck, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
@@ -78,4 +78,17 @@ test("an empty or invalid last change sorts as the oldest, not as NaN", async ()
   const names = (desc: boolean) => sortClean(rows, { by: "changed", desc }, (id) => id).map((i) => i.name).join("");
   assert.equal(names(false), "bcda");
   assert.equal(names(true), "adbc");
+});
+
+test("a locked reason splits into its lines, and the filters keep one agent, one type, or what can be ticked", async () => {
+  const { reasonLines, filterClean } = await import("../src/lib/format.ts");
+  assert.deepEqual(reasonLines("2 commits not pushed (main) · Stashed changes · Uncommitted changes (3 files)"), ["2 commits not pushed (main)", "Stashed changes", "Uncommitted changes (3 files)"]);
+  assert.deepEqual(reasonLines(""), []);
+  const a = { ...item(), agent: "a", name: "x" };
+  const b = { ...item(), agent: "b", name: "y", kind: "build", blocked: "Working" };
+  const all = { agent: "", type: "", deletable: false };
+  assert.equal(filterClean([a, b], all).length, 2);
+  assert.deepEqual(filterClean([a, b], { ...all, agent: "b" }).map((i) => i.name), ["y"]);
+  assert.deepEqual(filterClean([a, b], { ...all, type: "build output" }).map((i) => i.name), ["y"]);
+  assert.deepEqual(filterClean([a, b], { ...all, deletable: true }).map((i) => i.name), ["x"]);
 });

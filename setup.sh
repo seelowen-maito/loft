@@ -104,7 +104,7 @@ else
 fi
 
 node_major=$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')
-if [ -n "$node_major" ] && [ "$node_major" -ge 22 ] && command -v npm >/dev/null; then ok "Node $(node -v)"
+if [ -n "$node_major" ] && [ "$node_major" -ge 22 ] && command -v node >/dev/null; then ok "Node $(node -v)"
 else
   if [ -n "$node_major" ]; then fail "Node 22 or newer is needed (found $(node -v))"; else fail "Node is missing (22 or newer)"; fi
   if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then tip "Run: nvm install 22 && nvm alias default 22"
@@ -148,9 +148,10 @@ else
 fi
 
 section "Build"
-build_frontend() { cd frontend && { [ -d node_modules ] || npm install --no-audit --no-fund; } && npm run build; }
+. scripts/frontend-pm.sh
+build_frontend() { cd frontend && { [ -d node_modules ] || fe_install; } && fe run build; }
 if spin "Building the web app" build_frontend; then ok "web app"
-else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}frontend && npm install && npm run build"; exit 1; fi
+else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}frontend && pnpm install && pnpm run build"; exit 1; fi
 [ -x "$BIN" ] && label="Building loft" || label="Building loft ${D}(the first build takes a few minutes)${N}"
 if spin "$label" bash -c 'cd backend && cargo build --release'; then ok "loft"
 else fail "loft build failed"; show_log; tip "To see everything: cd ${HERE}backend && cargo build --release"; exit 1; fi

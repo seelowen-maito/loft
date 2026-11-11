@@ -23,6 +23,8 @@ struct ComposerView: View {
     var dictateOnAppear = false
     /// Long-pressing the mic starts a full voice conversation instead of dictation.
     var startVoice: (() -> Void)?
+    /// The other way round (an agent's chat, #340): tapping the mic opens Talk, holding it dictates into the field.
+    var tapOpensTalk = false
     /// A dictation was just sent by voice ("send", or yes to the question), so the parent can read the reply and listen again.
     var onVoiceSent: (() -> Void)?
     /// "Stop" said on its own ends dictation without sending. Nil: "stop" is plain text (the grill reads it itself).
@@ -189,23 +191,41 @@ struct ComposerView: View {
                     .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composerField")
                 Button {
-                    if longPressed { longPressed = false } else { toggleMic() }
+                    if longPressed { longPressed = false } else if talks, !micOn { openTalk() } else { toggleMic() }
                 } label: {
-                    Image(systemName: speech.state.isRecording ? "stop.circle.fill" : "mic.circle.fill")
-                        .font(.system(size: 32))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(speech.state.isRecording ? Theme.failure : .secondary)
+                    if talks {
+                        // Home's Talk button, at the composer's size.
+                        Image(systemName: micOn ? "stop.fill" : "mic.fill")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Theme.onAccent)
+                            .frame(width: 32, height: 32)
+                            .background(micOn ? Theme.failure : Theme.accent, in: Circle())
+                    } else {
+                        Image(systemName: speech.state.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                            .font(.system(size: 32))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(speech.state.isRecording ? Theme.failure : .secondary)
+                    }
                 }
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                    guard let startVoice, !speech.state.isRecording else { return }
+                    guard startVoice != nil, !speech.state.isRecording, !micOn else { return }
                     longPressed = true
-                    focused = false
-                    startVoice()
+                    if talks { toggleMic() } else { openTalk() }
                 })
                 .sensoryFeedback(.impact(weight: .medium), trigger: longPressed) { _, new in new }
-                .accessibilityLabel(speech.state.isRecording ? "Stop dictation" : "Dictate")
-                .accessibilityHint(startVoice == nil ? "" : "Touch and hold for a voice conversation")
-                .accessibilityAction(named: "Voice conversation") { startVoice?() }
+                .accessibilityLabel(micOn ? "Stop dictation" : talks ? "Talk" : "Dictate")
+                .accessibilityHint(micOn || startVoice == nil ? ""
+                                   : talks ? "Opens a voice conversation. Touch and hold to dictate into the message instead."
+                                   : "Touch and hold for a voice conversation")
+                .accessibilityActions {
+                    if !micOn, startVoice != nil {
+                        if talks {
+                            Button("Dictate into the message") { toggleMic() }
+                        } else {
+                            Button("Voice conversation") { openTalk() }
+                        }
+                    }
+                }
                 .accessibilityIdentifier("micButton")
                 Button(action: sendNow) {
                     Image(systemName: "arrow.up.circle.fill")
@@ -375,6 +395,13 @@ struct ComposerView: View {
     }
 
     // MARK: - Dictation
+
+    private var talks: Bool { tapOpensTalk && startVoice != nil }
+
+    private func openTalk() {
+        focused = false
+        startVoice?()
+    }
 
     private func toggleMic() {
         if micOn {
