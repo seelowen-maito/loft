@@ -96,6 +96,8 @@ final class VoiceSession {
     /// When something was last heard, for ending the dictation on a pause.
     @ObservationIgnored private var lastHeard = Date()
     @ObservationIgnored private var autoSend: Task<Void, Never>?
+    /// Closing or discarding while the mic is still starting: that start gives up.
+    @ObservationIgnored private var gate = StartGate()
 
     init(store: LoftStore, speaker: Speaker? = nil) {
         self.store = store
@@ -126,11 +128,13 @@ final class VoiceSession {
 
     private func listen() async {
         phase = .preparing
+        let attempt = gate.begin()
         do {
             if !TestMode.noSpeech { try await Self.requestPermissions() }
             let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
             let r = Recognizers.make(locale: locale)
             try await r.prepare()
+            guard gate.isCurrent(attempt) else { return r.cancel() }
             r.onPartial = { [weak self] text in self?.heard(partial: text) }
             r.onCommit = { [weak self] text in self?.heard(commit: text) }
             r.onError = { [weak self] message in self?.fail(message) }
@@ -139,12 +143,14 @@ final class VoiceSession {
             prompt = VoiceSend.Prompt(startedAt: lastHeard)
             evaluated = ""
             pauseBase = raw
-            if !TestMode.noSpeech { try await startAudio(feeding: r) }
+            if !TestMode.noSpeech { try await startAudio(feeding: r, attempt: attempt) }
             try r.start()
             phase = .listening
             started = Date()
             startClock()
         } catch {
+            // Closed or discarded while starting: nothing more to do.
+            guard gate.isCurrent(attempt) else { return }
             stopAudio()
             let v = error as? VoiceError
             fail(v?.message ?? error.localizedDescription, needsPermission: v?.isPermission ?? false)
@@ -618,6 +624,7 @@ final class VoiceSession {
 
     /// Throw away the dictation and stop everything.
     func discard() {
+        gate.cancel()
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
@@ -640,6 +647,7 @@ final class VoiceSession {
 
     /// Leave the session (e.g. closing the screen) without losing the draft.
     func close() {
+        gate.cancel()
         // Leaving mid-countdown keeps the text for review instead of sending behind your back.
         if autoSendAt != nil { autoSend?.cancel(); autoSend = nil; autoSendAt = nil }
         if phase == .listening || phase == .paused {
@@ -662,32 +670,59 @@ final class VoiceSession {
 
     // MARK: - Audio
 
-    private func startAudio(feeding r: SegmentRecognizer) async throws {
+    /// `attempt` is the start this is part of (`gate`), or nil for listening for the submit answer.
+    private func startAudio(feeding r: SegmentRecognizer, attempt: Int? = nil) async throws {
         if lease == nil {
             // Losing it (read-aloud elsewhere, a call) pauses the dictation, or just stops the mic when it was
-            // only listening for the answer to "Would you like to submit this?".
-            lease = try await AudioSessionOwner.shared.acquire(.listening, by: "Talk") { [weak self] _ in
+            // only listening for the answer to "Would you like to submit this?". A route with no microphone
+            // ends it with a message.
+            let id = try await AudioSessionOwner.shared.acquire(.listening, by: "Talk", onRouteChange: { [weak self] in
+                self?.routeChanged()
+            }) { [weak self] loss in
                 guard let self else { return }
                 self.lease = nil
-                if self.phase == .listening { self.pause() } else { self.stopAudio() }
+                if loss == .noMicrophone, self.phase == .listening {
+                    self.fail("The microphone stopped: this audio route has no microphone.")
+                } else if self.phase == .listening { self.pause() } else { self.stopAudio() }
             }
+            if let attempt, !gate.isCurrent(attempt) {
+                AudioSessionOwner.shared.release(id)
+                throw CancellationError()
+            }
+            lease = id
         }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.channelCount > 0, format.sampleRate > 0 else { throw VoiceError("No microphone is available.") }
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
+        feeding = r
+        try startMic()
+    }
+
+    /// The recognizer the microphone feeds, kept to start the mic again after a route change.
+    @ObservationIgnored private var feeding: SegmentRecognizer?
+
+    private func startMic() throws {
+        guard let r = feeding else { return }
+        try Microphone.start(engine, bufferSize: 2048) { [weak self] buffer, _ in
             r.append(buffer)
             let level = Self.rms(buffer)
             DispatchQueue.main.async { self?.setLevel(level) }
         }
-        engine.prepare()
-        try engine.start()
+    }
+
+    /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
+    /// with it, so start the mic again there.
+    private func routeChanged() {
+        guard lease != nil, feeding != nil else { return }
+        do {
+            try startMic()
+            VoiceLog.shared.add("Talk: mic restarted on the new route")
+        } catch {
+            VoiceLog.shared.add("Talk: mic couldn't restart on the new route: \(error.localizedDescription)")
+            if phase == .listening { fail(error.localizedDescription) } else { stopAudio() }
+        }
     }
 
     private func stopAudio() {
-        if engine.isRunning { engine.stop() }
-        if !TestMode.noSpeech { engine.inputNode.removeTap(onBus: 0) }
+        if !TestMode.noSpeech { Microphone.stop(engine) }
+        feeding = nil
         level = 0
         if let lease { AudioSessionOwner.shared.release(lease) }
         lease = nil

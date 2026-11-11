@@ -12,7 +12,7 @@ final class AudioSessionOwnerTests: XCTestCase {
         var category: AVAudioSession.Category = .soloAmbient
         var isInputAvailable = true
         var isOtherAudioPlaying = false
-        var route: String { "in fake, out fake" }
+        var route = "in MicrophoneBuiltIn, out Speaker"
         /// How many activations to refuse before accepting one.
         var refusals = 0
 
@@ -36,7 +36,7 @@ final class AudioSessionOwnerTests: XCTestCase {
 
     override func setUp() async throws {
         fake = FakeSession()
-        owner = AudioSessionOwner(fake, attempts: 3, retryWait: .milliseconds(1), linger: .milliseconds(20))
+        owner = AudioSessionOwner(fake, attempts: 3, retryWait: .milliseconds(1), linger: .milliseconds(20), settle: .milliseconds(30))
         VoiceLog.shared.clear()
     }
 
@@ -133,5 +133,84 @@ final class AudioSessionOwnerTests: XCTestCase {
         _ = try await owner.acquire(.speaking, by: "read-aloud") { _ in }
         owner.release(old)
         XCTAssertEqual(owner.heldFor, .speaking)
+    }
+
+    // MARK: - Route changes
+
+    private let car = "in BluetoothHFP, out BluetoothHFP"
+
+    /// The car's Bluetooth switching to call quality when the mic starts reports several changes in a row.
+    private func flap(_ routes: [String]) {
+        for r in routes {
+            fake.route = r
+            owner.routeChanged(reason: "category change")
+        }
+    }
+
+    func testAFlappingRouteRestartsTheMicOnceItSettles() async throws {
+        var restarts = 0
+        var lost: AudioSessionOwner.Loss?
+        _ = try await owner.acquire(.listening, by: "dictation", onRouteChange: { restarts += 1 }) { lost = $0 }
+        flap(["in BluetoothHFP, out BluetoothA2DPOutput", car, "in BluetoothHFP, out BluetoothA2DPOutput", car])
+        XCTAssertEqual(restarts, 0, "nothing happens while the route is still changing")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(restarts, 1, "one restart once the route has settled")
+        XCTAssertNil(lost)
+        XCTAssertEqual(owner.heldFor, .listening, "the mic stays on")
+        XCTAssertEqual(fake.events.filter { $0 == "on" || $0 == "off" }, ["on"], "the session never turns off and on")
+        XCTAssertTrue(log().contains("route settled on \(car); dictation restarts the mic"))
+        // Nothing more changes: no more restarts.
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(restarts, 1)
+    }
+
+    func testARouteThatComesBackChangesNothing() async throws {
+        var restarts = 0
+        _ = try await owner.acquire(.listening, by: "Talk", onRouteChange: { restarts += 1 }) { _ in }
+        let start = fake.route
+        flap([car, start])
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(restarts, 0)
+        XCTAssertEqual(owner.heldFor, .listening)
+        XCTAssertTrue(log().contains("route settled back"))
+    }
+
+    func testARouteWithNoMicrophoneEndsTheListenerWithAReason() async throws {
+        var lost: AudioSessionOwner.Loss?
+        var restarts = 0
+        _ = try await owner.acquire(.listening, by: "dictation", onRouteChange: { restarts += 1 }) { lost = $0 }
+        fake.isInputAvailable = false
+        flap(["in none, out BluetoothA2DPOutput"])
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(lost, .noMicrophone)
+        XCTAssertEqual(restarts, 0)
+        XCTAssertNil(owner.heldFor)
+        XCTAssertTrue(log().contains("no microphone on in none, out BluetoothA2DPOutput; dictation ends"))
+        // Reading aloud still works on that route.
+        _ = try await owner.acquire(.speaking, by: "read-aloud") { _ in }
+        XCTAssertEqual(owner.heldFor, .speaking)
+    }
+
+    func testARouteChangeWhileSpeakingLeavesTheReadingAlone() async throws {
+        var lost: AudioSessionOwner.Loss?
+        fake.isInputAvailable = false
+        _ = try await owner.acquire(.speaking, by: "read-aloud") { lost = $0 }
+        flap([car])
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(lost)
+        XCTAssertEqual(owner.heldFor, .speaking)
+    }
+
+    func testClosingTheChatDuringARouteChangeThenReopeningIt() async throws {
+        var calls = 0
+        let old = try await owner.acquire(.listening, by: "dictation", onRouteChange: { calls += 1 }) { _ in calls += 1 }
+        flap([car])
+        owner.release(old) // the chat closes before the route settles
+        var restarts = 0
+        _ = try await owner.acquire(.listening, by: "dictation", onRouteChange: { restarts += 1 }) { _ in }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(calls, 0, "the closed chat's mic is never called back")
+        XCTAssertEqual(restarts, 0, "the reopened chat started on the settled route")
+        XCTAssertEqual(owner.heldFor, .listening)
     }
 }

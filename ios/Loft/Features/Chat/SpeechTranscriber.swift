@@ -75,6 +75,8 @@ final class SpeechTranscriber {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var startup = StartupFailureGuard()
     @ObservationIgnored private var requestStarted = Date()
+    /// A quick on/off/on of the mic button: the start that was overtaken gives up.
+    @ObservationIgnored private var gate = StartGate()
 
     private func send(_ e: SpeechEvent) {
         let next = SpeechMachine.reduce(state, e)
@@ -85,6 +87,7 @@ final class SpeechTranscriber {
     func start() async {
         send(.start)
         guard state == .requestingPermission else { return }
+        let attempt = gate.begin()
         transcript = ""
         // `-no-speech` (UI tests): recording at once, with no prompts, microphone or recognizer.
         if TestMode.noSpeech { send(.began); return }
@@ -98,8 +101,8 @@ final class SpeechTranscriber {
             send(.denied("Microphone access is off for Loft. Turn it on in Settings › Privacy & Security › Microphone."))
             return
         }
-        // Stopped while the permission prompts were up.
-        guard state == .requestingPermission else { return }
+        // Stopped (or stopped and started again) while the permission prompts were up.
+        guard gate.isCurrent(attempt), state == .requestingPermission else { return }
 
         let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
         guard let recognizer = SFSpeechRecognizer(locale: locale) else {
@@ -122,28 +125,28 @@ final class SpeechTranscriber {
 
         do {
             // Losing the audio (read-aloud, a call, another app) ends the dictation, keeping what was heard.
-            lease = try await AudioSessionOwner.shared.acquire(.listening, by: "dictation") { [weak self] loss in
+            let lease = try await AudioSessionOwner.shared.acquire(.listening, by: "dictation", onRouteChange: { [weak self] in
+                self?.routeChanged()
+            }) { [weak self] loss in
                 guard let self, self.state.isRecording else { return }
                 self.lease = nil
                 self.cleanUp()
-                self.send(loss == .interrupted ? .interrupted : .stop)
+                switch loss {
+                case .handedOver: self.send(.stop)
+                case .interrupted: self.send(.interrupted)
+                case .noMicrophone: self.send(.error("Dictation stopped: this audio route has no microphone."))
+                }
             }
-            // Stopped while the audio was being handed over.
-            guard state == .requestingPermission else { cleanUp(); return }
-            let input = engine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            guard format.channelCount > 0, format.sampleRate > 0 else {
-                cleanUp()
-                send(.unavailable("No microphone is available."))
+            // Stopped (or started again) while the audio was being handed over.
+            guard gate.isCurrent(attempt), state == .requestingPermission else {
+                AudioSessionOwner.shared.release(lease)
                 return
             }
-            let feed = self.feed
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                feed.append(buffer)
-            }
-            engine.prepare()
-            try engine.start()
+            self.lease = lease
+            try startMic()
         } catch {
+            // A start that was overtaken leaves the newer one alone.
+            guard gate.isCurrent(attempt) else { return }
             cleanUp()
             send(.error("Couldn't start the microphone: \(error.localizedDescription)"))
             return
@@ -152,6 +155,25 @@ final class SpeechTranscriber {
         beginRequest()
         send(.began)
         VoiceLog.shared.add("mic on (\(locale.identifier), on-device \(recognizer.supportsOnDeviceRecognition))")
+    }
+
+    private func startMic() throws {
+        let feed = self.feed
+        try Microphone.start(engine, bufferSize: 1024) { buffer, _ in feed.append(buffer) }
+    }
+
+    /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
+    /// with it, so start the mic again there, keeping the recognition request.
+    private func routeChanged() {
+        guard state == .recording || state == .requestingPermission, lease != nil else { return }
+        do {
+            try startMic()
+            VoiceLog.shared.add("mic restarted on the new route")
+        } catch {
+            VoiceLog.shared.add("mic couldn't restart on the new route: \(error.localizedDescription)")
+            cleanUp()
+            send(.error("Dictation stopped: \(error.localizedDescription)"))
+        }
     }
 
     /// A fresh recognition request on the running microphone.
@@ -196,14 +218,14 @@ final class SpeechTranscriber {
     }
 
     func stop() {
+        gate.cancel()
         guard state.isRecording else { return }
         cleanUp()
         send(.stop)
     }
 
     private func cleanUp() {
-        if engine.isRunning { engine.stop() }
-        if !TestMode.noSpeech { engine.inputNode.removeTap(onBus: 0) }
+        if !TestMode.noSpeech { Microphone.stop(engine) }
         request?.endAudio()
         feed.request = nil
         generation += 1

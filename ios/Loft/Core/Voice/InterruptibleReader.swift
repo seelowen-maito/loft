@@ -78,8 +78,7 @@ final class InterruptibleReader {
         request?.endAudio()
         request = nil
         if let engine {
-            if engine.isRunning { engine.stop() }
-            engine.inputNode.removeTap(onBus: 0)
+            Microphone.stop(engine)
         }
         engine = nil
         if let lease { AudioSessionOwner.shared.release(lease) }
@@ -155,21 +154,13 @@ final class InterruptibleReader {
 
     private func startRecognition(locale: Locale, engine: AVAudioEngine) throws {
         guard let recognizer = SFSpeechRecognizer(locale: locale) else { return }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        // installTap raises an Objective-C exception (which Swift can't catch, so the app aborts) when the mic
-        // has no usable format: no microphone, or another engine still holding it. Read plainly instead.
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            throw VoiceError("The microphone isn't available (\(format.channelCount) channels at \(Int(format.sampleRate)) Hz).")
-        }
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         req.taskHint = .confirmation
         request = req
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            req.append(buffer)
-        }
+        // Throws instead of crashing when the route has no usable microphone: the caller reads plainly instead.
+        try Microphone.installTap(engine, bufferSize: 1024) { buffer, _ in req.append(buffer) }
         task = recognizer.recognitionTask(with: req) { [weak self] result, _ in
             guard let result else { return }
             let words = result.bestTranscription.segments.map {

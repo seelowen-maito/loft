@@ -1,0 +1,86 @@
+import AVFoundation
+import XCTest
+@testable import Loft
+
+/// The guarded mic start: a route without a usable input throws instead of crashing, and starting again and
+/// again never leaves two listeners.
+final class MicrophoneTests: XCTestCase {
+    /// An engine that, like `AVAudioEngine`, can't take a second tap or a tap whose format doesn't match the
+    /// hardware: it records that as a crash.
+    final class FakeEngine: MicEngine {
+        var isRunning = false
+        var micFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        var hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        var taps = 0
+        var installs = 0
+        var crashes: [String] = []
+
+        func installMicTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock) {
+            if taps > 0 { crashes.append("second tap") }
+            if format.channelCount == 0 || format.sampleRate != hardwareFormat.sampleRate { crashes.append("invalid format") }
+            taps += 1
+            installs += 1
+        }
+        func removeMicTap() { taps = 0 }
+        func prepare() {}
+        func start() throws { isRunning = true }
+        func stop() { isRunning = false }
+    }
+
+    private let engine = FakeEngine()
+    private func start() throws { try Microphone.start(engine, bufferSize: 1024) { _, _ in } }
+
+    func testPressingTheMicAgainAndAgainLeavesOneListener() throws {
+        try start()
+        try start()
+        Microphone.stop(engine)
+        try start()
+        try start()
+        XCTAssertEqual(engine.taps, 1)
+        XCTAssertEqual(engine.installs, 4)
+        XCTAssertTrue(engine.isRunning)
+        XCTAssertEqual(engine.crashes, [])
+    }
+
+    func testARouteWithNoInputThrowsAClearMessage() {
+        engine.micFormat = AVAudioFormat()
+        engine.hardwareFormat = AVAudioFormat()
+        XCTAssertThrowsError(try start()) {
+            XCTAssertEqual($0.localizedDescription, "No microphone is available on this audio route.")
+        }
+        XCTAssertEqual(engine.installs, 0)
+        XCTAssertFalse(engine.isRunning)
+    }
+
+    func testAFormatLeftOverFromTheOldRouteThrowsInsteadOfCrashing() {
+        // Bluetooth call quality runs the hardware at 16 kHz while the input still reports the old 48 kHz.
+        engine.hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        XCTAssertThrowsError(try start()) {
+            XCTAssertTrue($0.localizedDescription.contains("still switching audio route"))
+        }
+        XCTAssertEqual(engine.installs, 0)
+        XCTAssertEqual(engine.crashes, [])
+    }
+
+    func testARestartOnTheNewRouteReplacesTheTap() throws {
+        try start()
+        engine.isRunning = false // the engine stops when the route changes
+        engine.micFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        engine.hardwareFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        try start()
+        XCTAssertEqual(engine.taps, 1)
+        XCTAssertTrue(engine.isRunning)
+        XCTAssertEqual(engine.crashes, [])
+    }
+
+    func testAStartOvertakenByAStopOrAnotherStartGivesUp() {
+        var gate = StartGate()
+        let first = gate.begin()
+        gate.cancel() // the mic button pressed off while the first start waited
+        let second = gate.begin() // and on again
+        XCTAssertFalse(gate.isCurrent(first))
+        XCTAssertTrue(gate.isCurrent(second))
+        gate.cancel()
+        XCTAssertFalse(gate.isCurrent(second))
+    }
+}
