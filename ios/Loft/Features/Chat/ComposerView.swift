@@ -11,6 +11,8 @@ struct ComposerView: View {
     @Environment(Speaker.self) private var speaker
     @Binding var text: String
     let recipient: String
+    /// Who an auto-send goes to.
+    let agentId: String
     let isOrchestrator: Bool
     /// Set by the parent to start or cancel dictation (the grill's hands-free loop); reset to nil once handled.
     var control: Binding<ComposerControl?> = .constant(nil)
@@ -65,8 +67,8 @@ struct ComposerView: View {
     /// The transcript at the latest gap: words after it are one utterance ("…[pause] send").
     @State private var pauseBase = ""
     @State private var silenceWatch: Task<Void, Never>?
-    /// "Sending to … · Undo" after yes, with the cleaned text.
-    @State private var autoSend: Task<Void, Never>?
+    /// Whether the composer is on screen: an auto-send that ends after you left sends only the message.
+    @State private var shown = Shown()
     /// The text in the field is going out because of a voice yes / "send".
     @State private var voiceSending = false
     /// The text in the field was (at least partly) dictated: sending it, even with a tap, is a voice turn, so
@@ -88,12 +90,14 @@ struct ComposerView: View {
         return PhotoAttachment.refusal(bytes: a.filter { !$0.isVideo }.map(\.bytes), video: a.contains(where: \.isVideo))
     }
     private var canSend: Bool { (!trimmed.isEmpty || !attachments.wrappedValue.isEmpty) && !attachmentsHold && store.canWrite }
+    /// "Sending to … · Undo" after yes, with the cleaned text: held by the store, so it still goes if you leave.
+    private var pending: LoftStore.VoiceAutoSend? { store.voiceAutoSend.flatMap { $0.agentId == agentId ? $0 : nil } }
     private var micOn: Bool { phase == .listening || phase == .awaitingAnswer || phase == .asking }
 
     var body: some View {
         VStack(spacing: 6) {
-            if autoSend != nil {
-                AutoSendBar(recipient: recipient, undo: undoSend, sendNow: sendNow)
+            if let p = pending {
+                AutoSendBar(recipient: recipient, deadline: p.deadline, undo: undoSend, sendNow: { store.sendVoiceNow(p.id) })
             } else if phase == .cleaning {
                 Label("Tidying up what you said…", systemImage: "wand.and.stars")
                     .font(.footnote)
@@ -104,7 +108,7 @@ struct ComposerView: View {
                 SubmitPromptBar(question: VoiceSend.question(for: trimmed), yes: { answered(.yes, by: "tap") },
                                 no: { answered(.no, by: "tap") })
             }
-            if autoSend == nil, phase == .idle { briefBar }
+            if pending == nil, phase == .idle { briefBar }
             if let message = speech.state.message {
                 Label(message, systemImage: speech.state.isRecording ? "waveform" : "mic.slash")
                     .font(.caption)
@@ -252,7 +256,7 @@ struct ComposerView: View {
         }
         .onChange(of: focused) { _, f in
             // Starting to edit stops listening and any pending send.
-            guard f, phase != .idle || autoSend != nil else { return }
+            guard f, phase != .idle || pending != nil else { return }
             VoiceLog.shared.add("field tapped: mic off, kept for editing")
             cancelAutoSend()
             endDictation()
@@ -262,7 +266,7 @@ struct ComposerView: View {
             control.wrappedValue = nil
             switch c {
             case .listen:
-                if phase == .idle, autoSend == nil { startDictation() }
+                if phase == .idle, pending == nil { startDictation() }
             case .cancelDictation:
                 // A spoken grill command: drop its words from the field.
                 VoiceLog.shared.add("spoken grill command: dictation dropped")
@@ -271,15 +275,24 @@ struct ComposerView: View {
                 text = prefix
             case .stopListening:
                 // The interview ended (or the chat asked): mic off, nothing sent, the words stay.
-                guard phase != .idle || autoSend != nil else { return }
+                guard phase != .idle || pending != nil else { return }
                 VoiceLog.shared.add("asked to stop listening: mic off, nothing sent")
                 cancelAutoSend()
                 endDictation()
             }
         }
+        .onAppear {
+            shown.on = true
+            // Back during the Undo window: the bar with the time left, and the message in the field.
+            if let p = pending {
+                text = p.text
+                voiceSending = true
+                scheduleSend(p.text, in: max(0, p.deadline.timeIntervalSinceNow))
+            }
+        }
         .onDisappear {
-            // Leaving keeps the draft rather than sending behind your back.
-            cancelAutoSend()
+            // A pending auto-send still goes: the bar said it would.
+            shown.on = false
             endDictation()
         }
         .task {
@@ -567,20 +580,24 @@ struct ComposerView: View {
             voiceSending = true
             if withUndo {
                 VoiceLog.shared.add("sending in \(Int(VoiceSend.undoWindow)) s with Undo")
-                autoSend = Task {
-                    try? await Task.sleep(for: .seconds(VoiceSend.undoWindow))
-                    guard !Task.isCancelled, autoSend != nil else { return }
-                    sendNow()
-                }
+                scheduleSend(cleaned, in: VoiceSend.undoWindow)
             } else {
                 sendNow()
             }
         }
     }
 
+    /// Hands the send to the store. On screen when it fires, it's a Send; after you left, only the message goes
+    /// (no reading the reply out or listening again).
+    private func scheduleSend(_ message: String, in window: TimeInterval) {
+        let shown = shown, field = $text, send = send
+        store.scheduleVoiceSend(message, to: agentId, in: window) {
+            if shown.on { sendNow() } else { field.wrappedValue = ""; send(message, true) }
+        }
+    }
+
     private func sendNow() {
-        autoSend?.cancel()
-        autoSend = nil
+        if pending != nil { store.cancelVoiceSend() }
         if micOn {
             // Tapping Send mid-dictation sends what's there.
             silenceWatch?.cancel()
@@ -613,12 +630,13 @@ struct ComposerView: View {
     }
 
     private func cancelAutoSend() {
-        autoSend?.cancel()
-        autoSend = nil
+        if pending != nil { store.cancelVoiceSend() }
         voiceSending = false
         if phase == .cleaning { phase = .idle }
     }
 }
+
+private final class Shown { var on = false }
 
 /// "Would you like to submit this?" with Yes / No, while the mic listens for the answer.
 struct SubmitPromptBar: View {
@@ -666,9 +684,10 @@ enum ComposerControl: Equatable {
 struct AutoSendBar: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let recipient: String
+    /// When it goes; the bar runs out then.
+    let deadline: Date
     let undo: () -> Void
     let sendNow: () -> Void
-    @State private var started = Date()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -692,7 +711,7 @@ struct AutoSendBar: View {
             .controlSize(.regular)
             // Paused under UI tests: a bar redrawn ten times a second keeps the app from ever going idle.
             TimelineView(.animation(minimumInterval: 0.1, paused: TestMode.noAnimations)) { context in
-                ProgressView(value: min(1, context.date.timeIntervalSince(started) / VoiceSend.undoWindow))
+                ProgressView(value: min(1, max(0, 1 - deadline.timeIntervalSince(context.date) / VoiceSend.undoWindow)))
                     .tint(Theme.accent)
                     .accessibilityHidden(true)
             }
@@ -701,7 +720,6 @@ struct AutoSendBar: View {
         .padding(10)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onAppear {
-            started = Date()
             UIAccessibility.post(notification: .announcement, argument: "Sending to \(recipient). Tap Undo to keep it.")
         }
         .accessibilityElement(children: .contain)

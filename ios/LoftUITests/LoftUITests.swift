@@ -661,6 +661,22 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent as the cleaned message")
     }
 
+    /// Leaving the chat during the Undo window still sends it, once (#339).
+    func testLeavingDuringTheUndoWindowStillSends() {
+        let app = dictateInOrchestratorChat("Deploy uh the docs site")
+        XCTAssertTrue(app.buttons["submitPromptYes"].appears(timeout: 5))
+        app.buttons["submitPromptYes"].tap()
+        XCTAssertTrue(any("autoSendBar", app).appears(timeout: 5))
+        app.tabBars.buttons["Overview"].tap()
+        // The window is 3 s; wait it out away from the chat.
+        Thread.sleep(forTimeInterval: 4)
+        app.tabBars.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["Deploy the docs site"].appears(timeout: 5), "sent while you were away")
+        XCTAssertFalse(any("autoSendBar", app).exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Deploy the docs site").count, 1, "sent once")
+        XCTAssertNotEqual(composerValue(app), "Deploy the docs site", "it left the field")
+    }
+
     func testASpokenSendGoesAtOnce() {
         let app = dictateInOrchestratorChat("Fix the login bug, send to orchestrator")
         XCTAssertTrue(app.staticTexts["Fix the login bug"].appears(timeout: 5), "sent without the command words")
