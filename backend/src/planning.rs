@@ -3056,9 +3056,14 @@ pub(crate) mod tests {
     /// when `ui_waits`), #41 with the Dev, and the team's other `roles`, all busy. Reviewing and closing #41
     /// and #42 is routed, and the branch has no CI.
     async fn pipelined(st: &AppState, fake: &Fake, name: &str, roles: &[&str], ui_waits: bool) -> (Agent, Vec<Agent>) {
-        let slug = format!("octo/{name}");
         let ui = ticket("UI", if ui_waits { &["Store"] } else { &[] });
-        let (a, m) = planned(st, fake, name, vec![ticket("Store", &[]), ticket("API", &[]), ui]).await;
+        pipelined_with(st, fake, name, roles, vec![ticket("Store", &[]), ticket("API", &[]), ui]).await
+    }
+
+    /// `pipelined` with these tickets, #41 first.
+    async fn pipelined_with(st: &AppState, fake: &Fake, name: &str, roles: &[&str], tickets: Vec<Value>) -> (Agent, Vec<Agent>) {
+        let slug = format!("octo/{name}");
+        let (a, m) = planned(st, fake, name, tickets).await;
         let dev = busy(st, "Builder", name, "dev");
         let team = roles.iter().map(|r| busy(st, &format!("{r} agent"), name, r)).collect();
         press(st, &a, &m).await.unwrap();
@@ -3152,6 +3157,58 @@ pub(crate) mod tests {
         let w = woken(&st, &dev);
         assert_eq!(w.len(), 3);
         assert!(w[2].contains("build ticket #43 \"UI\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_that_closes_while_the_next_is_being_built_starts_nothing_new() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-close";
+        let (dev, team) = pipelined(&st, &fake, "pl-close", &["qa"], false).await;
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(woken(&st, &dev).len(), 2);
+
+        // #41 passes during #42's run: it closes, and the Dev keeps building #42.
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("Closed #41") && !out.contains("Next"), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["closed", "started", "open"]), Some(42)));
+        assert_eq!(woken(&st, &dev).len(), 2, "no wake in the middle of #42");
+
+        // #42 is in: #43 starts.
+        let out = tool(&st, &dev, "submit_ticket", submit_42()).await.unwrap();
+        assert!(out.ends_with("\nNext: #43 is with Builder. Loft wakes you with it once this run ends."), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["closed", "review", "started"]), Some(43)));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), 3);
+        assert!(w[2].contains("build ticket #43 \"UI\""), "{w:?}");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_waiting_for_the_user_holds_back_new_tickets_but_not_a_queued_fix() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/pl-human";
+        let tickets = vec![ticket("Store", &[]), ticket("API", &[]), ticket("UI", &[]), ticket("Docs", &[])];
+        let (dev, team) = pipelined_with(&st, &fake, "pl-human", &["qa"], tickets).await;
+        // While the Dev builds #41: #42 went to the user after its third round, and #43's fix waits.
+        crate::delivery::update(&st, slug, 40, |d| {
+            let t = d.ticket_mut(42).unwrap();
+            (t.state, t.rounds) = ("needs_human".into(), 3);
+            let t = d.ticket_mut(43).unwrap();
+            (t.state, t.rounds, t.commits, t.changes) = ("changes".into(), 1, vec!["1234567abc".into()], "Fix #43: the header is missing.".into());
+        });
+
+        // #41 is in: #43's fix runs, and #44 stays put.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.ends_with("\nNext: the Dev fixes #43 (round 1 of 3). Loft wakes you with it once this run ends."), "{out}");
+        assert_eq!(tickets_of(&st, slug), (states(&["review", "needs_human", "started", "open"]), Some(43)));
+        let w = woken(&st, &dev);
+        assert_eq!((w.len(), w[1].as_str()), (2, "Fix #43: the header is missing."));
+
+        // The fix is in and #41 closes: one ticket in review, but #42 waits for the user, so #44 doesn't start.
+        tool(&st, &dev, "submit_ticket", json!({ "number": 43, "commits": ["1234567abc"] })).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("Closed #41") && out.contains("\n#42 waits for the user, so no new ticket starts."), "{out}");
+        assert_eq!(tickets_of(&st, slug).0, states(&["closed", "needs_human", "review", "open"]));
+        assert_eq!(woken(&st, &dev).len(), 2);
     }
 
     #[tokio::test]
