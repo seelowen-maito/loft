@@ -825,8 +825,8 @@ final class LoftUITests: XCTestCase {
         app.buttons["sendButton"].tap()
         // The reply comes half a second after the send and is found by the store's first refetch, a second in.
         XCTAssertTrue(app.staticTexts["Done. I ran it and everything passed."].appears(timeout: 5))
-        // With no run seen, the reply is read once nothing new has come for 2 s (LoftStore.waitForReply), checked
-        // every half second: about 3 s after it shows, more on a busy Simulator.
+        // The reply is read once it has stopped changing for `Speaker.settle` (LoftStore.waitForReply), checked
+        // every quarter second: about a second after it shows, more on a busy Simulator.
         let bar = any("readAloudBar", app)
         XCTAssertTrue(bar.appears(timeout: 10), "reading starts once the reply has settled")
         // The bar's identifier covers its buttons, so Stop is found by its label.

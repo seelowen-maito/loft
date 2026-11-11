@@ -693,13 +693,12 @@ final class LoftStore {
         await Task { await deliver(p) }.value
     }
 
-    /// The agent's text replies after message `id`, joined, once its run is over. Nil when
+    /// The agent's text replies after message `id`, joined, once its run is over and they have
+    /// stopped changing for `Speaker.settle` (pieces and edits restart the wait). Nil when
     /// `keepWaiting` turns false (the conversation was left or stopped) or after an hour.
     func waitForReply(agentId: String, after id: Int64, while keepWaiting: () -> Bool) async -> String? {
-        var sawRun = false
-        var lastCount = 0
-        var settledTicks = 0
-        for tick in 0..<(60 * 60 * 2) { // checked every half second
+        var settle = ReplySettle()
+        for tick in 0..<(60 * 60 * 4) { // checked every quarter second, for an hour
             guard keepWaiting() else { return nil }
             let a = agent(agentId)
             // A run that started after the message and has ended is over, whatever the agent's status says: its
@@ -707,22 +706,18 @@ final class LoftStore {
             let after = conversation(agentId).filter { $0.id > id }
             let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
             let running = !runEnded && (a?.running == true || a?.status == "running")
-            sawRun = sawRun || running
-            let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
-            // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.
-            let question = replies.contains { $0.grill?.role == .round }
-            // When the run was never seen (its update missed), the reply counts once nothing new has come for 2 s,
-            // instead of waiting a fixed 10 s, which was long enough to leave the chat and lose the reading.
-            settledTicks = replies.count == lastCount ? settledTicks + 1 : 0
-            lastCount = replies.count
-            if !replies.isEmpty && (sawRun || question || settledTicks >= 4 || tick > 20) && !running {
-                return replies.map(\.displayContent).joined(separator: "\n\n")
+            let replies = after.filter { $0.role == "assistant" && $0.kind == "text" }
+            // The whole reply: once the run is over and nothing in it has changed (a new piece, an edit) for a moment.
+            let candidate = replies.isEmpty || running ? nil : replies.map(\.displayContent).joined(separator: "\n\n")
+            if let whole = settle.whole(candidate, at: Date()) {
+                VoiceLog.shared.add("reply: whole after \(replies.count) piece\(replies.count == 1 ? "" : "s")")
+                return whole
             }
             // Fetch history now and then, live or not: a message event missed during a reconnect or while in the
             // background would otherwise leave this waiting (and the reply unread) for an hour. The first fetch
             // comes after a second, so a quick reply whose event was missed isn't held back for five.
-            if tick == 2 || tick % 10 == 9 { try? await loadConversation(agentId) }
-            try? await Task.sleep(for: .milliseconds(500))
+            if tick == 4 || tick % 20 == 19 { try? await loadConversation(agentId) }
+            try? await Task.sleep(for: .milliseconds(250))
         }
         return nil
     }
