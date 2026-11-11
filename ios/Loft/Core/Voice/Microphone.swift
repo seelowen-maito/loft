@@ -21,6 +21,30 @@ enum Microphone {
         }
     }
 
+    /// The first start on a route: a Bluetooth route can still be switching to call quality, so a format
+    /// mismatch is retried a few times before it fails. Gives up with `CancellationError` once `stillWanted`
+    /// says the start was overtaken (stopped, or started again) while it waited.
+    static func startWhenSettled(_ engine: MicEngine, bufferSize: AVAudioFrameCount, attempts: Int = 3,
+                                 wait: Duration = .milliseconds(200), stillWanted: () -> Bool,
+                                 block: @escaping AVAudioNodeTapBlock) async throws {
+        var attempt = 1
+        while true {
+            do {
+                return try start(engine, bufferSize: bufferSize, block: block)
+            } catch is StillSwitching where attempt < attempts {
+                VoiceLog.shared.add("mic: the route is still switching; retrying (\(attempt) of \(attempts - 1))")
+                try await Task.sleep(for: wait)
+                guard stillWanted() else { throw CancellationError() }
+                attempt += 1
+            }
+        }
+    }
+
+    /// The input's format doesn't match the hardware yet: the route is switching.
+    struct StillSwitching: LocalizedError {
+        let errorDescription: String?
+    }
+
     /// Stops the engine and puts one checked tap on its input, without starting it (for an engine that
     /// starts once it has something to play).
     static func installTap(_ engine: MicEngine, bufferSize: AVAudioFrameCount, block: @escaping AVAudioNodeTapBlock) throws {
@@ -34,7 +58,7 @@ enum Microphone {
         // With voice processing on (the listening reader), the input delivers its processed format, which can
         // differ from the hardware's, so only a usable format is required there.
         guard engine.isVoiceProcessing || format.sampleRate == hardware.sampleRate else {
-            throw VoiceError("The microphone is still switching audio route (\(Int(format.sampleRate)) Hz, hardware \(Int(hardware.sampleRate)) Hz). Try again.")
+            throw StillSwitching(errorDescription: "The microphone is still switching audio route (\(Int(format.sampleRate)) Hz, hardware \(Int(hardware.sampleRate)) Hz). Try again.")
         }
         engine.installMicTap(bufferSize: bufferSize, format: format, block: block)
     }

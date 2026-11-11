@@ -151,6 +151,13 @@ final class VoiceSession {
         } catch {
             // Closed or discarded while starting: nothing more to do.
             guard gate.isCurrent(attempt) else { return }
+            // The audio went elsewhere while the mic waited for the route: pause, as losing it while listening does.
+            if error is CancellationError {
+                recognizer?.cancel()
+                recognizer = nil
+                if phase == .preparing { phase = .paused }
+                return
+            }
             stopAudio()
             let v = error as? VoiceError
             fail(v?.message ?? error.localizedDescription, needsPermission: v?.isPermission ?? false)
@@ -692,7 +699,10 @@ final class VoiceSession {
             lease = id
         }
         feeding = r
-        try startMic()
+        try await Microphone.startWhenSettled(engine, bufferSize: 2048, stillWanted: { [weak self] in
+            guard let self, self.lease != nil, self.feeding === r else { return false }
+            return attempt.map { self.gate.isCurrent($0) } ?? true
+        }, block: tap(feeding: r))
     }
 
     /// The recognizer the microphone feeds, kept to start the mic again after a route change.
@@ -700,7 +710,11 @@ final class VoiceSession {
 
     private func startMic() throws {
         guard let r = feeding else { return }
-        try Microphone.start(engine, bufferSize: 2048) { [weak self] buffer, _ in
+        try Microphone.start(engine, bufferSize: 2048, block: tap(feeding: r))
+    }
+
+    private func tap(feeding r: SegmentRecognizer) -> AVAudioNodeTapBlock {
+        { [weak self] buffer, _ in
             r.append(buffer)
             let level = Self.rms(buffer)
             DispatchQueue.main.async { self?.setLevel(level) }
