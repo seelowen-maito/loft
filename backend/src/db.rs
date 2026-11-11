@@ -56,9 +56,6 @@ pub struct Delivery {
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
     pub done_at: String,
-    /// The tech-debt issues its final Code Review filed ("#77", or "Loft issue <id>"), for the done summary.
-    #[serde(default)]
-    pub tech_debt: Vec<String>,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -1528,7 +1525,6 @@ impl Db {
                 stalled_at: String::new(),
                 stalled_on: vec![],
                 done_at: String::new(),
-                tech_debt: vec![],
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
