@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
-import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Bot, GitBranch, Inbox, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
 import { pendingItems, type PendingItem } from "./lib/pending";
+import { badgeText, badgeTitle, countAfter, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
+import NeedsYouPage from "./pages/NeedsYou";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
@@ -104,6 +106,33 @@ function PendingBadge() {
         </div>
       )}
     </div>
+  );
+}
+
+/** The Needs you counter, on every page: the count from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost. */
+function NeedsYouBadge({ live }: { live: boolean }) {
+  const [c, setC] = useState<Counts>({ count: 0, urgent: 0 });
+  useEffect(() => {
+    if (!live) return;
+    api.needsYouList().then((l) => setC({ count: l.count, urgent: l.urgent })).catch(() => {});
+  }, [live]);
+  useServerEvents(useCallback((e: ServerEvent) => setC((c) => countAfter(c, e)), []));
+  const n = badgeText(c.count);
+  return (
+    <NavLink
+      to="/needs-you"
+      title={badgeTitle(c)}
+      aria-label={`Needs you: ${badgeTitle(c)}`}
+      data-needs-you-count={c.count}
+      className={({ isActive }) => cx("relative rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}
+    >
+      <Inbox className="size-4" />
+      {n && (
+        <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", c.urgent > 0 ? "bg-warn" : "bg-accent")}>
+          {n}
+        </span>
+      )}
+    </NavLink>
   );
 }
 
@@ -215,6 +244,7 @@ export default function App() {
           </nav>
           <div className="ml-auto flex items-center gap-4 max-md:gap-3">
             <PendingBadge />
+            <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
             <div className="flex items-center gap-4 max-lg:hidden">
               <UpdateStatus live={live} />
@@ -251,6 +281,7 @@ export default function App() {
           {/* Issues were once "tasks": old links keep working. */}
           <Route path="/tasks" element={<OldTask />} />
           <Route path="/tasks/:id" element={<OldTask />} />
+          <Route path="/needs-you" element={<NeedsYouPage />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/clean" element={<CleanPage />} />

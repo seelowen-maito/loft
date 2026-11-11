@@ -1,3 +1,5 @@
+import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+
 export type Avatar = { svg: string };
 
 /** A weekly window with no autonomous wake-ups, in the Mac's local time. Days: 0 = Monday … 6 = Sunday. */
@@ -680,6 +682,11 @@ export const api = {
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
   needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
+  /** The whole Needs you list, for its page and the top bar's counter. */
+  needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
+  /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
+  needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
+    req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
   /** New devices asking to pair, from Needs you (the `pairing` items). */
   pairRequests: () =>
     req<{ items: { type: string; text: string; actions: { kind: string; path: string; body: { code: string } }[] }[] }>("GET", "/needs-you").then((r) =>

@@ -23,6 +23,7 @@ export function PushSettings() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const section = useRef<HTMLElement>(null);
 
   const load = () => {
     api.pushStatus().then((s) => {
@@ -34,6 +35,11 @@ export function PushSettings() {
     api.devices().then(setDevices);
   };
   useEffect(load, []);
+  // `/settings#push` (Needs you's "Push is off") scrolls here once it shows.
+  const shown = !!status;
+  useEffect(() => {
+    if (shown && window.location.hash === "#push") section.current?.scrollIntoView({ block: "start" });
+  }, [shown]);
   // After Sign in the backend collects the key; look until it has it or the code is gone.
   const signingIn = status?.signing_in;
   useEffect(() => {
@@ -118,12 +124,18 @@ export function PushSettings() {
   const addrChanged = relayAddr.trim() !== status.relay_address;
   const portal = portalHome(status);
   return (
-    <section className="panel space-y-4 p-5">
+    <section ref={section} id="push" className="panel scroll-mt-20 space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-[15px] font-medium tracking-tight">Push notifications</h2>
         <span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>
       </div>
       <p className="text-[12.5px] text-fg-2">Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</p>
+      {off && status.devices > 0 && (
+        <p role="alert" className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+          Push is off: Loft drops every alert for {status.devices === 1 ? "your paired phone" : `your ${status.devices} paired phones`}. Sign in below to get push through the
+          Loft relay, or add your own APNs key.
+        </p>
+      )}
 
       <div className="space-y-1.5">
         <span className="eyebrow">Loft relay</span>
