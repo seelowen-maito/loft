@@ -255,9 +255,6 @@ export type EndCard = {
 
 export type DeliveryStarted = { ticket: number; title?: string; agent_id: string; agent_name: string; at: string };
 
-/** A browser or iPhone paired with Loft (`/api/paired-clients`); `this` is the one asking. */
-export type PairedClient = { id: string; name: string; paired_at: string; last_used_at: string; this: boolean };
-
 /** A phone registered for push (`/api/devices`). */
 export type PushDevice = {
   token: string;
@@ -601,9 +598,6 @@ export type SystemReading = {
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
-/** Fired when Loft refuses a request because this browser is not paired (or was unpaired). */
-export const UNPAIRED = "loft:unpaired";
-
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
@@ -611,7 +605,6 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) window.dispatchEvent(new Event(UNPAIRED));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
 }
@@ -680,12 +673,6 @@ export const api = {
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
   needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
-  /** New devices asking to pair, from Needs you (the `pairing` items). */
-  pairRequests: () =>
-    req<{ items: { type: string; text: string; actions: { kind: string; path: string; body: { code: string } }[] }[] }>("GET", "/needs-you").then((r) =>
-      r.items.filter((i) => i.type === "pairing").map((i) => ({ code: i.actions[0].body.code, text: i.text })),
-    ),
-  answerPairing: (code: string, allow: boolean) => req<{ ok: boolean }>("POST", `/pair/${allow ? "approve" : "deny"}`, { code }),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
@@ -734,11 +721,6 @@ export const api = {
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
-  pairedClients: () => req<PairedClient[]>("GET", "/paired-clients"),
-  /** Forget this device: that client is refused from its next request on. */
-  forgetClient: (id: string) => req<{ ok: boolean }>("DELETE", `/paired-clients/${id}`),
-  /** Unpairs every client but this one. */
-  unpairAll: () => req<{ unpaired: number }>("POST", "/paired-clients/unpair-all", {}),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
