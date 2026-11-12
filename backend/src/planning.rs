@@ -57,7 +57,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "title": { "type": "string", "description": "What the slice delivers, in a few words." },
                 "body": { "type": "string", "description": "The ticket in Markdown, following the ticket template." },
                 "project": { "type": "string", "description": "The project whose repo gets this ticket, one of yours: its Repo line. Defaults to the spec's project. On GitHub it stays a sub-issue of the spec and keeps its blockers across repos." },
-                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Titles of the tickets in this list that must land before this one." }
+                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "What must land before this one: the title of a ticket in this list, or a blocker outside it written `owner/repo#n` (a ticket of another spec or repo, say one of the API that a UI ticket needs). Loft links it as a GitHub dependency and the Delivery waits until it closes. Publish the spec with the blockers first, so you have their numbers. Never guess a blocker: name only what the ticket needs, and the breakdown round lets the user confirm it." }
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
     }), json!({
@@ -676,6 +676,7 @@ pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, sl
 /// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did. The
 /// caller holds the repo's publish lock.
 pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<String>, String> {
+    crate::delivery::blocker_closed(state, slug, number);
     let d = crate::delivery::ticket_closed(state, slug, number).or_else(|| {
         let pr = spec_pr_in(ticket_body, slug)?;
         state.db.deliveries(slug, false).ok()?.into_iter().find(|d| d.pr == Some(pr))
@@ -783,6 +784,8 @@ struct Ticket {
     body: String,
     /// Positions in the list of the tickets that block this one.
     blocked_by: Vec<usize>,
+    /// Blockers that are issues on GitHub, not among these tickets: repo and number.
+    external: Vec<(String, i64)>,
     /// The planner as if the ticket's project were its only one: the `project` the ticket names, one of
     /// the planner's own (`all`), else the spec's (`me`).
     home: Agent,
@@ -816,7 +819,14 @@ fn tickets_in(all: &Agent, me: &Agent, args: &Value) -> Result<Vec<Ticket>, Stri
             _ => me.clone(),
         };
         let mut blocked_by = vec![];
+        let mut external: Vec<(String, i64)> = vec![];
         for b in t["blocked_by"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if let Some(e) = issue_named(b) {
+                if !external.contains(&e) {
+                    external.push(e);
+                }
+                continue;
+            }
             match keys.iter().position(|k| *k == key(b)) {
                 Some(j) if j == i => return Err(format!("\"{title}\" can't block itself")),
                 Some(j) if !blocked_by.contains(&j) => blocked_by.push(j),
@@ -824,9 +834,18 @@ fn tickets_in(all: &Agent, me: &Agent, args: &Value) -> Result<Vec<Ticket>, Stri
                 None => return Err(format!("\"{title}\" is blocked by \"{b}\", which isn't one of these tickets")),
             }
         }
-        out.push(Ticket { title, body, blocked_by, home });
+        out.push(Ticket { title, body, blocked_by, external, home });
     }
     Ok(out)
+}
+
+/// `owner/repo#n`, the way a blocker outside these tickets is named.
+fn issue_named(s: &str) -> Option<(String, i64)> {
+    let (repo, n) = s.trim().split_once('#')?;
+    let (owner, name) = repo.split_once('/')?;
+    let ok = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    (ok(owner) && ok(name)).then_some(())?;
+    Some((repo.to_string(), n.parse::<i64>().ok().filter(|n| *n > 0)?))
 }
 
 /// Positions in publishing order: every ticket after the ones that block it, otherwise as listed.
@@ -853,7 +872,7 @@ fn issue_ref(i: &Value, home: &str) -> Option<(String, i64, i64, String)> {
 
 /// The repo of an issue GitHub listed: from its `repository_url`, else `home`, where it was listed. GitHub
 /// may spell it in another case than a git origin, so compare it with `same_repo`.
-fn repo_of(i: &Value, home: &str) -> String {
+pub(crate) fn repo_of(i: &Value, home: &str) -> String {
     let prefix = format!("{}/repos/", crate::github::api_base().trim_end_matches('/'));
     i["repository_url"].as_str().and_then(|u| u.strip_prefix(&prefix)).unwrap_or(home).to_string()
 }
@@ -897,6 +916,9 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             if given && id.is_none_or(str::is_empty) {
                 return Err(format!("This plan is kept in Loft ({why}): pass the spec's Loft issue id from publish_spec as `spec`, not a number."));
             }
+            if let Some(t) = ts.iter().find(|t| !t.external.is_empty()) {
+                return Err(format!("\"{}\" is blocked by an issue outside these tickets, which a plan kept in Loft ({why}) can't link: block it by a ticket of this list.", t.title));
+            }
             return in_loft::tickets(state, me, id, &ts, &order, &why).await;
         }
     };
@@ -913,16 +935,18 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             github_home(state, &t.home).await.map_err(|why| format!("\"{}\" is for {}, which has no GitHub repo ({why}), so it can't join spec #{} on {slug}.", t.title, t.home.project, spec.unwrap_or(0)))?
         });
     }
-    // The Delivery only knows the tickets in the spec's repo, so one there can't wait on one elsewhere:
-    // it would start before its blocker landed.
-    for (i, t) in ts.iter().enumerate() {
-        if slugs[i] == slug
-            && let Some(&b) = t.blocked_by.iter().find(|&&b| slugs[b] != slug)
-        {
-            return Err(format!(
-                "\"{}\" is in {slug} but blocked by \"{}\" in {}: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.",
-                t.title, ts[b].title, slugs[b]
-            ));
+    // Blockers named by their issue (`owner/repo#n`), read now so a wrong one fails before anything is created.
+    let mut external: HashMap<(String, i64), (i64, bool)> = HashMap::new();
+    for t in &ts {
+        for (r, n) in &t.external {
+            if external.contains_key(&(r.clone(), *n)) {
+                continue;
+            }
+            let v = crate::github::get(state, &format!("/repos/{r}/issues/{n}")).await.map_err(|e| format!("\"{}\" is blocked by {r}#{n}, which Loft couldn't read on GitHub: {e}", t.title))?;
+            let (Some(id), false) = (v["id"].as_i64(), v.get("pull_request").is_some()) else {
+                return Err(format!("\"{}\" is blocked by {r}#{n}, which isn't an issue on GitHub (a PR can't block a ticket).", t.title));
+            };
+            external.insert((r.clone(), *n), (id, v["state"] != "closed"));
         }
     }
     let _held = state.publish_locks.of(&slug).lock_owned().await;
@@ -1001,26 +1025,44 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
                 state.db.record_published_issue(&slug, "sub_issue", &lk, n).map_err(|e| e.to_string())?;
             }
         }
+        // Every blocker, among these tickets or outside them: repo, number, database id once known, the
+        // ticket's position when it is one of these, and whether the Delivery must wait for it.
+        #[allow(clippy::type_complexity)]
+        let mut links: Vec<(String, i64, Option<i64>, Option<usize>, bool)> = vec![];
+        for &b in &t.blocked_by {
+            // Blockers go first, so every one of them is on GitHub by now.
+            let (brepo, bn, bid) = made[b].clone().expect("blockers are published first");
+            links.push((brepo, bn, bid, Some(b), true));
+        }
+        for (r, bn) in &t.external {
+            let (bid, open) = external[&(r.clone(), *bn)];
+            links.push((r.clone(), *bn, Some(bid), None, open));
+        }
         // The Delivery builds the tickets in the spec's repo; one in another repo is published and linked only.
+        // A blocker outside the spec's repo, or outside these tickets, is waited on until it closes.
         match spec {
             Some(s) if repo == slug => {
-                let blocker_numbers = t.blocked_by.iter().filter_map(|&b| made[b].as_ref().filter(|m| m.0 == slug).map(|m| m.1)).collect();
-                crate::delivery::record_ticket(state, &slug, s, n, &t.title, blocker_numbers)
+                let local = links.iter().filter(|l| l.3.is_some() && l.0 == slug).map(|l| l.1).collect();
+                let waiting = links.iter().filter(|l| l.4 && (l.0 != slug || l.3.is_none())).map(|l| format!("{}#{}", l.0, l.1)).collect();
+                crate::delivery::record_ticket_waiting(state, &slug, s, n, &t.title, local, waiting)
             }
             Some(_) => {}
             None => crate::delivery::record_standalone(state, &slug, n, &t.title, me.project.trim(), &me.id),
         }
         let mut blockers = vec![];
-        for &b in &t.blocked_by {
-            // Blockers go first, so every one of them is on GitHub by now.
-            let (brepo, bn, bid) = made[b].clone().expect("blockers are published first");
+        for (brepo, bn, bid, at, _) in links {
             blockers.push(shown(&brepo, bn));
             let dk = format!("{n}/{}", seen_from(repo, &brepo, bn));
             if matches!(state.db.published_issue(repo, "blocked_by", &dk), Ok(Some(_))) {
                 continue;
             }
+            if at.is_none() {
+                blocks_back(state, (&brepo, bn), (repo, n)).await?;
+            }
             let bid = issue_id(state, &brepo, bn, bid).await.map_err(|e| format!("{e} {retry}"))?;
-            made[b] = Some((brepo.clone(), bn, Some(bid)));
+            if let Some(b) = at {
+                made[b] = Some((brepo.clone(), bn, Some(bid)));
+            }
             let path = format!("/repos/{repo}/issues/{n}/dependencies/blocked_by");
             if let Err(e) = crate::github::request(state, reqwest::Method::POST, &path, Some(json!({ "issue_id": bid }))).await {
                 // Linked before but never recorded: GitHub turns the second link down, which is fine.
@@ -1044,6 +1086,34 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
     let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already published." } else { "" };
     let msg = format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n"));
     Ok(msg)
+}
+
+/// Refuses `blocker` as a blocker of `ticket` when it already waits, directly or through others, on that
+/// ticket: they would wait on each other for ever. Both are (repo, number); reads at most 30 issues.
+async fn blocks_back(state: &AppState, blocker: (&str, i64), ticket: (&str, i64)) -> Result<(), String> {
+    let name = |r: &str, n: i64| format!("{r}#{n}");
+    // Chains of issues, each blocked by the next, from the blocker on.
+    let mut queue = vec![vec![(blocker.0.to_string(), blocker.1)]];
+    let mut seen = 1;
+    while let Some(chain) = queue.pop() {
+        let (r, n) = chain.last().cloned().unwrap_or_default();
+        let v = crate::github::get(state, &format!("/repos/{r}/issues/{n}/dependencies/blocked_by?per_page=100")).await.unwrap_or(Value::Null);
+        for d in v.as_array().into_iter().flatten() {
+            let Some(dn) = d["number"].as_i64() else { continue };
+            let dr = repo_of(d, &r);
+            if same_repo(&dr, ticket.0) && dn == ticket.1 {
+                let ring: Vec<String> = std::iter::once(name(ticket.0, ticket.1)).chain(chain.iter().map(|(r, n)| name(r, *n))).chain([name(ticket.0, ticket.1)]).collect();
+                return Err(format!("{} can't be blocked by {}: they would block each other in a loop ({}).", name(ticket.0, ticket.1), name(blocker.0, blocker.1), ring.join(" → ")));
+            }
+            if seen < 30 && !chain.iter().any(|(cr, cn)| same_repo(cr, &dr) && *cn == dn) {
+                seen += 1;
+                let mut next = chain.clone();
+                next.push((dr, dn));
+                queue.push(next);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The published tickets as Loft issues right away, as in a project without a repo: each in its own
@@ -2034,13 +2104,6 @@ pub(crate) mod tests {
         let urls: Vec<String> = summary(&st, &lead).meta["grill"]["end_card"]["tickets"].as_array().unwrap().iter().map(|t| t["url"].as_str().unwrap().to_string()).collect();
         assert_eq!(urls, ["https://github.com/octo/cross-api/issues/41", "https://github.com/octo/cross-web/issues/7"]);
 
-        // A ticket in the spec's repo can't wait on one elsewhere: the Delivery would start it too early.
-        let before = (posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len());
-        let flipped = json!([screen(&[]), ticket("Endpoint v2", &["Screen"])]);
-        let err = mcp_call(&st, &lead, "publish_tickets", &json!({ "spec": 40, "tickets": flipped })).await.unwrap().unwrap_err();
-        assert_eq!(err, "\"Endpoint v2\" is in octo/cross-api but blocked by \"Screen\" in octo/cross-web: a ticket in the spec's repo can only be blocked by tickets in that repo. Swap the blocker, or name the other repo as the primary one.");
-        assert_eq!((posts(&fake, api, "issues").len(), posts(&fake, web, "issues").len()), before, "nothing was created");
-
         // A ticket for a project without a GitHub repo can't join a spec on GitHub.
         planner_on(&st, "cross-local", None);
         lead.projects.push("cross-local".into());
@@ -2740,6 +2803,96 @@ pub(crate) mod tests {
         assert_eq!(v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["ticket"], 2);
         assert_eq!(woken(&st, &dev).len(), 2);
         assert!(press_with(&st, &a, &m, json!({ "repo": "octo/three", "spec": 1 })).await.is_err());
+    }
+
+    /// GitHub's answer to reading issue #n of `slug`.
+    fn read_issue(fake: &Fake, slug: &str, n: i64, state: &str) {
+        fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, json!({ "number": n, "id": n * 100, "state": state }));
+    }
+
+    #[tokio::test]
+    async fn a_ticket_blocked_by_an_issue_in_another_repo_waits_for_it_to_close() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-ext";
+        // API needs ext-api#9 (open) and UI ext-done#9 (closed); same number #9 in two repos.
+        read_issue(&fake, "octo/ext-api", 9, "open");
+        read_issue(&fake, "octo/ext-done", 9, "closed");
+        let tickets = vec![ticket("Store", &[]), ticket("API", &["octo/ext-api#9", "Store"]), ticket("UI", &[" octo/ext-done#9"])];
+        let (a, m) = planned(&st, &fake, "dl-ext", tickets).await;
+        // Linked on GitHub like any blocker, closed or not.
+        assert_eq!(posts(&fake, slug, "issues/42/dependencies/blocked_by"), [json!({ "issue_id": 4100 }), json!({ "issue_id": 900 })]);
+        assert_eq!(posts(&fake, slug, "issues/43/dependencies/blocked_by"), [json!({ "issue_id": 900 })]);
+        let waits = |d: &crate::db::Delivery| d.tickets.iter().map(|t| (t.number, t.blocked_by.clone(), t.waiting_on.clone())).collect::<Vec<_>>();
+        let d = delivery(&st, slug);
+        assert_eq!(waits(&d), [(41, vec![], vec![]), (42, vec![41], vec!["octo/ext-api#9".to_string()]), (43, vec![], vec![])]);
+
+        // The Delivery's JSON lists what it waits on, with the Delivery that owns it when Loft has one.
+        let shown = crate::delivery::delivery_json(&st, &d);
+        assert_eq!(shown["waits_on"], json!([{ "blocker": "octo/ext-api#9", "delivery": null }]));
+        assert_eq!(shown["tickets"][1]["waiting_on"], json!(["octo/ext-api#9"]));
+
+        // The Lead's brief names it with its repo, and the ticket isn't ready.
+        let lead = busy(&st, "Lofty", "dl-ext", "lead");
+        busy(&st, "Builder", "dl-ext", "dev");
+        press(&st, &a, &m).await.unwrap();
+        let w = woken(&st, &lead);
+        assert!(w[0].contains("#42 \"API\"") && w[0].contains("blocked by #41, octo/ext-api#9"), "{w:?}");
+
+        // Closing ticket #9 of another repo, or another repo's #9, frees nothing; the right one does, in any case.
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "closed".into());
+        assert_eq!(crate::delivery::ready_tickets(&delivery(&st, slug)).iter().map(|t| t.number).collect::<Vec<_>>(), [43]);
+        crate::delivery::blocker_closed(&st, "octo/ext-done", 9);
+        crate::delivery::blocker_closed(&st, slug, 9);
+        assert_eq!(delivery(&st, slug).tickets[1].waiting_on, ["octo/ext-api#9"]);
+        st.rt.lock().unwrap().queued.clear();
+        crate::delivery::blocker_closed(&st, "Octo/Ext-API", 9);
+        let d = delivery(&st, slug);
+        assert!(d.tickets[1].waiting_on.is_empty());
+        assert_eq!(crate::delivery::ready_tickets(&d).iter().map(|t| t.number).collect::<Vec<_>>(), [42, 43]);
+        assert!(woken(&st, &lead).last().is_some_and(|w| w.contains("Octo/Ext-API#9 closed: tickets that waited on it are ready")));
+    }
+
+    #[tokio::test]
+    async fn starting_a_delivery_that_only_waits_says_what_for() {
+        let (fake, st) = (fake_github(), state());
+        read_issue(&fake, "octo/ext-only", 5, "open");
+        let (a, m) = planned(&st, &fake, "dl-only", vec![ticket("API", &["octo/ext-only#5"])]).await;
+        busy(&st, "Builder", "dl-only", "dev");
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert!(err.1.ends_with("It waits on octo/ext-only#5: start the Delivery that owns it first."), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_blocker_that_isnt_an_issue_stops_publishing_before_anything_is_made() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-bad";
+        let a = planner_on(&st, "dl-bad", Some(&format!("git@github.com:{slug}.git")));
+        tickets_repo(&fake, slug, 40, &[40, 41]);
+        fake.route("GET", "/repos/octo/other/issues/3", 200, json!({ "number": 3, "id": 300, "state": "open", "pull_request": {} }));
+        fake.route("GET", "/repos/octo/other/issues/4", 404, json!({ "message": "Not Found" }));
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Rounds").await.unwrap();
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("API", &["octo/other#3"])]).await.unwrap_err();
+        assert_eq!(err, "\"API\" is blocked by octo/other#3, which isn't an issue on GitHub (a PR can't block a ticket).");
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("API", &["octo/other#4"])]).await.unwrap_err();
+        assert!(err.starts_with("\"API\" is blocked by octo/other#4, which Loft couldn't read on GitHub"), "{err}");
+        // Not a reference: it's a title, which isn't one of the tickets.
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("API", &["other#4"])]).await.unwrap_err();
+        assert_eq!(err, "\"API\" is blocked by \"other#4\", which isn't one of these tickets");
+        assert_eq!(posts(&fake, slug, "issues").len(), 1, "only the spec");
+    }
+
+    #[tokio::test]
+    async fn a_blocker_that_already_waits_on_the_ticket_is_refused_naming_the_loop() {
+        let (fake, st) = (fake_github(), state());
+        // octo/b#2 is blocked by octo/c#3, which is blocked by octo/a#1: a#1 can't wait on b#2.
+        let dep = |n: i64, repo: &str| json!({ "number": n, "repository_url": format!("{}/repos/{repo}", crate::github::api_base()) });
+        fake.route("GET", "/repos/octo/b/issues/2/dependencies/blocked_by", 200, json!([dep(3, "octo/c")]));
+        fake.route("GET", "/repos/octo/c/issues/3/dependencies/blocked_by", 200, json!([dep(1, "octo/A")]));
+        let err = blocks_back(&st, ("octo/b", 2), ("octo/a", 1)).await.unwrap_err();
+        assert_eq!(err, "octo/a#1 can't be blocked by octo/b#2: they would block each other in a loop (octo/a#1 → octo/b#2 → octo/c#3 → octo/a#1).");
+        assert!(blocks_back(&st, ("octo/b", 2), ("octo/z", 9)).await.is_ok());
     }
 
     #[tokio::test]
@@ -4728,11 +4881,14 @@ pub(crate) mod tests {
             with(42, "open", json!([{ "name": "ready-for-agent" }, { "name": "in-progress" }]), 0),
             with(43, "open", ready.clone(), 1),
             with(45, "open", ready.clone(), 2),
+            with(46, "open", ready.clone(), 1),
         ]);
         let spec = spec_40_on(&st, &fake, "spec-page", slug, subs);
         fake.route("GET", &format!("/repos/{slug}/issues/43/dependencies/blocked_by"), 200, json!([{ "number": 42 }]));
-        // #99 isn't the spec's: the Delivery can't tell when it closes, so it doesn't hold #45 back.
-        fake.route("GET", &format!("/repos/{slug}/issues/45/dependencies/blocked_by"), 200, json!([{ "number": 41 }, { "number": 99 }]));
+        // #99 isn't the spec's but is closed, so it doesn't hold #45 back; #46 waits on an open issue of another repo.
+        fake.route("GET", &format!("/repos/{slug}/issues/45/dependencies/blocked_by"), 200, json!([{ "number": 41 }, { "number": 99, "state": "closed" }]));
+        let elsewhere = json!({ "number": 98, "state": "open", "repository_url": format!("{}/repos/octo/elsewhere", crate::github::api_base()) });
+        fake.route("GET", &format!("/repos/{slug}/issues/46/dependencies/blocked_by"), 200, json!([elsewhere]));
         let start = |id: String| crate::delivery::start_from_issue(State(st.clone()), Path(id));
 
         let v = start(spec.id.clone()).await.unwrap().0;
@@ -4741,9 +4897,9 @@ pub(crate) mod tests {
         assert_eq!((&posts(&fake, slug, "pulls")[0]["head"], &posts(&fake, slug, "pulls")[0]["body"]), (&json!("spec/40-rounds"), &json!("Closes #40")));
         assert!(woken(&st, &dev)[0].contains("build ticket #45 \"Ticket 45\""));
         let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
-        let shape: Vec<(i64, &str, Vec<i64>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone())).collect();
-        assert_eq!(shape, vec![(41, "closed", vec![]), (42, "elsewhere", vec![]), (43, "open", vec![42]), (45, "started", vec![41])]);
-        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "agent_id": null, "agent_name": null }));
+        let shape: Vec<(i64, &str, Vec<i64>, Vec<String>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone(), t.waiting_on.clone())).collect();
+        assert_eq!(shape, vec![(41, "closed", vec![], vec![]), (42, "elsewhere", vec![], vec![]), (43, "open", vec![42], vec![]), (45, "started", vec![41], vec![]), (46, "open", vec![], vec!["octo/elsewhere#98".to_string()])]);
+        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "waiting_on": [], "agent_id": null, "agent_name": null }));
         assert_eq!(v["current"], json!({ "number": 45, "title": "Ticket 45" }));
 
         // Again, or on another device: who has it, and nothing started twice.
