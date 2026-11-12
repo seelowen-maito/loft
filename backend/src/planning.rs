@@ -2713,6 +2713,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn two_specs_with_the_same_number_in_different_repos_start_apart() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "same-no", None);
+        let dev = busy(&st, "Builder", "same-no", "dev");
+        for repo in ["octo/one", "octo/two"] {
+            crate::delivery::record_spec(&st, repo, 1, "same-no", &a.id, "spec/1-x");
+            crate::delivery::record_ticket(&st, repo, 1, 2, "Store", vec![]);
+            fake.route("POST", &format!("/repos/{repo}/issues/2/labels"), 200, json!([{ "name": "in-progress" }]));
+        }
+        let entry = |repo: &str| json!({ "repo": repo, "spec": { "number": 1, "title": repo, "url": "" }, "tickets": [], "delivery": { "repo": repo, "spec": 1 } });
+        let mut card = entry("octo/one");
+        card["more"] = json!([entry("octo/two")]);
+        card["next_message"] = json!("");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "x", json!({ "grill": { "role": "summary", "final": true, "end_card": card } })).unwrap();
+
+        let v = press_with(&st, &a, &m, json!({ "repo": "octo/two", "spec": 1 })).await.unwrap();
+        let card = &v["message"]["meta"]["grill"]["end_card"];
+        assert!(card["delivery"]["started"].is_null(), "{card}");
+        assert_eq!(card["more"][0]["delivery"]["started"]["ticket"], 2);
+        assert_eq!(st.db.get_delivery("octo/two", 1).unwrap().unwrap().state, "running");
+        assert_eq!(st.db.get_delivery("octo/one", 1).unwrap().unwrap().state, "planned");
+
+        let v = press_with(&st, &a, &m, json!({ "repo": "octo/one", "spec": 1 })).await.unwrap();
+        assert_eq!(v["duplicate"], false);
+        assert_eq!(v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["ticket"], 2);
+        assert_eq!(woken(&st, &dev).len(), 2);
+        assert!(press_with(&st, &a, &m, json!({ "repo": "octo/three", "spec": 1 })).await.is_err());
+    }
+
+    #[tokio::test]
     async fn start_delivery_wakes_the_dev_on_the_first_unblocked_ticket_once() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-start";

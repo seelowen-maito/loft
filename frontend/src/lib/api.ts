@@ -706,8 +706,8 @@ export const api = {
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
   /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
-  startDelivery: (id: string, messageId: number, spec: number, initGit = false) =>
-    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery?spec=${spec}${initGit ? "&init_git=true" : ""}`),
+  startDelivery: (id: string, messageId: number, repo: string, spec: number, initGit = false) =>
+    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery?repo=${encodeURIComponent(repo)}&spec=${spec}${initGit ? "&init_git=true" : ""}`),
   /** Where a Delivery stands: for a plan kept in Loft, "ready" means Merge can run. */
   deliveryState: (repo: string, spec: number) =>
     req<{ state: string; local: boolean; branch: string; base: string }>("GET", `/deliveries/state?repo=${encodeURIComponent(repo)}&spec=${spec}`),

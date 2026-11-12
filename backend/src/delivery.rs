@@ -2517,8 +2517,9 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
 pub struct StartQuery {
     /// The user said yes to setting up git in a project folder that has none.
     init_git: bool,
-    /// Which spec of a card with several; the card's first one when absent.
+    /// Which spec of a card with several, as `repo` and `spec` (two repos can each have a #1); the card's first one when absent.
     spec: Option<i64>,
+    repo: Option<String>,
 }
 
 /// The project folder of a plan kept in Loft that hasn't started, when it has no git at all: a folder in
@@ -2539,15 +2540,13 @@ pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Pat
     let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
     // The card's first spec sits at its top, the others in `more`.
     let end = &m.meta["grill"]["end_card"];
-    let entry = match q.spec {
-        Some(n) if end["delivery"]["spec"].as_i64() != Some(n) => end["more"].as_array().and_then(|a| a.iter().position(|e| e["delivery"]["spec"].as_i64() == Some(n))),
-        _ => None,
-    };
+    let is = |d: &Value| q.spec.is_none_or(|n| d["spec"].as_i64() == Some(n)) && q.repo.as_deref().is_none_or(|r| d["repo"].as_str() == Some(r));
+    let entry = if is(&end["delivery"]) { None } else { end["more"].as_array().and_then(|a| a.iter().position(|e| is(&e["delivery"]))) };
     let card = &match entry {
         Some(i) => &end["more"][i],
         None => end,
     }["delivery"];
-    if q.spec.is_some_and(|n| card["spec"].as_i64() != Some(n)) {
+    if !is(card) {
         return Err(bad("This card has no such spec."));
     }
     let (Some(repo), Some(spec)) = (card["repo"].as_str(), card["spec"].as_i64()) else {

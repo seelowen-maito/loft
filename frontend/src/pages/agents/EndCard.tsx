@@ -21,9 +21,12 @@ function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; in
   return inLoft ? <Link to={i.url} className={cls}>{inner}</Link> : <a href={i.url} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>;
 }
 
-/** Who started `spec`, read from the card the backend sends back. */
-function startedOf(card: Card | undefined, spec: number): DeliveryStarted | null {
-  return [card, ...(card?.more ?? [])].find((c) => c?.delivery?.spec === spec)?.delivery?.started ?? null;
+/** A spec's key on the card: two repos can each have a #1. */
+const keyOf = (d: { repo: string; spec: number }) => `${d.repo}#${d.spec}`;
+
+/** Who started this spec, read from the card the backend sends back. */
+function startedOf(card: Card | undefined, d: { repo: string; spec: number }): DeliveryStarted | null {
+  return [card, ...(card?.more ?? [])].find((c) => c?.delivery && keyOf(c.delivery) === keyOf(d))?.delivery?.started ?? null;
 }
 
 type Run = (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => Promise<void>;
@@ -38,10 +41,10 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: 
   const start = (initGit: boolean) =>
     run("start", async () => {
       if (!delivery) return;
-      const r = await api.startDelivery(agentId, messageId, delivery.spec, initGit);
+      const r = await api.startDelivery(agentId, messageId, delivery.repo, delivery.spec, initGit);
       if (r.needs_git) return setAskGit(r.dir ?? "the project folder");
       setAskGit(null);
-      setStarted(startedOf(r.message.meta?.grill?.end_card, delivery.spec));
+      setStarted(startedOf(r.message.meta?.grill?.end_card, delivery));
     });
   const startedOn = started ?? (typeof outcome === "object" ? outcome : null) ?? delivery?.started ?? null;
   // A plan kept in Loft ends with Merge, once its reviews passed.
@@ -130,20 +133,20 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const shown = sent || !!setup?.sent_at;
   const items: CardSpec[] = [card, ...(card.more ?? [])];
   // Start every spec: one after the other, each on its own Lead; a spec that can't start says why, the rest go on.
-  const [outcome, setOutcome] = useState<Record<number, DeliveryStarted | string>>({});
-  const todo = items.filter((i) => i.delivery && !i.delivery.started && typeof outcome[i.delivery.spec] !== "object");
+  const [outcome, setOutcome] = useState<Record<string, DeliveryStarted | string>>({});
+  const todo = items.filter((i) => i.delivery && !i.delivery.started && typeof outcome[keyOf(i.delivery)] !== "object");
   const startAll = () =>
     run("start", async () => {
       for (const { delivery } of todo) {
         if (!delivery) continue;
         let result: DeliveryStarted | string;
         try {
-          const r = await api.startDelivery(agentId, messageId, delivery.spec);
-          result = r.needs_git ? "Has no git yet: start it on its own." : (startedOf(r.message.meta?.grill?.end_card, delivery.spec) ?? "Didn't start.");
+          const r = await api.startDelivery(agentId, messageId, delivery.repo, delivery.spec);
+          result = r.needs_git ? "Has no git yet: start it on its own." : (startedOf(r.message.meta?.grill?.end_card, delivery) ?? "Didn't start.");
         } catch (e) {
           result = (e as Error).message;
         }
-        setOutcome((o) => ({ ...o, [delivery.spec]: result }));
+        setOutcome((o) => ({ ...o, [keyOf(delivery)]: result }));
       }
     });
   return (
@@ -151,7 +154,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       {/* No repo: the plan was kept as Loft issues. */}
       <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {[...new Set(items.map((i) => i.repo || "kept in Loft"))].join(" · ")}</div>
       <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
-        {items.map((item, i) => <SpecBlock key={item.delivery?.spec ?? item.spec?.url ?? i} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={outcome[item.delivery?.spec ?? 0]} />)}
+        {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} />)}
       </div>
       {setup && (
         <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
