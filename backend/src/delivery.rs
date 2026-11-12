@@ -113,6 +113,12 @@ pub fn local_of(state: &AppState, project: &str, spec_id: &str) -> Option<Delive
     state.db.deliveries(&local_repo(project), false).ok()?.into_iter().find(|d| d.spec_id == spec_id)
 }
 
+/// The Delivery kept in Loft whose spec (or standalone ticket) is Loft issue `id`, in whichever project it
+/// started: one whose issue moved to another project since keeps it.
+fn local_of_issue(state: &AppState, id: &str) -> Option<Delivery> {
+    state.db.all_deliveries().ok()?.into_iter().find(|d| d.local && d.spec_id == id)
+}
+
 /// The Delivery of a plan kept in Loft, made when its spec is saved: the next number in the project, and
 /// the spec branch `spec/<number>-<slug>` it gets in the project's own repo when it starts.
 pub fn record_local_spec(state: &AppState, project: &str, spec_id: &str, title: &str, planner: &str) {
@@ -2586,7 +2592,7 @@ fn delivery_of_issue(state: &AppState, id: &str) -> Result<Delivery, crate::api:
 /// One kept in Loft stays its Delivery after the issue is published to GitHub.
 fn delivery_of_task(state: &AppState, t: &crate::db::Task) -> Option<Delivery> {
     let github = t.github.as_ref().and_then(|g| state.db.get_delivery(&g.repo, g.number).ok().flatten().filter(|d| !d.local));
-    github.or_else(|| local_of(state, &t.project, &t.id))
+    github.or_else(|| local_of_issue(state, &t.id))
 }
 
 /// A Delivery card button's answer: the Delivery as the card shows it now, and what the button did.
@@ -2707,7 +2713,7 @@ pub async fn resume_route(State(state): State<AppState>, Json(w): Json<Which>) -
 pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
     // A Loft issue's Delivery stays kept in Loft once the issue is published: no second one on GitHub.
-    let Some(g) = t.github.clone().filter(|_| local_of(&state, &t.project, &t.id).is_none()) else {
+    let Some(g) = t.github.clone().filter(|_| local_of_issue(&state, &t.id).is_none()) else {
         return start_loft_issue(&state, &t).await;
     };
     let (repo, n) = (g.repo.clone(), g.number);
@@ -2751,7 +2757,7 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
     if project.is_empty() {
         return Err(bad("Pick a project first: its Delivery runs in the project's own repo."));
     }
-    if local_of(state, project, &t.id).is_none() {
+    if local_of_issue(state, &t.id).is_none() {
         if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
             return Err(bad("This spec has no Delivery yet: its tickets get one when they're published with publish_tickets."));
         }
@@ -2765,7 +2771,7 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
         let _held = state.publish_locks.of(&local_repo(project)).lock_owned().await;
         record_local_standalone(state, project, &t.id, &t.title, planner);
     }
-    let d = local_of(state, project, &t.id).ok_or("The Delivery record couldn't be saved.").map_err(bad)?;
+    let d = local_of_issue(state, &t.id).ok_or("The Delivery record couldn't be saved.").map_err(bad)?;
     let s = start(state, &d.repo, d.spec, "").await.map_err(bad)?;
     let mut v = delivery_json(state, &state.db.get_delivery(&d.repo, d.spec)?.ok_or_else(not_found)?);
     v["ok"] = json!(true);

@@ -5380,6 +5380,14 @@ pub(crate) mod tests {
         assert_eq!(shown(t.id.clone()).await["agent_name"], "dev agent");
         assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
         st.db.save_task(&crate::db::Task { github: None, ..linked }).unwrap();
+        // Moved to another project meanwhile: it keeps its Delivery, and starts no second one.
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("elsewhere")).unwrap();
+        let moved = st.db.get_task(&t.id).unwrap().unwrap();
+        st.db.save_task(&crate::db::Task { project: "elsewhere".into(), ..moved.clone() }).unwrap();
+        assert_eq!(shown(t.id.clone()).await["agent_name"], "dev agent");
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        assert_eq!(st.db.all_deliveries().unwrap().len(), 1, "no second Delivery");
+        st.db.save_task(&moved).unwrap();
         assert_eq!(woken(&st, dev).len(), 1);
 
         tool(&st, dev, "submit_ticket", json!({ "number": t.id, "commits": ["abc1234def"] })).await.unwrap();
