@@ -59,6 +59,12 @@ struct TaskDetailView: View {
                     if let labels = t.labels, !labels.isEmpty {
                         IssueLabels(labels: labels)
                     }
+                    // A spec's project sits up here too, not only under Details.
+                    if SpecViews.isSpec(t), !t.project.isEmpty {
+                        Label(t.project, systemImage: "folder").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityLabel("Project \(t.project)")
+                            .accessibilityIdentifier("specProject")
+                    }
                 }
                 .padding(.vertical, 4)
                 if !t.description.isEmpty {

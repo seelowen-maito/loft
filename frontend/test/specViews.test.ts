@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, boardIssues, deliveryOf, parseBoard, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -78,6 +78,12 @@ test("dropped specs stay off the board unless asked for, and a fork's spec and i
   assert.deepEqual(ids({ stages: ["shipped"], showDropped: true }), ["d", "u"]);
   assert.deepEqual(all.map(specRef), ["me/loft#26", "me/loft#83", "up/loft#265"], "each card says which repo it is");
   assert.equal(specRef(task({ project: "web" })), "Loft · web");
+});
+
+test("a spec card names its project once: next to a GitHub ref, and only in the ref of a plan kept in Loft", () => {
+  assert.deepEqual(specMeta(task({ project: "web", github: { repo: "me/loft", number: 26 } })), { ref: "me/loft#26", project: "web" });
+  assert.deepEqual(specMeta(task({ project: "web" })), { ref: "Loft · web", project: null }, "not twice");
+  assert.deepEqual(specMeta(task({ project: "", github: { repo: "me/loft", number: 26 } })), { ref: "me/loft#26", project: null }, "no project, nothing added");
 });
 
 test("the board's open pane is in the URL, with the spec it came from, and leaves the filters alone", () => {

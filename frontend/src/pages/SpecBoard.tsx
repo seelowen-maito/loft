@@ -6,7 +6,7 @@ import { Origin } from "../components/Origin";
 import { parseFilters, withFilters } from "../lib/issueFilters";
 import { Sticker } from "../components/Sticker";
 import { GithubUser } from "../components/GithubUser";
-import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specRef, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
+import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specMeta, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
 /* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable).
@@ -77,13 +77,13 @@ function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; age
 }
 
 function SpecHead({ s, v, children }: { s: Task; v: View; children?: React.ReactNode }) {
-  const d = deliveryOf(s, v.deliveries), stage = stageOf(s, d), p = progressOf(s, d, v.tasks);
+  const d = deliveryOf(s, v.deliveries), stage = stageOf(s, d), p = progressOf(s, d, v.tasks), m = specMeta(s);
   return (
     <button onClick={() => v.openSpec(s.id)} className="block w-full space-y-1.5 text-left">
       <div className="flex flex-wrap items-start gap-x-2 gap-y-1"><span className={cx("min-w-[9rem] flex-1 leading-snug", v.o.dense ? "truncate text-[12.5px]" : "text-[13px]")}>{s.title}</span><Badge stage={stage} d={d} /></div>
       {p && <Bar {...p} stage={stage} />}
       {!v.o.dense && <Who d={d} agentById={v.agentById} />}
-      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{specRef(s)}</span>{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}{s.owner && <span className="ml-auto text-fg-2"><GithubUser login={s.owner} bare /></span>}</div>
+      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{m.ref}</span>{m.project && <span title="Project">{m.project}</span>}{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}{s.owner && <span className="ml-auto text-fg-2"><GithubUser login={s.owner} bare /></span>}</div>
       {children}
     </button>
   );

@@ -104,6 +104,11 @@ enum SpecViews {
         return "Loft" + (spec.project.isEmpty ? "" : " · \(spec.project)")
     }
 
+    /// The project a spec row shows next to its ref; nil when the ref already names it (a plan kept in Loft) or there is none.
+    static func project(_ spec: HBTask) -> String? {
+        spec.github == nil || spec.project.isEmpty ? nil : spec.project
+    }
+
     /// Tickets done of all: the Delivery's, else GitHub's sub-issue count, else the spec's sub-issues in Loft; nil when none.
     static func progress(of spec: HBTask, _ d: DeliverySummary?, tasks: [HBTask]) -> (done: Int, total: Int)? {
         if let d, !d.tickets.isEmpty { return (d.tickets.filter { $0.state == "closed" }.count, d.tickets.count) }
