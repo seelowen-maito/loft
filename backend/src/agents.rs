@@ -377,6 +377,8 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     if req.tool_name == "Kill" && decision == "allow_always" {
         anyhow::ensure!(crate::processes::kill_spec(&req.rule).is_some(), "there is no rule for this kill: allow it once");
     }
+    // A change to a user's checkout is allowed one command at a time: a saved rule would turn the guard off there.
+    anyhow::ensure!(!(req.tool_name == "Checkout" && decision == "allow_always"), "a change to your checkout can only be allowed once");
     let persist = decision == "allow_always" || (allow && req.source == "request");
     req.status = match (allow, persist) {
         (false, _) => "denied",
@@ -1166,6 +1168,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
         .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
+        .env(crate::kill_guard::URL_VAR, format!("http://127.0.0.1:{}/guard/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())

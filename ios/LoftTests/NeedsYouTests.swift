@@ -14,6 +14,7 @@ final class NeedsYouTests: XCTestCase {
         for rule in [nil, ""] { XCTAssertFalse(request("Kill", rule).canAlwaysAllow, rule ?? "nil") }
         XCTAssertTrue(request("Bash", "Bash(git *)").canAlwaysAllow)
         XCTAssertTrue(request("Bash", nil).canAlwaysAllow)
+        for rule in [nil, "", "Checkout(/d/loft)"] { XCTAssertFalse(request("Checkout", rule).canAlwaysAllow, rule ?? "nil") }
     }
 
     func testTheBackendsFixtureDecodes() throws {

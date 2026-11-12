@@ -582,11 +582,12 @@ pub fn cli() -> ! {
     }
 }
 
-/// A plain HTTP/1.1 POST to Loft on localhost, with no runtime to start: this runs inside an agent's command.
-/// No read timeout: a kill of someone else's process waits for the user.
-fn post(url: &str, body: &str) -> anyhow::Result<Value> {
-    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!("bad {URL_VAR}"))?;
-    let (host, path) = rest.split_once('/').ok_or_else(|| anyhow::anyhow!("bad {URL_VAR}"))?;
+/// A plain HTTP/1.1 POST to Loft on localhost, with no runtime to start: this runs inside an agent's command (and
+/// in the Bash hook). No read timeout: a kill of someone else's process, or a change to a user's checkout, waits for
+/// the user.
+pub fn post(url: &str, body: &str) -> anyhow::Result<Value> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!("bad Loft URL"))?;
+    let (host, path) = rest.split_once('/').ok_or_else(|| anyhow::anyhow!("bad Loft URL"))?;
     let mut s = std::net::TcpStream::connect(host)?;
     write!(
         s,

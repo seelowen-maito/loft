@@ -166,7 +166,8 @@ struct PermissionRequest: Codable, Identifiable, Hashable {
     /// Whether Always allow can save something. A Kill's rule is only ever one Loft made for a program it can
     /// name (the backend checks it), so an empty rule means none.
     var canAlwaysAllow: Bool {
-        toolName != "Kill" || !(rule ?? "").isEmpty
+        // A change to the user's checkout is only ever allowed once.
+        toolName != "Checkout" && (toolName != "Kill" || !(rule ?? "").isEmpty)
     }
 
     /// The whole request as text, for the explainer: the command, the file, the URL, or the input as JSON.
