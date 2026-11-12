@@ -3,7 +3,7 @@
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -25,6 +25,8 @@ pub enum Phase {
     /// A newer commit exists; waiting for running agents to finish.
     Waiting,
     Updating,
+    /// A newer build is on disk than the one running; a restart starts it.
+    Restart,
     Error,
 }
 
@@ -37,6 +39,17 @@ pub struct UpdateStatus {
     pub latest: Option<String>,
     pub running_agents: usize,
     pub error: Option<String>,
+    /// Why a restart hasn't happened, e.g. "2 agents are running".
+    pub why: Option<String>,
+}
+
+/// The commit this binary was built from (empty when it was built outside a git checkout).
+pub const BUILT_FROM: &str = env!("LOFT_COMMIT");
+
+/// Whether the build on disk was made after this process started, so it isn't the one running.
+pub fn newer_build_on_disk(started: SystemTime) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::fs::metadata(crate::signing::build_of(&exe)).and_then(|m| m.modified()).is_ok_and(|t| t > started)
 }
 
 /// True while an update is queued or being installed; the scheduler holds autonomous wake-ups then.
@@ -167,8 +180,10 @@ fn short(sha: &str) -> String {
 }
 
 pub async fn updater(state: AppState, root: PathBuf) {
-    // The commit this process was built from.
-    let built = run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string());
+    let started = SystemTime::now();
+    // The commit this process was built from, not the checkout's HEAD: a pull or a build the restart never
+    // followed leaves HEAD ahead of the running binary.
+    let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
     // A commit whose build failed; skipped until upstream moves on.
     let mut failed: Option<String> = None;
     loop {
@@ -188,6 +203,12 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 continue;
             }
         };
+        if newer_build_on_disk(started) {
+            let n = running_agents(&state);
+            set(&state, |s| *s = restart_status(&head, n, s.why.take()));
+            tokio::time::sleep(IDLE_POLL).await;
+            continue;
+        }
         match check(&root, &head).await {
             Err(e) => set(&state, |s| {
                 s.phase = Phase::Error;
@@ -210,7 +231,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 match install(&root).await {
                     Ok(()) => {
                         before_restart(&state).await;
-                        restart();
+                        restart(&state);
                     }
                     Err(e) => {
                         tracing::error!("update failed: {e:#}");
@@ -227,18 +248,62 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
+/// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
+/// doesn't check upstream while in this phase: the next update comes after the restart.
+fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
+    let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
+        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restart is refused until they finish", if running_agents == 1 { " is" } else { "s are" }))
+    });
+    UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
+}
+
 /// Replace this process with the build on disk (same args and env): after an update, the new build, which
-/// signs its own copy again. If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
-pub fn restart() -> ! {
-    if let Ok(exe) = std::env::current_exe() {
-        let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
-        tracing::error!("restart: exec failed: {err}");
-    }
-    std::process::exit(0)
+/// signs its own copy again. If exec fails, the old build keeps running and the status says why.
+pub fn restart(state: &AppState) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => return restart_failed(state, err),
+    };
+    let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
+    restart_failed(state, err)
+}
+
+fn restart_failed(state: &AppState, err: std::io::Error) {
+    tracing::error!("restart: exec failed: {err}");
+    // Stay up on the running build and say why it didn't switch.
+    set(state, |s| {
+        s.phase = Phase::Restart;
+        s.why = Some(format!("restart failed: {err}"));
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_running_commit_is_the_one_built_in() {
+        if super::BUILT_FROM.is_empty() {
+            return;
+        }
+        // Built from a checkout, so the embedded commit is a full sha; it's what `current` shows (7 chars).
+        assert_eq!(super::BUILT_FROM.len(), 40, "{:?}", super::BUILT_FROM);
+        assert_eq!(super::short(super::BUILT_FROM).len(), 7);
+    }
+
+    #[test]
+    fn a_failed_restart_keeps_its_reason_across_loop_ticks() {
+        let failed = Some("restart failed: boom".to_string());
+        assert_eq!(super::restart_status("abcdef012", 2, failed.clone()).why, failed);
+        assert_eq!(super::restart_status("abcdef012", 0, None).why, None);
+        assert!(super::restart_status("abcdef012", 1, Some("1 agent is running".into())).why.unwrap().starts_with("1 agent is"));
+    }
+
+    #[test]
+    fn a_build_made_after_start_is_a_newer_build() {
+        use std::time::{Duration, SystemTime};
+        assert!(!super::newer_build_on_disk(SystemTime::now() + Duration::from_secs(3600)));
+        assert!(super::newer_build_on_disk(SystemTime::UNIX_EPOCH));
+    }
+
     #[test]
     fn node_modules_made_by_npm_is_stale() {
         assert!(super::stale_modules(false));
