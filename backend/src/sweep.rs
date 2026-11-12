@@ -538,7 +538,7 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
             i.warning.clear();
             if working {
                 (i.blocked, i.ticked) = ("Working".into(), false);
-            } else if holds_git(&e.path(), 3) {
+            } else if holds_git(&e.path()) {
                 (i.blocked, i.ticked) = ("Holds a git clone: move it or delete it by hand".into(), false);
             }
             items.push(i);
@@ -654,12 +654,13 @@ fn is_test_output(path: &Path) -> bool {
     m.is_file() && (ends(".log") || (ends(".txt") && m.len() > BIG_TXT))
 }
 
-/// Whether `path` is or holds (up to 3 folders down) a `.git`: a clone, which only Clean's git check may clear.
-fn holds_git(path: &Path, depth: usize) -> bool {
+/// Whether `path` is or holds, at any depth, a `.git`: a clone, which only Clean's git check may clear. Symlinks
+/// aren't followed.
+fn holds_git(path: &Path) -> bool {
     if path.file_name().is_some_and(|n| n == ".git") || path.join(".git").symlink_metadata().is_ok() {
         return true;
     }
-    depth > 0 && std::fs::read_dir(path).into_iter().flatten().flatten().any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && holds_git(&e.path(), depth - 1))
+    std::fs::read_dir(path).into_iter().flatten().flatten().any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && holds_git(&e.path()))
 }
 
 /// When `path` last changed: its newest file's mtime or ctime, whichever is later. A copy that kept old mtimes
@@ -722,7 +723,7 @@ fn plan_scratch(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool,
                 p.skipped.push(skip(&id, &rel(&path), "symlink"));
                 continue;
             }
-            if holds_git(&path, 3) {
+            if holds_git(&path) {
                 p.skipped.push(skip(&id, &rel(&path), "holds a git clone"));
                 continue;
             }
@@ -864,11 +865,15 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
         return Err("git history: never deleted");
     }
     let main = mains(parts[0]).contains_key(parts[1]);
+    // Nothing inside a clone of `scratch/` or `notes/` goes by path, a log included.
+    if !main && parts.len() > 2 && (2..parts.len()).any(|k| root.join(parts[..k].join("/")).join(".git").symlink_metadata().is_ok()) {
+        return Err("inside a git clone");
+    }
     match (parts.len(), main) {
         (2, _) => Ok(()),
         (_, true) if p.is_dir() => Ok(()),
         (_, true) => Err("not a folder"),
-        (3, false) if parts[1] == "scratch" && holds_git(&p, 3) => Err("holds a git clone"),
+        (3, false) if parts[1] == "scratch" && holds_git(&p) => Err("holds a git clone"),
         (3, false) if parts[1] == "scratch" => Ok(()),
         (_, false) if parts[1] == "notes" && is_test_output(&p) => Ok(()),
         (_, false) => Err("not inside a main clone"),
@@ -2318,6 +2323,15 @@ mod tests {
             assert!(!i.ticked && i.blocked.starts_with("Holds a git clone"), "{rel}");
         }
         assert!(!items.iter().any(|i| i.rel.starts_with("notes/clone/")), "a clone in notes isn't opened");
+        // A clone deeper than 3 folders is seen too.
+        git(&ws.join("scratch/414/a/b/c/d/deep"), &["init", "-q"]);
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now() + Duration::from_secs(8 * 24 * 3600), &ticket_of, &mut p);
+        assert_eq!(planned(&p), ["scratch/plain"], "{:?}", p.skipped);
+        assert!(p.skipped.contains(&skip(&a.id, "scratch/414", "holds a git clone")));
+        // A log inside a clone in notes/ can't be removed by path.
+        let log = clean_paths(&st, Some(&a.id), vec![ws.join("notes/clone/dev.log")]).await;
+        assert!(log.lines.iter().all(|l| l.error.is_some()) && ws.join("notes/clone/dev.log").exists(), "{:?}", log.lines);
         // Not even by path.
         let log = clean_paths(&st, Some(&a.id), vec![ws.join("scratch/412"), ws.join("scratch/pra")]).await;
         assert!(log.lines.iter().all(|l| l.error.is_some()), "{:?}", log.lines);
