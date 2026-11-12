@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type UpdateStatus as Status } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
-import { refetchUntilNew } from "../lib/updateRefetch";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
@@ -12,6 +11,13 @@ export function UpdateStatus({ live }: { live: boolean }) {
   useEffect(() => {
     if (live) api.update().then(setS).catch(() => {});
   }, [live]);
+  // While a restart is due (or after a restart on its own) the page can't be told: ask again until it changes.
+  const restarting = s?.phase === "restart";
+  useEffect(() => {
+    if (!restarting) return setBusy(false);
+    const t = setInterval(() => api.update().then(setS).catch(() => {}), 3000);
+    return () => clearInterval(t);
+  }, [restarting]);
   useServerEvents(
     useCallback((e: ServerEvent) => {
       if (e.type === "update") setS(e.status);
@@ -34,18 +40,17 @@ export function UpdateStatus({ live }: { live: boolean }) {
 
   const restart = () => {
     setBusy(true);
-    api
-      .restart()
-      .then(() => refetchUntilNew(api.update, setS))
-      .catch((e) => alert((e as Error).message))
-      .finally(() => setBusy(false));
+    api.restart().catch((e) => {
+      alert((e as Error).message);
+      setBusy(false);
+    });
   };
   return (
     <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-3" title={title}>
       <span className={cx("size-1.5 rounded-full", dot)} />
       {label}
       {s.phase === "restart" && (
-        <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={busy || s.running_agents > 0} onClick={restart}>
+        <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={(busy && !s.why?.startsWith("restart failed")) || s.running_agents > 0} onClick={restart}>
           Restart
         </button>
       )}

@@ -223,7 +223,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 before_restart(&state).await;
                 restart(&state);
                 retry_at = Some(std::time::Instant::now() + backoff);
-                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                backoff = next_backoff(backoff);
             }
             tokio::time::sleep(IDLE_POLL).await;
             continue;
@@ -265,6 +265,10 @@ pub async fn updater(state: AppState, root: PathBuf) {
         }
         tokio::time::sleep(CHECK_EVERY).await;
     }
+}
+
+fn next_backoff(b: Duration) -> Duration {
+    (b * 2).min(RESTART_BACKOFF_MAX)
 }
 
 /// Restart now: no agent runs, and a failed exec's backoff is over.
@@ -343,7 +347,7 @@ mod tests {
         let mut b = super::RESTART_BACKOFF;
         let mut seen = vec![b.as_secs()];
         for _ in 0..6 {
-            b = (b * 2).min(super::RESTART_BACKOFF_MAX);
+            b = super::next_backoff(b);
             seen.push(b.as_secs());
         }
         assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600]);
