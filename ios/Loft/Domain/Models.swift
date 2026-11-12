@@ -114,7 +114,6 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     var clientId: String? { meta?["client_id"]?.stringValue }
     var taskId: String? { meta?["task_id"]?.stringValue }
     var toolName: String? { meta?["name"]?.stringValue }
-    var permissionRequestId: String? { meta?["request_id"]?.stringValue }
 
     /// The task a message is about: from `meta.task_id`, or the `[Task <id>]` tag briefs and reports start with.
     var referencedTaskId: String? { taskId ?? Self.splitTaskTag(content).id }

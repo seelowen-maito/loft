@@ -1631,12 +1631,14 @@ impl Db {
     }
 
     /// Records on an end-of-planning card that its Delivery started: who got which ticket.
-    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, started: &Value) -> Result<()> {
+    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, entry: Option<usize>, started: &Value) -> Result<()> {
         let c = self.0.lock().unwrap();
+        // The card's first spec sits at its top; the others in `more`.
+        let at = entry.map_or("$.grill.end_card".to_string(), |i| format!("$.grill.end_card.more[{i}]"));
         c.execute(
-            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.delivery.started', json(?3))
-             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.delivery') = 'object'",
-            params![agent_id, id, started.to_string()],
+            "UPDATE messages SET meta = json_set(meta, ?3 || '.delivery.started', json(?4))
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, ?3 || '.delivery') = 'object'",
+            params![agent_id, id, at, started.to_string()],
         )?;
         Ok(())
     }

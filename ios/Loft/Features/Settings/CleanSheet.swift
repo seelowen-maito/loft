@@ -251,12 +251,6 @@ struct CleanSheet: View {
         checks[i.path] = .some(c)
     }
 
-    private func checkAll(_ items: [CleanItem]) {
-        Task {
-            for i in items where i.canCheck { await runCheck(i) }
-        }
-    }
-
     private func open(_ i: CleanItem) {
         if inside[i.path] != nil {
             inside[i.path] = nil

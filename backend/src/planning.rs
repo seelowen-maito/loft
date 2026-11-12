@@ -2656,6 +2656,93 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_grill_that_published_two_specs_ends_with_both_and_starts_each() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/two-specs";
+        let a = planner_on(&st, "two-specs", Some("git@github.com:octo/two-specs.git"));
+        tickets_repo(&fake, slug, 40, &[40, 41, 50, 51]);
+        fake.route("GET", &format!("/repos/{slug}/issues/50/sub_issues"), 200, json!([]));
+        fake.route("POST", &format!("/repos/{slug}/issues/50/sub_issues"), 201, json!({}));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
+        for n in [41, 51] {
+            fake.route("POST", &format!("/repos/{slug}/issues/{n}/labels"), 200, json!([{ "name": "in-progress" }]));
+        }
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "First").await.unwrap();
+        publish_tickets(&st, &a, Some(40), vec![ticket("Store", &[])]).await.unwrap();
+        publish(&st, &a, "Second").await.unwrap();
+        publish_tickets(&st, &a, Some(50), vec![ticket("Sync", &[])]).await.unwrap();
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+
+        let m = summary(&st, &a);
+        let card = &m.meta["grill"]["end_card"];
+        // The first spec sits at the top as before; the second is in `more`, titled and with its own Delivery.
+        assert_eq!((&card["spec"]["number"], &card["spec"]["title"], &card["delivery"]), (&json!(40), &json!("First"), &json!({ "repo": slug, "spec": 40 })));
+        assert_eq!(card["tickets"][0]["number"], 41);
+        let more = card["more"].as_array().unwrap();
+        assert_eq!(more.len(), 1, "{card}");
+        assert_eq!((&more[0]["spec"]["number"], &more[0]["spec"]["title"], &more[0]["tickets"][0]["number"]), (&json!(50), &json!("Second"), &json!(51)));
+        assert_eq!(more[0]["delivery"], json!({ "repo": slug, "spec": 50 }));
+
+        // Start delivery on the second spec starts that one and marks it on the card, not the first.
+        busy(&st, "Builder", "two-specs", "dev");
+        let v = press_with(&st, &a, &m, json!({ "spec": 50 })).await.unwrap();
+        let card = &v["message"]["meta"]["grill"]["end_card"];
+        assert_eq!(card["more"][0]["delivery"]["started"]["ticket"], 51, "{card}");
+        assert!(card["delivery"]["started"].is_null());
+        assert_eq!(st.db.get_delivery(slug, 50).unwrap().unwrap().state, "running");
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "planned");
+        assert!(press_with(&st, &a, &m, json!({ "spec": 99 })).await.is_err());
+
+        // Start all presses each spec in turn: the started one is a duplicate and wakes nobody again, the other starts.
+        let dev = st.db.list_agents().unwrap().into_iter().find(|x| x.name == "Builder").unwrap();
+        let woke = woken(&st, &dev).len();
+        let again = press_with(&st, &a, &m, json!({ "spec": 50 })).await.unwrap();
+        assert_eq!(again["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), woke);
+        let first = press_with(&st, &a, &m, json!({ "spec": 40 })).await.unwrap();
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["ticket"], 41);
+        assert_eq!(woken(&st, &dev).len(), woke + 1);
+        // Pressed again, nothing more starts on either spec.
+        for spec in [40, 50] {
+            assert_eq!(press_with(&st, &a, &m, json!({ "spec": spec })).await.unwrap()["duplicate"], true);
+        }
+        assert_eq!(woken(&st, &dev).len(), woke + 1);
+    }
+
+    #[tokio::test]
+    async fn two_specs_with_the_same_number_in_different_repos_start_apart() {
+        let (fake, st) = (fake_github(), state());
+        let a = planner_on(&st, "same-no", None);
+        let dev = busy(&st, "Builder", "same-no", "dev");
+        for repo in ["octo/one", "octo/two"] {
+            crate::delivery::record_spec(&st, repo, 1, "same-no", &a.id, "spec/1-x");
+            crate::delivery::record_ticket(&st, repo, 1, 2, "Store", vec![]);
+            fake.route("POST", &format!("/repos/{repo}/issues/2/labels"), 200, json!([{ "name": "in-progress" }]));
+        }
+        let entry = |repo: &str| json!({ "repo": repo, "spec": { "number": 1, "title": repo, "url": "" }, "tickets": [], "delivery": { "repo": repo, "spec": 1 } });
+        let mut card = entry("octo/one");
+        card["more"] = json!([entry("octo/two")]);
+        card["next_message"] = json!("");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "x", json!({ "grill": { "role": "summary", "final": true, "end_card": card } })).unwrap();
+
+        let v = press_with(&st, &a, &m, json!({ "repo": "octo/two", "spec": 1 })).await.unwrap();
+        let card = &v["message"]["meta"]["grill"]["end_card"];
+        assert!(card["delivery"]["started"].is_null(), "{card}");
+        assert_eq!(card["more"][0]["delivery"]["started"]["ticket"], 2);
+        assert_eq!(st.db.get_delivery("octo/two", 1).unwrap().unwrap().state, "running");
+        assert_eq!(st.db.get_delivery("octo/one", 1).unwrap().unwrap().state, "planned");
+
+        let v = press_with(&st, &a, &m, json!({ "repo": "octo/one", "spec": 1 })).await.unwrap();
+        assert_eq!(v["duplicate"], false);
+        assert_eq!(v["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["ticket"], 2);
+        assert_eq!(woken(&st, &dev).len(), 2);
+        assert!(press_with(&st, &a, &m, json!({ "repo": "octo/three", "spec": 1 })).await.is_err());
+    }
+
+    #[tokio::test]
     async fn start_delivery_wakes_the_dev_on_the_first_unblocked_ticket_once() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-start";

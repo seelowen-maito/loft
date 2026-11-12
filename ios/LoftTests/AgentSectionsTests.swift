@@ -27,4 +27,14 @@ final class AgentSectionsTests: XCTestCase {
         XCTAssertEqual(AgentsListView.sections([agent("Amy", group: "Loft")]).map(\.title), ["Loft"])
         XCTAssertTrue(AgentsListView.sections([]).isEmpty)
     }
+
+    func testChatTabGroupsLikeAgentsTabWithoutTheOrchestrator() {
+        let agents = [agent("Solo"), agent("Amy", group: "Loft"), agent("Lead A", group: "Loft", lead: true),
+                      agent("Orch", group: "Loft")]
+        let sections = ConversationsView.sections(agents, orchestratorId: "Orch")
+        XCTAssertEqual(sections.map(\.title), ["Leads", "Loft", "No group"])
+        XCTAssertEqual(sections.map(\.title), AgentsListView.sections(agents).map(\.title))
+        XCTAssertFalse(sections.flatMap(\.agents).contains { $0.id == "Orch" })
+        XCTAssertEqual(ConversationsView.sections(agents, orchestratorId: nil).flatMap(\.agents).count, agents.count)
+    }
 }

@@ -3,7 +3,7 @@
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -13,6 +13,8 @@ use crate::state::{AppState, Event};
 
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5);
+const RESTART_BACKOFF: Duration = Duration::from_secs(30);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// How soon turning auto-update on in Settings takes effect.
 const OFF_POLL: Duration = Duration::from_secs(5);
 
@@ -25,6 +27,8 @@ pub enum Phase {
     /// A newer commit exists; waiting for running agents to finish.
     Waiting,
     Updating,
+    /// A newer build is on disk than the one running; a restart starts it.
+    Restart,
     Error,
 }
 
@@ -37,11 +41,28 @@ pub struct UpdateStatus {
     pub latest: Option<String>,
     pub running_agents: usize,
     pub error: Option<String>,
+    /// Why a restart hasn't happened, e.g. "2 agents are running".
+    pub why: Option<String>,
 }
 
-/// True while an update is queued or being installed; the scheduler holds autonomous wake-ups then.
+/// The commit this binary was built from (empty when it was built outside a git checkout).
+pub const BUILT_FROM: &str = env!("LOFT_COMMIT");
+
+/// Whether the build on disk was made after this process started, so it isn't the one running.
+pub fn newer_build_on_disk(started: SystemTime) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::fs::metadata(crate::signing::build_of(&exe)).and_then(|m| m.modified()).is_ok_and(|t| t > started)
+}
+
+/// True while an update is queued, being installed or about to be restarted into; the scheduler holds
+/// autonomous wake-ups then. Not after a failed exec: that would hold them for as long as the retries fail.
 pub fn pending(state: &AppState) -> bool {
-    matches!(state.update.lock().unwrap().phase, Phase::Waiting | Phase::Updating)
+    let s = state.update.lock().unwrap();
+    match s.phase {
+        Phase::Waiting | Phase::Updating => true,
+        Phase::Restart => !s.why.as_deref().is_some_and(|w| w.starts_with("restart failed")),
+        _ => false,
+    }
 }
 
 fn set(state: &AppState, f: impl FnOnce(&mut UpdateStatus)) {
@@ -167,10 +188,15 @@ fn short(sha: &str) -> String {
 }
 
 pub async fn updater(state: AppState, root: PathBuf) {
-    // The commit this process was built from.
-    let built = run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string());
+    let started = SystemTime::now();
+    // The commit this process was built from, not the checkout's HEAD: a pull or a build the restart never
+    // followed leaves HEAD ahead of the running binary.
+    let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
     // A commit whose build failed; skipped until upstream moves on.
     let mut failed: Option<String> = None;
+    // After a failed exec: when to try again, and how long to wait after the next failure.
+    let mut retry_at: Option<std::time::Instant> = None;
+    let mut backoff = RESTART_BACKOFF;
     loop {
         if !state.settings.get().auto_update {
             set(&state, |s| *s = UpdateStatus::default());
@@ -188,6 +214,20 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 continue;
             }
         };
+        if newer_build_on_disk(started) {
+            let n = running_agents(&state);
+            set(&state, |s| *s = restart_status(&head, n, s.why.take()));
+            // Restart by itself once agents are idle, as an update does; `restart` only returns when exec failed.
+            let now = std::time::Instant::now();
+            if should_restart(n, now, retry_at) {
+                before_restart(&state).await;
+                restart(&state);
+                retry_at = Some(std::time::Instant::now() + backoff);
+                backoff = next_backoff(backoff);
+            }
+            tokio::time::sleep(IDLE_POLL).await;
+            continue;
+        }
         match check(&root, &head).await {
             Err(e) => set(&state, |s| {
                 s.phase = Phase::Error;
@@ -210,7 +250,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
                 match install(&root).await {
                     Ok(()) => {
                         before_restart(&state).await;
-                        restart();
+                        restart(&state);
                     }
                     Err(e) => {
                         tracing::error!("update failed: {e:#}");
@@ -227,18 +267,107 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
+fn next_backoff(b: Duration) -> Duration {
+    (b * 2).min(RESTART_BACKOFF_MAX)
+}
+
+/// Restart now: no agent runs, and a failed exec's backoff is over.
+fn should_restart(running_agents: usize, now: std::time::Instant, retry_at: Option<std::time::Instant>) -> bool {
+    running_agents == 0 && retry_at.is_none_or(|t| now >= t)
+}
+
+/// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
+/// doesn't check upstream in this phase (the commit it would compare is the old one, so it would rebuild what's
+/// already on disk): it restarts when idle, and the new process checks.
+fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
+    let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
+        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }))
+    });
+    UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
+}
+
 /// Replace this process with the build on disk (same args and env): after an update, the new build, which
-/// signs its own copy again. If exec fails, exit and leave the restart to the supervisor (e.g. launchd KeepAlive).
-pub fn restart() -> ! {
-    if let Ok(exe) = std::env::current_exe() {
-        let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
-        tracing::error!("restart: exec failed: {err}");
-    }
-    std::process::exit(0)
+/// signs its own copy again. If exec fails, the old build keeps running and the status says why.
+pub fn restart(state: &AppState) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => return restart_failed(state, err),
+    };
+    let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
+    restart_failed(state, err)
+}
+
+fn restart_failed(state: &AppState, err: std::io::Error) {
+    tracing::error!("restart: exec failed: {err}");
+    // Stay up on the running build and say why it didn't switch.
+    set(state, |s| {
+        s.phase = Phase::Restart;
+        s.why = Some(format!("restart failed: {err}"));
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_running_commit_is_the_one_built_in() {
+        if super::BUILT_FROM.is_empty() {
+            return;
+        }
+        // Built from a checkout, so the embedded commit is a full sha; it's what `current` shows (7 chars).
+        assert_eq!(super::BUILT_FROM.len(), 40, "{:?}", super::BUILT_FROM);
+        assert_eq!(super::short(super::BUILT_FROM).len(), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wake_ups_are_held_until_the_restart_unless_it_failed() {
+        let st = crate::tasks::tests::state();
+        let phase = |p: super::Phase, why: Option<&str>| {
+            *st.update.lock().unwrap() = super::UpdateStatus { phase: p, why: why.map(Into::into), ..Default::default() };
+            super::pending(&st)
+        };
+        assert!(phase(super::Phase::Restart, None));
+        assert!(phase(super::Phase::Restart, Some("1 agent is running; restarts when they finish")));
+        assert!(!phase(super::Phase::Restart, Some("restart failed: boom")));
+        assert!(!phase(super::Phase::UpToDate, None));
+    }
+
+    #[test]
+    fn a_restart_waits_for_idle_and_for_its_backoff() {
+        use std::time::Instant;
+        let now = Instant::now();
+        assert!(!super::should_restart(1, now, None));
+        assert!(super::should_restart(0, now, None));
+        assert!(!super::should_restart(0, now, Some(now + Duration::from_secs(5))));
+        assert!(super::should_restart(0, now, Some(now)));
+        assert!(!super::should_restart(2, now, Some(now)));
+    }
+
+    #[test]
+    fn the_restart_backoff_doubles_up_to_its_cap() {
+        let mut b = super::RESTART_BACKOFF;
+        let mut seen = vec![b.as_secs()];
+        for _ in 0..6 {
+            b = super::next_backoff(b);
+            seen.push(b.as_secs());
+        }
+        assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600]);
+    }
+
+    #[test]
+    fn a_failed_restart_keeps_its_reason_across_loop_ticks() {
+        let failed = Some("restart failed: boom".to_string());
+        assert_eq!(super::restart_status("abcdef012", 2, failed.clone()).why, failed);
+        assert_eq!(super::restart_status("abcdef012", 0, None).why, None);
+        assert!(super::restart_status("abcdef012", 1, Some("1 agent is running".into())).why.unwrap().starts_with("1 agent is"));
+    }
+
+    #[test]
+    fn a_build_made_after_start_is_a_newer_build() {
+        use std::time::{Duration, SystemTime};
+        assert!(!super::newer_build_on_disk(SystemTime::now() + Duration::from_secs(3600)));
+        assert!(super::newer_build_on_disk(SystemTime::UNIX_EPOCH));
+    }
+
     #[test]
     fn node_modules_made_by_npm_is_stale() {
         assert!(super::stale_modules(false));

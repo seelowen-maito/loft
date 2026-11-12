@@ -243,14 +243,19 @@ export type GrillSession = {
 export type PlannedIssue = { number: number; title: string; url: string };
 
 /** The end-of-planning card on a grill's final summary (`meta.grill.end_card`). */
-export type EndCard = {
+export type CardSpec = {
   repo: string;
   spec: PlannedIssue | null;
   tickets: PlannedIssue[];
-  /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
-  next_message: string;
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
   delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
+};
+
+/** The first spec sits at the top (older cards have only that one); further specs of the grill are in `more`. */
+export type EndCard = CardSpec & {
+  more?: CardSpec[];
+  /** Left in the composer after Clear context, never sent by Loft. Empty once every spec has a Delivery. */
+  next_message: string;
   /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
@@ -463,11 +468,13 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
+  /** For "restart": why the restart hasn't happened. */
+  why: string | null;
 };
 
 export type Settings = {
@@ -699,8 +706,8 @@ export const api = {
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
   /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
-  startDelivery: (id: string, messageId: number, initGit = false) =>
-    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery${initGit ? "?init_git=true" : ""}`),
+  startDelivery: (id: string, messageId: number, repo: string, spec: number, initGit = false) =>
+    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery?repo=${encodeURIComponent(repo)}&spec=${spec}${initGit ? "&init_git=true" : ""}`),
   /** Where a Delivery stands: for a plan kept in Loft, "ready" means Merge can run. */
   deliveryState: (repo: string, spec: number) =>
     req<{ state: string; local: boolean; branch: string; base: string }>("GET", `/deliveries/state?repo=${encodeURIComponent(repo)}&spec=${spec}`),
