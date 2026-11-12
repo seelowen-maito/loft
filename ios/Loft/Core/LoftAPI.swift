@@ -26,7 +26,7 @@ protocol LoftAPI: Sendable {
     /// "Start delivery" on the end-of-planning card `messageId`: the server starts the spec's first ready ticket
     /// on the team's Dev once and returns the card with `delivery.started` (`duplicate` when it had started).
     /// `initGit`: the user said yes to setting up git in a project folder that has none (`needsGit` came back).
-    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse
+    func startDelivery(agentId: String, messageId: Int64, repo: String, spec: Int, initGit: Bool) async throws -> SendMessageResponse
     /// A standalone ticket's or a spec's Delivery, for its issue page; nil when it has none.
     func issueDelivery(taskId: String) async throws -> IssueDelivery?
     /// The issue page's Delivery card buttons: Start delivery (once), Pause on a running one, Resume on a stalled
@@ -283,8 +283,10 @@ struct LiveLoftAPI: LoftAPI {
         try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/team-setup"))
     }
 
-    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
-        try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/start-delivery\(initGit ? "?init_git=true" : "")"))
+    func startDelivery(agentId: String, messageId: Int64, repo: String, spec: Int, initGit: Bool) async throws -> SendMessageResponse {
+        var query = [URLQueryItem(name: "repo", value: repo), URLQueryItem(name: "spec", value: String(spec))]
+        if initGit { query.append(URLQueryItem(name: "init_git", value: "true")) }
+        return try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/start-delivery", query: query))
     }
 
     func issueDelivery(taskId: String) async throws -> IssueDelivery? { try await get("/issues/\(taskId)/delivery") }
@@ -505,7 +507,7 @@ extension LoftAPI {
     }
     func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }
     func sendTeamSetup(agentId: String, messageId: Int64) async throws -> SendMessageResponse { throw APIError.unsupported("Team setup") }
-    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse { throw APIError.unsupported("Delivery") }
+    func startDelivery(agentId: String, messageId: Int64, repo: String, spec: Int, initGit: Bool) async throws -> SendMessageResponse { throw APIError.unsupported("Delivery") }
     func issueDelivery(taskId: String) async throws -> IssueDelivery? { nil }
     func issueDeliveryAction(taskId: String, _ action: IssueDeliveryAction) async throws -> IssueDeliveryReply { throw APIError.unsupported("Delivery") }
     func publishTask(id: String) async throws -> HBTask { throw APIError.unsupported("Publishing to GitHub") }
