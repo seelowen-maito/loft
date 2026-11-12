@@ -214,8 +214,13 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
-        // A kill with no program to name has no rule to save, so no Always.
-        let always = p.tool_name != "Kill" || crate::processes::kill_spec(&p.rule).is_some();
+        // A kill with no program to name has no rule to save, so no Always; a change to the user's checkout is only
+        // ever allowed once.
+        let always = match p.tool_name.as_str() {
+            "Kill" => crate::processes::kill_spec(&p.rule).is_some(),
+            "Checkout" => false,
+            _ => true,
+        };
         let mut actions = vec![action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" }))];
         if always {
             actions.push(action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })));
@@ -1123,12 +1128,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_kill_with_no_rule_offers_no_always_allow() {
+    async fn a_kill_with_no_rule_or_a_change_to_a_checkout_offers_no_always_allow() {
         let st = state();
         let dev = agent(&st, "Dev");
-        for (id, rule) in [("k1", "Kill(/d/*/App)"), ("k2", "")] {
+        for (id, tool, rule) in [("k1", "Kill", "Kill(/d/*/App)"), ("k2", "Kill", ""), ("c1", "Checkout", ""), ("c2", "Checkout", "Checkout(/d/loft)")] {
             st.db.save_permission(&PermissionRequest {
-                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: "Kill".into(), input: json!({ "command": "pkill sleep" }),
+                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: tool.into(), input: json!({ "command": "pkill sleep" }),
                 reason: String::new(), rule: rule.into(), status: "pending".into(), created_at: now(),
             }).unwrap();
         }
@@ -1136,6 +1141,8 @@ mod tests {
         let kinds = |id: &str| items.iter().find(|i| i.id == format!("permission:{id}")).unwrap().actions.iter().map(|a| a["kind"].as_str().unwrap()).collect::<Vec<_>>();
         assert!(kinds("k1").contains(&"approve_always"));
         assert_eq!(kinds("k2"), vec!["approve", "deny", "open"]);
+        assert_eq!(kinds("c1"), vec!["approve", "deny", "open"]);
+        assert_eq!(kinds("c2"), vec!["approve", "deny", "open"]);
     }
 
     #[tokio::test]

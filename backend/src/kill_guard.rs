@@ -335,11 +335,23 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
 }
 
 /// `path` with symlinks followed, even when it doesn't exist yet (a folder `clone` will make): its nearest folder that
-/// exists is resolved, and the rest put back on.
+/// exists is resolved, and the rest put back on. A dangling symlink on the way counts as where it points.
 fn real(path: PathBuf) -> PathBuf {
+    real_at(path, 0)
+}
+
+fn real_at(path: PathBuf, links: usize) -> PathBuf {
     for base in path.ancestors() {
+        let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
         if let Ok(r) = std::fs::canonicalize(base) {
-            return r.join(path.strip_prefix(base).unwrap_or(Path::new("")));
+            return r.join(rest);
+        }
+        // As many links as the system follows (a loop never resolves).
+        if links < 40
+            && let Ok(to) = std::fs::read_link(base)
+        {
+            let to = base.parent().map_or(to.clone(), |p| p.join(&to));
+            return real_at(to.join(rest), links + 1);
         }
     }
     path
@@ -1617,6 +1629,15 @@ mod tests {
         let new = std::fs::canonicalize(other.join("src")).unwrap().join("new");
         assert_eq!(asks("git clone /src link/new", &at(&ws)), Some(new.clone()));
         assert_eq!(asks("git init link/new", &at(&ws)), Some(new));
+        // A dangling symlink: where it points, not where it sits.
+        std::os::unix::fs::symlink(other.join("missing"), ws.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("../../../other/gone", ws.join("relative")).unwrap();
+        assert_eq!(asks("git clone /src dangling", &at(&ws)), Some(other.join("missing")));
+        assert_eq!(asks("git init dangling/sub", &at(&ws)), Some(other.join("missing/sub")));
+        assert_eq!(asks("git clone /src relative", &at(&ws)), Some(other.join("gone")));
+        // A loop of links doesn't hang: it stays where it is.
+        std::os::unix::fs::symlink(ws.join("loop"), ws.join("loop")).unwrap();
+        assert_eq!(asks("git clone /src loop", &at(&ws)), None);
         // A repository kept apart from its folder is judged by where it goes too.
         let apart = project.join("repo.git");
         for cmd in [format!("git clone --separate-git-dir {} /src mine", at(&apart)), format!("git init --separate-git-dir={} mine", at(&apart))] {
