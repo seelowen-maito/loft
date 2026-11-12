@@ -137,6 +137,18 @@ export function initialTicks(items: CleanItem[]): Set<string> {
   return new Set(items.filter((i) => i.ticked && !cleanStatus(i, 0).locked && !canCheck(i, 0)).map((i) => i.path));
 }
 
+/** Whether a finished Check leaves the row ticked: only "safe" does, so a re-check that finds unpushed work, or can't
+ * tell, unticks it. */
+export function ticksAfter(c: GitCheck): boolean {
+  return c.state === "safe";
+}
+
+/** What Delete selected removes: the ticked rows the table shows, and the folders opened inside them. A row the
+ * filters hide is never removed unseen, even if a late Check ticked it. */
+export function chosenRows(shown: CleanItem[], inside: Map<string, CleanItem[] | null>, ticked: Set<string>): CleanItem[] {
+  return shown.flatMap((i) => [i, ...(inside.get(i.path) ?? [])]).filter((i) => ticked.has(i.path));
+}
+
 /** Runs `fn` over `xs`, at most `limit` at a time; `onDone(n)` after each finishes. `fn` must not throw. */
 export async function inBatches<T>(xs: T[], limit: number, fn: (x: T) => Promise<void>, onDone: (n: number) => void = () => {}): Promise<void> {
   let next = 0;

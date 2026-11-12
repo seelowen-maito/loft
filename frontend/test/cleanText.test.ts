@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCheck, cleanState, filterClean, inBatches, initialTicks, selectable, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
+import { chosenRows, ticksAfter, canCheck, cleanState, filterClean, inBatches, initialTicks, selectable, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -125,4 +125,19 @@ test("Clean starts with the rows the API ticks, but not clones, locked rows or w
   const clone = { ...item(), ticked: true };
   const working = { ...out, path: "/s/b/x.log", blocked: "Working" };
   assert.deepEqual([...initialTicks([out, open, clone, working])], ["/s/a/dev.log"]);
+});
+
+test("only a safe check leaves a row ticked, so a re-check that finds trouble unticks it", () => {
+  assert.equal(ticksAfter({ state: "safe", lines: [] }), true);
+  assert.equal(ticksAfter({ state: "unsafe", lines: [] }), false);
+  assert.equal(ticksAfter({ state: "unknown", lines: [] }), false);
+});
+
+test("Delete selected takes only ticked rows the filters show, folders opened inside them included", () => {
+  const a = { ...item(), path: "/s/a/x" };
+  const hidden = { ...item(), path: "/s/b/y" };
+  const child = { ...item(), path: "/s/a/x/out", rel: "x/out" };
+  const ticked = new Set(["/s/a/x", "/s/b/y", "/s/a/x/out"]);
+  assert.deepEqual(chosenRows([a], new Map([[a.path, [child]]]), ticked).map((i) => i.path), ["/s/a/x", "/s/a/x/out"]);
+  assert.equal(chosenRows([a], new Map(), ticked).some((i) => i.path === hidden.path), false);
 });

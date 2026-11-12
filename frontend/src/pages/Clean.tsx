@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
-import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
+import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 
 /** Clean: every agent's workspace items in a full-screen table at `/settings/clean`, to filter, tick and delete. */
@@ -44,9 +44,8 @@ export default function CleanPage() {
       setStopping(null);
     }
   };
-  const confirm = async () => {
+  const confirm = async (paths: string[]) => {
     if (!table) return;
-    const paths = [...table.ticked];
     setShown({ at: null, what: "", title: "Cleaning…", running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
     // The log fills in as Loft removes each folder.
     let done = false;
@@ -103,7 +102,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
   busy: boolean;
   onTick: (paths: string[], on: boolean) => void;
   onStop: (agent: string) => void;
-  onConfirm: () => void;
+  onConfirm: (paths: string[]) => void;
 }) {
   // Folders listed inside opened items, by path; null while loading.
   const [inside, setInside] = useState<Map<string, CleanItem[] | null>>(new Map());
@@ -115,9 +114,6 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
   // Locked reasons opened to their full list, by path.
   const [more, setMore] = useState<Set<string>>(new Set());
   const { items, ticked } = table;
-  const known = [...items, ...[...inside.values()].flatMap((xs) => xs ?? [])];
-  const chosen = known.filter((i) => ticked.has(i.path));
-  const total = chosen.reduce((n, i) => n + i.bytes, 0);
   const toggle = (path: string, on: boolean) => onTick([path], on);
   // Progress of Check git on all: done of total, null when idle.
   const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
@@ -146,11 +142,11 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
       c = { state: "unknown", lines: [`Can't check: ${(e as Error).message}`] };
     }
     setChecks((cur) => new Map(cur).set(i.path, c));
-    // A clean check ticks the row.
-    if (c.state === "safe") onTick([i.path], true);
+    // A clean check ticks the row; any other result unticks it.
+    onTick([i.path], ticksAfter(c));
   };
   const checkAll = async () => {
-    const todo = shown.filter((i) => canCheck(i, 0) && !cleanState(i, 0).locked);
+    const todo = shown.filter((i) => canCheck(i, 0) && !cleanState(i, 0).locked && checks.get(i.path)?.state !== "safe");
     setBatch({ done: 0, total: todo.length });
     await inBatches(todo, 3, check, (done) => setBatch({ done, total: todo.length }));
     setBatch(null);
@@ -230,10 +226,14 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
   const shownAgents = new Set<string>();
   const shown = filterClean(items, filter);
   const sorted = sortClean(shown, sort, name);
+  const chosen = chosenRows(shown, inside, ticked);
+  const total = chosen.reduce((n, i) => n + i.bytes, 0);
   const pickable = selectable(shown, checks);
   const nTicked = pickable.filter((i) => ticked.has(i.path)).length;
   const all = pickable.length > 0 && nTicked === pickable.length;
-  if (allBox.current) allBox.current.indeterminate = nTicked > 0 && !all;
+  useEffect(() => {
+    if (allBox.current) allBox.current.indeterminate = nTicked > 0 && !all;
+  });
   const processes = (agent: string): React.ReactNode => {
     const ps = left[agent];
     if (shownAgents.has(agent) || !ps?.length || items.find((i) => i.agent === agent)?.blocked === "Working") return null;
@@ -273,16 +273,16 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
       ) : (
         <>
         <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-fg-2">
-          <select className="input min-w-0 flex-1 sm:w-48 sm:flex-none" aria-label="Agent" value={filter.agent} onChange={(e) => changeFilter({ ...filter, agent: e.target.value })}>
+          <select className="input min-w-0 flex-1 sm:w-48 sm:flex-none" aria-label="Agent" disabled={batch !== null} value={filter.agent} onChange={(e) => changeFilter({ ...filter, agent: e.target.value })}>
             <option value="">All agents</option>
             {agents.map((a) => <option key={a} value={a}>{name(a)}</option>)}
           </select>
-          <select className="input min-w-0 flex-1 sm:w-48 sm:flex-none" aria-label="Type" value={filter.type} onChange={(e) => changeFilter({ ...filter, type: e.target.value })}>
+          <select className="input min-w-0 flex-1 sm:w-48 sm:flex-none" aria-label="Type" disabled={batch !== null} value={filter.type} onChange={(e) => changeFilter({ ...filter, type: e.target.value })}>
             <option value="">All types</option>
             {types.map((x) => <option key={x} value={x}>{x}</option>)}
           </select>
           <label className="flex w-full items-center gap-1.5 sm:w-auto">
-            <input type="checkbox" checked={filter.deletable} onChange={(e) => changeFilter({ ...filter, deletable: e.target.checked })} />
+            <input type="checkbox" disabled={batch !== null} checked={filter.deletable} onChange={(e) => changeFilter({ ...filter, deletable: e.target.checked })} />
             Deletable only
           </label>
           <label className="flex items-center gap-1.5">
@@ -333,7 +333,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
           {chosen.length === 0 ? "Nothing selected" : `${chosen.length} selected · ${fmtBytes(total)}`}
         </span>
         <CopyCommands items={chosen} name={name} />
-        <button className="btn-primary" disabled={chosen.length === 0 || busy} onClick={onConfirm}>
+        <button className="btn-primary" disabled={chosen.length === 0 || busy} onClick={() => onConfirm(chosen.map((i) => i.path))}>
           Delete selected
         </button>
       </div>
