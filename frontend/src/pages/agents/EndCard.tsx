@@ -4,7 +4,7 @@ import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2
 import { cx } from "../../lib/format";
 import { teamNote } from "../../lib/teamNote";
 import { StartDeliveryButton } from "../../components/StartDeliveryButton";
-import { api, type DeliveryStarted, type EndCard as Card, type PlannedIssue } from "../../lib/api";
+import { api, type DeliveryStarted, type EndCard as Card, type CardSpec, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
 function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
@@ -21,37 +21,25 @@ function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; in
   return inLoft ? <Link to={i.url} className={cls}>{inner}</Link> : <a href={i.url} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>;
 }
 
-/** The end of a planning grill: the spec and tickets it published, Start delivery for a spec with a Delivery
- *  (otherwise Clear context leaves the next message in the composer), and the team check. */
-export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
-  const [busy, setBusy] = useState<"clear" | "setup" | "start" | "merge" | null>(null);
-  const [sent, setSent] = useState(false);
+type Run = (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => Promise<void>;
+
+/** One published spec (or standalone ticket) with its tickets and its own Start delivery. */
+function SpecBlock({ agentId, messageId, item, busy, run }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run }) {
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
   // A plan kept in a folder with no git: Start delivery asks before setting it up.
   const [askGit, setAskGit] = useState<string | null>(null);
   const [declined, setDeclined] = useState(false);
+  const delivery = item.delivery;
   const start = (initGit: boolean) =>
     run("start", async () => {
-      const r = await api.startDelivery(agentId, messageId, initGit);
+      if (!delivery) return;
+      const r = await api.startDelivery(agentId, messageId, delivery.spec, initGit);
       if (r.needs_git) return setAskGit(r.dir ?? "the project folder");
       setAskGit(null);
-      setStarted(r.message.meta?.grill?.end_card?.delivery?.started ?? null);
+      const card = r.message.meta?.grill?.end_card;
+      const mine = [card, ...(card?.more ?? [])].find((c) => c?.delivery?.spec === delivery.spec);
+      setStarted(mine?.delivery?.started ?? null);
     });
-  const [error, setError] = useState<string | null>(null);
-  const run = async (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => {
-    setBusy(what);
-    setError(null);
-    try {
-      await f();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-  const setup = card.setup;
-  const shown = sent || !!setup?.sent_at;
-  const delivery = card.delivery;
   const startedOn = started ?? delivery?.started ?? null;
   // A plan kept in Loft ends with Merge, once its reviews passed.
   const [stage, setStage] = useState<{ state: string; branch: string; base: string } | null>(null);
@@ -65,12 +53,10 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
     };
   }, [delivery?.local, delivery?.repo, delivery?.spec, !!startedOn]);
   return (
-    <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
-      {/* No repo: the plan was kept as Loft issues. */}
-      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {card.repo || "kept in Loft"}</div>
-      <div className="mt-2 space-y-0.5">
-        {card.spec && <Issue i={card.spec} inLoft={!card.repo} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
-        {card.tickets.map((t) => <Issue key={t.url} i={t} inLoft={!card.repo} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
+    <div>
+      <div className="space-y-0.5">
+        {item.spec && <Issue i={item.spec} inLoft={!item.repo} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
+        {item.tickets.map((t) => <Issue key={t.url} i={t} inLoft={!item.repo} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
       </div>
       {askGit && (
         <div className="mt-3 space-y-2 rounded-xl border border-accent/25 bg-accent/[0.05] px-3 py-2 text-[12.5px] text-fg-2">
@@ -88,13 +74,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         </div>
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
-      {setup && (
-        <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
-          <Users className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
-          {teamNote(card.missing_roles)}
-        </div>
-      )}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
           <StartDeliveryButton
             className="text-[12.5px]"
@@ -120,8 +100,47 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
           </button>
         )}
         {delivery?.local && (merged || stage?.state === "merged") && <span className="font-mono text-[11.5px] text-good">{merged ?? `Merged ${stage?.branch} into ${stage?.base}`}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** The end of a planning grill: the specs and tickets it published, each with Start delivery when it has a
+ *  Delivery (otherwise Clear context leaves the next message in the composer), and the team check. */
+export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
+  const [busy, setBusy] = useState<"clear" | "setup" | "start" | "merge" | null>(null);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run: Run = async (what, f) => {
+    setBusy(what);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const setup = card.setup;
+  const shown = sent || !!setup?.sent_at;
+  const items: CardSpec[] = [card, ...(card.more ?? [])];
+  return (
+    <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
+      {/* No repo: the plan was kept as Loft issues. */}
+      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {[...new Set(items.map((i) => i.repo || "kept in Loft"))].join(" · ")}</div>
+      <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
+        {items.map((item, i) => <SpecBlock key={item.delivery?.spec ?? item.spec?.url ?? i} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} />)}
+      </div>
+      {setup && (
+        <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
+          <Users className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
+          {teamNote(card.missing_roles)}
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
-          className={cx("btn text-[12.5px]", !delivery && "btn-primary")}
+          className={cx("btn text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
           disabled={busy !== null}
           title={card.next_message ? `Starts a fresh session and leaves "${card.next_message}" in the composer.` : "Starts a fresh session."}
           onClick={() => run("clear", () => onClear(card.next_message))}
