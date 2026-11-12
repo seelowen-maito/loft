@@ -191,7 +191,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       {/* No repo: the plan was kept as Loft issues. */}
-      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {[...new Set(items.map((i) => i.repo || "kept in Loft"))].join(" · ")}</div>
+      <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done{items.length === 1 && ` · ${card.repo || "kept in Loft"}`}</div>
       <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
         {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} showRepo={items.length > 1} note={items.length === 1 ? teamLine : undefined} extra={items.length === 1 ? actions : undefined} />)}
       </div>
