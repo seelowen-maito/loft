@@ -145,7 +145,7 @@ pub fn checkout_changes(command: &str, cwd: &Path) -> Vec<Change> {
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
-        let folder = std::fs::canonicalize(&c.folder).unwrap_or(c.folder);
+        let folder = real(c.folder);
         if !out.iter().any(|o| o.folder == folder) {
             out.push(Change { folder, ..c });
         }
@@ -310,18 +310,23 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
         "init" => Some(&["-b", "--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format"][..]),
         _ => None,
     } {
-        let mut words = vec![];
+        let (mut words, mut git_dir) = (vec![], None);
         let mut it = rest.iter();
         while let Some(a) = it.next() {
-            if valued.contains(a) {
+            if *a == "--separate-git-dir" {
+                git_dir = it.next().copied();
+            } else if let Some(d) = a.strip_prefix("--separate-git-dir=") {
+                git_dir = Some(d);
+            } else if valued.contains(a) {
                 it.next();
             } else if !a.starts_with('-') {
                 words.push(*a);
             }
         }
-        // `clone <repository> [<folder>]`, `init [<folder>]`
+        // `clone <repository> [<folder>]`, `init [<folder>]`, and the repository's own folder when it's apart.
         let target = words.get(if sub == "clone" { 1 } else { 0 });
-        return target.map_or(dirs.cwd.clone(), |t| dirs.at(t)).into_iter().collect();
+        let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
+        return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
     let found = dirs.cwd.map(repo_root);
     // The checkout a `.git` folder belongs to.
@@ -329,10 +334,21 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
     [tree.unwrap_or(found), repo].into_iter().flatten().collect()
 }
 
+/// `path` with symlinks followed, even when it doesn't exist yet (a folder `clone` will make): its nearest folder that
+/// exists is resolved, and the rest put back on.
+fn real(path: PathBuf) -> PathBuf {
+    for base in path.ancestors() {
+        if let Ok(r) = std::fs::canonicalize(base) {
+            return r.join(path.strip_prefix(base).unwrap_or(Path::new("")));
+        }
+    }
+    path
+}
+
 /// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
 /// Symlinks are followed first, as git does.
 fn repo_root(folder: PathBuf) -> PathBuf {
-    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+    let folder = real(folder);
     folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
@@ -1597,6 +1613,16 @@ mod tests {
         std::os::unix::fs::symlink(other.join("src"), ws.join("link")).unwrap();
         assert_eq!(asks("cd link && git reset --hard", &at(&ws)), Some(other.clone()));
         assert_eq!(asks("git -C link checkout main", &at(&ws)), Some(other.clone()));
+        // A new folder through that link is in the other checkout, though it doesn't exist yet.
+        let new = std::fs::canonicalize(other.join("src")).unwrap().join("new");
+        assert_eq!(asks("git clone /src link/new", &at(&ws)), Some(new.clone()));
+        assert_eq!(asks("git init link/new", &at(&ws)), Some(new));
+        // A repository kept apart from its folder is judged by where it goes too.
+        let apart = project.join("repo.git");
+        for cmd in [format!("git clone --separate-git-dir {} /src mine", at(&apart)), format!("git init --separate-git-dir={} mine", at(&apart))] {
+            assert_eq!(asks(&cmd, &at(&ws)), Some(apart.clone()), "should ask: {cmd}");
+        }
+        assert_eq!(asks("git clone --separate-git-dir ../x/mine.git /src mine", &at(&ws)), None);
         // Before this command, the shell may have been anywhere: the workspace stands for it.
         for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
             assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
