@@ -60,7 +60,7 @@ const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ?
 
 function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
   // A ticket its Dev reported waiting says so, with what on in its tooltip.
-  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state);
+  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state, t.waiting_on);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>

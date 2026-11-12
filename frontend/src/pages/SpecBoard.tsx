@@ -30,7 +30,7 @@ function Verdicts({ v }: { v: Record<string, string> }) {
 
 /** A ticket as a card: opens its own issue. */
 function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
-  const l = ticketLabel(t.state), a = t.agentId ? agentById.get(t.agentId) : undefined;
+  const l = ticketLabel(t.state, t.waitingOn), a = t.agentId ? agentById.get(t.agentId) : undefined;
   const body = (
     <>
       <div className="flex items-start gap-1.5">

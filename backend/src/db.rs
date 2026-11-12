@@ -165,6 +165,9 @@ pub struct DeliveryTicket {
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
+    /// Open blockers outside this spec, as `owner/repo#n`: the ticket isn't handed out until each closes.
+    #[serde(default)]
+    pub waiting_on: Vec<String>,
     /// "open", "started" (being built, or fixed), "review" (submitted), "changes" (sent back for changes while
     /// the Dev builds another ticket: its fix waits in `changes`), "closing" (passed, its close failed and is
     /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
