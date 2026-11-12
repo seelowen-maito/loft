@@ -421,7 +421,11 @@ async fn clear_closed_blockers(state: &AppState, repo: &str) {
         }
     }
     for w in open {
-        let Some((r, n)) = w.rsplit_once('#').and_then(|(r, n)| Some((r, n.parse::<i64>().ok()?))) else { continue };
+        // The name was checked when it was stored, but it goes into an API path: check it again.
+        let Some((r, n)) = w.rsplit_once('#').and_then(|(r, n)| Some((r, n.parse::<i64>().ok()?))).filter(|(r, _)| plain_repo(r)) else {
+            tracing::warn!("delivery {repo}: {w} isn't a blocker name, left alone");
+            continue;
+        };
         let key = w.to_lowercase();
         let etag = state.mirror.wait_etags.lock().unwrap().get(&key).cloned();
         let closed = match crate::github::get_if_changed(state, &format!("/repos/{r}/issues/{n}"), etag.as_deref()).await {
@@ -435,7 +439,12 @@ async fn clear_closed_blockers(state: &AppState, repo: &str) {
                 };
                 closed
             }
-            Err(e) if crate::github::is_gone(&e) => true,
+            // Gone, or no longer readable (access lost): not the same as closed, so nothing is released. The
+            // running Deliveries waiting on it stall, and Needs you shows why.
+            Err(e) if crate::github::is_gone(&e) => {
+                stall_on_lost_blocker(state, repo, &w);
+                false
+            }
             Err(e) if crate::github::is_paused(&e) => return,
             Err(e) => {
                 tracing::warn!("delivery {repo}: couldn't read {w}: {e}");
@@ -444,6 +453,16 @@ async fn clear_closed_blockers(state: &AppState, repo: &str) {
         };
         if closed {
             blocker_closed(state, r, n, repo).await;
+        }
+    }
+}
+
+/// Stalls each running Delivery of `repo` with a ticket waiting on `blocker`, which Loft can't read any more.
+fn stall_on_lost_blocker(state: &AppState, repo: &str, blocker: &str) {
+    for d in state.db.deliveries(repo, true).unwrap_or_default() {
+        let waiting: Vec<i64> = d.tickets.iter().filter(|t| t.state != "closed" && t.waiting_on.iter().any(|w| w.eq_ignore_ascii_case(blocker))).map(|t| t.number).collect();
+        if !waiting.is_empty() {
+            stall(state, &d, "blocker_gone", waiting, None, None);
         }
     }
 }
@@ -632,6 +651,7 @@ fn stall_why(reason: &str) -> &'static str {
         "run_failed" => "the run Loft woke for its step failed",
         "restart" => "its run was lost when Loft restarted",
         "wait_gone" => "a ticket waited on an issue or agent that is gone (deleted, or Loft can no longer read it): tell its Dev what to do, then Resume",
+        "blocker_gone" => "a ticket waits on an issue in another spec or repo that is gone or that Loft can no longer read: restore access to it, then Resume",
         "ci_missing" => "its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume",
         _ => "the run Loft woke for its step ended without its call",
     }

@@ -2937,14 +2937,34 @@ pub(crate) mod tests {
         assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"]);
         crate::delivery::retry(&st, slug).await;
         assert!(delivery(&st, slug).tickets[0].waiting_on.is_empty());
-        // Gone (404) counts too.
+    }
+
+    #[tokio::test]
+    async fn a_blocker_loft_can_no_longer_read_stalls_the_delivery_and_releases_nothing() {
+        let (fake, st) = (fake_github(), state());
         read_issue(&fake, "octo/ext-gone", 4, "open");
-        let (_a, _m) = planned(&st, &fake, "dl-gone", vec![ticket("API", &["octo/ext-gone#4"])]).await;
+        let (a, m) = planned(&st, &fake, "dl-gone", vec![ticket("API", &["octo/ext-gone#4"]), ticket("UI", &[])]).await;
         let gone = "octo/dl-gone";
-        assert_eq!(delivery(&st, gone).tickets[0].waiting_on, ["octo/ext-gone#4"]);
+        // UI isn't blocked, so the Delivery starts.
+        busy(&st, "Lofty", "dl-gone", "lead");
+        press(&st, &a, &m).await.unwrap();
         fake.route("GET", "/repos/octo/ext-gone/issues/4", 404, json!({ "message": "Not Found" }));
         crate::delivery::retry(&st, gone).await;
-        assert!(delivery(&st, gone).tickets[0].waiting_on.is_empty());
+        let d = delivery(&st, gone);
+        assert_eq!(d.tickets[0].waiting_on, ["octo/ext-gone#4"], "still waiting: access lost isn't closed");
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "blocker_gone", vec![41]));
+    }
+
+    #[tokio::test]
+    async fn a_stored_blocker_name_that_isnt_a_plain_repo_is_never_read() {
+        let (fake, st) = (fake_github(), state());
+        read_issue(&fake, "octo/ext-dots", 987654, "open");
+        let (_a, _m) = planned(&st, &fake, "dl-dots", vec![ticket("API", &["octo/ext-dots#987654"])]).await;
+        crate::delivery::update(&st, "octo/dl-dots", 40, |d| d.tickets[0].waiting_on = vec!["../..#987654".into()]);
+        crate::delivery::retry(&st, "octo/dl-dots").await;
+        assert_eq!(delivery(&st, "octo/dl-dots").tickets[0].waiting_on, ["../..#987654"]);
+        let bad: Vec<_> = fake.seen("/").into_iter().filter(|s| s.path.contains("987654")).map(|s| s.path).collect();
+        assert_eq!(bad, ["/repos/octo/ext-dots/issues/987654"], "only the real read at publish, none for the dot-segment name");
     }
 
     #[tokio::test]
