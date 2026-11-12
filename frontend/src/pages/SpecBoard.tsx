@@ -22,7 +22,7 @@ const sections = (specs: Task[], byProject: boolean) =>
 /** Grid columns by how many columns show (at least the Issues column or a spec stage). */
 const GRID = ["", "grid-cols-1", "grid-cols-2", "grid-cols-3", "grid-cols-4", "grid-cols-5", "grid-cols-6"];
 
-const Dot = ({ state }: { state: string }) => <span className={cx("inline-block size-2 shrink-0 rounded-full", TONE_BG[ticketLabel(state).tone])} title={ticketLabel(state).text} />;
+const Dot = ({ state, waitingOn }: { state: string; waitingOn?: string[] }) => <span className={cx("inline-block size-2 shrink-0 rounded-full", TONE_BG[ticketLabel(state, waitingOn).tone])} title={ticketLabel(state, waitingOn).text} />;
 
 function Verdicts({ v }: { v: Record<string, string> }) {
   return <>{Object.entries(v).map(([r, x]) => <span key={r} className={cx("rounded-full border border-line px-1.5 font-mono text-[10px]", x === "pass" ? "text-good" : "text-fg-3")} title={`${r}: ${x}`}>{r} {x === "pass" ? "✓" : "…"}</span>)}</>;
@@ -37,9 +37,9 @@ function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: bool
         <span className="font-mono text-[10.5px] text-fg-3">{t.number ? `#${t.number}` : "·"}</span>
         <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12px]" : "text-[12.5px]", t.state === "closed" && "text-fg-3")}>{t.title}</span>
       </div>
-      {(!dense || t.current) && (
+      {(!dense || t.current || !!t.waitingOn?.length) && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
-          <span className={cx("font-mono text-[10px]", TONE_TEXT[l.tone])}>{l.text}</span>
+          <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])}>{l.text}</span>
           <Verdicts v={t.verdicts} />
           {a && <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-fg-2"><Sticker avatar={a.avatar} lead={a.role === "lead"} size={14} />{a.name}</span>}
         </div>
@@ -126,7 +126,7 @@ function Cards(v: View) {
                           <>
                             <button onClick={() => toggle(s.id)} aria-expanded={isOpen} className="mt-2 flex w-full items-center gap-1.5 text-left text-[11.5px] text-fg-3 hover:text-fg">
                               <ChevronRight className={cx("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} />)}</span>
+                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} waitingOn={t.waitingOn} />)}</span>
                               <span className="ml-auto font-mono text-[10.5px]">{ts.length} {ts.length === 1 ? "ticket" : "tickets"}</span>
                             </button>
                             {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} dense agentById={v.agentById} open={v.openTicket} />)}</div>}

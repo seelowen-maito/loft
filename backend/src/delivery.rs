@@ -399,7 +399,7 @@ pub async fn blocker_closed(state: &AppState, repo: &str, n: i64, held: &str) {
         let Some(d) = update(state, &d.repo, d.spec, |d| d.tickets.iter_mut().for_each(|t| t.waiting_on.retain(|w| !w.eq_ignore_ascii_case(&blocker)))) else { continue };
         if let Some(lead) = lead_of(state, &d)
             && d.state == "running"
-            && none_in_flight(&d)
+            && none_working(&d)
             && !ready_tickets(&d).is_empty()
         {
             wake_lead(state, &d, &lead, &format!("{blocker} closed: tickets that waited on it are ready."));
@@ -529,6 +529,11 @@ pub fn ticket_closed(state: &AppState, repo: &str, number: i64) -> Option<Delive
 pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     let closed = |n: &i64| d.tickets.iter().any(|t| t.number == *n && t.state == "closed");
     d.tickets.iter().find(|t| t.state == "open" && t.waiting_on.is_empty() && t.blocked_by.iter().all(closed))
+}
+
+/// Whether no ticket of `d` is in flight except ones whose Dev reported waiting (`wait_ticket`): that Dev is free.
+fn none_working(d: &Delivery) -> bool {
+    d.tickets.iter().all(|t| !matches!(t.state.as_str(), "review" | "changes" | "closing" | "needs_human") && !(t.state == "started" && t.wait_for.is_empty()))
 }
 
 /// No ticket is being built, reviewed, waiting for its fix or waiting for the user: nothing will wake the
