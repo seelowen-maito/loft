@@ -417,7 +417,7 @@ mod tests {
         // A Dismiss hides it for that off period only: off again later, it's back with a new id.
         crate::apns::remove_relay_key().unwrap();
         let id = collect(&st).unwrap().into_iter().find(|i| i.kind == "push_off").map(|i| to_push(&i).id).unwrap();
-        crate::needs_you::dismiss_item(axum::extract::State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        let _ = crate::needs_you::dismiss_item(axum::extract::State(st.clone()), axum::extract::Path(id.clone())).await.unwrap();
         assert_eq!(off(&st), 0, "dismissed");
         crate::apns::store_relay_key(crate::apns::tests::RELAY_KEY).unwrap();
         assert_eq!(off(&st), 0);

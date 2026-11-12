@@ -1161,7 +1161,7 @@ mod tests {
         // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
         // daemon 300 runs under launchd and has a child 301.
         let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
-        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]), |pid| Some(pid));
+        mark_under_app(&mut procs, &HashSet::from([100, 200, 201]), Some);
         let under: Vec<i32> = procs.iter().filter(|p| p.under_app).map(|p| p.pid).collect();
         assert_eq!(under, vec![100, 101, 200, 201, 202]);
     }
