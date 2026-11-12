@@ -223,7 +223,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <header className="sticky top-0 z-40 border-b border-line bg-ink-950/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-5 max-md:gap-3 max-md:px-4">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-5 max-md:gap-3 max-md:px-4 max-[21rem]:gap-2 max-[21rem]:px-3">
           <NavLink to="/" className="flex items-center gap-2.5">
             <Logo />
             <span className="text-[15px] font-medium tracking-tight max-sm:hidden">loft</span>
@@ -249,7 +249,7 @@ export default function App() {
               </NavLink>
             )}
           </nav>
-          <div className="ml-auto flex items-center gap-4 max-md:gap-3">
+          <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
             <PendingBadge />
             <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
