@@ -114,9 +114,11 @@ const PM_CHANGES: &[&str] = &["install", "i", "ci", "add", "remove", "rm", "unin
 const CARGO_CHANGES: &[&str] = &["build", "b", "run", "r", "test", "t", "check", "c", "clean", "update", "install", "add", "remove"];
 
 /// Where a command runs, as the commands before it leave it: its folder (None when the guard can't tell, as after
-/// `cd "$dir"`), the folder before the last `cd` (for `cd -`) and the `pushd` stack.
+/// `cd "$dir"`), the folder before the last `cd` (for `cd -`) and the `pushd` stack. A `cd -` or `popd` past what the
+/// command set goes to where it started: the agent's own folder, which may be inside the user's checkout.
 #[derive(Clone, Default)]
 struct Dirs {
+    start: Option<PathBuf>,
     cwd: Option<PathBuf>,
     old: Option<PathBuf>,
     stack: Vec<Option<PathBuf>>,
@@ -135,10 +137,11 @@ impl Dirs {
 }
 
 /// Every change `command`, run in `cwd`, makes to a checkout (see the module docs), each folder once. A folder the
-/// guard can't tell (`cd "$dir"`, a first `cd -`) lets the commands after it run.
+/// guard can't tell (`cd "$dir"`) lets the commands after it run.
 pub fn checkout_changes(command: &str, cwd: &Path) -> Vec<Change> {
     let mut found = vec![];
-    changes(command, &mut Dirs { cwd: Some(cwd.to_path_buf()), ..Default::default() }, 0, &mut found);
+    let start = Some(cwd.to_path_buf());
+    changes(command, &mut Dirs { start: start.clone(), cwd: start, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -180,7 +183,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             "cd" => {
                 let to = match args.iter().find(|a| !matches!(a.as_str(), "-L" | "-P" | "-e" | "-@")).map(String::as_str) {
                     None => dirs::home_dir(),
-                    Some("-") => dirs.old.clone(),
+                    Some("-") => dirs.old.clone().or(dirs.start.clone()),
                     Some(dir) => dirs.at(dir),
                 };
                 dirs.cd(to);
@@ -199,8 +202,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 continue;
             }
             "popd" => {
-                // Past the stack this command built, the guard can't tell.
-                let to = if args.is_empty() { dirs.stack.pop().flatten() } else { None };
+                let to = match dirs.stack.pop() {
+                    Some(d) if args.is_empty() => d,
+                    _ => dirs.start.clone(),
+                };
                 dirs.cd(to);
                 continue;
             }
@@ -1458,14 +1463,14 @@ mod tests {
             // Back in the clone.
             "pushd /nowhere/dev/loft; popd; git pull",
             "cd /nowhere/dev/loft; cd -; git pull",
-            // Where the shell was before this command: the guard can't tell, so it doesn't ask.
+            // Where the shell was before this command can't be told: the folder it started in stands for it.
             "cd -; git pull",
             "popd; git pull",
         ] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
-        // `cd -` is not `cd` (home), which is outside the projects folder but is the user's.
-        assert_eq!(asks("cd -; git pull", USER), None);
+        assert_eq!(asks("cd -; git pull", USER), user);
+        assert_eq!(asks("cd /tmp; popd; git pull", USER), user);
     }
 
     #[test]
@@ -1559,6 +1564,11 @@ mod tests {
             assert_eq!(asks("git status", &at(cwd)), None);
             assert_eq!(asks("git -C loft pull", &at(&ws)), None);
         }
+        // Before this command, the shell may have been anywhere: the workspace stands for it.
+        for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
+            assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
+        }
+        assert_eq!(asks("cd -; git checkout main", &at(&clone)), None);
         // In the agent's clone, or a folder of it: its own repository.
         assert_eq!(asks("git checkout main", &at(&clone)), None);
         assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
