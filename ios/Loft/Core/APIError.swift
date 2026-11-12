@@ -31,7 +31,7 @@ enum APIError: Error, Equatable, LocalizedError {
         case .server(let status, let message):
             switch status {
             case 404: message == "not found" ? "Not found" : message
-            case 409: message
+            case 409, 429: message
             case 400, 422: message
             default: "Loft returned an error (\(status))"
             }

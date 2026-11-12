@@ -34,10 +34,31 @@ pub struct Delivery {
     pub pr: Option<i64>,
     /// "planned" (published, not started), "running" (building tickets), "final_review" (every ticket
     /// closed, the Code reviewer reviews the spec PR), "final_fixes" (the Dev fixes what it found),
-    /// "needs_human" (too many final rounds), "ready" (Loft marked the spec PR ready; a plan kept in Loft
-    /// waits for Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready,
-    /// merged or closed).
+    /// "needs_human" (too many final rounds), "stalled" (the run woken for its step ended without the
+    /// step's call: see `resume_to`), "paused" (the user paused it: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
+    /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
+    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
+    #[serde(default)]
+    pub resume_to: String,
+    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
+    /// lost when Loft restarted).
+    #[serde(default)]
+    pub stall_reason: String,
+    /// When it stalled (RFC 3339): a new stall is a new Needs you item.
+    #[serde(default)]
+    pub stalled_at: String,
+    /// The tickets whose step stalled it. Acting on another ticket leaves them stalled; empty when the stall
+    /// isn't about a ticket (the Lead's wake, the final steps).
+    #[serde(default)]
+    pub stalled_on: Vec<i64>,
+    /// The question the stalling run ended with, when its reply asked the user to decide something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_ask: Option<StallAsk>,
+    /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
+    /// item and the planner's wake, once. Empty before.
+    #[serde(default)]
+    pub done_at: String,
     /// The ready-for-review call failed: the mirror retries it on its next poll.
     #[serde(default)]
     pub ready_retry: bool,
@@ -53,6 +74,14 @@ pub struct Delivery {
     /// Changes rounds of the final Code Review of the whole spec PR.
     #[serde(default)]
     pub final_rounds: u32,
+    /// After Reopen delivery: the spec branch's newest commit when it reopened. Its commits passed a final
+    /// review already, so the next one reviews only what came after. Empty before any reopen.
+    #[serde(default)]
+    pub reviewed_to: String,
+    /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
+    /// ticket or final review waiting for the user hands them to the Dev.
+    #[serde(default)]
+    pub last_notes: String,
     /// Made from a spec PR recorded before Deliveries: its tickets' states weren't recorded, so GitHub
     /// says whether they're closed.
     #[serde(default)]
@@ -85,16 +114,59 @@ impl Delivery {
     pub fn ticket_mut(&mut self, n: i64) -> Option<&mut DeliveryTicket> {
         self.tickets.iter_mut().find(|t| t.number == n)
     }
+
+    /// The state its step is in: a stalled or paused one's is the state it goes back to.
+    pub fn step_state(&self) -> &str {
+        if matches!(self.state.as_str(), "stalled" | "paused") { &self.resume_to } else { &self.state }
+    }
+
+    /// Back to the state it stalled or paused in, if it did.
+    pub fn unstall(&mut self) {
+        if matches!(self.state.as_str(), "stalled" | "paused") {
+            self.state = std::mem::take(&mut self.resume_to);
+        }
+        (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
+        self.stalled_on.clear();
+        self.stall_ask = None;
+    }
+
+    /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
+    /// other ticket still stalls it.
+    pub fn clear_stall(&mut self, n: i64) {
+        if self.state == "stalled" {
+            self.stalled_on.retain(|t| *t != n);
+            if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
+                self.stall_ask = None;
+            }
+            if self.stalled_on.is_empty() {
+                self.unstall();
+            }
+        }
+    }
 }
 
+/// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StallAsk {
+    pub agent: String,
+    /// The ticket whose step the run was for; none for the Lead's or the final steps.
+    #[serde(default)]
+    pub ticket: Option<i64>,
+    /// The question's line.
+    pub question: String,
+    /// The whole reply it ends.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryTicket {
     pub number: i64,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
-    /// "open", "started" (being built), "review" (submitted), "closing" (passed, its close failed and is
+    /// "open", "started" (being built, or fixed), "review" (submitted), "changes" (sent back for changes while
+    /// the Dev builds another ticket: its fix waits in `changes`), "closing" (passed, its close failed and is
     /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
     /// never handed out, and done when it closes) or "closed".
     pub state: String,
@@ -104,15 +176,35 @@ pub struct DeliveryTicket {
     /// The commits last submitted, oldest first.
     #[serde(default)]
     pub commits: Vec<String>,
-    /// This round's verdict per reviewing role ("qa", "security"): "pending" or "pass".
+    /// This round's verdict per reviewing role ("qa", "security"), and "ci" for the CI Loft follows on GitHub:
+    /// "pending" or "pass".
     #[serde(default)]
     pub verdicts: std::collections::BTreeMap<String, String>,
+    /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
+    #[serde(default)]
+    pub submitted_at: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
+    /// A "changes" ticket's changes brief, sent to the Dev once it submits the ticket it's building.
+    #[serde(default)]
+    pub changes: String,
+    /// The Dev building it: the Lead assigned it (`assign_ticket`), or Loft handed it to the team's Dev.
+    #[serde(default)]
+    pub agent: String,
+    /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
+    #[serde(default)]
+    pub notes: String,
+}
+
+impl DeliveryTicket {
+    /// A ticket in `state` with nothing submitted, reviewed or assigned yet.
+    pub fn new(number: i64, title: impl Into<String>, blocked_by: Vec<i64>, state: &str) -> Self {
+        DeliveryTicket { number, title: title.into(), blocked_by, state: state.into(), ..Default::default() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,9 +212,16 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// Free-form project or tag; agents sharing one are grouped in the UI.
+    /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
+    /// none), so clients that only know one project keep working.
     #[serde(default)]
     pub project: String,
+    /// Free-text label its team goes by (Acme); never a path. Empty: it has no team.
+    #[serde(default)]
+    pub group: String,
+    /// The projects it works in, main first.
+    #[serde(default)]
+    pub projects: Vec<String>,
     pub personality: String,
     pub prompt: String,
     pub model: String,
@@ -152,12 +251,12 @@ pub struct Agent {
     #[serde(default)]
     pub memory_index: Option<String>,
     /// What it does in its team: "lead", "dev", "code_reviewer", "qa", "security" or "custom"
-    /// (`planning::ROLES`). A team (the agents sharing a project) has at most one Lead. Set from the
+    /// (`planning::ROLES`). A team (the agents sharing a group, `Agent::team`) has at most one Lead. Set from the
     /// template it came from; agents saved before these roles get one once at startup.
     #[serde(default)]
     pub role: String,
-    /// Fresh context for each Delivery ticket: "off", "above_80k" (cleared before a new ticket when its
-    /// context is at the context warning or above) or "always". A Lead follows it only as the agent
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" (cleared before a new
+    /// ticket when its context is at N thousand tokens or above) or "always". A Lead follows it only as the agent
     /// building the tickets.
     #[serde(default = "default_fresh_context")]
     pub fresh_context: String,
@@ -174,6 +273,9 @@ pub struct Agent {
     #[serde(default)]
     pub context_tokens: Option<u64>,
     pub last_run_at: Option<String>,
+    /// When its last run ended, so the idle time survives a restart. None until a run ends.
+    #[serde(default)]
+    pub last_run_ended_at: Option<String>,
     pub next_run_at: Option<String>,
     pub total_cost_usd: f64,
     /// The running total Claude Code last reported for `session_id`, so a run's cost is what it added.
@@ -194,11 +296,26 @@ pub struct Agent {
     pub read_at: Option<String>,
 }
 
+/// The Fresh context of an agent saved before the setting existed: it keeps the old default.
 pub fn default_fresh_context() -> String {
     "above_80k".into()
 }
 
+/// The Fresh context a new agent starts with, from the dialog, a template or an agent: rereading the code each
+/// ticket costs less than carrying ~96k tokens of context through every call (measured on a 12-ticket spec).
+pub const NEW_AGENT_FRESH_CONTEXT: &str = "always";
+
 impl Agent {
+    /// Its team's name: its group. Empty: it has no team.
+    pub fn team(&self) -> &str {
+        self.group.trim()
+    }
+
+    /// Whether `project` is one it works in.
+    pub fn has_project(&self, project: &str) -> bool {
+        self.projects.iter().any(|p| p == project.trim())
+    }
+
     /// An Unread reply: a run the user started ended after their read mark.
     pub fn unread_reply(&self) -> bool {
         let at = |t: &Option<String>| t.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
@@ -331,6 +448,19 @@ pub struct PullRequest {
     pub checks_sha: String,
     /// GitHub answered 404/410: the PR (or its repo) is gone, so it's no longer polled.
     pub gone: bool,
+    /// The PR's label names, from the payload the poller already reads (the verdicts show from them).
+    pub labels: Vec<String>,
+    /// The head commit the pass labels (tests:green, qa:passed, security:passed) were set for, so a new head clears them.
+    pub passes_sha: String,
+    /// GitHub's node id, which marking a draft ready (GraphQL) needs.
+    pub node_id: String,
+    /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
+    pub kind: String,
+    pub kind_sha: String,
+    /// Commits on the base branch the head doesn't have, from GitHub's compare; 0 when up to date or unknown.
+    pub behind_by: i64,
+    /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
+    pub ready_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -537,6 +667,10 @@ CREATE TABLE IF NOT EXISTS needs_you_dismissed (
     item_id TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS needs_you_seen (
+    item_id TEXT PRIMARY KEY,
+    seen_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS published_issues (
     slug TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -565,6 +699,18 @@ CREATE TABLE IF NOT EXISTS all_time_spend (
     runs INTEGER NOT NULL,
     cost_usd REAL NOT NULL
 );
+-- Each agent's port range, by slot (ports.rs); deleting the agent frees it.
+CREATE TABLE IF NOT EXISTS port_ranges (
+    slot INTEGER PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE
+);
+-- Paired clients are gone: drop the table, and the token hashes in it, where an earlier build made it.
+DROP TABLE IF EXISTS paired_clients;
+-- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it, and its row goes once the device has.
+CREATE TABLE IF NOT EXISTS agent_devices (
+    agent_id TEXT PRIMARY KEY,
+    udid TEXT NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -578,8 +724,7 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
             "SELECT id, data FROM agents WHERE id IN (SELECT agent_id FROM messages WHERE kind = 'run_end'
                AND json_extract(meta, '$.cost_usd') IS NOT NULL AND json_extract(meta, '$.session_cost_usd') IS NULL)",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (agent_id, data) in agents {
         let current = serde_json::from_str::<Value>(&data).ok().and_then(|d| d["session_id"].as_str().map(String::from));
@@ -588,10 +733,9 @@ fn per_run_costs(conn: &Connection) -> Result<()> {
             let mut st = tx.prepare(
                 "SELECT id, kind, meta FROM messages WHERE agent_id = ?1 AND kind IN ('run_start', 'run_end', 'clear', 'resume') ORDER BY id",
             )?;
-            let rows = st
+            st
                 .query_map([&agent_id], |r| Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null))))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         // The session the runs belong to (None while unnamed), its last total, and each named session's last total.
         let mut sid: Option<String> = None;
@@ -711,8 +855,7 @@ impl Db {
             conn.execute("ALTER TABLE memories ADD COLUMN title TEXT NOT NULL DEFAULT ''", [])?;
             let old: Vec<(i64, String)> = {
                 let mut st = conn.prepare("SELECT id, content FROM memories")?;
-                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for (id, content) in old {
                 conn.execute("UPDATE memories SET title = ?1 WHERE id = ?2", params![title_from(&content), id])?;
@@ -752,11 +895,22 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        // Needs you seen marks are forgotten when their item leaves the list, but only while Loft watches: the marks
+        // of items that went while it was off go here, at start-up, after 30 days.
+        conn.execute("DELETE FROM needs_you_seen WHERE seen_at < ?1", [(Utc::now() - chrono::Duration::days(30)).to_rfc3339()])?;
         conn.execute(
             "DELETE FROM run_ledger WHERE ended_at < ?1",
             [(Utc::now() - chrono::Duration::days(RUN_LEDGER_DAYS)).to_rfc3339()],
         )?;
         conn.execute("CREATE INDEX IF NOT EXISTS grill_sessions_open ON grill_sessions(agent_id, created_at) WHERE status <> 'ended'", [])?;
+        // Agents saved before groups existed get their project as group and only project, once, so every
+        // team stays as it was until the user changes it. Before the roles below: they save each agent back.
+        conn.execute(
+            "UPDATE agents SET data = json_set(data, '$.group', COALESCE(json_extract(data, '$.project'), ''),
+                 '$.projects', CASE WHEN TRIM(COALESCE(json_extract(data, '$.project'), '')) = '' THEN json('[]') ELSE json_array(TRIM(json_extract(data, '$.project'))) END)
+             WHERE json_type(data, '$.projects') IS NULL",
+            [],
+        )?;
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
         let unroled: Vec<(Value, &str)> = {
@@ -812,7 +966,9 @@ impl Db {
         let c = self.0.lock().unwrap();
         let data: Option<String> = c
             .query_row(
-                "SELECT data FROM agents WHERE json_extract(data, '$.role') = ?1 AND trim(json_extract(data, '$.project')) = ?2
+                // An agent works in `project` when it's its main project or one of its projects.
+                "SELECT data FROM agents a WHERE json_extract(data, '$.role') = ?1
+                   AND (trim(json_extract(data, '$.project')) = ?2 OR EXISTS (SELECT 1 FROM json_each(a.data, '$.projects') WHERE trim(value) = ?2))
                  ORDER BY position, created_at LIMIT 1",
                 [role, project],
                 |r| r.get(0),
@@ -916,7 +1072,56 @@ impl Db {
         c.execute("DELETE FROM permissions WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pull_requests WHERE agent_id = ?1", [id])?;
         c.execute("DELETE FROM pending_fyis WHERE agent_id = ?1", [id])?;
+        c.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [id])?;
+        // Its device's row stays until the device is gone, so Loft knows it for an orphan (simulator::tidy).
         Ok(())
+    }
+
+    /// The UDID of the agent's Simulator device, if it has one.
+    pub fn agent_device(&self, agent_id: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT udid FROM agent_devices WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_agent_device(&self, agent_id: &str, udid: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO agent_devices (agent_id, udid) VALUES (?1, ?2)", params![agent_id, udid])?;
+        Ok(())
+    }
+
+    /// Forgets a deleted device.
+    pub fn forget_agent_device(&self, udid: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM agent_devices WHERE udid = ?1", [udid])?;
+        Ok(())
+    }
+
+    /// Every agent device, deleted agents' included until their device is gone, as (UDID, agent id).
+    pub fn agent_devices(&self) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT udid, agent_id FROM agent_devices")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The agent's port range slot: the one it has while `usable` keeps it, else the lowest usable free one
+    /// below `slots`, kept for it. None when every one is taken.
+    pub fn port_slot(&self, agent_id: &str, usable: impl Fn(i64) -> bool, slots: i64) -> Result<Option<i64>> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let mine: Option<i64> = tx.query_row("SELECT slot FROM port_ranges WHERE agent_id = ?1", [agent_id], |r| r.get(0)).optional()?;
+        if let Some(slot) = mine.filter(|&s| usable(s)) {
+            return Ok(Some(slot));
+        }
+        tx.execute("DELETE FROM port_ranges WHERE agent_id = ?1", [agent_id])?;
+        let taken: std::collections::HashSet<i64> = {
+            let mut st = tx.prepare("SELECT slot FROM port_ranges")?;
+            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let Some(slot) = (0..slots).find(|s| !taken.contains(s) && usable(*s)) else { return Ok(None) };
+        tx.execute("INSERT INTO port_ranges (slot, agent_id) VALUES (?1, ?2)", params![slot, agent_id])?;
+        tx.commit()?;
+        Ok(Some(slot))
     }
 
     // ---- tasks --------------------------------------------------------
@@ -1126,6 +1331,11 @@ impl Db {
         Ok(c.execute("DELETE FROM push_seen WHERE seen_at < ?1", [&cutoff])?)
     }
 
+    /// The database file, for backups (backup.rs), which read it through a connection of their own.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
+    }
+
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.
     #[cfg(test)]
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1176,9 +1386,43 @@ impl Db {
         Ok(rows)
     }
 
+    /// Whether the user dismissed Needs you item `item_id`.
+    pub fn needs_you_dismissed(&self, item_id: &str) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT 1 FROM needs_you_dismissed WHERE item_id = ?1", [item_id], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn dismiss_needs_you(&self, item_id: &str) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute("INSERT OR REPLACE INTO needs_you_dismissed (item_id, dismissed_at) VALUES (?1, ?2)", params![item_id, now()])?;
+        Ok(())
+    }
+
+    /// The Needs you items the user has seen (on any client). A read only: a mark goes when its item leaves the list
+    /// (`forget_needs_you_seen`), or at start-up after 30 days (`open`), so one that waits longer stays seen.
+    pub fn seen_needs_you(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT item_id FROM needs_you_seen")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    /// Marks these items seen; one already seen keeps its first time.
+    pub fn mark_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let at = now();
+        for id in item_ids {
+            c.execute("INSERT OR IGNORE INTO needs_you_seen (item_id, seen_at) VALUES (?1, ?2)", params![id, at])?;
+        }
+        Ok(())
+    }
+
+    /// Forgets that these items were seen: they left the list, so if one comes back with the same id it is new again.
+    pub fn forget_needs_you_seen(&self, item_ids: &[String]) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        for id in item_ids {
+            c.execute("DELETE FROM needs_you_seen WHERE item_id = ?1", [id])?;
+        }
         Ok(())
     }
 
@@ -1298,16 +1542,9 @@ impl Db {
             let tickets = subs
                 .iter()
                 .filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(s, _)| s == spec.to_string()))
-                .map(|(_, _, n)| DeliveryTicket {
-                    number: *n,
-                    title: String::new(),
-                    blocked_by: blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect(),
-                    state: "open".into(),
-                    rounds: 0,
-                    commits: vec![],
-                    verdicts: Default::default(),
-                    id: String::new(),
-                    skipped: String::new(),
+                .map(|(_, _, n)| {
+                    let blocked_by = blocks.iter().filter(|(r, k, _)| *r == repo && k.split_once('/').is_some_and(|(t, _)| t == n.to_string())).map(|(_, _, b)| *b).collect();
+                    DeliveryTicket::new(*n, "", blocked_by, "open")
                 })
                 .collect();
             let d = Delivery {
@@ -1318,11 +1555,19 @@ impl Db {
                 branch: String::new(),
                 pr: Some(pr),
                 state: if has(&settled) { "settled" } else { "planned" }.into(),
+                resume_to: String::new(),
+                stall_reason: String::new(),
+                stalled_at: String::new(),
+                stalled_on: vec![],
+                stall_ask: None,
+                done_at: String::new(),
                 ready_retry: has(&retry),
                 tickets,
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                reviewed_to: String::new(),
+                last_notes: String::new(),
                 migrated: true,
                 standalone: false,
                 local: false,
@@ -1361,6 +1606,14 @@ impl Db {
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
     }
 
+    /// Every spec's Delivery on any repo, newest spec first: one read for a list that shows them all.
+    pub fn all_deliveries(&self) -> Result<Vec<Delivery>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT data FROM deliveries ORDER BY spec DESC")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
     /// The repo's Deliveries in `state`, picked by the state column so the others aren't decoded.
     pub fn deliveries_in(&self, repo: &str, state: &str) -> Result<Vec<Delivery>> {
         let c = self.0.lock().unwrap();
@@ -1378,12 +1631,14 @@ impl Db {
     }
 
     /// Records on an end-of-planning card that its Delivery started: who got which ticket.
-    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, started: &Value) -> Result<()> {
+    pub fn mark_delivery_started(&self, agent_id: &str, id: i64, entry: Option<usize>, started: &Value) -> Result<()> {
         let c = self.0.lock().unwrap();
+        // The card's first spec sits at its top; the others in `more`.
+        let at = entry.map_or("$.grill.end_card".to_string(), |i| format!("$.grill.end_card.more[{i}]"));
         c.execute(
-            "UPDATE messages SET meta = json_set(meta, '$.grill.end_card.delivery.started', json(?3))
-             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, '$.grill.end_card.delivery') = 'object'",
-            params![agent_id, id, started.to_string()],
+            "UPDATE messages SET meta = json_set(meta, ?3 || '.delivery.started', json(?4))
+             WHERE agent_id = ?1 AND id = ?2 AND json_type(meta, ?3 || '.delivery') = 'object'",
+            params![agent_id, id, at, started.to_string()],
         )?;
         Ok(())
     }
@@ -1716,14 +1971,36 @@ mod tests {
             "id": id, "name": id, "title": "", "personality": "", "prompt": "", "model": "sonnet", "effort": "",
             "interval_minutes": 0, "allowed_tools": [], "disallowed_tools": [], "mcp_servers": {},
             "permission_mode": "auto", "avatar": { "svg": "" }, "status": "idle", "status_text": "",
-            "session_id": null, "last_run_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
+            "session_id": null, "last_run_at": null, "last_run_ended_at": null, "next_run_at": null, "total_cost_usd": 0.0, "created_at": now(),
         }))
         .unwrap()
     }
 
     #[test]
+    fn a_stored_delivery_with_a_key_we_no_longer_have_still_loads() {
+        let db = Db::open(&crate::testdir::for_this_test("delivery-old-key").join("d.db")).unwrap();
+        // A Delivery saved when it had `tech_debt` (the field is gone): the key is ignored, not an error.
+        let json = serde_json::json!({ "repo": "o/r", "spec": 5, "state": "running", "created_at": "2026-01-01T00:00:00Z", "tech_debt": ["#77"] });
+        db.0.lock().unwrap().execute("INSERT INTO deliveries (repo, spec, state, data) VALUES ('o/r', 5, 'running', ?1)", params![json.to_string()]).unwrap();
+        let d = db.get_delivery("o/r", 5).unwrap().unwrap();
+        assert_eq!((d.spec, d.state.as_str()), (5, "running"));
+    }
+
+    #[test]
+    fn a_seen_mark_outlives_30_days_while_loft_runs_and_goes_at_the_next_start() {
+        let path = crate::testdir::for_this_test("seen").join("seen.db");
+        let db = Db::open(&path).unwrap();
+        db.mark_needs_you_seen(&["task:t:blocked".to_string(), "disk_low".to_string()]).unwrap();
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        db.0.lock().unwrap().execute("UPDATE needs_you_seen SET seen_at = ?1 WHERE item_id = 'task:t:blocked'", [&old]).unwrap();
+        assert_eq!(db.seen_needs_you().unwrap().len(), 2, "a look prunes nothing");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().seen_needs_you().unwrap(), vec!["disk_low".to_string()]);
+    }
+
+    #[test]
     fn stored_running_totals_become_per_run_costs_once() {
-        let path = std::env::temp_dir().join(format!("loft-costs-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("costs").join("costs.db");
         {
             let db = Db::open(&path).unwrap();
             let mut a = agent("a");
@@ -1777,7 +2054,7 @@ mod tests {
 
     #[test]
     fn fyis_kept_in_agent_data_move_to_their_table_in_order() {
-        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("fyis").join("fyis.db");
         {
             let db = Db::open(&path).unwrap();
             db.save_agent(&agent("a")).unwrap();
@@ -1801,7 +2078,7 @@ mod tests {
 
     #[test]
     fn agent_with_role_finds_the_first_in_list_order_within_the_trimmed_project() {
-        let path = std::env::temp_dir().join(format!("loft-roles-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("roles").join("roles.db");
         let db = Db::open(&path).unwrap();
         let with = |id: &str, project: &str, role: &str| {
             let mut a = agent(id);
@@ -1820,12 +2097,42 @@ mod tests {
         assert_eq!(found(" loft", "lead").as_deref(), Some("lead"));
         assert_eq!(found("loft", "qa"), None);
         assert_eq!(found("", "dev"), None, "no project, no team");
+        // An agent of a group works in each of its projects, not only its main one.
+        let mut web = agent("web-dev");
+        (web.project, web.projects, web.role) = ("b2c".into(), vec!["b2c".into(), "b2b".into()], "dev".into());
+        db.save_agent(&web).unwrap();
+        assert_eq!(found("b2b", "dev").as_deref(), Some("web-dev"), "a project that isn't its main one");
+        assert_eq!(found("b2", "dev"), None, "whole names only");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agents_saved_before_groups_get_their_project_as_group_and_only_project_once() {
+        let path = crate::testdir::for_this_test("groups").join("groups.db");
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, project) in [("a", "api"), ("b", " api "), ("c", "")] {
+                db.save_agent(&agent(id)).unwrap();
+                // As agents were stored before groups: a project and nothing else.
+                let c = db.0.lock().unwrap();
+                c.execute("UPDATE agents SET data = json_remove(json_set(data, '$.project', ?1), '$.group', '$.projects') WHERE id = ?2", params![project, id]).unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let got = |id: &str| { let a = db.get_agent(id).unwrap().unwrap(); (a.group.trim().to_string(), a.projects.clone(), a.team().to_string()) };
+        assert_eq!(got("a"), ("api".into(), vec!["api".to_string()], "api".into()));
+        assert_eq!(got("b"), ("api".into(), vec!["api".to_string()], "api".into()), "same team as before");
+        assert_eq!(got("c"), ("".into(), vec![], "".into()));
+        // An edit after the migration stays.
+        db.update_agent("a", |a| a.group = "Acme".into()).unwrap();
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Acme", "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn restored_fyis_go_back_ahead_of_newer_ones_and_leave_with_their_agent() {
-        let path = std::env::temp_dir().join(format!("loft-fyis-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("fyis").join("fyis.db");
         let db = Db::open(&path).unwrap();
         db.save_agent(&agent("a")).unwrap();
         db.add_pending_fyi("a", "first").unwrap();
@@ -1845,7 +2152,7 @@ mod tests {
 
     #[test]
     fn grill_status_is_its_own_column_and_older_sessions_get_theirs() {
-        let path = std::env::temp_dir().join(format!("loft-grills-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("grills").join("grills.db");
         let session = |id: &str, agent: &str, status: &str, at: &str| {
             serde_json::json!({ "id": id, "agent_id": agent, "topic": id, "status": status, "created_at": at, "updated_at": at })
         };
@@ -1891,7 +2198,7 @@ mod tests {
 
     #[test]
     fn older_memories_get_their_first_line_as_title_and_keep_their_text() {
-        let path = std::env::temp_dir().join(format!("loft-memories-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("memories").join("memories.db");
         let long = "Deploys go through staging first and only then to production, after the smoke tests pass on it\nmore";
         {
             let c = Connection::open(&path).unwrap();
@@ -1957,7 +2264,7 @@ mod tests {
 
     #[test]
     fn all_time_spend_starts_from_history_once_and_never_goes_down() {
-        let path = std::env::temp_dir().join(format!("loft-all-time-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("all-time").join("all-time.db");
         let end = |db: &Db, agent: &str, cost: Option<f64>| {
             let meta = cost.map_or(serde_json::json!({ "stopped": true }), |c| serde_json::json!({ "cost_usd": c, "session_cost_usd": c }));
             db.add_message(agent, None, "system", "run_end", "", meta).unwrap();
@@ -2000,7 +2307,7 @@ mod tests {
     #[test]
     fn the_run_ledger_starts_from_the_run_ends_there_are_once() {
         use chrono::Duration;
-        let path = std::env::temp_dir().join(format!("loft-ledger-{}.db", uuid::Uuid::new_v4()));
+        let path = crate::testdir::for_this_test("ledger").join("ledger.db");
         let now = Utc::now();
         let ago = |d: i64| (now - Duration::days(d)).to_rfc3339();
         // What the period figures read before the ledger, straight from the run ends.

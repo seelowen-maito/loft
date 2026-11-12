@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// "Attach a task" from the composer: search by title or project; open tasks first, the ones waiting on you on
+/// "Attach an issue" from the composer: search by title or project; open tasks first, the ones waiting on you on
 /// top, then the most recently updated (as on the web, #116).
 struct TaskPicker: View {
     @Environment(LoftStore.self) private var store
@@ -28,12 +28,12 @@ struct TaskPicker: View {
                             .accessibilityIdentifier("attachTask-\(t.id)")
                     }
                 } footer: {
-                    Text("The agent gets the task's title, status and latest note with your message.")
+                    Text("The agent gets the issue's title, status and latest note with your message.")
                 }
             }
             .overlay { if tasks.isEmpty { ContentUnavailableView.search(text: query) } }
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Title or project")
-            .navigationTitle("Attach a task")
+            .navigationTitle("Attach an issue")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
@@ -71,7 +71,7 @@ struct TaskChip: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .accessibilityLabel("Task: \(task.title), \(task.state.label)")
-        .accessibilityHint("Opens the task")
+        .accessibilityLabel("Issue: \(task.title), \(task.state.label)")
+        .accessibilityHint("Opens the issue")
     }
 }

@@ -1,3 +1,5 @@
+import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+
 export type Avatar = { svg: string };
 
 /** A weekly window with no autonomous wake-ups, in the Mac's local time. Days: 0 = Monday … 6 = Sunday. */
@@ -7,8 +9,14 @@ export type Agent = {
   id: string;
   name: string;
   title: string;
-  /** Free-form project or tag; agents sharing one are grouped. */
+  /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
+  /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
+  group?: string;
+  /** The projects it works in, main first. Missing from servers before groups. */
+  projects?: string[];
+  /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
+  project_problems?: { project: string; problem: string }[];
   personality: string;
   prompt: string;
   model: string;
@@ -23,9 +31,9 @@ export type Agent = {
   subagent_model: string;
   /** Subagents running at once; null is Claude Code's default, 0 turns them off. */
   max_subagents: number | null;
-  /** What it does in its team: one of `ROLES`. A Lead (one per project) wears a captain hat. */
+  /** What it does in its team: one of `ROLES`. A Lead (one per group, `teamOf`) wears a captain hat. */
   role?: string;
-  /** Fresh context for each Delivery ticket: "off", "above_80k" (the default) or "always". */
+  /** Fresh context for each Delivery ticket: "off", "above_80k" (agents saved before the setting), "above_100k" … "above_200k" or "always" (a new agent's). */
   fresh_context?: string;
   /** Whether that setting applies: to every agent but a Lead that only coordinates (its team has a Dev). */
   fresh_context_applies?: boolean;
@@ -54,6 +62,8 @@ export type Agent = {
   subagents?: RunningSubagent[];
   /** A run the user started (by a message or a schedule) ended with a reply or an error they haven't seen. */
   unread_reply?: boolean;
+  /** Agent messages in its chat (their ids) waiting for its current run to end. */
+  queued_messages?: number[];
 };
 
 /** The roles an agent can have, as stored in `Agent.role`, with what each does. */
@@ -65,8 +75,6 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
-
-export const roleLabel = (role: string) => ROLES.find((r) => r.value === role)?.label ?? role;
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -98,14 +106,33 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
 export type IssueDelivery = {
+  /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
+  /** Why it stalled: "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
+  stall_reason?: string | null;
+  /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
+  state_line?: { tone: string; text: string } | null;
+  /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
+  can_pause?: boolean;
+  /** Resume applies: the Delivery is stalled or paused, or a ticket or its final review waits for the user. */
+  can_resume?: boolean;
+  /** Reopen delivery applies: it's done, and tickets published into the spec since are open. */
+  can_reopen?: boolean;
+  /** A ticket, or the final review, waits for the user after too many changes rounds. */
+  needs_human?: boolean;
   started: boolean;
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
+  waiting_for_lead?: number[];
+  /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
+  waiting_on_you?: number[];
+  /** Its open PR's branch is behind its base by `count` commits; null when it isn't. An older server doesn't send it. */
+  behind?: { count: number; base: string } | null;
 };
 
 export type Task = {
@@ -216,14 +243,19 @@ export type GrillSession = {
 export type PlannedIssue = { number: number; title: string; url: string };
 
 /** The end-of-planning card on a grill's final summary (`meta.grill.end_card`). */
-export type EndCard = {
+export type CardSpec = {
   repo: string;
   spec: PlannedIssue | null;
   tickets: PlannedIssue[];
-  /** Left in the composer after Clear context, never sent by Loft. Empty for a spec with a Delivery. */
-  next_message: string;
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
   delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
+};
+
+/** The first spec sits at the top (older cards have only that one); further specs of the grill are in `more`. */
+export type EndCard = CardSpec & {
+  more?: CardSpec[];
+  /** Left in the composer after Clear context, never sent by Loft. Empty once every spec has a Delivery. */
+  next_message: string;
   /** Roles no agent in the project fills: "dev", "code_reviewer", "qa", "security". */
   missing_roles: string[];
   /** The message "Set up the team with lofty" sends, when roles are missing; `sent_at` once it was sent. */
@@ -245,8 +277,33 @@ export type PushDevice = {
   last_seen_at: string;
 };
 
-/** `GET /api/push`: whether APNs is set up. The key itself is never returned. */
-export type PushStatus = { configured: boolean; key_present: boolean; key_id: string; team_id: string; bundle_id: string; devices: number };
+/** The relay's portal page where the user manages their keys, when Sign in is offered; else null (only pasting a key). */
+export const portalHome = (s: Pick<PushStatus, "relay_url" | "signin">): string | null => (s.signin && s.relay_url ? `${s.relay_url}/` : null);
+
+/** `GET /api/push`: which path pushes take: `own_key` (straight to Apple), `relay` (the Loft push relay) or `none`. Never the key or the relay key. */
+export type PushStatus = {
+  path: "own_key" | "relay" | "none";
+  /** Whether a relay key is stored and the relay hasn't refused it. */
+  relay_key: boolean;
+  /** The relay answered 401 to the stored key: pushes through it stopped until the user signs in again or pastes a new key. */
+  relay_refused: boolean;
+  /** Sign in was pressed and the code isn't allowed on the portal yet. */
+  signing_in: boolean;
+  /** While Sign in waits: the confirmation code the user types on the portal's Allow page (null from a relay that gives none). */
+  signin_code: string | null;
+  /** The relay address in use (saved, else LOFT_RELAY_URL, else the official relay); null when there is none. Its push portal is at the same address. */
+  relay_url: string | null;
+  /** The address saved in Settings ("" when none: the environment's, if any, is used). */
+  relay_address: string;
+  /** Sign in is offered: there is a relay, and it hasn't said its portal isn't configured. */
+  signin: boolean;
+  configured: boolean;
+  key_present: boolean;
+  key_id: string;
+  team_id: string;
+  bundle_id: string;
+  devices: number;
+};
 
 export type Memory = { id: number; agent_id: string; title: string; content: string; tags: string; created_at: string };
 
@@ -355,6 +412,10 @@ export type PullRequest = {
   error: string | null;
   checked_at: string | null;
   created_at: string;
+  /** Label names, as GitHub has them (the verdicts are tests:green, qa:passed, security:passed and their failures). */
+  labels?: string[];
+  /** Commits on the base the branch doesn't have; 0 when up to date. An older server doesn't send it. */
+  behind_by?: number;
 };
 
 export type AgentSummary = {
@@ -394,12 +455,26 @@ export type AgentsSummary = {
 
 export type FileEntry = { path: string; dir: boolean; depth: number; size: number; is_repo: boolean };
 
+/** Herdr UI on this machine (`GET /api/herdr`). */
+export type HerdrStatus = {
+  herdr: { path: string; version: string | null } | null;
+  /** Loft's plugin as Herdr has it linked, if it is. */
+  linked: { root: string; enabled: boolean } | null;
+  built: boolean;
+  /** This machine's os-arch, e.g. macos-aarch64: other machines like it get a ready-made build. */
+  platform: string;
+  /** The Loft the Herdr UI client on this machine talks to. */
+  url: string | null;
+};
+
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
+  /** For "restart": why the restart hasn't happened. */
+  why: string | null;
 };
 
 export type Settings = {
@@ -415,6 +490,67 @@ export type Settings = {
   auto_publish_all: boolean;
   /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
+  /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
+  backup_dir: string;
+  /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
+  idle_timeout_hours: number;
+};
+
+/** The backups folder, its newest backup and the last attempt's error (a good backup clears it). */
+export type BackupStatus = {
+  dir: string;
+  last: { at: string; bytes: number; path: string } | null;
+  error: { message: string; at: string } | null;
+  /** iCloud Drive → Loft backups, the one-click choice; null when iCloud Drive is off on the Mac. */
+  icloud: string | null;
+};
+
+/** Every agent's workspace size, whether it is busy, how many processes it left running, and the disk's free space. */
+export type WorkspaceSizes = {
+  /** `busy`: in a run, so Clean can't remove its items. `processes`: how many an idle agent left running. */
+  agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
+  free_bytes: number | null;
+  low_disk_bytes: number;
+};
+/** A process an idle agent left running, listed in Clean; `age_secs` is how long ago it started. */
+export type LeftProcess = { pid: number; command: string; age_secs: number };
+/** What a clean leaves, and why; `rel` is inside the agent's workspace, empty for all of it. */
+export type CleanSkip = { agent: string; rel: string; reason: string };
+/** One thing Clean lists: a workspace's top-level item, or a folder inside a main clone. `path` is absolute; `command`
+ * is the equivalent `rm -rf`, to read or copy (Loft removes by path); `changed` is its newest file's change. `label`
+ * says why it starts unticked, `blocked` why it can't be ticked, and `opens` that it lists its own folders. */
+export type CleanItem = {
+  agent: string;
+  path: string;
+  rel: string;
+  name: string;
+  kind: "clone" | "worktree" | "build" | "folder" | "file" | "symlink";
+  bytes: number;
+  changed: string;
+  command: string;
+  label: string;
+  note: string;
+  warning: string;
+  ticked: boolean;
+  blocked: string;
+  opens: boolean;
+};
+/** Clean's Check of a clone or worktree: "safe" (clean and pushed), "unsafe" (unpushed commits or uncommitted
+ * changes) or "unknown" (Loft wouldn't run git there), and what to say. */
+export type GitCheck = { state: "safe" | "unsafe" | "unknown"; lines: string[] };
+/** A clean's log, live while `running`: each removal (or its error), what was skipped, and the totals. */
+export type CleanLog = {
+  at: string | null;
+  what: string;
+  /** "Cleaning Loft Tester…" while running, then "Cleaned Loft Tester"; empty in an older log. */
+  title?: string;
+  running: boolean;
+  /** `done` is what was done when it isn't a removal, like "Shut down" a Simulator device (`rel` is its name). */
+  lines: { agent: string; path: string; rel: string; bytes: number; error: string | null; command: string; done?: string }[];
+  skipped: CleanSkip[];
+  freed_bytes: number;
+  removed: number;
+  failed: number;
 };
 
 export type ApprovalMode = "ask" | "own" | "all";
@@ -440,6 +576,8 @@ export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
   binary: string | null;
   adhoc_signed: boolean | null;
+  /** The identity Loft is signed with, like "loft"; null when ad-hoc or unknown. */
+  signed_by?: string | null;
   host: string | null;
 };
 
@@ -491,7 +629,10 @@ export function grillError(e: unknown) {
   return m;
 }
 
-export type Simulator = { udid: string; name: string; runtime: string };
+/** A booted simulator; `agent` is the agent whose device it is, null for one the user booted. */
+export type Simulator = { udid: string; name: string; runtime: string; agent: { id: string; name: string } | null };
+/** An agent's Simulator device, for Settings → Disk: its size on disk and whether it is booted. No agent: an orphan, which the tidy deletes. */
+export type AgentDevice = { udid: string; name: string; state: string; bytes: number; agent: { id: string; name: string } | null };
 /** Points are fractions of the screen, 0–1. */
 export type SimulatorInput =
   | { action: "tap"; x: number; y: number }
@@ -501,7 +642,9 @@ export type SimulatorInput =
   | { action: "button"; name: "home" | "lock" };
 
 export const api = {
-  simulators: () => req<{ interactive: boolean; devices: Simulator[] }>("GET", "/simulator"),
+  simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
+  /** Agents' Simulator devices, biggest first; none without Xcode. */
+  agentDevices: () => req<{ devices: AgentDevice[] }>("GET", "/simulator/devices"),
   simulatorInput: (udid: string, input: SimulatorInput) => req<{ ok: boolean }>("POST", "/simulator/input", { udid, ...input }),
   info: () => req<Info>("GET", "/info"),
   update: () => req<UpdateStatus>("GET", "/update"),
@@ -511,18 +654,49 @@ export const api = {
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
-  saveSettings: (s: Omit<Settings, "github_token"> & { github_token?: string }) => req<SettingsView>("PUT", "/settings", s),
+  saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
+  herdrStatus: () => req<HerdrStatus>("GET", "/herdr"),
+  /** Builds the client, links Loft's plugin into this machine's Herdr and opens the agents' tabs. */
+  herdrSetup: () => req<{ ok: boolean; done: string[]; message: string }>("POST", "/herdr/setup"),
+  backups: () => req<BackupStatus>("GET", "/backups"),
+  workspaces: () => req<WorkspaceSizes>("GET", "/workspaces"),
+  /** What Clean on one agent, or Clean all, lists: each workspace's top-level items. */
+  cleanPreview: (agent?: string) => req<{ items: CleanItem[] }>("GET", agent ? `/workspaces/clean/preview?agent=${encodeURIComponent(agent)}` : "/workspaces/clean/preview"),
+  /** The folders in `rel` inside one of the agent's main clones. */
+  cleanFolders: (agent: string, rel: string) => req<{ items: CleanItem[] }>("GET", `/workspaces/clean/folders?agent=${encodeURIComponent(agent)}&rel=${encodeURIComponent(rel)}`),
+  /** Runs Clean's read-only git check in one of the agent's clones or worktrees; only on the user's click. */
+  cleanCheck: (agent: string, rel: string) => req<GitCheck>("POST", "/workspaces/clean/check", { agent, rel }),
+  /** Removes the previewed folders the user kept ticked. */
+  clean: (agent: string | undefined, paths: string[]) => req<CleanLog>("POST", "/workspaces/clean", { agent, paths }),
+  /** The running or last clean's log, the daily sweep's included. */
+  cleanLog: () => req<CleanLog>("GET", "/workspaces/log"),
+  /** What each idle agent left running, by agent id. */
+  leftRunning: () => req<Record<string, LeftProcess[]>>("GET", "/workspaces/processes"),
+  /** Stops what an agent not in a run left running (409 when it is in one). */
+  stopLeftRunning: (agent: string) => req<{ stopped: number }>("POST", `/workspaces/${agent}/stop-processes`),
+  backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
+  /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
+  needsYou: () => req<{ items: { agent: { id: string; name: string } | null }[] }>("GET", "/needs-you"),
+  /** The whole Needs you list, for its page and the top bar's counter. */
+  needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
+  /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
+  needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
+  /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
+  needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
+    req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
   agentsSummary: () => req<AgentsSummary>("GET", "/agents/summary?totals=true"),
   createAgent: (a: Partial<Agent>) => req<Agent & { notice?: string }>("POST", "/agents", a),
   reorderAgents: (ids: string[]) => req<{ ok: boolean }>("PUT", "/agents/order", { ids }),
   updateAgent: (id: string, a: Partial<Agent>) => req<Agent & { notice?: string }>("PATCH", `/agents/${id}`, a),
+  /** What deleting the agent with its workspace would free. */
+  workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
   /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
@@ -532,8 +706,8 @@ export const api = {
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
   /** "Start delivery" on an end-of-planning card: starts the spec's first ready ticket on the team's Dev, once. */
-  startDelivery: (id: string, messageId: number, initGit = false) =>
-    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery${initGit ? "?init_git=true" : ""}`),
+  startDelivery: (id: string, messageId: number, repo: string, spec: number, initGit = false) =>
+    req<{ ok: boolean; duplicate?: boolean; needs_git?: boolean; dir?: string; message: Message }>("POST", `/agents/${id}/messages/${messageId}/start-delivery?repo=${encodeURIComponent(repo)}&spec=${spec}${initGit ? "&init_git=true" : ""}`),
   /** Where a Delivery stands: for a plan kept in Loft, "ready" means Merge can run. */
   deliveryState: (repo: string, spec: number) =>
     req<{ state: string; local: boolean; branch: string; base: string }>("GET", `/deliveries/state?repo=${encodeURIComponent(repo)}&spec=${spec}`),
@@ -558,15 +732,19 @@ export const api = {
   syncIssues: () => req<MirrorSync>("POST", "/issues/sync", {}),
   task: (id: string) => req<Task>("GET", `/issues/${id}`),
   pushStatus: () => req<PushStatus>("GET", "/push"),
-  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean }) => req<PushStatus>("PUT", "/push", b),
+  configurePush: (b: { key_id?: string; team_id?: string; bundle_id?: string; key_p8?: string; remove_key?: boolean; relay_key?: string; remove_relay_key?: boolean; relay_url?: string }) =>
+    req<PushStatus>("PUT", "/push", b),
+  /** Asks the relay for a one-time code; `url` is the portal page that allows it. The key is collected by the backend. */
+  pushSignIn: () => req<{ url: string; confirm: string | null }>("POST", "/push/signin"),
   devices: () => req<PushDevice[]>("GET", "/devices"),
   testPush: (token: string) => req<{ ok: boolean }>("POST", `/devices/${token}/test`),
   removeDevice: (token: string) => req<{ ok: boolean }>("DELETE", `/devices/${token}`),
   taskPlan: (id: string) => req<TaskPlan>("GET", `/issues/${id}/plan`),
   taskComments: (id: string) => req<TaskComment[]>("GET", `/issues/${id}/comments?limit=200`),
   /** `send`: deliver to the task's agent (else a private note); `github`: post it on the mirrored issue too, after approval;
-   * `reopen`: run a finished task again with it. */
-  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean }) =>
+   * `reopen`: run a finished task again with it (a failed one always runs again); `agent_id`: on a task with nobody on it,
+   * hand it to this agent. */
+  commentTask: (id: string, text: string, opts: { send: boolean; github: boolean; reopen: boolean; agent_id?: string }) =>
     req<{ comment: TaskComment | null; queued?: boolean; delivered_to?: string | null; task?: Task }>("POST", `/issues/${id}/comments`, {
       text,
       client_id: crypto.randomUUID(),
@@ -581,10 +759,20 @@ export const api = {
   publishTask: (id: string) => req<Task>("POST", `/issues/${id}/publish`),
   /** Closed on GitHub while being worked on: go on, and reopen it there. */
   keepWorking: (id: string) => req<Task>("POST", `/issues/${id}/keep-working`, {}),
+  /** The user opened the issue: a finished one's result to look at leaves Needs you, on every client. */
+  issueOpened: (id: string) => req<{ ok: boolean; cleared: number }>("POST", `/issues/${id}/opened`, {}),
   /** A standalone ticket's or a spec's Delivery: whether it started, who has it, its PR and a spec's tickets; null when it has none. */
+  /** Every spec's Delivery in one read, for the Issues page's spec views. */
+  deliverySummaries: () => req<import("./specViews").DeliverySummary[]>("GET", "/deliveries/summary"),
   issueDelivery: (id: string) => req<IssueDelivery | null>("GET", `/issues/${id}/delivery`),
   /** "Start delivery" on a standalone ticket or a spec: its branch, its draft PR and the team's Dev, once. */
   startIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; duplicate: boolean; ticket: number }>("POST", `/issues/${id}/start-delivery`),
+  /** Resume on a stalled or paused Delivery: Loft checks what was done meanwhile, then wakes only the agent its step waits on. */
+  resumeIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/resume-delivery`),
+  /** Pause on a running Delivery: Loft stops the run working on it and sends no more wakes until Resume. */
+  pauseIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/pause-delivery`),
+  /** Reopen a done Delivery for tickets published since: its spec PR goes back to draft, and the Lead (or Dev) is woken. */
+  reopenIssueDelivery: (id: string) => req<IssueDelivery & { ok: boolean; message: string }>("POST", `/issues/${id}/reopen-delivery`),
   /** Posts a Loft comment on the GitHub issue, with `text` instead when you edited it. */
   approveComment: (id: string, cid: number, text?: string) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/approve`, text === undefined ? {} : { text }),
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),

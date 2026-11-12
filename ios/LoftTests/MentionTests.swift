@@ -20,4 +20,15 @@ final class MentionTests: XCTestCase {
         XCTAssertEqual(r.fromAgentName, "QA Agent")
         XCTAssertFalse(msg("assistant", [:]).isMentionReply)
     }
+
+    func testTagsOnYourMessage() {
+        let m = msg("user", ["tags": .array([
+            ["tag": "#42", "kind": "spec", "title": "Settings", "state": "open", "url": "https://github.com/o/loft/issues/42", "task_id": "t1"],
+            ["tag": "o/loft#7", "kind": "pr", "title": "Fix", "state": "open", "url": "https://github.com/o/loft/pull/7"],
+        ])])
+        XCTAssertEqual(m.tags.map(\.tag), ["#42", "o/loft#7"])
+        XCTAssertEqual(m.tags[0].taskId, "t1", "a Loft issue opens in the app")
+        XCTAssertNil(m.tags[1].taskId, "a pull request opens on GitHub")
+        XCTAssertEqual(msg("user", [:]).tags, [])
+    }
 }

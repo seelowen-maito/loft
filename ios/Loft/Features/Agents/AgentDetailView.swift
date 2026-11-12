@@ -3,11 +3,16 @@ import SwiftUI
 struct AgentDetailView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(\.dismiss) private var dismiss
     let agentId: String
     @State private var confirmStop = false
     @State private var error: APIError?
     @State private var busy = false
     @State private var showAllActivity = false
+    @State private var confirmDelete = false
+    /// The workspace's size, fetched when the screen opens and again when Delete agent is tapped; nil when the server couldn't say.
+    @State private var workspaceBytes: Int64?
+    private var sizeText: String { workspaceBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "…" }
 
     var body: some View {
         if let agent = store.agent(agentId) {
@@ -46,6 +51,10 @@ struct AgentDetailView: View {
 
             Section {
                 actions(agent, state: state)
+                if store.info?.supports(.workspaces) == true {
+                    LabeledContent("Workspace", value: sizeText)
+                        .accessibilityIdentifier("workspaceSize")
+                }
             }
 
             let approvals = store.pendingApprovals(for: agent.id)
@@ -57,11 +66,11 @@ struct AgentDetailView: View {
             }
 
             if store.supportsTasks {
-                Section("Tasks") {
+                Section("Issues") {
                     if let current {
                         NavigationLink(value: TaskRoute(id: current.id)) { TaskRow(task: current) }
                     } else {
-                        Text(state == .working ? "Working outside a tracked task." : "No task assigned right now.")
+                        Text(state == .working ? "Working outside a tracked issue." : "No issue assigned right now.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(assigned) { t in
@@ -111,7 +120,9 @@ struct AgentDetailView: View {
             if let fresh = agent.freshContext, agent.freshContextApplies != false {
                 Section {
                     Picker("Fresh context", selection: Binding(get: { fresh }, set: { v in act { try await store.setFreshContext(agent.id, v) } })) {
-                        Text("Above 80k").tag("above_80k")
+                        ForEach([80, 100, 120, 150, 180, 200], id: \.self) { n in
+                            Text("Above \(n)k").tag("above_\(n)k")
+                        }
                         Text("Always").tag("always")
                         Text("Off").tag("off")
                     }
@@ -128,12 +139,27 @@ struct AgentDetailView: View {
                 LabeledContent("Agent ID") {
                     Text(agent.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                 }
-                if let p = agent.project, !p.isEmpty { LabeledContent("Project", value: p) }
+                if let g = agent.group, !g.trimmingCharacters(in: .whitespaces).isEmpty { LabeledContent("Group", value: g) }
+                if agent.allProjects.count > 1 {
+                    LabeledContent("Projects", value: agent.allProjects.enumerated().map { $0.offset == 0 ? "\($0.element) (main)" : $0.element }.joined(separator: ", "))
+                } else if let p = agent.allProjects.first {
+                    LabeledContent("Project", value: p)
+                }
                 if let m = agent.model, !m.isEmpty { LabeledContent("Model", value: [m, agent.effort ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")) }
                 if let mode = agent.permissionMode { LabeledContent("Permissions", value: Self.describe(mode: mode)) }
                 LabeledContent("Schedule", value: (agent.intervalMinutes ?? 0) > 0 ? "Every \(Self.describe(minutes: agent.intervalMinutes!))" : "Only when messaged")
                 if let next = agent.nextRunAt, (agent.intervalMinutes ?? 0) > 0 { LabeledContent("Next wake-up", value: next.formatted(date: .omitted, time: .shortened)) }
                 if let last = agent.lastRunAt { LabeledContent("Last run", value: last.formatted(date: .abbreviated, time: .shortened)) }
+            }
+
+            if agent.builtin != true {
+                Section {
+                    Button(role: .destructive) { askToDelete(agent) } label: {
+                        Label("Delete agent", systemImage: "trash").foregroundStyle(Theme.failure)
+                    }
+                    .disabled(!store.canWrite || busy)
+                    .accessibilityIdentifier("deleteAgent")
+                }
             }
         }
         .navigationTitle(agent.name)
@@ -146,16 +172,40 @@ struct AgentDetailView: View {
         .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
         } message: {
-            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its tasks stay as they are; cancel them separately.")
+            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
+        }
+        .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
+            Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
+        } message: {
+            Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
+                 + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
         }
         .errorAlert($error)
+        .task { workspaceBytes = try? await store.workspaceSize(agent.id) }
+    }
+
+    private func askToDelete(_ agent: Agent) {
+        busy = true
+        Task {
+            workspaceBytes = try? await store.workspaceSize(agent.id)
+            busy = false
+            confirmDelete = true
+        }
+    }
+
+    private func delete(_ agent: Agent, purgeFiles: Bool) {
+        act {
+            try await store.deleteAgent(agent.id, purgeFiles: purgeFiles)
+            dismiss()
+        }
     }
 
     @ViewBuilder private func actions(_ agent: Agent, state: AgentState) -> some View {
         Button { router.openChat(agent.id) } label: { Label("Chat with \(agent.name)", systemImage: "bubble.left.and.bubble.right") }
             .accessibilityIdentifier("chatWithAgent")
         if store.supportsTasks {
-            Button { router.composer = .newTask(agentId: agent.id, parentId: nil) } label: { Label("Assign a task", systemImage: "checklist") }
+            Button { router.composer = .newTask(agentId: agent.id, parentId: nil) } label: { Label("Assign an issue", systemImage: "checklist") }
                 .disabled(!store.canWrite)
         }
         Button { router.openChat(agent.id, draft: "What's your status? Summarize what you're working on and anything blocking you.") } label: {
@@ -272,7 +322,7 @@ private struct DelegationSection: View {
             } header: {
                 Text("Works with")
             } footer: {
-                Text("From delegated tasks and agent-to-agent messages.")
+                Text("From delegated issues and agent-to-agent messages.")
             }
         }
     }

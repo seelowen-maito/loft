@@ -50,10 +50,6 @@ export function saveDraft(agent: string, d: Draft, storage?: Store) {
   write(agentKey(agent), empty ? null : JSON.stringify(d), storage);
 }
 
-export function clearDraft(agent: string, storage?: Store) {
-  write(agentKey(agent), null, storage);
-}
-
 export function loadAnswerDraft(session: string, round: number, question: string, storage?: Store): AnswerDraft {
   try {
     const d = JSON.parse(read(answerKey(session, round, question), storage) ?? "null");

@@ -5,12 +5,13 @@ export const atQuery = (text: string) => /(?:^|[\s([{"'])@([^\s@]*)$/.exec(text)
 
 export type MentionGroup = { title: string; agents: Agent[] };
 
-/** Agents matching `query` (case-insensitive, at the start of the name or of one of its words): `project`'s first, then the rest. */
+/** Agents matching `query` (case-insensitive, at the start of the name or of one of its words): those working in `project` first, then the rest. */
 export function mentionGroups(agents: Agent[], project: string, query: string): MentionGroup[] {
   const q = query.toLowerCase();
   const hit = (a: Agent) => a.name.toLowerCase().split(/\s+/).some((w) => w.startsWith(q));
-  const mine = agents.filter((a) => a.project.trim() === project.trim() && hit(a));
-  const rest = agents.filter((a) => a.project.trim() !== project.trim() && hit(a));
+  const ours = (a: Agent) => (project.trim() ? (a.projects?.length ? a.projects : [a.project.trim()]).includes(project.trim()) : !a.project.trim());
+  const mine = agents.filter((a) => ours(a) && hit(a));
+  const rest = agents.filter((a) => !ours(a) && hit(a));
   return [
     { title: project.trim() || "No project", agents: mine },
     { title: "Other agents", agents: rest },

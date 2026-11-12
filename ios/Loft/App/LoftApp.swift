@@ -12,6 +12,7 @@ struct LoftApp: App {
     init() {
         if TestMode.noAnimations { UIView.setAnimationsEnabled(false) }
         Prefs.registerDefaults()
+        OldPairing.clear()
         let store = LoftStore(api: Self.makeAPI())
         _store = State(initialValue: store)
         _voice = State(initialValue: VoiceSession(store: store))
@@ -25,6 +26,12 @@ struct LoftApp: App {
 
     private static func makeAPI() -> LoftAPI? {
         #if DEBUG
+        // A UI test starts on the List, not on the Issues view the last test left; `-keep-issues-view` is a relaunch
+        // that checks it's kept.
+        let args = ProcessInfo.processInfo.arguments
+        if (args.contains("-ui-testing") || args.contains("-ui-onboarding")) && !args.contains("-keep-issues-view") {
+            UserDefaults.standard.removeObject(forKey: "issuesView")
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-onboarding") { return nil }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
             // Each UI test starts from nothing, not from the last test's cached state.
@@ -145,6 +152,7 @@ struct RootView: View {
     @Environment(Router.self) private var router
 
     var body: some View {
+        @Bindable var store = store
         VStack(spacing: 0) {
             if store.isDemo { DemoBanner() }
             main
@@ -174,7 +182,7 @@ struct RootView: View {
                     NavigationStack(path: $router.tasksPath) {
                         TaskListView().withRoutes()
                     }
-                    .tabItem { Label("Tasks", systemImage: "checklist") }
+                    .tabItem { Label("Issues", systemImage: "checklist") }
                     .tag(Router.Tab.tasks)
 
                     NavigationStack(path: $router.chatPath) {
@@ -232,7 +240,7 @@ private struct CreateMenu: ViewModifier {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { router.composer = .newTask(agentId: nil, parentId: nil) } label: {
-                        Label("New task", systemImage: "checklist")
+                        Label("New issue", systemImage: "checklist")
                     }
                     .disabled(!store.supportsTasks)
                     if let o = store.orchestrator {

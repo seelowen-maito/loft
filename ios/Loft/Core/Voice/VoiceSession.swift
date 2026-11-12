@@ -50,6 +50,10 @@ final class VoiceSession {
     private(set) var reply: String?
     /// Set while a finished dictation waits to go out by itself ("Sending… Undo"); nil otherwise.
     private(set) var autoSendAt: Date?
+    /// Talk: a message that went out after its countdown (Send now, or the time ran out). The chat takes over from
+    /// here: it shows the message and waits for the reply, reading it aloud. Cleared by whoever hands over.
+    struct HandOff: Equatable { let agentId: String; let after: Int64 }
+    var handOff: HandOff?
 
     var raw: String { VoiceText.join([committed, live]) }
     /// Waiting for, or reading, the answer to what was just sent: the Talk screen reads the next question itself.
@@ -69,13 +73,15 @@ final class VoiceSession {
 
     let speaker: Speaker
     @ObservationIgnored private let store: LoftStore
-    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let engine: MicEngine
+    @ObservationIgnored private let audio: AudioSessionOwner
     @ObservationIgnored private var recognizer: SegmentRecognizer?
     @ObservationIgnored private var segments: [String] = []
     @ObservationIgnored private var started: Date?
     @ObservationIgnored private var accumulated: TimeInterval = 0
     @ObservationIgnored private var clock: Timer?
-    @ObservationIgnored private var interruption: NSObjectProtocol?
+    /// The audio held from `AudioSessionOwner` while the mic is on.
+    @ObservationIgnored private var lease: UUID?
     @ObservationIgnored private var lastLevelAt = Date.distantPast
     @ObservationIgnored private var confirmText = ""
     /// When the answer to "Would you like to submit this?" last changed, and when the question was asked.
@@ -91,10 +97,23 @@ final class VoiceSession {
     /// When something was last heard, for ending the dictation on a pause.
     @ObservationIgnored private var lastHeard = Date()
     @ObservationIgnored private var autoSend: Task<Void, Never>?
+    /// Closing or discarding while the mic is still starting: that start gives up.
+    @ObservationIgnored private var gate = StartGate()
 
-    init(store: LoftStore, speaker: Speaker? = nil) {
+    /// Asks for permission and makes a prepared recognizer. Tests swap it for one without either.
+    @ObservationIgnored var prepareRecognizer: () async throws -> SegmentRecognizer = {
+        if !TestMode.noSpeech { try await VoiceSession.requestPermissions() }
+        let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
+        let r = Recognizers.make(locale: locale)
+        try await r.prepare()
+        return r
+    }
+
+    init(store: LoftStore, speaker: Speaker? = nil, audio: AudioSessionOwner? = nil, engine: MicEngine = AVAudioEngine()) {
         self.store = store
         self.speaker = speaker ?? Speaker()
+        self.audio = audio ?? .shared
+        self.engine = engine
     }
 
     // MARK: - Listening
@@ -121,11 +140,10 @@ final class VoiceSession {
 
     private func listen() async {
         phase = .preparing
+        let attempt = gate.begin()
         do {
-            if !TestMode.noSpeech { try await Self.requestPermissions() }
-            let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
-            let r = Recognizers.make(locale: locale)
-            try await r.prepare()
+            let r = try await prepareRecognizer()
+            guard gate.isCurrent(attempt) else { return r.cancel() }
             r.onPartial = { [weak self] text in self?.heard(partial: text) }
             r.onCommit = { [weak self] text in self?.heard(commit: text) }
             r.onError = { [weak self] message in self?.fail(message) }
@@ -134,12 +152,21 @@ final class VoiceSession {
             prompt = VoiceSend.Prompt(startedAt: lastHeard)
             evaluated = ""
             pauseBase = raw
-            if !TestMode.noSpeech { try startAudio(feeding: r) }
+            if !TestMode.noSpeech { try await startAudio(feeding: r, attempt: attempt) }
             try r.start()
             phase = .listening
             started = Date()
             startClock()
         } catch {
+            // Closed or discarded while starting: nothing more to do.
+            guard gate.isCurrent(attempt) else { return }
+            // The audio went elsewhere while the mic waited for the route: pause, as losing it while listening does.
+            if error is CancellationError {
+                recognizer?.cancel()
+                recognizer = nil
+                if phase == .preparing { phase = .paused }
+                return
+            }
             stopAudio()
             let v = error as? VoiceError
             fail(v?.message ?? error.localizedDescription, needsPermission: v?.isPermission ?? false)
@@ -226,7 +253,6 @@ final class VoiceSession {
             try? await Task.sleep(for: .seconds(VoiceSend.undoWindow))
             guard let self, !Task.isCancelled, self.phase == .review, self.autoSendAt != nil else { return }
             VoiceLog.shared.add("talk: countdown over: sending")
-            self.autoSendAt = nil
             // `send` cancels any pending countdown: this one is done, so let go of it first rather than
             // cancelling the task we're running in (its request then failed as "Cancelled").
             self.autoSend = nil
@@ -287,7 +313,7 @@ final class VoiceSession {
     func replay() async {
         guard phase == .replied, let text = reply else { return }
         phase = .speaking
-        _ = await speaker.readReply(text, isActive: { phase == .speaking })
+        _ = await speaker.readReply(text, replace: true, isActive: { self.phase == .speaking })
         if phase == .speaking { phase = .replied }
     }
 
@@ -413,7 +439,7 @@ final class VoiceSession {
             r.onPartial = { [weak self] t in self?.confirmHeard(t) }
             r.onCommit = { [weak self] t in self?.confirmHeard(t) }
             recognizer = r
-            try startAudio(feeding: r)
+            try await startAudio(feeding: r)
             try r.start()
         } catch {
             // Tapping still works.
@@ -487,6 +513,8 @@ final class VoiceSession {
     /// The only way anything leaves the phone: an explicit send of the reviewed text.
     func send(_ text: String) async {
         guard phase == .review, let agentId else { return }
+        // After the countdown, a message (not an interview answer) hands over to the chat once it's sent.
+        let handsOver = autoSendAt != nil && store.currentGrillQuestion(for: agentId) == nil
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
@@ -517,6 +545,15 @@ final class VoiceSession {
             return sendFailed(failed)
         }
         VoiceLog.shared.add("talk: sent \(VoiceLog.clip(text))")
+        if handsOver {
+            // Still `.sending` until the screen closes (`close` makes it idle), so it shows Sent, not the mic.
+            VoiceLog.shared.add("talk: on to the chat for the reply")
+            clearDraft()
+            segments = []
+            committed = ""
+            handOff = HandOff(agentId: agentId, after: before)
+            return
+        }
         await afterSent(agentId: agentId, before: before)
     }
 
@@ -569,7 +606,7 @@ final class VoiceSession {
             phase = .speaking
             let id = next != nil ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
             VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
-            let ended = await speaker.readReply(spoken, messageId: id, isActive: { phase == .speaking })
+            let ended = await speaker.readReply(spoken, messageId: id, isActive: { self.phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")
             if next == nil {
                 // The reply stays on screen with Replay, Reply by voice, Open chat and Done.
@@ -603,6 +640,7 @@ final class VoiceSession {
 
     /// Throw away the dictation and stop everything.
     func discard() {
+        gate.cancel()
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
@@ -625,6 +663,7 @@ final class VoiceSession {
 
     /// Leave the session (e.g. closing the screen) without losing the draft.
     func close() {
+        gate.cancel()
         // Leaving mid-countdown keeps the text for review instead of sending behind your back.
         if autoSendAt != nil { autoSend?.cancel(); autoSend = nil; autoSendAt = nil }
         if phase == .listening || phase == .paused {
@@ -647,33 +686,70 @@ final class VoiceSession {
 
     // MARK: - Audio
 
-    private func startAudio(feeding r: SegmentRecognizer) throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.channelCount > 0, format.sampleRate > 0 else { throw VoiceError("No microphone is available.") }
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
+    /// `attempt` is the start this is part of (`gate`), or nil for listening for the submit answer.
+    private func startAudio(feeding r: SegmentRecognizer, attempt: Int? = nil) async throws {
+        if lease == nil {
+            let id = try await audio.acquire(.listening, by: "Talk", onRouteChange: { [weak self] in
+                self?.routeChanged()
+            }) { [weak self] loss in self?.lost(loss) }
+            if let attempt, !gate.isCurrent(attempt) {
+                audio.release(id)
+                throw CancellationError()
+            }
+            lease = id
+        }
+        feeding = r
+        try await Microphone.startWhenSettled(engine, bufferSize: 2048, stillWanted: { [weak self] in
+            guard let self, self.lease != nil, self.feeding === r else { return false }
+            return attempt.map { self.gate.isCurrent($0) } ?? true
+        }, block: tap(feeding: r))
+    }
+
+    /// Losing the audio (read-aloud elsewhere, a call) pauses the dictation, or just stops the mic when it was
+    /// only listening for the answer to "Would you like to submit this?". A route with no microphone ends it
+    /// with a message.
+    func lost(_ loss: AudioSessionOwner.Loss) {
+        lease = nil
+        if loss == .noMicrophone, phase == .listening {
+            fail("The microphone stopped: this audio route has no microphone.")
+        } else if phase == .listening { pause() } else { stopAudio() }
+    }
+
+    /// The recognizer the microphone feeds, kept to start the mic again after a route change.
+    @ObservationIgnored private var feeding: SegmentRecognizer?
+
+    private func startMic() throws {
+        guard let r = feeding else { return }
+        try Microphone.start(engine, bufferSize: 2048, block: tap(feeding: r))
+    }
+
+    private func tap(feeding r: SegmentRecognizer) -> AVAudioNodeTapBlock {
+        { [weak self] buffer, _ in
             r.append(buffer)
             let level = Self.rms(buffer)
             DispatchQueue.main.async { self?.setLevel(level) }
         }
-        engine.prepare()
-        try engine.start()
-        if interruption == nil {
-            interruption = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
-                let began = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) == .began
-                Task { @MainActor in if began { self?.pause() } }
-            }
+    }
+
+    /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
+    /// with it, so start the mic again there.
+    func routeChanged() {
+        guard lease != nil, feeding != nil else { return }
+        do {
+            try startMic()
+            VoiceLog.shared.add("Talk: mic restarted on the new route")
+        } catch {
+            VoiceLog.shared.add("Talk: mic couldn't restart on the new route: \(error.localizedDescription)")
+            if phase == .listening { fail(error.localizedDescription) } else { stopAudio() }
         }
     }
 
     private func stopAudio() {
-        if engine.isRunning { engine.stop() }
-        if !TestMode.noSpeech { engine.inputNode.removeTap(onBus: 0) }
+        if !TestMode.noSpeech { Microphone.stop(engine) }
+        feeding = nil
         level = 0
+        if let lease { audio.release(lease) }
+        lease = nil
     }
 
     private func setLevel(_ l: Float) {

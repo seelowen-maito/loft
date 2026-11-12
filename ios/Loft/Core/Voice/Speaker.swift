@@ -4,6 +4,9 @@ import UIKit
 
 /// Reads agent replies aloud with Apple's on-device voices, in the language each
 /// reply is written in. Code, links and Markdown are left out.
+///
+/// The one way into reading aloud: every caller goes through `speak` or `readReply`. One reading plays at a
+/// time; a new request waits for the one playing unless it asks to `replace` it, and `stop()` drops them all.
 @MainActor
 @Observable
 final class Speaker: NSObject {
@@ -26,26 +29,49 @@ final class Speaker: NSObject {
     /// The interview's extra command phrases, for recognizing them while reading.
     @ObservationIgnored var phrases: GrillPhrases?
 
+    /// How long a reply must stop changing before it's read: the one setting for "the whole reply is in".
+    nonisolated static let settle: TimeInterval = 0.8
+
     @ObservationIgnored private let synth = AVSpeechSynthesizer()
+    @ObservationIgnored private let turns = ReadingTurns()
+    /// The utterance playing now: the end of an earlier one (it arrives late) mustn't end this reading.
+    @ObservationIgnored private var utterance: ObjectIdentifier?
     @ObservationIgnored private var finished: CheckedContinuation<Void, Never>?
     @ObservationIgnored private var reader: InterruptibleReader?
+    /// The audio held from `AudioSessionOwner` while the plain voice reads.
+    @ObservationIgnored private var lease: UUID?
     /// How the current reading was cut short, returned by `speak`.
     @ObservationIgnored private var endedBy: ReadAloudCommand?
+    @ObservationIgnored private let audio: AudioSessionOwner
 
-    override init() {
+    init(audio: AudioSessionOwner = .shared) {
+        self.audio = audio
         super.init()
         synth.delegate = self
     }
 
+    /// A message's speak button (or Retry): it replaces whatever is being read.
     func speak(_ message: ChatMessage) {
-        Task { await speak(message.displayContent, messageId: message.id) }
+        Task { await speak(message.displayContent, messageId: message.id, replace: true) }
     }
 
     /// Speaks and returns once done (or stopped). With `interruptible`, it listens meanwhile (when that's
     /// on in Settings and VoiceOver isn't running) and returns the command that cut it short, if any.
+    /// It waits for a reading in progress to end first, unless `replace` stops it.
     @discardableResult
-    func speak(_ markdown: String, messageId: Int64? = nil, interruptible: Bool = false, hasMore: Bool = false) async -> ReadAloudCommand? {
-        stop()
+    func speak(_ markdown: String, messageId: Int64? = nil, interruptible: Bool = false, hasMore: Bool = false,
+               replace: Bool = false) async -> ReadAloudCommand? {
+        await turn(replace: replace) {
+            await self.play(markdown, messageId: messageId, interruptible: interruptible, hasMore: hasMore)
+        }
+    }
+
+    private func turn(replace: Bool, _ work: @escaping @MainActor () async -> ReadAloudCommand?) async -> ReadAloudCommand? {
+        if replace { stop() } else if isSpeaking { VoiceLog.shared.add("read-aloud: waiting for the reading in progress") }
+        return await turns.run(work) ?? nil
+    }
+
+    private func play(_ markdown: String, messageId: Int64?, interruptible: Bool, hasMore: Bool) async -> ReadAloudCommand? {
         let (text, truncated) = VoiceText.speakable(markdown)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
@@ -91,13 +117,15 @@ final class Speaker: NSObject {
                 reader = nil
             }
         }
-        // The mic (the composer or the Talk screen) may still be letting go of the audio: wait for it, briefly.
-        if let problem = await activateSession() {
-            return failed(messageId, "the audio wasn't available (\(problem))")
-        }
+        let problem = await takeAudio()
+        // Stopped while the audio was being handed over, or another request took it before this one held it:
+        // ended on purpose, not a failure to report.
+        guard isSpeaking else { done(); return endedBy }
+        if let problem { return failed(messageId, problem) }
         synthStarted = false
         await withCheckedContinuation { c in
             finished = c
+            utterance = ObjectIdentifier(u)
             synth.speak(u)
         }
         if !synthStarted && endedBy == nil && !stoppedOnPurpose {
@@ -118,7 +146,12 @@ final class Speaker: NSObject {
     /// A reply in a hands-free conversation: the short version first when that's on, "more" (said or tapped)
     /// for the rest, "repeat" from the start. Returns `.stop` or `.skip` when one cut it short, nil when read through.
     @discardableResult
-    func readReply(_ markdown: String, messageId: Int64? = nil, isActive: () -> Bool) async -> ReadAloudCommand? {
+    func readReply(_ markdown: String, messageId: Int64? = nil, replace: Bool = false,
+                   isActive: @escaping @MainActor () -> Bool) async -> ReadAloudCommand? {
+        await turn(replace: replace) { await self.playReply(markdown, messageId: messageId, isActive: isActive) }
+    }
+
+    private func playReply(_ markdown: String, messageId: Int64?, isActive: () -> Bool) async -> ReadAloudCommand? {
         var parts: (text: String, rest: String?) = UserDefaults.standard.bool(forKey: Prefs.voiceShortRead) ? VoiceText.shortRead(markdown) : (markdown, nil)
         // A long reply: the on-device model's few sentences instead of its opening; "more" then reads it all.
         if parts.rest != nil, let spoken = await OnDeviceFeatures.spokenVersion(of: markdown) {
@@ -127,7 +160,7 @@ final class Speaker: NSObject {
         var next: (text: String, rest: String?)? = parts
         while let part = next, isActive() {
             next = nil
-            switch await speak(part.text, messageId: messageId, interruptible: true, hasMore: part.rest != nil) {
+            switch await play(part.text, messageId: messageId, interruptible: true, hasMore: part.rest != nil) {
             case .repeatIt: next = parts
             case .more: next = part.rest.map { ($0, nil) }
             case .stop: return .stop
@@ -154,10 +187,16 @@ final class Speaker: NSObject {
     func interrupt(_ c: ReadAloudCommand) {
         guard isSpeaking else { return }
         endedBy = c
-        stop()
+        stopPlaying()
     }
 
+    /// Stops the reading and drops the ones waiting their turn.
     func stop() {
+        turns.cancelAll()
+        stopPlaying()
+    }
+
+    private func stopPlaying() {
         if isSpeaking { stoppedOnPurpose = true }
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
         reader?.stop()
@@ -171,44 +210,45 @@ final class Speaker: NSObject {
         hasMore = false
         current = nil
         messageId = nil
+        utterance = nil
+        if let lease { audio.release(lease) }
+        lease = nil
         finished?.resume()
         finished = nil
     }
 
-    /// Makes the audio session ready for speech, retrying for up to a second while the mic lets go of it.
-    /// Returns the error when it never became available.
-    private func activateSession() async -> String? {
-        let s = AVAudioSession.sharedInstance()
-        var last: String?
-        for attempt in 0..<5 {
-            do {
-                // Keep recording possible: a voice session listens again right after.
-                if s.category != .playAndRecord {
-                    try s.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-                }
-                try s.setActive(true)
-                if attempt > 0 { VoiceLog.shared.add("read-aloud: audio ready after \(attempt * 200) ms") }
-                return nil
-            } catch {
-                last = error.localizedDescription
-                if attempt == 0 { VoiceLog.shared.add("read-aloud: waiting for the audio (\(error.localizedDescription))") }
-                try? await Task.sleep(for: .milliseconds(200))
-            }
+    /// Takes the audio from the owner for reading aloud (the mic hands it over). Returns why it couldn't.
+    private func takeAudio() async -> String? {
+        do {
+            lease = try await audio.acquire(.speaking, by: "read-aloud") { [weak self] _ in self?.stopPlaying() }
+            return nil
+        } catch {
+            return (error as? VoiceError)?.message ?? error.localizedDescription
         }
-        return last
     }
 
-    /// Reads a short sample in one voice, for the voice picker.
+    /// Reads a short sample in one voice, for the voice picker. A tap there is explicit, so it isn't queued
+    /// through `turns`: `stop()` drops the readings waiting and cuts the one playing.
     func preview(_ voice: AVSpeechSynthesisVoice) async {
         stop()
-        _ = await activateSession()
+        if let problem = await takeAudio() {
+            VoiceLog.shared.add("read-aloud: couldn't preview the voice: \(problem)")
+            return
+        }
         isSpeaking = true
         let u = AVSpeechUtterance(string: VoiceChoice.sample(for: voice.language))
         u.voice = voice
         await withCheckedContinuation { c in
             finished = c
+            utterance = ObjectIdentifier(u)
             synth.speak(u)
         }
+    }
+
+    /// The synthesizer's end of `u`: only the utterance playing now ends the reading.
+    private func ended(_ u: ObjectIdentifier) {
+        guard u == utterance else { return VoiceLog.shared.add("read-aloud: ignored the end of an earlier reading") }
+        done()
     }
 
     private static func askForMore(_ text: String, byVoice: Bool) -> String {
@@ -241,11 +281,56 @@ extension Speaker: AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        Task { @MainActor in self.done() }
+        let id = ObjectIdentifier(u)
+        Task { @MainActor in self.ended(id) }
     }
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
-        Task { @MainActor in self.done() }
+        let id = ObjectIdentifier(u)
+        Task { @MainActor in self.ended(id) }
+    }
+}
+
+/// One reading at a time, in the order asked. `cancelAll` drops the ones still waiting (the one playing is
+/// stopped by its owner); they return nil without running.
+@MainActor
+final class ReadingTurns {
+    private var tail: Task<Void, Never>?
+    private var generation = 0
+
+    func run<T>(_ work: @escaping @MainActor () async -> T) async -> T? {
+        let mine = generation
+        let previous = tail
+        let task = Task { @MainActor () -> T? in
+            await previous?.value
+            guard mine == self.generation else { return nil }
+            return await work()
+        }
+        tail = Task { _ = await task.value }
+        return await task.value
+    }
+
+    func cancelAll() { generation += 1 }
+}
+
+/// A reply counts as whole once it has stopped changing for `delay`: pieces and edits restart the wait.
+struct ReplySettle {
+    var delay: TimeInterval = Speaker.settle
+    private var text: String?
+    private var since = Date.distantPast
+
+    init(delay: TimeInterval = Speaker.settle) { self.delay = delay }
+
+    /// `candidate`: the reply as it stands now, nil while it can't be whole yet (the run still going).
+    /// Returns it once it has been the same for `delay`.
+    mutating func whole(_ candidate: String?, at now: Date) -> String? {
+        if candidate != text {
+            text = candidate
+            since = now
+            return nil
+        }
+        guard let text, now.timeIntervalSince(since) >= delay else { return nil }
+        return text
     }
 }
 

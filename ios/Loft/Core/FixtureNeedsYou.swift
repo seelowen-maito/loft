@@ -71,13 +71,13 @@ enum FixtureNeedsYou {
       "text": ""
      },
      "kind": "answer",
-     "label": "Reply on the task",
+     "label": "Reply on the issue",
      "method": "POST",
      "path": "/api/tasks/9768b326-df66-4876-803e-41f8a4317202/comments"
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "9768b326-df66-4876-803e-41f8a4317202"
@@ -86,7 +86,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/task%3A9768b326-df66-4876-803e-41f8a4317202%3Ablocked/dismiss"
     }
@@ -100,7 +100,7 @@ enum FixtureNeedsYou {
    "id": "task:9768b326-df66-4876-803e-41f8a4317202:blocked",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/9768b326-df66-4876-803e-41f8a4317202"
     }
    ],
@@ -133,7 +133,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/question%3A1/dismiss"
     }
@@ -212,7 +212,7 @@ enum FixtureNeedsYou {
     },
     {
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/stuck%3Abe%3A1/dismiss",
      "body": {}
@@ -227,24 +227,13 @@ enum FixtureNeedsYou {
       "text": ""
      },
      "kind": "answer",
-     "label": "Reply on the task",
-     "method": "POST",
-     "path": "/api/tasks/dbc521e2-042c-4485-a15d-956c162919ed/comments"
-    },
-    {
-     "body": {
-      "reopen": true,
-      "send": true,
-      "text": ""
-     },
-     "kind": "retry",
-     "label": "Reopen and send",
+     "label": "Reply on the issue",
      "method": "POST",
      "path": "/api/tasks/dbc521e2-042c-4485-a15d-956c162919ed/comments"
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "dbc521e2-042c-4485-a15d-956c162919ed"
@@ -253,21 +242,18 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/task%3Adbc521e2-042c-4485-a15d-956c162919ed%3Afailed/dismiss"
     }
    ],
    "age_seconds": 0,
-   "agent": {
-    "id": "qa",
-    "name": "QA Agent"
-   },
+   "agent": null,
    "created_at": "2026-10-23T14:37:36.763444+00:00",
    "id": "task:dbc521e2-042c-4485-a15d-956c162919ed:failed",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/dbc521e2-042c-4485-a15d-956c162919ed"
     }
    ],
@@ -293,13 +279,13 @@ enum FixtureNeedsYou {
      "kind": "open",
      "label": "Open on GitHub",
      "target": {
-      "url": "https://github.com/o/r/pull/7"
+      "url": "https://github.com/octo/loft/pull/214"
      }
     },
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/pr%3Apr1%3Aabc/dismiss"
     }
@@ -314,13 +300,13 @@ enum FixtureNeedsYou {
    "links": [
     {
      "label": "Pull request",
-     "url": "https://github.com/o/r/pull/7"
+     "url": "https://github.com/octo/loft/pull/214"
     }
    ],
    "reason": "Ready to merge, 3 checks passed.",
    "task_id": null,
-   "text": "→  · +0 −0 in 0 files",
-   "title": "o/r#7: Fix it",
+   "text": "settings-endpoints → main · +412 −38 in 9 files",
+   "title": "loft#214: Settings endpoints",
    "type": "pr_ready",
    "urgency": 1
   },
@@ -328,13 +314,13 @@ enum FixtureNeedsYou {
    "actions": [
     {"body": {}, "kind": "deny", "label": "Cancel issue", "method": "POST", "path": "/api/issues/t2/cancel"},
     {"body": {}, "kind": "approve", "label": "Keep working (reopens #43)", "method": "POST", "path": "/api/issues/t2/keep-working"},
-    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t2"}}
+    {"kind": "open", "label": "Open issue", "target": {"screen": "task", "task_id": "t2"}}
    ],
    "age_seconds": 300,
    "agent": {"id": "be", "name": "Backend Agent"},
    "created_at": "2026-10-23T14:32:36.763574+00:00",
    "id": "closed_on_github:t2:2026-10-23T14:32:00Z",
-   "links": [{"label": "Task", "path": "/tasks/t2"}],
+   "links": [{"label": "Issue", "path": "/tasks/t2"}],
    "project": "loft",
    "reason": "#43 was closed on GitHub while it's being worked on.",
    "task_id": "t2",
@@ -348,13 +334,13 @@ enum FixtureNeedsYou {
     {"body": {}, "kind": "approve", "label": "Approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
     {"body": {"text": "Backend is done: 4 endpoints with tests. iOS screen next."}, "kind": "answer", "label": "Edit and approve", "method": "POST", "path": "/api/issues/t1/comments/77/approve"},
     {"body": {}, "kind": "deny", "label": "Keep in Loft", "method": "POST", "path": "/api/issues/t1/comments/77/keep"},
-    {"kind": "open", "label": "Open task", "target": {"screen": "task", "task_id": "t1"}}
+    {"kind": "open", "label": "Open issue", "target": {"screen": "task", "task_id": "t1"}}
    ],
    "age_seconds": 120,
    "agent": {"id": "be", "name": "Backend Agent"},
    "created_at": "2026-10-23T14:35:36.763574+00:00",
    "id": "comment:77",
-   "links": [{"label": "Task", "path": "/tasks/t1"}],
+   "links": [{"label": "Issue", "path": "/tasks/t1"}],
    "project": "loft",
    "reason": "Not on GitHub yet: approve to post it on octo/loft#42.",
    "task_id": "t1",
@@ -378,7 +364,7 @@ enum FixtureNeedsYou {
     },
     {
      "kind": "open",
-     "label": "Open task",
+     "label": "Open issue",
      "target": {
       "screen": "task",
       "task_id": "c835a7f2-343c-414d-8165-cf09eb16575b"
@@ -387,7 +373,7 @@ enum FixtureNeedsYou {
     {
      "body": {},
      "kind": "dismiss",
-     "label": "Dismiss",
+     "label": "Done",
      "method": "POST",
      "path": "/api/needs-you/done%3Ac835a7f2-343c-414d-8165-cf09eb16575b%3A2026-10-23T14%3A37%3A36.763574%2B00%3A00/dismiss"
     }
@@ -401,7 +387,7 @@ enum FixtureNeedsYou {
    "id": "done:c835a7f2-343c-414d-8165-cf09eb16575b:2026-10-23T14:37:36.763574+00:00",
    "links": [
     {
-     "label": "Task",
+     "label": "Issue",
      "path": "/tasks/c835a7f2-343c-414d-8165-cf09eb16575b"
     }
    ],
@@ -415,6 +401,50 @@ enum FixtureNeedsYou {
  ],
  "urgent": 4,
  "version": 1
+}
+"""#
+
+    /// `-fixture-backup-failed`: the Mac's backups failing for two days, as the server words it.
+    static let backupFailed = #"""
+{
+ "actions": [
+  { "body": {}, "kind": "retry", "label": "Back up now", "method": "POST", "path": "/api/backups" },
+  { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#backups" } },
+  { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/backup%3A2026-11-07T03%3A00%3A00%2B00%3A00/dismiss" }
+ ],
+ "age_seconds": 0,
+ "agent": null,
+ "created_at": "2026-11-09T09:00:00+00:00",
+ "id": "backup:2026-11-07T03:00:00+00:00",
+ "links": [],
+ "reason": "The last good one is from Nov 7, 03:00. can't create /Volumes/Backup/Loft backups",
+ "task_id": null,
+ "text": "can't create /Volumes/Backup/Loft backups: No such file or directory\n\nBackups folder: /Volumes/Backup/Loft backups",
+ "title": "Loft's backups are failing",
+ "type": "backup_failed",
+ "urgency": 1
+}
+"""#
+
+    /// `-fixture-disk-low`: under 20 GB free, as the server words it.
+    static let diskLow = #"""
+{
+ "actions": [
+  { "body": {}, "kind": "retry", "label": "Clean now", "method": "POST", "path": "/api/workspaces/clean" },
+  { "kind": "open", "label": "Open Settings", "target": { "url": "http://fixture-mac.tailnet.ts.net:7420/settings#workspaces" } },
+  { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/disk_low/dismiss" }
+ ],
+ "age_seconds": 0,
+ "agent": null,
+ "created_at": "2026-11-09T09:00:00+00:00",
+ "id": "disk_low",
+ "links": [],
+ "reason": "14.3 GB are free where agents' workspaces live.",
+ "task_id": null,
+ "text": "Clean now removes build output from idle workspaces. Settings shows each workspace's size; deleting an agent deletes its workspace by default.",
+ "title": "Disk almost full",
+ "type": "disk_low",
+ "urgency": 1
 }
 """#
 }

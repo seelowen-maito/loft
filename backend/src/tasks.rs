@@ -74,6 +74,23 @@ pub(crate) fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &s
     }
 }
 
+/// The warning for an issue whose assignee doesn't work in its project, if it doesn't. Agents with no
+/// projects take any.
+fn project_warning(state: &AppState, t: &Task) -> Option<String> {
+    let a = state.db.get_agent(t.agent_id.as_deref()?).ok()??;
+    if t.project.is_empty() || a.projects.is_empty() || a.has_project(&t.project) {
+        return None;
+    }
+    Some(format!("{} doesn't work in {}: its projects are {}.", a.name, t.project, a.projects.join(", ")))
+}
+
+/// Logs the project warning in the thread, if there is one.
+fn warn_project(state: &AppState, t: &Task, author: &str) {
+    if let Some(w) = project_warning(state, t) {
+        log(state, t, author, "status", &w, json!({ "status": t.status, "warning": true }));
+    }
+}
+
 /// A status entry: "Started by Web Dev", "Marked done by you".
 pub(crate) fn log_status(state: &AppState, t: &Task, author: &str, text: &str) {
     log(state, t, author, "status", text, json!({ "status": t.status }));
@@ -270,6 +287,7 @@ pub fn create(state: &AppState, p: &Value, created_by: &str) -> Result<(Task, bo
     state.db.save_task(&t).map_err(|e| e.to_string())?;
     emit(state, &t);
     log_status(state, &t, created_by, &format!("Created by {}", who(state, created_by)));
+    warn_project(state, &t, created_by);
     crate::mirror::auto_publish(state, &t);
     Ok((t, true))
 }
@@ -308,21 +326,42 @@ fn brief(state: &AppState, t: &Task, note: &str) -> String {
     s
 }
 
+/// Who hands an issue to an agent with [`execute`].
+#[derive(Clone, Copy)]
+pub enum By<'a> {
+    /// The user, from a client: the only one who can send a blocked or failed issue again.
+    User,
+    /// An agent: delegating it, or starting an issue it created for itself.
+    Agent(&'a Agent),
+}
+
+fn refuse_spec(t: &Task) -> Result<(), ApiError> {
+    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
+        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
+    }
+    Ok(())
+}
+
 /// Hand a task to an agent and start it (or queue it behind the agent's current run).
-/// `by` is the agent delegating it, or None when the user started it.
-pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: Option<&Agent>) -> Result<(Task, bool), ApiError> {
+///
+/// The user (`By::User`) can send a blocked or failed issue again, to another agent or the same one: the agent gets
+/// why it stopped with the brief, and the history says it was sent again. An agent can't.
+pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, by: By) -> Result<(Task, bool), ApiError> {
     let mut t = state.db.get_task(id)?.ok_or_else(not_found)?;
-    if is_active(&t) {
+    let again = matches!(t.status.as_str(), "blocked" | "failed");
+    if again && !matches!(by, By::User) {
+        return Err(ApiError(StatusCode::CONFLICT, format!("This issue is {}: only the user can send it again.", t.status)));
+    }
+    if is_active(&t) && !again {
         return Err(ApiError(StatusCode::CONFLICT, "This task is already running. Cancel it first to restart it.".into()));
     }
     if is_closed(&t) {
         return Err(ApiError(StatusCode::CONFLICT, format!("This task is {}. Reopen it before running it again.", t.status)));
     }
-    if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
-        return Err(bad("A spec is split into tickets: hand each ticket to an agent, not the spec as one task."));
-    }
+    refuse_spec(&t)?;
     let agent_id = agent_id.map(str::to_string).or(t.agent_id.clone()).ok_or_else(|| bad("Pick an agent to run this task."))?;
     let agent = state.db.get_agent(&agent_id)?.ok_or_else(|| bad("unknown agent_id"))?;
+    let before = t.clone();
     let ts = now();
     t.agent_id = Some(agent.id.clone());
     t.kind = "work".into();
@@ -333,17 +372,33 @@ pub fn execute(state: &AppState, id: &str, agent_id: Option<&str>, note: &str, b
     t.updated_at = ts;
     state.db.save_task(&t)?;
     emit(state, &t);
-    let by_id = by.map_or("user", |a| a.id.as_str());
-    log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    let by_id = match by {
+        By::User => "user",
+        By::Agent(a) => a.id.as_str(),
+    };
+    let previous = before.agent_id.as_deref().and_then(|id| state.db.get_agent(id).ok().flatten());
+    let mut context = String::new();
+    if again {
+        log_status(state, &t, by_id, &format!("Sent again to {} by you: it was {}", agent.name, before.status));
+        let by_whom = previous.as_ref().map_or(String::new(), |p| if p.id == agent.id { " by you".to_string() } else { format!(" by {}", p.name) });
+        let why = before.error.trim();
+        context = format!("The user sends you this issue again: it was {}{by_whom}{}", before.status, if why.is_empty() { ".".to_string() } else { format!(", because: {why}") });
+        // A blocked issue's agent may still have it in mind: it's someone else's now.
+        if let Some(p) = previous.as_ref().filter(|p| p.id != agent.id && before.status == "blocked" && is_running(state, &p.id)) {
+            agents::enqueue(state, &p.id, Some(format!("[Task {}] {} was sent to {} by the user. Stop working on it.", t.id, t.title, agent.name)), "user");
+        }
+    } else {
+        log_status(state, &t, by_id, &format!("Sent to {} by {}", agent.name, who(state, by_id)));
+    }
     if !note.trim().is_empty() {
         log(state, &t, by_id, "comment", note.trim(), json!({ "to_agent": agent.id, "handoff": true }));
     }
     let queued = is_running(state, &agent.id);
-    let text = brief(state, &t, note);
+    let text = brief(state, &t, &[context.as_str(), note.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n"));
     match by {
         // `task_role` lets apps show a compact task row instead of the full brief.
-        Some(from) => agents::message_from_agent_with(state, from, &agent, &text, json!({ "task_id": t.id, "task_role": "brief" })),
-        None => {
+        By::Agent(from) if from.id != agent.id => agents::message_from_agent_with(state, from, &agent, &text, json!({ "task_id": t.id, "task_role": "brief" })),
+        _ => {
             agents::enqueue_with(state, &agent.id, Some(text), json!({ "task_id": t.id, "task_role": "brief" }), "user");
         }
     }
@@ -386,7 +441,11 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/{id}/plan", at_get(plan))
         .route("/{id}/publish", post(crate::mirror::publish_route))
         .route("/{id}/keep-working", post(crate::mirror::keep_working))
+        .route("/{id}/opened", post(crate::needs_you::issue_opened))
         .route("/{id}/start-delivery", post(crate::delivery::start_from_issue))
+        .route("/{id}/resume-delivery", post(crate::delivery::resume_from_issue))
+        .route("/{id}/pause-delivery", post(crate::delivery::pause_from_issue))
+        .route("/{id}/reopen-delivery", post(crate::delivery::reopen_from_issue))
         .route("/{id}/delivery", at_get(crate::delivery::issue_delivery))
         .route("/{id}/comments/{cid}/approve", post(crate::mirror::approve_route))
         .route("/{id}/comments/{cid}/keep", post(crate::mirror::keep_route))
@@ -460,6 +519,9 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<String>, Json(
         };
         log_status(&state, &t, "user", &text);
     }
+    if t.agent_id != before.agent_id || t.project != before.project {
+        warn_project(&state, &t, "user");
+    }
     crate::mirror::write_through(&state, &before, &t).await;
     Ok(Json(json!(state.db.get_task(&id)?.unwrap_or(t))))
 }
@@ -490,10 +552,10 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Re
 // ---- task references in messages ----------------------------------------
 
 /// Task ids a message points at: the one attached (`meta.task_id`) first, then task links in the
-/// text (`…/tasks/<id>` or `loft://task/<id>`), existing tasks only, at most 5.
+/// text (`…/issues/<id>`, the old `…/tasks/<id>` or `loft://task/<id>`), existing tasks only, at most 5.
 pub fn references(state: &AppState, attached: Option<&str>, text: &str) -> Vec<String> {
     let mut ids: Vec<String> = attached.into_iter().map(|s| s.trim().to_lowercase()).collect();
-    for marker in ["/tasks/", "loft://task/"] {
+    for marker in ["/issues/", "/tasks/", "loft://task/"] {
         let mut rest = text;
         while let Some(i) = rest.find(marker) {
             let after = &rest[i + marker.len()..];
@@ -539,7 +601,7 @@ pub fn reference_header(state: &AppState, ids: &[String]) -> String {
 
 /// Text from an issue (a GitHub title, say) made safe inside the header: it can't close the quote or the
 /// bracket, or start a line of its own.
-fn inert(s: &str) -> String {
+pub(crate) fn inert(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '“' | '”' => '"',
@@ -639,6 +701,8 @@ pub struct CommentBody {
     /// On a finished task: reopen it and run it again with this comment as the instruction.
     #[serde(default)]
     reopen: bool,
+    /// On an issue with nobody on it: hand it to this agent and deliver the comment to it.
+    agent_id: Option<String>,
 }
 
 fn yes() -> bool {
@@ -659,8 +723,13 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         let found = state.db.list_task_comments(&id, 1, Some(existing + 1))?;
         return Ok((StatusCode::OK, Json(json!({ "comment": found.first(), "duplicate": true }))));
     }
-    let agent = t.agent_id.as_deref().and_then(|a| state.db.get_agent(a).ok().flatten());
-    if b.reopen {
+    let mut agent = t.agent_id.as_deref().and_then(|a| state.db.get_agent(a).ok().flatten());
+    // Nobody on the issue: a picked agent takes it, as a hand-off does.
+    if let (None, true, Some(id)) = (&agent, b.send, &b.agent_id) {
+        agent = Some(state.db.get_agent(id)?.ok_or_else(|| bad("unknown agent_id"))?);
+    }
+    // Answering a failed issue runs it again, so it has one clear action.
+    if b.reopen || (b.send && t.status == "failed" && agent.is_some()) {
         // Reopening runs the task again with the comment as its instruction; `execute` keeps it in the thread.
         if !(is_closed(&t) || t.status == "failed") {
             return Err(ApiError(StatusCode::CONFLICT, "Only a finished task can be reopened.".into()));
@@ -668,12 +737,14 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         if agent.is_none() {
             return Err(bad("This task has no agent. Run it with an agent instead."));
         }
+        // What `execute` would refuse, before the task is touched: a refused rerun leaves it as it was.
+        refuse_spec(&t)?;
         let mut reopened = t.clone();
         reopened.status = "ready".into();
         state.db.save_task(&reopened)?;
         log_status(&state, &reopened, "user", "Reopened by you");
         crate::mirror::write_through(&state, &t, &reopened).await;
-        let (t, queued) = execute(&state, &t.id, None, text, None)?;
+        let (t, queued) = execute(&state, &t.id, agent.as_ref().map(|a| a.id.as_str()), text, By::User)?;
         let c = state.db.list_task_comments(&t.id, 1, None)?.pop();
         return Ok((StatusCode::CREATED, Json(json!({ "comment": c, "task": t, "queued": queued, "delivered_to": t.agent_id }))));
     }
@@ -692,14 +763,38 @@ pub async fn add_comment(State(state): State<AppState>, Path(id): Path<String>, 
         meta["to_agent"] = json!(a.id);
     }
     let c = log(&state, &t, "user", "comment", text, meta).ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the comment".into()))?;
-    deliver_mentions(&state, &t, &c, &who, deliver.then_some(t.agent_id.as_deref()).flatten());
+    let prompt = comment_prompt(&t, text);
+    let mut t = t;
     let mut queued = false;
+    if let (true, Some(a)) = (deliver, &agent) {
+        // An answer hands the turn back: out of blocked or waiting, so the Needs you item clears.
+        let before = t.clone();
+        let picked = t.agent_id.is_none();
+        t.agent_id = Some(a.id.clone());
+        if is_active(&t) && t.status != "in_progress" {
+            t.error = String::new();
+            if !set_status(&state, &mut t, "in_progress", "user", Some("Answered by you")) {
+                return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the task".into()));
+            }
+        } else if picked {
+            t.updated_at = now();
+            state.db.save_task(&t)?;
+            emit(&state, &t);
+        }
+        if picked {
+            log_status(&state, &t, "user", &format!("Sent to {} by you", a.name));
+        }
+        if picked || before.status != t.status {
+            crate::mirror::write_through(&state, &before, &t).await;
+        }
+    }
+    deliver_mentions(&state, &t, &c, &who, deliver.then_some(t.agent_id.as_deref()).flatten());
     if let (true, Some(a)) = (deliver, &agent) {
         queued = is_running(&state, &a.id);
         // The chat keeps what you wrote, as a task row (title, then your comment); the agent's prompt adds
         // how to answer. Queued behind a running run like any message.
         agents::add_msg(&state, &a.id, None, "user", "text", &format!("[Task {}] {}\n{}", t.id, t.title, text), json!({ "task_id": t.id, "task_role": "comment", "task_comment_id": c.id }));
-        agents::wake_for_user(&state, &a.id, comment_prompt(&t, text));
+        agents::wake_for_user(&state, &a.id, prompt);
     }
     Ok((StatusCode::CREATED, Json(json!({ "comment": c, "queued": queued, "delivered_to": deliver.then(|| t.agent_id.clone()).flatten() }))))
 }
@@ -713,7 +808,7 @@ pub struct ExecuteBody {
 
 pub async fn execute_task(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ExecuteBody>>) -> Result<Json<Value>, ApiError> {
     let b = body.map(|b| b.0).unwrap_or_default();
-    let (t, queued) = execute(&state, &id, b.agent_id.as_deref(), &b.note, None)?;
+    let (t, queued) = execute(&state, &id, b.agent_id.as_deref(), &b.note, By::User)?;
     Ok(Json(json!({ "task": t, "queued": queued })))
 }
 
@@ -892,7 +987,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "parent_id": { "type": "string" },
                 "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Ids of Loft issues that must finish first." },
                 "priority": { "type": "string", "enum": PRIORITIES },
-                "project": { "type": "string" },
+                "project": { "type": "string", "description": "One of your projects. Defaults to the assignee's main project, else yours." },
                 "start": { "type": "boolean", "description": "Hand it to the agent now." }
             }, "required": ["title"] }
         }),
@@ -1017,14 +1112,21 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
                 "agent_id": assignee.as_ref().map(|a| a.id.clone()),
                 "depends_on": args.get("depends_on").cloned().unwrap_or(json!([])),
             });
-            for k in ["parent_id", "priority", "project"] {
+            for k in ["parent_id", "priority"] {
                 if !s(k).is_empty() {
                     p[k] = json!(s(k));
                 }
             }
-            // No project given: the assignee's (in `create`), else the creating agent's.
-            if s("project").is_empty() && assignee.is_none() && !me.project.is_empty() {
-                p["project"] = json!(me.project);
+            // No project given: the assignee's main one, else the creating agent's. Resolved here, so the
+            // check below sees the project the issue really gets.
+            let project = match s("project") {
+                p if !p.is_empty() => p,
+                _ => assignee.as_ref().map_or(me.project.trim(), |a| a.project.trim()).to_string(),
+            };
+            p["project"] = json!(project);
+            // An agent with projects creates issues only in them.
+            if !project.is_empty() && !me.projects.is_empty() && !me.has_project(&project) {
+                return Err(format!("You don't work in {project}, so you can't create issues there. Your projects: {}. Ask the user, or an agent that works in {project}.", me.projects.join(", ")));
             }
             let (t, _) = create(state, &p, &me.id)?;
             if let Some(parent) = t.parent_id.as_deref() {
@@ -1032,8 +1134,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value, find_age
             }
             match assignee {
                 Some(a) if args["start"].as_bool() == Some(true) => {
-                    let by = (a.id != me.id).then_some(me);
-                    let (t, queued) = execute(state, &t.id, Some(&a.id), "", by).map_err(|e| e.1)?;
+                    let (t, queued) = execute(state, &t.id, Some(&a.id), "", By::Agent(me)).map_err(|e| e.1)?;
                     Ok(format!("Created and started task {}. {} {}.", t.id, a.name, if queued { "will pick it up after its current run" } else { "is on it now" }))
                 }
                 _ => Ok(format!("Created task {}.", t.id)),
@@ -1138,14 +1239,23 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     pub(crate) fn state() -> AppState {
-        let dir = std::env::temp_dir().join(format!("loft-test-{}", uuid::Uuid::new_v4()));
+        // Tests don't read the real disk: plenty is free unless a test sets `FAKE_FREE` itself.
+        crate::sweep::FAKE_FREE.with(|f| f.set(Some(u64::MAX)));
+        // Removed when the test's thread ends.
+        let dir = crate::testdir::for_this_test("test");
         // Boot with a temp projects folder so no test writes into the real ~/projects.
         let projects = dir.join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
         AppState {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
-            cfg: Arc::new(crate::state::Config { port: 0, storage_dir: dir.join("agents") }),
+            cfg: Arc::new(crate::state::Config {
+                port: 0,
+                storage_dir: dir.join("agents"),
+                xcrun: dir.join("no-xcrun"),
+                // No xcode-select to run, so `xcrun` is run as it is.
+                xcode: crate::state::XcodeLookup { developer_dir: None, xcode_select: dir.join("no-xcode-select"), root: dir.clone() },
+            }),
             events: tokio::sync::broadcast::channel(64).0,
             rt: Arc::new(Mutex::new(Default::default())),
             repos: Arc::new(Default::default()),
@@ -1162,6 +1272,8 @@ pub(crate) mod tests {
             publish_known: Arc::new(Default::default()),
             mirror: Arc::new(Default::default()),
             listings: Arc::new(Default::default()),
+            xcode: Arc::new(Default::default()),
+            needs_you: Arc::new(Default::default()),
         }
     }
 
@@ -1187,18 +1299,18 @@ pub(crate) mod tests {
         // Busy, so the brief is queued instead of starting a real claude run.
         st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
         // Run it with a note: the instruction is kept as your comment.
-        execute(&st, &t.id, Some(&a.id), "Start with the login screen", None).unwrap();
+        execute(&st, &t.id, Some(&a.id), "Start with the login screen", By::User).unwrap();
         let find = |k: &str| Err::<Agent, _>(k.to_string());
         for note in ["looked at it", "halfway"] {
             mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "note": note }), find).unwrap().unwrap();
         }
         mcp_call(&st, &a, "update_task", &json!({ "id": t.id, "status": "done", "summary": "Fixed." }), find).unwrap().unwrap();
-        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
+        let (_, Json(c)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false, agent_id: None })).await.unwrap();
         let c = c["comment"].clone();
         // A retried post isn't added twice.
-        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false })).await.unwrap();
+        let (code, Json(again)) = add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "Thanks!".into(), client_id: Some("c1".into()), send: false, github: None, reopen: false, agent_id: None })).await.unwrap();
         assert_eq!((code, again["comment"]["id"].clone()), (StatusCode::OK, c["id"].clone()));
-        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, github: None, reopen: false })).await.is_err());
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), Json(CommentBody { text: "  ".into(), client_id: None, send: true, github: None, reopen: false, agent_id: None })).await.is_err());
 
         let Json(thread) = list_comments(State(st.clone()), Path(t.id.clone()), Query(CommentsQuery { limit: None, before: None })).await.unwrap();
         let rows: Vec<(String, String)> = thread.as_array().unwrap().iter().map(|c| (c["kind"].as_str().unwrap().into(), c["text"].as_str().unwrap().into())).collect();
@@ -1223,7 +1335,155 @@ pub(crate) mod tests {
     }
 
     fn comment(text: &str, send: bool, reopen: bool) -> Json<CommentBody> {
-        Json(CommentBody { text: text.into(), client_id: None, send, github: None, reopen })
+        Json(CommentBody { text: text.into(), client_id: None, send, github: None, reopen, agent_id: None })
+    }
+
+    fn status_of(st: &AppState, id: &str) -> String {
+        st.db.get_task(id).unwrap().unwrap().status
+    }
+
+    /// Puts a task in `status` as its agent would, with `error` as the reason.
+    fn stuck(st: &AppState, id: &str, status: &str) {
+        let mut t = st.db.get_task(id).unwrap().unwrap();
+        t.status = status.into();
+        t.error = "Need the API key".into();
+        st.db.save_task(&t).unwrap();
+    }
+
+    fn needs_you(st: &AppState, id: &str) -> bool {
+        crate::needs_you::collect(st).unwrap().iter().any(|i| i.task_id.as_deref() == Some(id))
+    }
+
+    #[tokio::test]
+    async fn answering_a_blocked_or_waiting_issue_hands_it_back_to_its_agent() {
+        let st = state();
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        for status in ["blocked", "waiting_approval"] {
+            let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
+            execute(&st, &t.id, None, "", By::User).unwrap();
+            stuck(&st, &t.id, status);
+            assert!(needs_you(&st, &t.id));
+            let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Use the staging key", true, false)).await.unwrap();
+            assert_eq!(r["delivered_to"], json!(a.id), "{status}");
+            assert_eq!(status_of(&st, &t.id), "in_progress", "{status}");
+            assert!(!needs_you(&st, &t.id), "{status}: the item clears at once");
+            let q = queued(&st, &a);
+            assert!(q.contains(&format!("(status: {})]\nUse the staging key", status.replace('_', " "))), "{q}");
+            let texts: Vec<String> = st.db.list_task_comments(&t.id, 50, None).unwrap().into_iter().map(|c| c.text).collect();
+            assert_eq!(texts[texts.len() - 2..], ["Use the staging key", "Answered by you"]);
+            st.rt.lock().unwrap().queued.remove(&a.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn answering_a_failed_issue_runs_it_again_with_the_answer() {
+        let st = state();
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
+        stuck(&st, &t.id, "failed");
+        st.rt.lock().unwrap().queued.remove(&a.id);
+        let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Try with Xcode 26", true, false)).await.unwrap();
+        assert_eq!((r["task"]["status"].clone(), r["delivered_to"].clone()), (json!("in_progress"), json!(a.id)));
+        assert!(queued(&st, &a).contains("Try with Xcode 26"), "the brief carries the answer");
+        assert!(!needs_you(&st, &t.id));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_or_failed_issue_is_sent_again_to_another_agent_or_the_same_one_with_why_it_stopped() {
+        let st = state();
+        let (a, b) = (agent(&st, "Reviewer"), agent(&st, "Builder"));
+        busy(&st, &a);
+        busy(&st, &b);
+        for status in ["blocked", "failed"] {
+            let (t, _) = create(&st, &json!({ "title": "Fix login", "description": "The login button does nothing.", "agent_id": a.id }), "user").unwrap();
+            execute(&st, &t.id, None, "", By::User).unwrap();
+            stuck(&st, &t.id, status);
+            st.rt.lock().unwrap().queued.clear();
+
+            // To another agent: it takes the issue, in progress again, with the description and the reason.
+            let Json(r) = execute_task(State(st.clone()), Path(t.id.clone()), Some(Json(ExecuteBody { agent_id: Some(b.id.clone()), note: "You can touch code.".into() }))).await.unwrap();
+            assert_eq!((r["task"]["status"].clone(), r["task"]["agent_id"].clone(), r["task"]["error"].clone()), (json!("in_progress"), json!(b.id), json!("")), "{status}");
+            let q = queued(&st, &b);
+            assert!(q.contains("The login button does nothing.") && q.contains(&format!("it was {status} by Reviewer, because: Need the API key")) && q.contains("You can touch code."), "{status}: {q}");
+            assert!(!needs_you(&st, &t.id), "{status}: the item clears");
+            let texts: Vec<String> = st.db.list_task_comments(&t.id, 50, None).unwrap().into_iter().map(|c| c.text).collect();
+            assert!(texts.contains(&format!("Sent again to Builder by you: it was {status}")), "{status}: {texts:?}");
+            // The agent that blocked it is told it's someone else's now; one that failed it ended already.
+            assert_eq!(queued(&st, &a).contains("was sent to Builder by the user"), status == "blocked", "{status}");
+
+            // Blocked again, back to the same agent.
+            stuck(&st, &t.id, status);
+            execute(&st, &t.id, None, "", By::User).unwrap();
+            assert_eq!(status_of(&st, &t.id), "in_progress");
+            assert!(queued(&st, &b).contains(&format!("it was {status} by you, because: Need the API key")), "{status}");
+            st.rt.lock().unwrap().queued.clear();
+        }
+        // An agent can't take over another agent's blocked issue this way, and an issue in progress isn't sent again.
+        let (t, _) = create(&st, &json!({ "title": "Other", "agent_id": a.id }), "user").unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", By::User).unwrap_err().0, StatusCode::CONFLICT);
+        stuck(&st, &t.id, "blocked");
+        assert_eq!(execute(&st, &t.id, Some(&b.id), "", By::Agent(&b)).unwrap_err().0, StatusCode::CONFLICT);
+        // Nor send its own blocked or failed issue again: only the user does.
+        for status in ["blocked", "failed"] {
+            stuck(&st, &t.id, status);
+            assert_eq!(execute(&st, &t.id, Some(&a.id), "", By::Agent(&a)).unwrap_err().0, StatusCode::CONFLICT, "{status}");
+            assert_eq!(status_of(&st, &t.id), status);
+        }
+        // An agent still starts a new issue it created for itself: the brief is queued for it, not messaged.
+        st.rt.lock().unwrap().queued.clear();
+        let (own, _) = create(&st, &json!({ "title": "Own", "agent_id": a.id }), &a.id).unwrap();
+        execute(&st, &own.id, Some(&a.id), "", By::Agent(&a)).unwrap();
+        assert_eq!(status_of(&st, &own.id), "in_progress");
+        assert!(queued(&st, &a).contains("Own"), "{}", queued(&st, &a));
+    }
+
+    #[tokio::test]
+    async fn a_refused_rerun_leaves_the_failed_issue_failed() {
+        let st = state();
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        let (t, _) = create(&st, &json!({ "title": "Settings", "agent_id": a.id, "labels": ["spec"] }), "user").unwrap();
+        stuck(&st, &t.id, "failed");
+        let before = st.db.list_task_comments(&t.id, 50, None).unwrap().len();
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), comment("Try again", true, false)).await.is_err());
+        assert_eq!(status_of(&st, &t.id), "failed");
+        assert_eq!(st.db.list_task_comments(&t.id, 50, None).unwrap().len(), before, "no Reopened entry");
+        assert!(needs_you(&st, &t.id), "still waiting on you");
+    }
+
+    #[tokio::test]
+    async fn answering_an_issue_with_nobody_on_it_hands_it_to_the_picked_agent_or_keeps_a_note() {
+        let st = state();
+        let a = agent(&st, "Worker");
+        busy(&st, &a);
+        for status in ["blocked", "failed"] {
+            let (t, _) = create(&st, &json!({ "title": "Solo" }), "user").unwrap();
+            stuck(&st, &t.id, status);
+            // Nobody picked: a note only, and the answer says so.
+            let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Just a thought", true, false)).await.unwrap();
+            assert_eq!(r["delivered_to"], Value::Null, "{status}");
+            assert_eq!(r["comment"]["meta"]["private"], json!(true));
+            assert_eq!(status_of(&st, &t.id), status, "a note changes nothing");
+            // An agent picked: it gets the issue and the answer.
+            let mut b = comment("Worker, take it from here", true, false);
+            b.agent_id = Some(a.id.clone());
+            let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), b).await.unwrap();
+            assert_eq!(r["delivered_to"], json!(a.id), "{status}");
+            let now = st.db.get_task(&t.id).unwrap().unwrap();
+            assert_eq!((now.status.as_str(), now.agent_id.as_deref()), ("in_progress", Some(a.id.as_str())), "{status}");
+            assert!(queued(&st, &a).contains("Worker, take it from here"), "{status}");
+            assert!(!needs_you(&st, &t.id));
+            st.rt.lock().unwrap().queued.remove(&a.id);
+        }
+        // An unknown agent is refused.
+        let (t, _) = create(&st, &json!({ "title": "Solo" }), "user").unwrap();
+        let mut b = comment("hi", true, false);
+        b.agent_id = Some("nope".into());
+        assert!(add_comment(State(st.clone()), Path(t.id.clone()), b).await.is_err());
     }
 
     /// An agent marked busy, so whatever reaches it is queued instead of starting a real claude run.
@@ -1241,7 +1501,7 @@ pub(crate) mod tests {
         let a = agent(&st, "Worker");
         busy(&st, &a);
         let (t, _) = create(&st, &json!({ "title": "Fix login", "agent_id": a.id }), "user").unwrap();
-        execute(&st, &t.id, None, "", None).unwrap();
+        execute(&st, &t.id, None, "", By::User).unwrap();
         st.rt.lock().unwrap().queued.remove(&a.id);
         let (_, Json(r)) = add_comment(State(st.clone()), Path(t.id.clone()), comment("Also check the iPad layout", true, false)).await.unwrap();
         assert_eq!((r["queued"].clone(), r["delivered_to"].clone()), (json!(true), json!(a.id)));
@@ -1433,7 +1693,7 @@ pub(crate) mod tests {
         assert!(q.contains(&format!("[The user refers to task {} “Fix login” (status: in progress, agent: Worker). Latest note: halfway.", t.id)), "{q}");
         // A link in the text works too; an unknown attached task is refused; unknown links are ignored.
         st.rt.lock().unwrap().queued.remove(&a.id);
-        let Json(r) = send(&format!("see http://mac:7420/tasks/{} and loft://task/{}", t.id, uuid::Uuid::new_v4()), None).await.ok().unwrap();
+        let Json(r) = send(&format!("see http://mac:7420/issues/{} or http://mac:7420/tasks/{} and loft://task/{}", t.id, t.id, uuid::Uuid::new_v4()), None).await.ok().unwrap();
         assert_eq!((r["message"]["meta"]["task_refs"].clone(), r["message"]["meta"]["task_id"].clone()), (json!([t.id]), Value::Null));
         assert!(send("hi", Some(&uuid::Uuid::new_v4().to_string())).await.is_err());
         let Json(r) = send("plain message", None).await.ok().unwrap();
@@ -1649,6 +1909,50 @@ pub(crate) mod tests {
         assert!(apply_fields(&st, &mut a2, &json!({ "parent_id": a.id })).is_err());
         assert!(apply_fields(&st, &mut a2, &json!({ "depends_on": [a.id] })).is_err());
         assert!(apply_fields(&st, &mut a2, &json!({ "depends_on": [b.id] })).is_ok());
+    }
+
+    #[tokio::test]
+    async fn issues_outside_the_assignee_s_projects_warn_the_user_and_are_refused_to_agents() {
+        let st = state();
+        let mk = |name: &str, projects: &[&str]| {
+            let mut a = agent(&st, name);
+            a.projects = projects.iter().map(|p| p.to_string()).collect();
+            a.project = a.projects.first().cloned().unwrap_or_default();
+            st.db.save_agent(&a).unwrap();
+            a
+        };
+        let web = mk("Web", &["b2c", "b2b"]);
+        let api = mk("Api", &["api"]);
+        let loose = mk("Loose", &[]);
+        let warnings = |id: &str| st.db.list_task_comments(id, 50, None).unwrap().into_iter().filter(|c| c.meta["warning"] == json!(true)).map(|c| c.text).collect::<Vec<_>>();
+
+        // The user: a warning in the thread, and the issue is created anyway.
+        let (t, _) = create(&st, &json!({ "title": "Outside", "agent_id": web.id, "project": "api" }), "user").unwrap();
+        assert_eq!(t.project, "api");
+        assert_eq!(warnings(&t.id), ["Web doesn't work in api: its projects are b2c, b2b."]);
+        let (t, _) = create(&st, &json!({ "title": "Inside", "agent_id": web.id, "project": "b2b" }), "user").unwrap();
+        assert!(warnings(&t.id).is_empty());
+        let (t, _) = create(&st, &json!({ "title": "Default", "agent_id": web.id }), "user").unwrap();
+        assert_eq!((t.project.as_str(), warnings(&t.id).len()), ("b2c", 0), "the main project by default");
+        // Reassigning to an agent without the project warns too.
+        let Json(_) = update(State(st.clone()), Path(t.id.clone()), Json(json!({ "agent_id": api.id }))).await.unwrap();
+        assert_eq!(warnings(&t.id), ["Api doesn't work in b2c: its projects are api."]);
+
+        // An agent: refused outside its own projects, with the list.
+        let find = |k: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == k).ok_or("none".to_string());
+        let err = mcp_call(&st, &web, "create_issue", &json!({ "title": "X", "project": "api" }), find).unwrap().unwrap_err();
+        assert_eq!(err, "You don't work in api, so you can't create issues there. Your projects: b2c, b2b. Ask the user, or an agent that works in api.");
+        assert!(mcp_call(&st, &web, "create_issue", &json!({ "title": "Y", "project": "b2b" }), find).unwrap().is_ok());
+        // Leaving the project out doesn't get around it: the assignee's main project is checked too.
+        let before = st.db.list_tasks().unwrap().len();
+        let err = mcp_call(&st, &web, "create_issue", &json!({ "title": "Via Api", "agent": "Api" }), find).unwrap().unwrap_err();
+        assert!(err.starts_with("You don't work in api"), "{err}");
+        assert_eq!(st.db.list_tasks().unwrap().len(), before, "nothing created");
+        let r = mcp_call(&st, &web, "create_issue", &json!({ "title": "For me", "agent": "Web" }), find).unwrap().unwrap();
+        let id = r.split_whitespace().nth(2).unwrap().trim_end_matches('.');
+        assert_eq!(st.db.get_task(id).unwrap().unwrap().project, "b2c", "its own main project");
+        // An agent with no projects isn't limited.
+        assert!(mcp_call(&st, &loose, "create_issue", &json!({ "title": "Z", "project": "api" }), find).unwrap().is_ok());
     }
 
     #[test]

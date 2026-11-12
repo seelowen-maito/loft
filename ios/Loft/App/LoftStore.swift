@@ -39,6 +39,12 @@ final class LoftStore {
 
     private(set) var agents: [Agent] = []
     private(set) var tasks: [HBTask] = []
+    /// Every spec's Delivery, for the Specs view, by spec (`SpecViews.index`); loaded when it opens and after each
+    /// issue, pull request, needs-you or Delivery change.
+    private(set) var deliverySummaries: [String: DeliverySummary] = [:]
+    private var deliveriesRefresh: Task<Void, Never>?
+    /// How many screens show Deliveries (the Specs view, a spec's detail), so live issue changes reload them.
+    var deliveryWatchers = 0
     private(set) var permissions: [PermissionRequest] = []
     private(set) var activity: [ActivityItem] = []
     private(set) var activityHasMore = true
@@ -47,6 +53,14 @@ final class LoftStore {
     /// A short note for the Needs you list ("Already done").
     var needsYouNotice: String?
     private(set) var pullRequests: [PullRequest] = []
+    /// The Delivery of each issue whose page loaded its card, by Loft issue id (absent: none, or not loaded).
+    /// A `delivery` event reloads the ones it's about, so an open card stays live.
+    private(set) var deliveries: [String: IssueDelivery] = [:]
+    /// Issues whose Delivery card is on screen, with how many: only these reload on reconnects and `delivery` events.
+    private var deliveryCards: [String: Int] = [:]
+    /// Bumped by each Delivery load and action reply per issue: a load applies its answer only if nothing newer
+    /// started or landed meanwhile, so a late, older answer can't put a Resumed card back to Stalled.
+    private var deliveryGen: [String: Int] = [:]
     /// Plan views by parent task id, for the chat's plan cards. Kept here rather than in the card: the chat's lazy
     /// list drops a card's state when it scrolls out of view, and a card that comes back short and loads again moves
     /// the bottom-anchored list, which scrolls it out again, round and round.
@@ -114,19 +128,27 @@ final class LoftStore {
         needsYou = list
         // The app icon's badge follows what needs you. Not awaited: refresh() runs this before the app counts
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
-        let count = list.count
+        // Only what hasn't been seen, here or on the web.
+        let count = list.unseen
         Task.detached { try? await UNUserNotificationCenter.current().setBadgeCount(count) }
+    }
+
+    /// Marks the Needs you items shown as seen, for every client (the web's counter too), then refreshes the badge.
+    func markNeedsYouSeen(_ ids: [String]) async {
+        guard let api, supportsNeedsYou, !ids.isEmpty else { return }
+        try? await api.needsYouRequest(method: "POST", path: "/api/needs-you/seen", body: NeedsYouSeen.body(ids))
+        await refreshNeedsYou()
     }
 
     /// Runs a "Needs you" action (approve, deny, answer, retry, merge, restart, dismiss, skip), then refreshes.
     /// `text` is the user's words for answer and retry.
     /// Returns false when it had already been handled (404/409: answered elsewhere, or the item is gone): not an error.
     @discardableResult
-    func perform(_ action: NeedsYouAction, text: String? = nil) async throws -> Bool {
+    func perform(_ action: NeedsYouAction, text: String? = nil, agentId: String? = nil) async throws -> Bool {
         let api = try requireWrite()
         guard let method = action.method, let path = action.path else { return true }
         do {
-            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString))
+            try await api.needsYouRequest(method: method, path: path, body: action.body(text: text, clientId: UUID().uuidString, agentId: agentId))
         } catch APIError.server(let status, _) where status == 404 || status == 409 {
             await refreshNeedsYou()
             return false
@@ -185,6 +207,33 @@ final class LoftStore {
     /// connection is left as it was; a relaunch starts from it again.
     private(set) var isDemo = false
 
+    /// The address that opens the demo instead of a server (App Review types it in). Matched on the text alone,
+    /// before any request: case, spaces, a trailing slash and the https:// prefix don't matter.
+    static let demoAddress = "demo-loft-dev.get-loft.com"
+
+    nonisolated static func isDemoAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["https://", "http://"] where s.hasPrefix(prefix) { s.removeFirst(prefix.count) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s == demoAddress
+    }
+
+    /// Connects to what was typed on the connect screen: the demo for the demo address (no request at all), the
+    /// server otherwise, saved for next time. False when it isn't an address.
+    @discardableResult
+    func connect(address: String) -> Bool {
+        if Self.isDemoAddress(address) {
+            enterDemo()
+            return true
+        }
+        guard let url = LiveLoftAPI.normalize(address) else { return false }
+        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
+        UserDefaults.standard.removeObject(forKey: "serverURL-override")
+        configure(LiveLoftAPI(baseURL: url))
+        activate()
+        return true
+    }
+
     func enterDemo() {
         deactivate()
         isDemo = true
@@ -221,6 +270,7 @@ final class LoftStore {
     func activate() {
         isActive = true
         if api != nil && connectionTask == nil { startConnection() }
+        sendOverdueVoiceSend()
     }
 
     /// The app went to the background: drop the stream (iOS would suspend it anyway) and save.
@@ -314,6 +364,8 @@ final class LoftStore {
         if let o = orchestratorId { await refreshGrill(o) }
         if info.supports(.grill) { await loadGrillPhrases() }
         if info.supports(.needsYou) { await refreshNeedsYou() }
+        // A reconnect may have missed `delivery` events: open cards catch up.
+        for id in deliveryCards.keys { try? await loadDelivery(id) }
         scheduleSave()
     }
 
@@ -374,6 +426,25 @@ final class LoftStore {
         }
     }
 
+    /// Loads the Deliveries now; `soon` waits a moment so a burst of issue changes reads once.
+    func loadDeliveries(soon: Bool = false) {
+        guard supportsTasks else { return }
+        deliveriesRefresh?.cancel()
+        deliveriesRefresh = Task { [weak self] in
+            if soon { try? await Task.sleep(for: .seconds(1.5)) }
+            guard let self, let api = self.api, !Task.isCancelled else { return }
+            if let fresh = try? await api.deliverySummaries() { self.deliverySummaries = SpecViews.index(fresh) }
+        }
+    }
+
+    /// Merge a plan kept in Loft; returns the server's message.
+    func mergeDelivery(_ d: DeliverySummary) async throws -> String {
+        let message = try await requireTasks().mergeDelivery(repo: d.repo, spec: d.spec)
+        try? await refresh()
+        loadDeliveries()
+        return message
+    }
+
     private func refreshActivitySoon() {
         guard supportsActivity else { return }
         activityRefresh?.cancel()
@@ -428,29 +499,40 @@ final class LoftStore {
             }
         case .pullRequest(let pr):
             upsert(&pullRequests, pr)
+            // A review verdict comes as a pull request change, needs you as a needs-you one.
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .task(let t):
             let before = task(t.id)
             upsert(&tasks, t)
             if let before, before.status != t.status {
                 switch t.state {
-                case .done: notifier.post(.taskOutcome, title: "Task done", body: t.title, whenActive: isActive,
+                case .done: notifier.post(.taskOutcome, title: "Issue done", body: t.title, whenActive: isActive,
                                           target: ["screen": "task", "task_id": t.id])
-                case .failed: notifier.post(.taskOutcome, title: "Task failed", body: t.title, whenActive: isActive,
+                case .failed: notifier.post(.taskOutcome, title: "Issue failed", body: t.title, whenActive: isActive,
                                             itemId: NeedsYouKey.task(t.id, "failed"), target: ["screen": "task", "task_id": t.id])
-                case .blocked: notifier.post(.taskOutcome, title: "Task blocked", body: t.title, whenActive: isActive,
+                case .blocked: notifier.post(.taskOutcome, title: "Issue blocked", body: t.title, whenActive: isActive,
                                              itemId: NeedsYouKey.task(t.id, "blocked"), target: ["screen": "task", "task_id": t.id])
                 default: break
                 }
             }
             refreshActivitySoon()
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .taskDeleted(let id):
             tasks.removeAll { $0.id == id }
         case .system(let r):
             system = r
         case .grill(let s):
             if let agentId = s.agentId ?? grillAgent(for: s.sessionId) { grillSessions[agentId] = s }
-        case .needsYou(_, let ids):
-            if ids != needsYou?.items.map(\.id) { Task { await refreshNeedsYou() } }
+        case .needsYou(_, let new, let ids):
+            // Seen on the web: the same ids, fewer new.
+            if ids != needsYou?.items.map(\.id) || (new != nil && new != needsYou?.new) { Task { await refreshNeedsYou() } }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
+        case .delivery(let repo, let spec):
+            for id in deliveryCards.keys {
+                guard let g = task(id)?.github, g.number == spec, g.repo.caseInsensitiveCompare(repo) == .orderedSame else { continue }
+                Task { try? await loadDelivery(id) }
+            }
+            if deliveryWatchers > 0 { loadDeliveries(soon: true) }
         case .other:
             break
         }
@@ -507,10 +589,61 @@ final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
-    func send(_ text: String, to agentId: String, meta: JSONValue? = nil) async {
+    /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
+    /// composer, so it still goes when you leave the chat during the window.
+    struct VoiceAutoSend: Identifiable {
+        let id = UUID()
+        let agentId: String
+        let text: String
+        let deadline: Date
+        let send: () -> Void
+    }
+
+    private(set) var voiceAutoSend: VoiceAutoSend?
+    @ObservationIgnored private var voiceAutoSendTimer: Task<Void, Never>?
+
+    /// Sends `text` to the agent (by calling `send`) once `window` is over, unless it's cancelled first.
+    /// Replaces a pending one for the same agent (a composer coming back takes it over, with the time that's left);
+    /// one for another agent goes now, so it isn't lost.
+    func scheduleVoiceSend(_ text: String, to agentId: String, in window: TimeInterval, send: @escaping () -> Void) {
+        if let other = voiceAutoSend, other.agentId != agentId { sendVoiceNow(other.id) }
+        voiceAutoSendTimer?.cancel()
+        let pending = VoiceAutoSend(agentId: agentId, text: text, deadline: Date().addingTimeInterval(window), send: send)
+        voiceAutoSend = pending
+        voiceAutoSendTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(window))
+            guard !Task.isCancelled else { return }
+            self?.sendVoiceNow(pending.id)
+        }
+    }
+
+    /// Sends the pending one now (Send now, or its window ended). It goes once: whatever fires second finds nothing.
+    func sendVoiceNow(_ id: UUID? = nil) {
+        guard let pending = voiceAutoSend, id == nil || pending.id == id else { return }
+        voiceAutoSend = nil
+        // Not cancelled: this may be running in that very timer, and its send would then fail as "Cancelled".
+        voiceAutoSendTimer = nil
+        VoiceLog.shared.add("sent \(VoiceLog.clip(pending.text)) after the Undo window")
+        pending.send()
+    }
+
+    /// Back from the background: one whose window ended meanwhile goes now.
+    func sendOverdueVoiceSend(now: Date = Date()) {
+        if let pending = voiceAutoSend, pending.deadline <= now { sendVoiceNow(pending.id) }
+    }
+
+    func cancelVoiceSend() {
+        voiceAutoSendTimer?.cancel()
+        voiceAutoSendTimer = nil
+        voiceAutoSend = nil
+    }
+
+    /// `images`: uploads to send with the text (a video); with them the text may be empty.
+    func send(_ text: String, to agentId: String, meta: JSONValue? = nil, images: [String] = []) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let p = PendingMessage(id: UUID().uuidString, agentId: agentId, text: text, createdAt: Date(), meta: meta)
+        guard !text.isEmpty || !images.isEmpty else { return }
+        let p = PendingMessage(id: UUID().uuidString, agentId: agentId, text: text, createdAt: Date(), meta: meta,
+                               images: images.isEmpty ? nil : images)
         pending.append(p)
         await deliverUncancelled(p)
     }
@@ -521,32 +654,31 @@ final class LoftStore {
         await Task { await deliver(p) }.value
     }
 
-    /// The agent's text replies after message `id`, joined, once its run is over. Nil when
+    /// The agent's text replies after message `id`, joined, once its run is over and they have
+    /// stopped changing for `Speaker.settle` (pieces and edits restart the wait). Nil when
     /// `keepWaiting` turns false (the conversation was left or stopped) or after an hour.
     func waitForReply(agentId: String, after id: Int64, while keepWaiting: () -> Bool) async -> String? {
-        var sawRun = false
-        var lastCount = 0
-        var settledTicks = 0
-        for tick in 0..<(60 * 60 * 2) { // checked every half second
+        var settle = ReplySettle()
+        for tick in 0..<(60 * 60 * 4) { // checked every quarter second, for an hour
             guard keepWaiting() else { return nil }
             let a = agent(agentId)
-            let running = a?.running == true || a?.status == "running"
-            sawRun = sawRun || running
-            let replies = conversation(agentId).filter { $0.id > id && $0.role == "assistant" && $0.kind == "text" }
-            // A round from an interview is posted by a tool call; it's the reply even if the run's end was missed.
-            let question = replies.contains { $0.grill?.role == .round }
-            // When the run was never seen (its update missed), the reply counts once nothing new has come for 2 s,
-            // instead of waiting a fixed 10 s, which was long enough to leave the chat and lose the reading.
-            settledTicks = replies.count == lastCount ? settledTicks + 1 : 0
-            lastCount = replies.count
-            if !replies.isEmpty && (sawRun || question || settledTicks >= 4 || tick > 20) && !running {
-                return replies.map(\.displayContent).joined(separator: "\n\n")
+            // A run that started after the message and has ended is over, whatever the agent's status says: its
+            // update can be missed (a reconnect, the app in the background), and the reply was then never read.
+            let after = conversation(agentId).filter { $0.id > id }
+            let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
+            let running = !runEnded && (a?.running == true || a?.status == "running")
+            let replies = after.filter { $0.role == "assistant" && $0.kind == "text" }
+            // The whole reply: once the run is over and nothing in it has changed (a new piece, an edit) for a moment.
+            let candidate = replies.isEmpty || running ? nil : replies.map(\.displayContent).joined(separator: "\n\n")
+            if let whole = settle.whole(candidate, at: Date()) {
+                VoiceLog.shared.add("reply: whole after \(replies.count) piece\(replies.count == 1 ? "" : "s")")
+                return whole
             }
             // Fetch history now and then, live or not: a message event missed during a reconnect or while in the
             // background would otherwise leave this waiting (and the reply unread) for an hour. The first fetch
             // comes after a second, so a quick reply whose event was missed isn't held back for five.
-            if tick == 2 || tick % 10 == 9 { try? await loadConversation(agentId) }
-            try? await Task.sleep(for: .milliseconds(500))
+            if tick == 4 || tick % 20 == 19 { try? await loadConversation(agentId) }
+            try? await Task.sleep(for: .milliseconds(250))
         }
         return nil
     }
@@ -591,6 +723,16 @@ final class LoftStore {
         return (r.text, "cleaned \(VoiceLog.clip(text)) → \(VoiceLog.clip(r.text))")
     }
 
+    /// Uploads a file to the agent's chat uploads; the server's name for it, to send with a message.
+    func upload(_ file: URL, to agentId: String, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        guard canWrite else { throw APIError.offline }
+        guard let api else { throw APIError.notConfigured }
+        return try await api.upload(agentId: agentId, file: file, progress: progress)
+    }
+
+    /// Where an upload plays from.
+    func uploadURL(agentId: String, file: String) -> URL? { api?.uploadURL(agentId: agentId, file: file) }
+
     /// Retry a failed send. The same client id goes up, so the server drops it if the first try did land.
     func retry(_ p: PendingMessage) async {
         guard let i = pending.firstIndex(where: { $0.id == p.id }) else { return }
@@ -607,7 +749,7 @@ final class LoftStore {
         do {
             guard canWrite else { throw APIError.offline }
             guard let api else { throw APIError.notConfigured }
-            let r = try await api.sendMessage(agentId: p.agentId, text: p.text, clientId: p.id, meta: p.meta)
+            let r = try await api.sendMessage(agentId: p.agentId, text: p.text, clientId: p.id, meta: p.meta, images: p.images ?? [])
             if let m = r.message { insert(m) }
             pending.removeAll { $0.id == p.id }
         } catch {
@@ -786,7 +928,7 @@ final class LoftStore {
 
     private func requireTasks() throws -> LoftAPI {
         let api = try requireWrite()
-        guard supportsTasks else { throw APIError.unsupported("Tasks") }
+        guard supportsTasks else { throw APIError.unsupported("Issues") }
         return api
     }
 
@@ -799,13 +941,19 @@ final class LoftStore {
     }
 
     func stopRun(_ agentId: String) async throws { try await requireWrite().stopRun(agentId: agentId) }
+    func workspaceSize(_ agentId: String) async throws -> Int64 { try await requireWrite().workspaceSize(agentId: agentId) }
+    /// Deletes the agent and, with `purgeFiles`, its workspace; it leaves the list without waiting for the event.
+    func deleteAgent(_ agentId: String, purgeFiles: Bool) async throws {
+        try await requireWrite().deleteAgent(id: agentId, purgeFiles: purgeFiles)
+        apply(.agentDeleted(agentId))
+    }
     func restartRun(_ agentId: String) async throws {
         try await requireWrite().restartRun(agentId: agentId)
         // The agent_updated event normally follows; fetch anyway so the bar clears without a live stream.
         if let list = try? await api?.agents() { agents = list }
     }
     func runNow(_ agentId: String) async throws { try await requireWrite().runNow(agentId: agentId) }
-    /// Fresh context for each Delivery ticket: "off", "above_80k" or "always".
+    /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always".
     func setFreshContext(_ agentId: String, _ value: String) async throws {
         upsert(&agents, try await requireWrite().updateAgent(id: agentId, ["fresh_context": .string(value)]))
     }
@@ -847,6 +995,48 @@ final class LoftStore {
         return nil
     }
 
+    /// Load issue `taskId`'s Delivery for its card.
+    func loadDelivery(_ taskId: String) async throws {
+        guard let api else { throw APIError.notConfigured }
+        let gen = bumpDeliveryGen(taskId)
+        let d = try await api.issueDelivery(taskId: taskId)
+        if deliveryGen[taskId] == gen { deliveries[taskId] = d }
+    }
+
+    private func bumpDeliveryGen(_ taskId: String) -> Int {
+        let gen = deliveryGen[taskId, default: 0] + 1
+        deliveryGen[taskId] = gen
+        return gen
+    }
+
+    /// Issue `taskId`'s Delivery card came on screen: it stays live from `delivery` events and reconnects until
+    /// `hideDeliveryCard`.
+    func showDeliveryCard(_ taskId: String) {
+        deliveryCards[taskId, default: 0] += 1
+    }
+
+    /// Issue `taskId`'s Delivery card left the screen: once no other copy shows it, it stops reloading.
+    func hideDeliveryCard(_ taskId: String) {
+        guard let n = deliveryCards[taskId] else { return }
+        deliveryCards[taskId] = n > 1 ? n - 1 : nil
+    }
+
+    /// Start delivery, Pause or Resume on issue `taskId`'s Delivery card. Returns what the server says it did.
+    @discardableResult
+    func deliveryAction(_ taskId: String, _ action: IssueDeliveryAction) async throws -> String? {
+        do {
+            let r = try await requireTasks().issueDeliveryAction(taskId: taskId, action)
+            // Newer than any load already on its way.
+            _ = bumpDeliveryGen(taskId)
+            deliveries[taskId] = r.delivery
+            return r.message
+        } catch {
+            // Refused (it started elsewhere, or isn't stalled any more): show where it stands now.
+            try? await loadDelivery(taskId)
+            throw error
+        }
+    }
+
     @discardableResult
     func createTask(_ fields: [String: JSONValue]) async throws -> HBTask {
         let t = try await requireTasks().createTask(fields)
@@ -872,10 +1062,48 @@ final class LoftStore {
         IssueSettings(try await requireWrite().serverSettings())
     }
 
+
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     func saveIssueSettings(_ s: IssueSettings) async throws {
         let api = try requireWrite()
         _ = try await api.putServerSettings(s.applied(to: try await api.serverSettings()))
+    }
+
+    /// Settings › Backups: the Mac's backups and where they go (`backup_dir`, "" for the Mac's default folder).
+    func backups() async throws -> (status: BackupStatus, backupDir: String) {
+        let api = try requireWrite()
+        async let status = api.backups()
+        async let settings = api.serverSettings()
+        return (try await status, try await settings["backup_dir"]?.stringValue ?? "")
+    }
+
+    func backUpNow() async throws -> BackupStatus { try await requireWrite().backUpNow() }
+    func workspaceSizes() async throws -> WorkspaceSizes { try await requireWrite().workspaceSizes() }
+    func cleanPreview(agentId: String?) async throws -> [CleanItem] { try await requireWrite().cleanPreview(agentId: agentId) }
+    func cleanFolders(agentId: String, rel: String) async throws -> [CleanItem] { try await requireWrite().cleanFolders(agentId: agentId, rel: rel) }
+    func cleanCheck(agentId: String, rel: String) async throws -> GitCheck { try await requireWrite().cleanCheck(agentId: agentId, rel: rel) }
+    func clean(agentId: String?, paths: [String]) async throws -> CleanLog { try await requireWrite().clean(agentId: agentId, paths: paths) }
+    func cleanLog() async throws -> CleanLog { try await requireWrite().cleanLog() }
+    func leftRunning() async throws -> [String: [LeftProcess]] { try await requireWrite().leftRunning() }
+    func stopLeftRunning(agentId: String) async throws { try await requireWrite().stopLeftRunning(agentId: agentId) }
+    func agentDevices() async throws -> [AgentDevice] { try await requireWrite().agentDevices() }
+
+    /// Moves the backups to `dir`, leaving the server's other settings as they are. The server refuses a folder
+    /// agents or a repo can reach, and says why.
+    func saveBackupDir(_ dir: String) async throws {
+        // Only the folder: the server keeps every key left out, so a change made on the web meanwhile stays.
+        _ = try await requireWrite().putServerSettings(.object(["backup_dir": .string(dir)]))
+    }
+
+    /// Settings › Disk: hours with no run before Loft stops an agent's processes and Simulator device; nil on a Mac
+    /// without it.
+    func idleTimeoutHours() async throws -> Int? {
+        try await requireWrite().serverSettings()["idle_timeout_hours"]?.numberValue.map { Int($0) }
+    }
+
+    /// Saves only the idle timeout, as `saveBackupDir` does the folder.
+    func saveIdleTimeout(hours: Int) async throws {
+        _ = try await requireWrite().putServerSettings(.object(["idle_timeout_hours": .number(Double(hours))]))
     }
 
     func approveComment(_ c: TaskComment, text: String? = nil) async throws {
@@ -892,6 +1120,12 @@ final class LoftStore {
         let t = try await requireTasks().publishTask(id: id)
         upsert(&tasks, t)
         return t
+    }
+
+    /// The user opened a finished issue: its result to look at leaves Needs you (an older server ignores it).
+    func issueOpened(_ id: String) async {
+        guard let api = try? requireTasks() else { return }
+        try? await api.issueOpened(id: id)
     }
 
     func deleteTask(_ id: String) async throws {
@@ -926,9 +1160,11 @@ final class LoftStore {
 
     private func resetData() {
         info = nil; lastSync = nil
-        agents = []; tasks = []; permissions = []; activity = []; pullRequests = []
+        agents = []; tasks = []; deliverySummaries = [:]; permissions = []; activity = []; pullRequests = []; deliveries = [:]; deliveryCards = [:]
         usage = nil; usageLoadedAt = nil; summaries = [:]; system = nil
         messages = [:]; historyHasMore = [:]; pending = []
+        // Its agent is on the old server: it must not go through the new one (#351).
+        cancelVoiceSend()
     }
 
     private func restore(_ s: Snapshot) {

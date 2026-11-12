@@ -118,6 +118,8 @@ enum TaskState: String, CaseIterable, Hashable, Identifiable {
     var needsAttention: Bool { self == .failed || self == .blocked || self == .waitingApproval }
     /// Can be handed to an agent (again).
     var canExecute: Bool { self == .inbox || self == .ready || self == .failed || self == .unknown }
+    /// Stopped with a reason: Send to… hands it to an agent again (another one, or the same), with the reason.
+    var canSendAgain: Bool { self == .blocked || self == .failed }
 }
 
 enum TaskPriority: String, CaseIterable, Identifiable {
@@ -165,13 +167,13 @@ enum TaskFilter: String, CaseIterable, Identifiable {
 
     var emptyMessage: String {
         switch self {
-        case .all: "No tasks yet. Add one with the + button."
+        case .all: "No issues yet. Add one with the + button."
         case .inbox: "Your inbox is empty."
         case .ready: "Nothing is queued up for an agent."
-        case .inProgress: "No agent is working on a task right now."
+        case .inProgress: "No agent is working on an issue right now."
         case .blocked: "Nothing is blocked."
-        case .done: "No finished tasks yet."
-        case .failed: "No failed tasks."
+        case .done: "No finished issues yet."
+        case .failed: "No failed issues."
         }
     }
 }

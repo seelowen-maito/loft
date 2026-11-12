@@ -59,13 +59,33 @@ struct SettingsView: View {
     /// Settings › GitHub issues, from the server; nil until loaded, or on a server without them.
     @State private var issueSettings: IssueSettings?
     @State private var issueSettingsError: APIError?
+    /// Settings › Backups, from the server: the status and the saved `backup_dir`; nil until loaded.
+    @State private var backup: BackupStatus?
+    @State private var backupDir = ""
+    @State private var backingUp = false
+    @State private var confirmICloud = false
+    @State private var backupError: APIError?
+    /// Settings › Disk: workspace sizes and free space, nil until loaded; the last clean's log; the open clean.
+    @State private var disk: WorkspaceSizes?
+    @State private var lastClean: CleanLog?
+    /// Agents' Simulator devices, nil on a Mac that doesn't list them.
+    @State private var devices: [AgentDevice]?
+    @State private var measuringDisk = true
+    /// The idle timeout in hours as the stepper shows it, and as the server last saved it; nil on a Mac without it.
+    @State private var idleHours: Int?
+    @State private var savedIdleHours: Int?
+    @State private var idleError: APIError?
+    @State private var cleanSheet: CleanSheet.Start?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmForget = false
+    /// Re-read every few seconds while Settings is open and on returning to the app, so it changes as the model gets ready.
+    @State private var aiStatus = OnDeviceModel.status
+    @Environment(\.scenePhase) private var scenePhase
     @State private var copied = false
 
     /// An Apple Intelligence switch with its one-line explanation; off and disabled while the model can't run.
     private func aiToggle(_ title: String, _ value: Binding<Bool>, enabled: Bool = true, id: String, note: String) -> some View {
-        let usable = OnDeviceModel.status.isAvailable && enabled
+        let usable = aiStatus.isAvailable && enabled
         return Toggle(isOn: usable ? value : .constant(false)) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -110,7 +130,6 @@ struct SettingsView: View {
                 }
                 if let v = store.info?.version { LabeledContent("Loft version", value: v) }
                 if let sync = store.lastSync { LabeledContent("Last sync", value: sync.formatted(date: .abbreviated, time: .standard)) }
-                LabeledContent("Authentication", value: "None · tailnet only")
                 Button("Reconnect") { store.reconnect() }
                 NavigationLink("Change server") { ConnectView(isOnboarding: false) }
             }
@@ -123,7 +142,7 @@ struct SettingsView: View {
             } header: {
                 Text("Orchestrator")
             } footer: {
-                Text("The agent the Chat tab opens first and that “Plan & delegate” hands tasks to. Its own permissions apply.")
+                Text("The agent the Chat tab opens first and that “Plan & delegate” hands issues to. Its own permissions apply.")
             }
 
             Section {
@@ -152,7 +171,7 @@ struct SettingsView: View {
                     if let e = push.lastError { Text(e).font(.footnote).foregroundStyle(Theme.failure) }
                 }
                 Toggle("Approval requests", isOn: $notifyApprovals)
-                Toggle("Task done, failed or blocked", isOn: $notifyTaskOutcomes)
+                Toggle("Issue done, failed or blocked", isOn: $notifyTaskOutcomes)
                 Toggle("Agent run failures", isOn: $notifyFailures)
             } header: {
                 Text("Notifications")
@@ -242,7 +261,7 @@ struct SettingsView: View {
             }
 
             Section {
-                LabeledContent("On-device model", value: OnDeviceModel.status.text)
+                LabeledContent("On-device model", value: aiStatus.text)
                     .accessibilityIdentifier("onDeviceModelStatus")
                 // Off and disabled while the model can't run, so it doesn't look like it's working; the setting is kept.
                 aiToggle("Understand voice commands", $aiCommands, id: "aiCommandsToggle",
@@ -283,6 +302,18 @@ struct SettingsView: View {
                 .disabled(!store.canWrite)
             }
 
+            if let backup {
+                backupsSection(backup)
+            }
+
+            if let disk {
+                diskSection(disk)
+            } else if measuringDisk, store.info?.supports(.workspaces) == true {
+                Section("Disk") {
+                    ProgressView("Measuring workspaces…").frame(maxWidth: .infinity)
+                }
+            }
+
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     Text("Dark").tag("dark")
@@ -314,12 +345,210 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task { issueSettings = try? await store.issueSettings() }
         .errorAlert($issueSettingsError)
+        .task { await loadBackups() }
+        .task { await loadDisk() }
+        .task {
+            savedIdleHours = try? await store.idleTimeoutHours()
+            idleHours = savedIdleHours
+        }
+        .errorAlert($backupError)
+        .errorAlert($idleError)
+        .task(id: idleHours) { await saveIdleHours() }
+        .onDisappear {
+            // Leaving within the debounce cancels the save above, so send it now.
+            if let h = idleHours, h != savedIdleHours { Task { try? await store.saveIdleTimeout(hours: h) } }
+        }
+        .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
+            Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
+        } message: {
+            Text(Self.iCloudWarning)
+        }
         .task { notificationStatus = await store.notifier.authorizationStatus() }
+        .task {
+            while !Task.isCancelled {
+                aiStatus = OnDeviceModel.status
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { aiStatus = OnDeviceModel.status }
+        }
+        .fullScreenCover(item: $cleanSheet) { start in
+            CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) {
+                await loadDisk()
+            }
+        }
         .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget", role: .destructive) { store.forgetServer() }
         } message: {
             Text("The saved address and cached data on this iPhone are removed. Nothing changes on the Mac.")
         }
+    }
+
+    static let iCloudWarning = "Backups in iCloud Drive leave your Mac: all your chats and your GitHub token are then stored by Apple."
+
+    private func loadBackups() async {
+        guard store.info?.supports(.backups) == true, let b = try? await store.backups() else { return }
+        backup = b.status
+        backupDir = b.backupDir
+    }
+
+    private func loadDisk() async {
+        guard store.info?.supports(.workspaces) == true else { return }
+        defer { measuringDisk = false }
+        disk = try? await store.workspaceSizes()
+        if store.info?.supports(.cleanPicker) == true { lastClean = try? await store.cleanLog() }
+        if store.info?.supports(.agentDevices) == true { devices = try? await store.agentDevices() }
+    }
+
+    /// Saves the stepper's value once it stops changing, so tapping + five times sends one save; goes back to the
+    /// saved value if the Mac refuses it.
+    private func saveIdleHours() async {
+        guard let h = idleHours, h != savedIdleHours else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        guard !Task.isCancelled else { return }
+        do {
+            try await store.saveIdleTimeout(hours: h)
+            savedIdleHours = h
+        } catch {
+            idleError = APIError.from(error)
+            idleHours = savedIdleHours
+        }
+    }
+
+    /// A Mac whose Clean lists the workspace to tick what goes; an older one's Clean works another way, so it gets none.
+    private var canClean: Bool { store.info?.supports(.cleanPicker) == true }
+
+    private func diskSection(_ d: WorkspaceSizes) -> some View {
+        Section {
+            LabeledContent("Free") {
+                Text(d.freeBytes.map(bytesText) ?? "Unknown")
+                    .foregroundStyle(d.isLow ? Theme.failure : .primary)
+            }
+            .accessibilityIdentifier("diskFree")
+            ForEach(d.agents.sorted { $0.bytes > $1.bytes }) { r in
+                LabeledContent {
+                    Text(bytesText(r.bytes))
+                } label: {
+                    Text(r.name)
+                }
+            }
+            ForEach(devices ?? []) { d in
+                LabeledContent {
+                    HStack(spacing: 10) {
+                        Text(d.stateText).foregroundStyle(.secondary)
+                        Text(bytesText(d.bytes))
+                    }
+                } label: {
+                    Label(d.title, systemImage: "iphone")
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("device-\(d.udid)")
+            }
+            if let h = idleHours {
+                // Web Settings has no maximum, so a larger saved value still shows.
+                Stepper(value: Binding(get: { h }, set: { idleHours = $0 }), in: 1...max(168, h)) {
+                    LabeledContent("Idle timeout", value: h == 1 ? "1 hour" : "\(h) hours")
+                }
+                .disabled(!store.canWrite)
+                .accessibilityIdentifier("idleTimeout")
+            }
+            if canClean {
+                Button("Check space") { cleanSheet = .check }
+                    .accessibilityIdentifier("checkSpace")
+            }
+            if let last = lastClean, let at = last.at {
+                Button {
+                    cleanSheet = .log(last)
+                } label: {
+                    LabeledContent {
+                        Text("View log")
+                    } label: {
+                        Text("\(last.title ?? last.what) \(at.formatted(.relative(presentation: .named)))")
+                        Text("Freed \(bytesText(last.freedBytes)) from \(last.removed) item\(last.removed == 1 ? "" : "s")\(last.failed > 0 ? " · \(last.failed) failed" : "")")
+                    }
+                }
+                .accessibilityIdentifier("lastClean")
+            }
+        } header: {
+            Text("Disk")
+        } footer: {
+            Text("Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Your Mac also removes build output untouched for 3 days, daily, and stops the processes and shuts down the Simulator device of an agent with no run for the idle timeout.")
+        }
+    }
+
+    private func saveBackupDir(_ dir: String) {
+        Task {
+            do { try await store.saveBackupDir(dir) } catch { backupError = APIError.from(error) }
+            await loadBackups()
+        }
+    }
+
+    private func backUpNow() {
+        Task {
+            backingUp = true
+            defer { backingUp = false }
+            do { backup = try await store.backUpNow() } catch {
+                backupError = APIError.from(error)
+                // The failure is recorded: show it next to the last good backup.
+                await loadBackups()
+            }
+        }
+    }
+
+    /// The last backup and any error, Back up now, and where backups go: this Mac or iCloud Drive in one tap.
+    private func backupsSection(_ b: BackupStatus) -> some View {
+        let folder = b.folder(backupDir)
+        return Section {
+            LabeledContent("Last backup") {
+                if let last = b.last {
+                    Text("\(last.at.formatted(.relative(presentation: .named))) · \(last.bytes.formatted(.byteCount(style: .file)))")
+                } else {
+                    Text("None yet")
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("backupLast")
+            if let e = b.error {
+                Label("Failed \(e.at.formatted(.relative(presentation: .named))): \(e.message)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.failure)
+                    .accessibilityIdentifier("backupError")
+            }
+            Picker("Back up to", selection: Binding(get: { folder }, set: { new in
+                switch new {
+                case .local: saveBackupDir("")
+                case .icloud: confirmICloud = true
+                case .other: break
+                }
+            })) {
+                Text("This Mac").tag(BackupStatus.Folder.local)
+                if b.icloud != nil { Text("iCloud Drive").tag(BackupStatus.Folder.icloud) }
+                if case .other(let d) = folder { Text((d as NSString).lastPathComponent).tag(folder) }
+            }
+            .accessibilityIdentifier("backupFolderPicker")
+            LabeledContent("Folder") {
+                Text(b.dir).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+            }
+            Button {
+                backUpNow()
+            } label: {
+                if backingUp {
+                    HStack(spacing: 8) { ProgressView(); Text("Backing up…") }
+                } else {
+                    Text("Back up now")
+                }
+            }
+            .disabled(backingUp)
+            .accessibilityIdentifier("backUpNow")
+        } header: {
+            Text("Backups")
+        } footer: {
+            Text(folder == .icloud
+                 ? Self.iCloudWarning
+                 : "Your Mac backs up Loft's database and settings once a day, and keeps 7 daily and 4 weekly backups. iCloud Drive keeps them off the Mac too.")
+        }
+        .disabled(!store.canWrite)
     }
 
     /// The device language as a name ("English (United States)"), without region overrides like "@rg=iszzzz"
@@ -351,7 +580,7 @@ struct SettingsView: View {
             "server version \(store.info?.version ?? "?") · features \(store.info?.features?.joined(separator: ",") ?? "none")",
             "connection \(store.connection.label)",
             "last sync \(store.lastSync.map { JSONCoding.formatDate($0) } ?? "never")",
-            "agents \(store.agents.count) · tasks \(store.tasks.count) · pending approvals \(store.pendingApprovals().count) · unsent \(store.pending.count)",
+            "agents \(store.agents.count) · issues \(store.tasks.count) · pending approvals \(store.pendingApprovals().count) · unsent \(store.pending.count)",
         ]
         if case .reconnecting(let attempt, let e) = store.connection {
             lines.append("last error (attempt \(attempt)): \(e.diagnostic)")

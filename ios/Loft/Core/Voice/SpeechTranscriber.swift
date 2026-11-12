@@ -61,10 +61,12 @@ final class SpeechTranscriber {
     private(set) var state: SpeechState = .idle
     private(set) var transcript = ""
 
-    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let engine: MicEngine
+    @ObservationIgnored private let audio: AudioSessionOwner
     @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var task: SFSpeechRecognitionTask?
-    @ObservationIgnored private var interruption: NSObjectProtocol?
+    /// The audio held from `AudioSessionOwner` while the mic is on.
+    @ObservationIgnored private var lease: UUID?
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     /// The microphone tap feeds whichever request is current.
     @ObservationIgnored private let feed = RequestFeed()
@@ -74,6 +76,13 @@ final class SpeechTranscriber {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var startup = StartupFailureGuard()
     @ObservationIgnored private var requestStarted = Date()
+    /// A quick on/off/on of the mic button: the start that was overtaken gives up.
+    @ObservationIgnored private var gate = StartGate()
+
+    init(audio: AudioSessionOwner? = nil, engine: MicEngine = AVAudioEngine()) {
+        self.audio = audio ?? .shared
+        self.engine = engine
+    }
 
     private func send(_ e: SpeechEvent) {
         let next = SpeechMachine.reduce(state, e)
@@ -84,21 +93,19 @@ final class SpeechTranscriber {
     func start() async {
         send(.start)
         guard state == .requestingPermission else { return }
+        let attempt = gate.begin()
         transcript = ""
         // `-no-speech` (UI tests): recording at once, with no prompts, microphone or recognizer.
         if TestMode.noSpeech { send(.began); return }
 
-        let auth = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
-        guard auth == .authorized else {
-            send(.denied("Speech recognition is off for Loft. Turn it on in Settings › Privacy & Security › Speech Recognition."))
+        do {
+            try await VoiceSession.requestPermissions()
+        } catch {
+            send(.denied(error.localizedDescription))
             return
         }
-        guard await AVAudioApplication.requestRecordPermission() else {
-            send(.denied("Microphone access is off for Loft. Turn it on in Settings › Privacy & Security › Microphone."))
-            return
-        }
-        // Stopped while the permission prompts were up.
-        guard state == .requestingPermission else { return }
+        // Stopped (or stopped and started again) while the permission prompts were up.
+        guard gate.isCurrent(attempt), state == .requestingPermission else { return }
 
         let locale = UserDefaults.standard.string(forKey: Prefs.speechLocale).map(Locale.init(identifier:)) ?? Locale.current
         guard let recognizer = SFSpeechRecognizer(locale: locale) else {
@@ -116,42 +123,79 @@ final class SpeechTranscriber {
         }
 
         self.recognizer = recognizer
+        await listen(attempt)
+    }
+
+    /// `start` with the permission and recognizer checks skipped: takes the audio and turns the mic on. For
+    /// tests, which have no recognizer, so no request is made.
+    func startSkippingChecks() async {
+        send(.start)
+        guard state == .requestingPermission else { return }
+        await listen(gate.begin())
+    }
+
+    private func listen(_ attempt: Int) async {
         committed = ""
         startup = StartupFailureGuard()
 
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.record, mode: .measurement, options: .duckOthers)
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-            let input = engine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            guard format.channelCount > 0, format.sampleRate > 0 else {
-                cleanUp()
-                send(.unavailable("No microphone is available."))
+            let lease = try await audio.acquire(.listening, by: "dictation", onRouteChange: { [weak self] in
+                self?.routeChanged()
+            }) { [weak self] loss in self?.lost(loss) }
+            // Stopped (or started again) while the audio was being handed over.
+            guard gate.isCurrent(attempt), state == .requestingPermission else {
+                audio.release(lease)
                 return
             }
+            self.lease = lease
             let feed = self.feed
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                feed.append(buffer)
-            }
-            engine.prepare()
-            try engine.start()
+            try await Microphone.startWhenSettled(engine, bufferSize: 1024, stillWanted: { [weak self] in
+                self.map { $0.gate.isCurrent(attempt) && $0.state == .requestingPermission } ?? false
+            }) { buffer, _ in feed.append(buffer) }
         } catch {
+            // A start that was overtaken leaves the newer one alone.
+            guard gate.isCurrent(attempt) else { return }
+            // Stopped, or the audio was lost, while the mic waited for the route: that path already said so.
+            if error is CancellationError { return }
             cleanUp()
             send(.error("Couldn't start the microphone: \(error.localizedDescription)"))
             return
         }
 
-        interruption = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.state == .recording else { return }
-                self.cleanUp()
-                self.send(.interrupted)
-            }
-        }
         beginRequest()
         send(.began)
-        VoiceLog.shared.add("mic on (\(locale.identifier), on-device \(recognizer.supportsOnDeviceRecognition))")
+        VoiceLog.shared.add("mic on (\(recognizer?.locale.identifier ?? "no recognizer"), on-device \(recognizer?.supportsOnDeviceRecognition ?? false))")
+    }
+
+    /// Losing the audio (read-aloud, a call, another app) ends the dictation, keeping what was heard.
+    func lost(_ loss: AudioSessionOwner.Loss) {
+        guard state.isRecording else { return }
+        lease = nil
+        cleanUp()
+        switch loss {
+        case .handedOver: send(.stop)
+        case .interrupted: send(.interrupted)
+        case .noMicrophone: send(.error("Dictation stopped: this audio route has no microphone."))
+        }
+    }
+
+    private func startMic() throws {
+        let feed = self.feed
+        try Microphone.start(engine, bufferSize: 1024) { buffer, _ in feed.append(buffer) }
+    }
+
+    /// The route settled on another one (the car's Bluetooth switching to call quality): the engine stopped
+    /// with it, so start the mic again there, keeping the recognition request.
+    func routeChanged() {
+        guard state == .recording || state == .requestingPermission, lease != nil else { return }
+        do {
+            try startMic()
+            VoiceLog.shared.add("mic restarted on the new route")
+        } catch {
+            VoiceLog.shared.add("mic couldn't restart on the new route: \(error.localizedDescription)")
+            cleanUp()
+            send(.error("Dictation stopped: \(error.localizedDescription)"))
+        }
     }
 
     /// A fresh recognition request on the running microphone.
@@ -196,14 +240,14 @@ final class SpeechTranscriber {
     }
 
     func stop() {
+        gate.cancel()
         guard state.isRecording else { return }
         cleanUp()
         send(.stop)
     }
 
     private func cleanUp() {
-        if engine.isRunning { engine.stop() }
-        if !TestMode.noSpeech { engine.inputNode.removeTap(onBus: 0) }
+        if !TestMode.noSpeech { Microphone.stop(engine) }
         request?.endAudio()
         feed.request = nil
         generation += 1
@@ -211,9 +255,8 @@ final class SpeechTranscriber {
         task?.cancel()
         task = nil
         request = nil
-        if let interruption { NotificationCenter.default.removeObserver(interruption) }
-        interruption = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if let lease { audio.release(lease) }
+        lease = nil
     }
 }
 

@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var confirmStop = false
     @State private var actionError: APIError?
     @State private var confirmEndGrill = false
+    /// The open interview full screen over the chat (`InterviewView`).
+    @State private var showingInterview = false
     // Grill voice loop, all inside this chat: read the question, open the mic, catch spoken commands.
     @State private var composerControl: ComposerControl?
     /// The last question read aloud, so each is read once.
@@ -38,8 +40,10 @@ struct ChatView: View {
     @State private var quickAckTask: Task<String?, Never>?
     /// "Send to <agent>?" for a message to the Orchestrator that looks meant for one agent.
     @State private var routeSuggestion: RouteSuggestion?
-    /// A task picked in "Attach a task", sent with the next message (`meta.task_id`).
+    /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
+    /// Photos and a video picked in the composer, uploading or up, until they go with a message.
+    @State private var attachments: [AttachmentDraft] = []
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
     @State private var resuming = false
@@ -173,6 +177,17 @@ struct ChatView: View {
                     .padding(.top, 6)
                     .background(.bar)
                 }
+                if grill != nil {
+                    Button { showingInterview = true } label: {
+                        Label("Open interview", systemImage: "arrow.up.left.and.arrow.down.right").frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 6)
+                    .background(.bar)
+                    .accessibilityHint("Shows one question at a time, full screen")
+                    .accessibilityIdentifier("openInterview")
+                }
                 RunWatchBar(agentId: agentId)
                 if let s = suggested, s.messageId == askingMessage?.id, draft.isEmpty, !s.replies.isEmpty {
                     SuggestedReplies(replies: s.replies) { r in
@@ -200,12 +215,12 @@ struct ChatView: View {
                         Spacer(minLength: 0)
                         Button { attached = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
                             .foregroundStyle(.secondary)
-                            .accessibilityLabel("Remove the attached task")
+                            .accessibilityLabel("Remove the attached issue")
                     }
                     .padding(.horizontal, Theme.gutter)
                     .background(.bar)
                     .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Attached task: \(t.title)")
+                    .accessibilityLabel("Attached issue: \(t.title)")
                     .accessibilityIdentifier("attachedTask")
                 }
                 if let t = talkText, !t.isEmpty {
@@ -221,18 +236,28 @@ struct ChatView: View {
                     }, done: { talkText = nil })
                     .id(t)
                 }
-                ComposerView(text: $draft, recipient: agent.name, isOrchestrator: store.orchestratorId == agent.id,
+                ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
                              dictateOnAppear: dictate,
                              startVoice: { Task { await voice.start(agentId: agentId) } },
-                             onVoiceSent: continueByVoice,
+                             // In an interview the chat's own dictation drives it, so the mic stays as it was.
+                             tapOpensTalk: grill == nil,
+                             onVoiceSent: { continueByVoice() },
                              onVoiceStop: stopByVoice,
-                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil) { text, byVoice in
+                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
+                             videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
+                    if !attachments.isEmpty {
+                        // A message with photos or a video is always plain chat.
+                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let files = attachments.compactMap(\.uploaded)
+                        attached = nil
+                        attachments = []
+                        Task { await store.send(text, to: agentId, meta: meta, images: files) }
                     // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
                     // on another one) and the voice moves on; typed text is always chat, as on the web.
-                    if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
+                    } else if store.composerAnswers(byVoice: byVoice, agentId: agentId) {
                         Task { do { try await store.answerCurrentGrill(text, agentId: agentId) } catch { actionError = APIError.from(error) } }
                     } else if VoicePresentation.shared.statusAgentId == agentId, attached == nil {
                         // A Talk dictation sent from here gets the full-screen status (Sent, Thinking, the reply).
@@ -255,6 +280,12 @@ struct ChatView: View {
             talkText = t
             VoicePresentation.shared.returnedText = nil
         }
+        // Sent from Talk: the reply is waited for and read here, as for a message dictated in this chat.
+        .onChange(of: VoicePresentation.shared.replyAfter, initial: true) { _, h in
+            guard let h, h.agentId == agentId else { return }
+            VoicePresentation.shared.replyAfter = nil
+            continueByVoice(after: h.after)
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -271,7 +302,7 @@ struct ChatView: View {
                 Menu {
                     NavigationLink(value: AgentRoute(id: agent.id)) { Label("Agent details", systemImage: "person.crop.circle") }
                     if let t = store.currentTask(for: agent.id) {
-                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current task", systemImage: "checklist") }
+                        NavigationLink(value: TaskRoute(id: t.id)) { Label("Current issue", systemImage: "checklist") }
                     }
                     // Interviews start when the agent asks; there's no mode to switch on. While one runs it can be paused or ended here.
                     if let s = grill {
@@ -352,6 +383,7 @@ struct ChatView: View {
         }
         .onDisappear(perform: stopVoiceWork)
         .sheet(isPresented: $pickingTask) { TaskPicker { attached = $0 } }
+        .fullScreenCover(isPresented: $showingInterview) { InterviewView(agent: agent) }
         .sheet(isPresented: $resuming) { ResumeSheet(agentId: agentId) }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
@@ -434,13 +466,14 @@ extension ChatView {
 
     /// Hands-free chat: once the reply to a dictated message is in, read it and listen again, so after
     /// the first tap on the mic nothing needs a tap. A grill question that comes back is read by `readAloud`.
-    fileprivate func continueByVoice() {
-        let before = store.conversation(agentId).last?.id ?? 0
+    /// `after`: the last message before the one sent, when it went out before this chat opened (from Talk).
+    fileprivate func continueByVoice(after: Int64? = nil) {
+        let before = after ?? store.conversation(agentId).last?.id ?? 0
         let wasGrilling = grill != nil
         voiceLoop?.cancel()
         voiceLoop = Task {
             // The quick acknowledgement first, while the real reply is worked on.
-            if readReplies, !UIAccessibility.isVoiceOverRunning, let ack = await quickAckTask?.value, !Task.isCancelled {
+            if after == nil, readReplies, !UIAccessibility.isVoiceOverRunning, let ack = await quickAckTask?.value, !Task.isCancelled {
                 VoiceLog.shared.add("ai: reading the quick acknowledgement")
                 await speaker.speak(ack)
             }
@@ -755,6 +788,21 @@ private struct MessageBubble: View {
                 Text(message.content).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
         default:
+            let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
+            if !photos.isEmpty {
+                // Two a row, an odd one on the message's side.
+                VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
+                    ForEach(Array(stride(from: 0, to: photos.count, by: 2)), id: \.self) { i in
+                        HStack(spacing: 6) { ForEach(photos[i..<min(i + 2, photos.count)], id: \.self) { ChatPhoto(url: $0) } }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            }
+            ForEach(message.videos, id: \.self) { f in
+                if let url = store.uploadURL(agentId: message.agentId, file: f) {
+                    ChatVideo(url: url).frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+                }
+            }
             HStack(alignment: .bottom) {
                 if isUser { Spacer(minLength: 48) }
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
@@ -788,13 +836,22 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("taskChips")
                     }
-                    CollapsibleText(text: message.displayContent)
-                        .font(.body)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .foregroundStyle(isUser ? .white : .primary)
-                        .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
-                                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    if !message.tags.isEmpty {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { ForEach(message.tags) { TagChip(tag: $0) } }
+                            VStack(alignment: isUser ? .trailing : .leading, spacing: 4) { ForEach(message.tags) { TagChip(tag: $0) } }
+                        }
+                        .accessibilityIdentifier("tagChips")
+                    }
+                    if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
+                        CollapsibleText(text: message.displayContent)
+                            .font(.body)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .foregroundStyle(isUser ? Theme.onAccent : .primary)
+                            .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
+                                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
                              : "\(message.fromAgentName == nil && message.role != "user" ? agent.name + " · " : "")\(message.createdAt.formatted(date: .omitted, time: .shortened))")
@@ -851,7 +908,7 @@ struct ReadAloudBar: View {
                 Button { speaker.interrupt(.stop) } label: {
                     Label("Stop", systemImage: "stop.fill").frame(minWidth: 72, minHeight: 36)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityHint("Stops reading")
                 .accessibilityIdentifier("readAloudStop")
             }
@@ -935,7 +992,7 @@ private struct RouteSuggestionBar: View {
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("Send", action: send)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.accent)
                 .accessibilityIdentifier("routeSend")
             Button(action: dismiss) { Image(systemName: "xmark") }
                 .buttonStyle(.bordered)
@@ -1017,11 +1074,22 @@ private struct PendingBubble: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 4) {
-                Text(message.text)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(.white)
-                    .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if let files = message.images, !files.isEmpty {
+                    let photos = files.filter { !VideoAttachment.isVideo($0) }.count
+                    if photos < files.count {
+                        Label("Video", systemImage: "video.fill").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if photos > 0 {
+                        Label(photos == 1 ? "Photo" : "\(photos) photos", systemImage: "photo").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(Theme.onAccent)
+                        .background(Theme.accent.opacity(message.isFailed ? 0.35 : 0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
                 if let failure = message.failure {
                     Label("Not sent: \(failure)", systemImage: "exclamationmark.circle")
                         .font(.caption)
@@ -1036,7 +1104,7 @@ private struct PendingBubble: View {
                         Button { Task { await store.retry(message) } } label: {
                             Label("Retry", systemImage: "arrow.clockwise").padding(.vertical, 6)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.accent)
                         .disabled(!store.canWrite)
                         .accessibilityIdentifier("retrySend")
                     }

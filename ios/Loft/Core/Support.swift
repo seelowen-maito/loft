@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import os
 
 enum Log {
@@ -62,6 +63,8 @@ struct PendingMessage: Codable, Identifiable, Hashable {
     var failure: String?
     /// Sent with the message (a grill answer's tag); nil for plain messages.
     var meta: JSONValue?
+    /// Uploads sent with it (a video), by the server's names.
+    var images: [String]? = nil
 
     var isFailed: Bool { failure != nil }
 }
@@ -183,5 +186,14 @@ extension Date {
         if s < 60 { return "\(s)s" }
         if s < 3600 { return "\(s / 60)m" }
         return String(format: "%dh %02dm", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// The pairing token an earlier version kept in the Keychain. Pairing is gone, so it is deleted at launch.
+enum OldPairing {
+    static let service = "loft.client-token"
+
+    static func clear() {
+        SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: service] as CFDictionary)
     }
 }

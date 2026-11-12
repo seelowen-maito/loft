@@ -1,9 +1,59 @@
 # Push notifications (APNs)
 
 Alerts reach the iPhone app when it's closed. The backend sends them through Apple's Push Notification
-service with token-based auth (an APNs auth key, `.p8`).
+service, by one of two paths (ADR 0002):
 
-## Setting it up (by hand, once)
+| | **Your own key** | **The Loft relay** |
+|---|---|---|
+| When | A `.p8` key, key id and team id in Settings | A relay key in Settings, and no key of your own |
+| Setup | The steps below (an Apple developer account) | **Sign in** with Apple on the push portal, or paste a relay key |
+| Path | Loft → Apple | Loft → push relay → Apple |
+| Who sees the push text | Only Apple | The relay, in transit only (never stored or logged) |
+| Apps | Any bundle id (your own build) | The official Loft app only |
+
+**The easy way (the TestFlight app):** Settings → Push notifications → **Sign in**, then Sign in with Apple and
+**Allow** on the portal at `https://portal.get-loft.com`. Allow notifications on the phone and press **Send test
+push**. A self-built app has its own bundle id, which the relay doesn't serve: it needs [your own key](#setting-up-your-own-key-by-hand-once).
+To run your own relay and portal, follow the deploy runbook in [`relay/README.md`](../relay/README.md): it needs an Apple
+Services ID with your domain and the exact `https://<host>/auth/callback` return URL, and `PORTAL_URL` with `https://`.
+
+Your own key wins when both are set. A relay key only counts when Loft knows the relay's address: Settings → Push
+notifications → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in the code (the official relay, `https://portal.get-loft.com`). The saved address wins and takes effect at once. With neither, **nothing is pushed**: items that come in meanwhile aren't sent
+late once one is added. Settings → Push notifications shows which ("Your own key", "Using the Loft relay" or "Push is
+off"), and `GET /api/push` reports it as `path: "own_key" | "relay" | "none"`. Everything else is the same on both
+paths: which phones, which kinds, quiet hours, the rate limit and the payload.
+
+## The Loft relay
+
+The relay address is a push setting: https only, no user name or password in it, and set only through
+`PUT /api/push` (Settings), never through the general settings or an agent tool. The push portal lives at the same
+address (ADR 0003), so there is no separate portal address. A saved address wins over `LOFT_RELAY_URL`, which stays as a
+fallback for scripted installs. A portal address saved by an older Loft is ignored.
+
+The relay is login-only. With the relay address set, Settings → Push notifications → **Sign in** asks the
+relay for a one-time code (10 minutes, at most 5 per IP per hour) and opens `<relay address>/connect?code=…`. After signing in with Apple and pressing
+Allow there, this backend, polling the relay, receives a new relay key once and stores it: the key never passes
+through the browser, and the code stops working. Approving from a phone works too. With a relay address (Settings → Relay address, else `LOFT_RELAY_URL`, else `RELAY_URL` in
+`backend/src/apns.rs`, the official `https://portal.get-loft.com`), Settings shows **Sign in** and, with a key stored,
+"Manage keys". A relay whose portal isn't configured (its operator makes keys with `relay/scripts/create-key.js`)
+answers `/api/pair` with `503 {portal: false}`: Settings then drops **Sign in** for that address and offers only
+pasting a key. Pasting a key in Settings → Push notifications → Loft relay stays as a fallback. Either way it is kept owner-only in
+the same folder as the `.p8` (`relay-key`): never logged, returned by the API or shown to agents. Each push sends the
+phone's token, its environment, the bundle id and the payload; the relay forwards them to Apple and passes Apple's
+answer back, so a gone phone is removed as it is with a key. If the relay can't be reached, or refuses a push (its
+limits are 20 a minute and 1,000 a day per key), the push is logged and dropped, and the next one is tried. A revoked
+key gets `401`: pushes stop until a new key is pasted.
+
+On the portal a user sees their keys (name, created, last used; never the key), creates up to 5 and revokes them.
+**Delete my account** asks them to sign in with Apple once more, then deletes the account (Apple's user id, the only
+thing stored about a person) and every key, and revokes the Sign in with Apple token: the Lofts using those keys
+stop pushing. From one network, at most 5 sign-ins and 5 key creations are taken an hour.
+
+The relay itself, its API, deploying it and the portal (the Apple and Vercel setup, step by step), running it
+without the portal, and making and revoking keys by hand are in [`relay/README.md`](../relay/README.md). To keep push
+entirely between your Mac and Apple, use your own key (below) instead: the relay is then never called.
+
+## Setting up your own key (by hand, once)
 
 1. **App id:** developer.apple.com → Certificates, IDs & Profiles → Identifiers → your app id (`LOFT_BUNDLE_ID`) → tick **Push Notifications** → Save. (The app project adds the matching *Push Notifications* capability and the `aps-environment` entitlement.)
 2. **Auth key:** same portal → **Keys** → **+** → name it "Loft push", tick **Apple Push Notifications service (APNs)** → Continue → Register.
@@ -14,7 +64,8 @@ service with token-based auth (an APNs auth key, `.p8`).
 
 ## Where the key lives
 
-`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. That's outside the repo
+`~/Library/Application Support/Loft/apns/AuthKey.p8`, file mode `0600` in a `0700` folder. The relay key, when
+one is set, is `relay-key` in the same folder, with the same modes. That's outside the repo
 and outside Loft's data folder (`.loft/`), so the backup plan (#79) only includes it encrypted.
 
 - It's checked to be a P-256 private key before it's stored.
@@ -42,11 +93,11 @@ uses the right host per device. The same auth key works for both.
 | `PATCH /api/devices/{token}` | `{kinds?, quiet_hours? (null clears), name?}` |
 | `DELETE /api/devices/{token}` | Stop pushing to this phone. |
 | `POST /api/devices/{token}/test` | Sends a test push. 410 if Apple says the token is gone (the device is then removed). |
-| `GET /api/push` | `{configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key. |
-| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?}` |
+| `GET /api/push` | `{path: "own_key"\|"relay"\|"none", relay_key (whether one is stored), relay_url (in use), relay_address (saved), signin (Sign in is offered: a relay, and it hasn't said its portal isn't configured), signing_in, configured, key_present, key_id, team_id, bundle_id, devices}`. Never the key or the relay key. |
+| `PUT /api/push` | `{key_id?, team_id?, bundle_id?, key_p8?, remove_key?, relay_key?, remove_relay_key?, relay_url?}` |
 
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
-`grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
+`grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`, `delivery_stalled`, `delivery_done`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
 `grill_question`, the name before rounds, is still accepted and stored as `grill_round`.
 `quiet_hours`: `{start: "22:00", end: "07:00", tz: "Europe/Lisbon", utc_offset_minutes: 60}`.
 
@@ -73,7 +124,7 @@ When Apple answers **410**, or **400 BadDeviceToken / DeviceTokenNotForTopic**, 
 - `badge` is the "needs you" count.
 - `thread-id` groups a phone's notifications by agent. `apns-collapse-id` is the item id (hashed if longer than 64 bytes).
 - `time-sensitive` is used for urgency 3 (needs the *Time Sensitive Notifications* capability in the app); everything else is `active`.
-- `target` has the same shape as a "needs you" `open` action.
+- `target` has the same shape as a "needs you" `open` action. The iPhone opens a `target.url` only when it is `https` on `github.com` or on the host of the Loft it is connected to; any other link just opens the app.
 - Test pushes carry `type: "test"`.
 - No silent or background pushes.
 
@@ -83,20 +134,22 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 
 - **Only new items.** An item is pushed at most once (its id is remembered for 30 days). A changed item gets a new id (`docs/needs-you-api.md`). Dismissed or resolved items leave the list, so they're never pushed again.
 - **Nothing old.** Items already waiting when Loft starts, or that came in while push wasn't set up, are marked as seen and not pushed late.
-- **Per device:** only the `kinds` it chose (by default all but `task_failed` and `pr_ready`), and nothing during its quiet hours (the item stays in the "needs you" list).
+- **Per device:** only the `kinds` it chose (by default all but `task_failed`, `pr_ready` and `pr_review`), and nothing during its quiet hours (the item stays in the "needs you" list).
 - **Rate limit:** at most 5 pushes per device per 10 minutes. The rest become one "N more things need you" summary per window (`type: "summary"`, `target: {screen: "needs_you"}`).
 
 | type | title | body |
 |---|---|---|
 | permission | "<agent> needs your approval" | "Wants to use <tool name>" |
-| task_approval | "<agent> needs your approval" | task title |
-| task_blocked | "<agent> is blocked" | task title |
+| task_approval | "<agent> needs your approval" | issue title |
+| task_blocked | "<agent> is blocked" | issue title |
 | question | "<agent> asked you something" | "Open the chat to answer" |
 | grill_round | "<agent>: round <n>" | "Interview: <topic>" |
 | stuck | "<agent> may be stuck" | "No activity for N min" / "Waiting on a background task" |
-| task_failed | "A task failed" | task title |
+| task_failed | "An issue failed" | issue title |
 | pr_ready | "Ready to merge" | "<repo>#<n>: <title>" |
 | pr_review | "Review requested" | "<repo>#<n>: <title>" |
+| delivery_stalled | "Delivery stalled" | the spec's (or standalone ticket's) title |
+| delivery_done | "Delivery done" | the spec's (or standalone ticket's) title |
 
 Push text is built from names and titles only, never from the item's `reason` or `text`: no tool input, no message content, no errors.
 It's still run through the same credential redaction. Send errors are logged with the device name and status, never the payload.

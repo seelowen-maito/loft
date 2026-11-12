@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useParams } from "react-router";
-import { Bot, GitBranch, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
+import { Bot, GitBranch, Inbox, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
+import { oldTasksTarget } from "./lib/oldTasks";
 import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
+import { pendingItems, type PendingItem } from "./lib/pending";
+import { badgeText, badgeTitle, badgeTone, countAfter, countsOf, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
+import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
+import NeedsYouPage, { useCloseNeedsYou } from "./pages/NeedsYou";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
 import { TempMeter } from "./components/TempMeter";
+import { Shortcuts } from "./components/Shortcuts";
 
 function Clock() {
   const [now, setNow] = useState(new Date());
@@ -38,10 +44,15 @@ function Logo() {
   );
 }
 
+/** Pending permission requests: opens the oldest one's card in its agent's chat; with several, also lists them all. */
 function PendingBadge() {
-  const [count, setCount] = useState(0);
+  const [items, setItems] = useState<PendingItem[]>([]);
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
   const refresh = useCallback(() => {
-    api.permissions().then((p) => setCount(p.filter((r) => r.status === "pending").length)).catch(() => {});
+    // Without the agents the requests still show, unnamed.
+    Promise.all([api.permissions(), api.agents().catch(() => [])]).then(([p, a]) => setItems(pendingItems(p, a))).catch(() => {});
   }, []);
   useEffect(refresh, [refresh]);
   useServerEvents(
@@ -49,11 +60,85 @@ function PendingBadge() {
       if (e.type === "permission") refresh();
     }, [refresh]),
   );
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const count = items.length;
   if (!count) return null;
-  return (
-    <NavLink to="/agents" className="flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn">
+  const pill = "flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn";
+  const label = (
+    <>
       <ShieldAlert className="size-3.5" />
       {count}<span className="max-md:hidden"> permission{count > 1 ? "s" : ""} pending</span>
+    </>
+  );
+  if (count === 1) {
+    return <Link to={items[0].href} className={pill} title={items[0].title}>{label}</Link>;
+  }
+  return (
+    <div ref={box} className="relative">
+      <button
+        type="button"
+        className={pill}
+        title={`Oldest: ${items[0].title}`}
+        aria-expanded={open}
+        onClick={() => {
+          if (!open) navigate(items[0].href);
+          setOpen(!open);
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-full z-50 mt-2 flex w-72 flex-col rounded-lg border border-line-strong bg-ink-800/95 p-1 shadow-xl backdrop-blur">
+          {items.map((i) => (
+            <Link key={i.id} to={i.href} role="menuitem" title={i.title} onClick={() => setOpen(false)} className="flex items-baseline gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] hover:bg-white/5">
+              <span className="shrink-0 text-fg">{i.agent}</span>
+              <code className="min-w-0 truncate font-mono text-[11.5px] text-accent">{i.tool}</code>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The Needs you counter, on every page: what the user hasn't seen (on any client), from the list, then from each `needs_you` event. Reloads on reconnect, as events sent while offline are lost.
+ * It opens Needs you, and closes it when it's open. */
+function NeedsYouBadge({ live }: { live: boolean }) {
+  const { pathname } = useLocation();
+  const close = useCloseNeedsYou();
+  const [c, setC] = useState<Counts>({ count: 0, urgent: 0 });
+  useEffect(() => {
+    if (!live) return;
+    api.needsYouList().then((l) => setC(countsOf(l))).catch(() => {});
+  }, [live]);
+  useServerEvents(useCallback((e: ServerEvent) => setC((c) => countAfter(c, e)), []));
+  const n = badgeText(c.count);
+  return (
+    <NavLink
+      to="/needs-you"
+      title={badgeTitle(c)}
+      aria-label={`Needs you: ${badgeTitle(c)}`}
+      data-needs-you-count={c.count}
+      onClick={(e) => {
+        if (iconAction(pathname) !== "close") return;
+        e.preventDefault();
+        close();
+      }}
+      className={({ isActive }) => cx("relative rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}
+    >
+      <Inbox className="size-4" />
+      {n && (
+        <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", badgeTone(c) === "warn" ? "bg-warn" : "bg-accent")}>
+          {n}
+        </span>
+      )}
     </NavLink>
   );
 }
@@ -112,10 +197,22 @@ function useShowSimulator() {
 /** `/issues/:project/:number` from the old Issues tab: the list, searched for `#number` in that project. */
 function OldIssue() {
   const { project = "", number = "" } = useParams();
-  return <Navigate to={`/tasks?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+  return <Navigate to={`/issues?q=${encodeURIComponent(`#${number}`)}&project=${encodeURIComponent(project)}`} replace />;
+}
+
+function OldTask() {
+  const { id } = useParams();
+  return <Navigate to={oldTasksTarget(id, window.location.search)} replace />;
+}
+
+/** The Issues tab: from an agent's page, on that agent's group (the Issues page turns `from` into it). */
+function issuesLink(path: string): string {
+  const id = /^\/agents\/([^/]+)/.exec(path)?.[1];
+  return id ? `/issues?from=${encodeURIComponent(id)}` : "/issues";
 }
 
 export default function App() {
+  const location = useLocation();
   const live = useLiveConnection();
   const showSimulator = useShowSimulator();
   const tab = ({ isActive }: { isActive: boolean }) =>
@@ -126,7 +223,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <header className="sticky top-0 z-40 border-b border-line bg-ink-950/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-5 max-md:gap-3 max-md:px-4">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-5 max-md:gap-3 max-md:px-4 max-[21rem]:gap-2 max-[21rem]:px-3">
           <NavLink to="/" className="flex items-center gap-2.5">
             <Logo />
             <span className="text-[15px] font-medium tracking-tight max-sm:hidden">loft</span>
@@ -143,7 +240,7 @@ export default function App() {
               </span>{" "}
               <span className="max-md:hidden">Agents</span>
             </NavLink>
-            <NavLink to="/tasks" className={tab} aria-label="Issues">
+            <NavLink to={issuesLink(location.pathname)} className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
             </NavLink>
             {showSimulator && (
@@ -152,8 +249,9 @@ export default function App() {
               </NavLink>
             )}
           </nav>
-          <div className="ml-auto flex items-center gap-4 max-md:gap-3">
+          <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
             <PendingBadge />
+            <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
             <div className="flex items-center gap-4 max-lg:hidden">
               <UpdateStatus live={live} />
@@ -174,19 +272,25 @@ export default function App() {
         </div>
       </header>
       <UpdateBanner live={live} />
+      <Shortcuts />
       <main className="min-h-0 flex-1">
         <Routes>
           <Route path="/" element={<Navigate to="/repos" replace />} />
           <Route path="/repos" element={<ReposPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
-          {/* The old GitHub Issues tab's links: the one list, showing GitHub's, or that issue. */}
-          <Route path="/issues" element={<Navigate to="/tasks?source=github" replace />} />
+          <Route path="/agents/:id/interview" element={<AgentsPage />} />
+          {/* The old GitHub Issues tab's links: each opens that issue, found in the list. */}
+          <Route path="/issues" element={<TasksPage />} />
+          <Route path="/issues/:id" element={<TasksPage />} />
           <Route path="/issues/:project/:number" element={<OldIssue />} />
-          <Route path="/tasks" element={<TasksPage />} />
-          <Route path="/tasks/:id" element={<TasksPage />} />
+          {/* Issues were once "tasks": old links keep working. */}
+          <Route path="/tasks" element={<OldTask />} />
+          <Route path="/tasks/:id" element={<OldTask />} />
+          <Route path="/needs-you" element={<NeedsYouPage />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/clean" element={<CleanPage />} />
         </Routes>
       </main>
     </div>

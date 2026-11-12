@@ -41,6 +41,10 @@ pub struct Mirror {
     repos: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Cursor>>>>,
     /// Why each skipped project was last skipped, so the log says it once, not every poll.
     skipped: std::sync::Mutex<HashMap<String, String>>,
+    /// ETag of each issue of another repo last read by number (`repo#n`), so an unchanged one answers 304.
+    etags: std::sync::Mutex<HashMap<String, String>>,
+    /// Other repos already logged as unreadable this run, so the log says it once.
+    unreadable: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Where the change poll of one repo stands.
@@ -76,9 +80,9 @@ pub struct Report {
     pub closed_tickets: Vec<(i64, String)>,
 }
 
-/// The projects the agents belong to, A–Z (case-insensitive), each once.
+/// Every project of every agent, A–Z (case-insensitive), each once.
 pub(crate) fn projects(state: &AppState) -> anyhow::Result<Vec<String>> {
-    let mut ps: Vec<String> = state.db.list_agents()?.iter().map(|a| a.project.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    let mut ps: Vec<String> = state.db.list_agents()?.iter().flat_map(|a| a.projects.iter().chain([&a.project])).map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
     ps.sort();
     ps.dedup();
     ps.sort_by_key(|p| p.to_lowercase());
@@ -200,6 +204,9 @@ pub async fn sync_project(state: &AppState, project: &str, full: bool) -> Option
         report.error = Some(e.to_string());
     }
     drop(cursor);
+    if full {
+        other_repos(state, project, &repo, &mut report).await;
+    }
     // A ticket closed on GitHub by hand: when it was its spec's last, the spec PR is ready for review.
     // Delivery records change under the repo's publish lock, like every other Delivery step, so a poll
     // can't write back a record a submit or review changed meanwhile.
@@ -280,6 +287,55 @@ async fn full_read(state: &AppState, project: &str, repo: &str, cursor: &mut Cur
     }
     cursor.etag = None;
     Ok(())
+}
+
+/// Loft issues of `project` linked to a repo other than its own (its origin moved, say) aren't in its
+/// repo's reads: a full read reads each one still open by number and brings GitHub's changes in. Only
+/// those: nothing else of that repo is imported. A repo that can't be read is left as it is until the
+/// next full read, and logged once per run.
+async fn other_repos(state: &AppState, project: &str, repo: &str, report: &mut Report) {
+    let mut by_repo: HashMap<String, Vec<i64>> = HashMap::new();
+    for t in state.db.list_tasks().unwrap_or_default().into_iter().filter(|t| t.project == project) {
+        if let Some(g) = t.github.filter(|g| g.state == "open" && !g.repo.eq_ignore_ascii_case(repo)) {
+            by_repo.entry(g.repo).or_default().push(g.number);
+        }
+    }
+    for (other, numbers) in by_repo {
+        let cursor = state.mirror.cursor(&other);
+        let _held = cursor.lock().await;
+        for n in numbers {
+            let key = format!("{}#{n}", other.to_lowercase());
+            let etag = state.mirror.etags.lock().unwrap().get(&key).cloned();
+            let e = match crate::github::get_if_changed(state, &format!("/repos/{other}/issues/{n}"), etag.as_deref()).await {
+                Ok(None) => continue,
+                Ok(Some((i, etag))) => {
+                    if let Some(etag) = etag {
+                        state.mirror.etags.lock().unwrap().insert(key, etag);
+                    }
+                    // Transferred away: left as it is, like a link whose repo is gone. Unlinked or deleted
+                    // in Loft while it was read: dropped, so nothing of that repo is ever imported.
+                    let still_linked = i["number"].as_i64().is_some_and(|n| linked(state, &other).iter().any(|t| t.github.as_ref().is_some_and(|g| g.number == n)));
+                    if same_repo(&i, &other) && still_linked {
+                        let mut r = Report::default();
+                        apply(state, project, &other, &i, &mut r);
+                        report.updated += r.updated;
+                    }
+                    continue;
+                }
+                Err(e) => e,
+            };
+            if crate::github::is_paused(&e) {
+                break;
+            }
+            if state.mirror.unreadable.lock().unwrap().insert(other.to_lowercase()) {
+                tracing::warn!("mirror: can't read {other}, its linked issues stay as they are: {e}");
+            }
+            // One issue deleted: the others are still read. Anything else: the repo waits for the next full read.
+            if !crate::github::is_gone(&e) {
+                break;
+            }
+        }
+    }
 }
 
 /// What changed since the last read, open or closed. An unchanged answer comes back as 304 with the same ETag.
@@ -462,7 +518,8 @@ fn apply(state: &AppState, project: &str, repo: &str, i: &Value, report: &mut Re
             let moved = t.github.as_ref().is_some_and(|g| g.state != l.state) && t.state() != l.state;
             // Closed on GitHub while an agent works on it: the work isn't stopped behind the user's back.
             // The issue stays open, the mismatch is shown (`github.state` closed, issue open) and asked about.
-            let working = crate::tasks::is_active(&t);
+            // A blocked one's agent stopped already: it closes, like a failed one, and leaves Needs you.
+            let working = crate::tasks::is_active(&t) && t.status != "blocked";
             let status = match (moved, l.state.as_str()) {
                 (true, "closed") if working => None,
                 (true, "closed") => Some(if i["state_reason"] == "not_planned" { "cancelled" } else { "done" }),
@@ -602,7 +659,7 @@ pub async fn keep_working(State(state): State<AppState>, axum::extract::Path(id)
     };
     let path = format!("/repos/{}/issues/{}", g.repo, g.number);
     let v = crate::github::request(&state, reqwest::Method::PATCH, &path, Some(json!({ "state": "open" }))).await.map_err(|e| crate::api::bad(format!("Couldn't reopen #{} on GitHub: {e}", g.number)))?;
-    keep_link(&state, &g.repo, &v);
+    keep_link(&state, &g.repo, &v, true);
     let t = state.db.get_task(&id)?.ok_or_else(crate::api::not_found)?;
     crate::tasks::log_status(&state, &t, "user", &format!("Kept working; #{} reopened on GitHub", g.number));
     Ok(Json(json!(t)))
@@ -791,10 +848,14 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
     }
     let cursor = state.mirror.cursor(&g.repo);
     let _held = cursor.lock().await;
+    // What Loft knows of GitHub now, under the lock: an earlier write (or a refresh) may have moved it on
+    // since this edit was made.
+    let known = state.db.get_task(&after.id).ok().flatten().and_then(|t| t.github).filter(|k| k.repo == g.repo && k.number == g.number).unwrap_or_else(|| g.clone());
     let path = format!("/repos/{}/issues/{}", g.repo, g.number);
     let result = async {
         let now_there = crate::github::get(state, &path).await?;
-        if now_there["updated_at"].as_str().is_some_and(|u| u != g.updated_at) {
+        // A close the poll hasn't applied yet (its link still says open) is a change too: GitHub's reason isn't written over.
+        if now_there["updated_at"].as_str().is_some_and(|u| u != known.updated_at) || now_there["state"].as_str().is_some_and(|s| s != known.state) {
             apply(state, &after.project, &g.repo, &now_there, &mut Report::default());
             links_from_github(state, &g.repo, &now_there).await;
             if let Ok(Some(t)) = state.db.get_task(&after.id) {
@@ -807,7 +868,7 @@ pub async fn write_through(state: &AppState, before: &Task, after: &Task) {
         // Remember what GitHub says now, so the next poll (or edit) doesn't take Loft's own write for a
         // change: the PATCH answer has it, unless a link written after it moved the issue on again.
         match patched.filter(|_| !links_changed(before, after)) {
-            Some(v) => keep_link(state, &g.repo, &v),
+            Some(v) => keep_link(state, &g.repo, &v, true),
             None => refresh_link(state, &g.repo, g.number).await,
         }
         for n in parents {
@@ -874,15 +935,23 @@ async fn links_to_github(state: &AppState, g: &GithubLink, now_there: &Value, be
 /// Reads issue #n again and keeps GitHub's `updated_at` (and state) on the Loft issue that mirrors it.
 async fn refresh_link(state: &AppState, repo: &str, n: i64) {
     if let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await {
-        keep_link(state, repo, &v);
+        keep_link(state, repo, &v, false);
     }
 }
 
-/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it.
-fn keep_link(state: &AppState, repo: &str, v: &Value) {
+/// Keeps what GitHub says of issue `v` (`updated_at`, state) on the Loft issue that mirrors it. `v` is
+/// GitHub's answer to Loft's own write (`own`), or a read. A state read that the Loft issue doesn't have
+/// yet (a spec read closed here before the poll got to it) stays as it was, so the poll's `apply` still
+/// sees GitHub move and moves the Loft issue with it. A state Loft wrote is kept as is, even when the
+/// Loft issue moved on again meanwhile: its own write is no GitHub change.
+fn keep_link(state: &AppState, repo: &str, v: &Value, own: bool) {
     let Some(n) = v["number"].as_i64() else { return };
     if let Some(mut t) = linked(state, repo).into_iter().find(|t| t.github.as_ref().is_some_and(|g| g.number == n)) {
-        t.github = Some(link(repo, v));
+        let mut l = link(repo, v);
+        if !own && l.state != t.state() {
+            l.state = t.github.as_ref().unwrap().state.clone();
+        }
+        t.github = Some(l);
         if state.db.save_task(&t).is_ok() {
             crate::tasks::emit(state, &t);
         }
@@ -1262,6 +1331,80 @@ pub(crate) mod tests {
         let t4 = st.db.get_task(&ids[&4]).unwrap().unwrap();
         assert_eq!(t4.github.as_ref().map(|g| g.state.as_str()), Some("closed"), "a closed issue that has a Loft issue stays mirrored");
         assert_eq!(t4.status, "done", "closed on GitHub as completed: done in Loft");
+    }
+
+    #[tokio::test]
+    async fn issues_linked_to_another_repo_follow_it_on_a_full_read_and_nothing_else_comes_in() {
+        let st = state();
+        let fake = own_fake(&st);
+        // The project's origin moved to octo/new; some Loft issues still link to octo/old, one to a repo that's gone.
+        project(&st, "mir-moved", Some("https://github.com/octo/new"));
+        fake.route("GET", "/repos/octo/new/issues", 200, json!([]));
+        let at = "2026-10-02T00:00:00Z";
+        let mut ids = HashMap::new();
+        for (repo, n) in [("octo/gone", 5), ("octo/old", 1), ("octo/old", 2), ("octo/old", 3)] {
+            let t = Task {
+                id: format!("moved-{n}"),
+                title: format!("#{n}"),
+                kind: "todo".into(),
+                status: "ready".into(),
+                project: "mir-moved".into(),
+                github: Some(link(repo, &gh(repo, n, &format!("#{n}"), "open", at))),
+                ..Default::default()
+            };
+            st.db.save_task(&t).unwrap();
+            ids.insert(n, t.id);
+        }
+        fake.route("GET", "/repos/octo/old/issues/1", 200, gh("octo/old", 1, "Shipped", "closed", "2026-10-03T00:00:00Z"));
+        fake.in_turn("GET", "/repos/octo/old/issues/2", vec![(200, gh("octo/old", 2, "Renamed", "open", "2026-10-03T00:00:00Z")), (304, Value::Null)]);
+        fake.with_headers("GET", "/repos/octo/old/issues/2", &[("etag", "\"e2\"")]);
+        let mut dropped = gh("octo/old", 3, "Dropped", "closed", "2026-10-03T00:00:00Z");
+        dropped["state_reason"] = json!("not_planned");
+        fake.route("GET", "/repos/octo/old/issues/3", 200, dropped);
+        // octo/gone answers 404 (unrouted): left as it is, and the rest is still read.
+
+        let r = sync_project(&st, "mir-moved", true).await.unwrap();
+        assert_eq!((r.created, r.updated, r.error), (0, 3, None));
+        let task = |n: i64| st.db.get_task(&ids[&n]).unwrap().unwrap();
+        assert_eq!((task(1).status.as_str(), task(1).github.unwrap().state.as_str()), ("done", "closed"), "closed as completed on its own repo: done");
+        assert_eq!(task(3).status, "cancelled", "closed as not planned: cancelled");
+        assert_eq!((task(2).title.as_str(), task(2).status.as_str()), ("Renamed", "ready"), "still open: its title follows");
+        assert_eq!((task(5).status.as_str(), task(5).github.unwrap().state.as_str()), ("ready", "open"), "an unreadable repo's link stays as it is");
+        assert!(fake.seen("/repos/octo/old/issues?").is_empty() && fake.seen("/repos/octo/old/issues").len() == 3, "only the linked issues, by number: nothing of octo/old is imported");
+
+        // The next full read: only #2 is still open, and it answers 304 to its ETag. A change poll doesn't read other repos.
+        sync_project(&st, "mir-moved", false).await.unwrap();
+        let r = sync_project(&st, "mir-moved", true).await.unwrap();
+        assert_eq!((r.updated, r.error), (0, None));
+        let old = fake.seen("/repos/octo/old/");
+        assert_eq!(old.len(), 4, "{old:?}");
+        assert_eq!((old[3].path.as_str(), &old[3].headers["if-none-match"]), ("/repos/octo/old/issues/2", &json!("\"e2\"")));
+        assert_eq!(fake.seen("/repos/octo/gone/").len(), 2, "tried again on each full read");
+        assert_eq!(linked(&st, "octo/old").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_sync_reads_every_project_of_an_agent() {
+        let st = state();
+        let fake = own_fake(&st);
+        for p in ["grp-api", "grp-b2b", "grp-b2c"] {
+            project(&st, p, Some(&format!("https://github.com/octo/{p}")));
+            fake.route("GET", &format!("/repos/octo/{p}/issues"), 200, json!([gh(&format!("octo/{p}"), 1, &format!("{p} issue"), "open", "2026-10-02T00:00:00Z")]));
+        }
+        // One agent in all three, instead of one agent each.
+        for a in st.db.list_agents().unwrap() {
+            st.db.delete_agent(&a.id).unwrap();
+        }
+        let mut web = crate::tasks::tests::agent(&st, "Web");
+        (web.group, web.project, web.projects) = ("Grp".into(), "grp-b2c".into(), vec!["grp-b2c".into(), "grp-api".into(), "grp-b2b".into()]);
+        st.db.save_agent(&web).unwrap();
+
+        let Json(v) = sync_now(State(st.clone()), None).await.unwrap();
+        let synced: Vec<&str> = v["projects"].as_array().unwrap().iter().map(|r| r["project"].as_str().unwrap()).collect();
+        assert_eq!(synced, ["grp-api", "grp-b2b", "grp-b2c"]);
+        for p in ["grp-api", "grp-b2b", "grp-b2c"] {
+            assert_eq!(mirrored(&st, &format!("octo/{p}")).len(), 1, "{p}");
+        }
     }
 
     #[tokio::test]
@@ -1773,6 +1916,86 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_spec_read_closed_by_a_refresh_before_the_poll_still_closes_in_loft() {
+        for (name, reason, worked, status) in [("kl-done", "completed", false, "done"), ("kl-dropped", "not_planned", false, "cancelled"), ("kl-worked", "completed", true, "in_progress")] {
+            let st = state();
+            let fake = own_fake(&st);
+            let repo = format!("octo/{name}");
+            let id = one_mirrored(&st, &fake, name, &repo, "2026-10-02T00:00:00Z").await;
+            if worked {
+                let a = crate::tasks::tests::agent(&st, "Builder");
+                crate::tasks::tests::busy(&st, &a);
+                crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
+            }
+            // Closed on GitHub: a refresh (its ticket changed) reads it first, then the full read no longer lists it.
+            let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+            closed["state_reason"] = json!(reason);
+            fake.route("GET", &format!("/repos/{repo}/issues/1"), 200, closed);
+            refresh_link(&st, &repo, 1).await;
+            fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([]));
+            let r = sync_project(&st, name, true).await.unwrap();
+            assert_eq!((r.updated, r.error), (1, None), "{name}");
+            let t = st.db.get_task(&id).unwrap().unwrap();
+            assert_eq!((t.status.as_str(), t.github.as_ref().unwrap().state.as_str()), (status, "closed"), "{name}");
+            let asked = st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text.starts_with("#1 was closed on GitHub while it's being worked on"));
+            assert_eq!(asked, worked, "{name}: only the worked-on one is asked about");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_another_repo_without_a_link_any_more_is_dropped() {
+        let st = state();
+        let fake = own_fake(&st);
+        project(&st, "mir-drop", Some("https://github.com/octo/new2"));
+        fake.route("GET", "/repos/octo/new2/issues", 200, json!([]));
+        let t = Task { id: "drop-1".into(), title: "#1".into(), kind: "todo".into(), status: "ready".into(), project: "mir-drop".into(), github: Some(link("octo/old2", &gh("octo/old2", 1, "#1", "open", "2026-10-02T00:00:00Z"))), ..Default::default() };
+        st.db.save_task(&t).unwrap();
+        // The answer is for an issue no Loft issue links to any more (as when its link goes while the read is in flight).
+        fake.route("GET", "/repos/octo/old2/issues/1", 200, gh("octo/old2", 9, "Someone else's", "open", "2026-10-03T00:00:00Z"));
+        let r = sync_project(&st, "mir-drop", true).await.unwrap();
+        assert_eq!((r.created, r.updated, r.error), (0, 0, None));
+        assert_eq!(linked(&st, "octo/old2").len(), 1, "nothing of octo/old2 is imported");
+        assert_eq!(st.db.get_task("drop-1").unwrap().unwrap().github.unwrap().updated_at, "2026-10-02T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn done_in_loft_doesnt_write_over_a_github_close_the_poll_hasnt_applied() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/wt-reason";
+        let id = one_mirrored(&st, &fake, "wt-reason", repo, "2026-10-02T00:00:00Z").await;
+        // Closed as not planned on GitHub; a refresh read it, so the link has its updated_at but still says open.
+        let mut closed = gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+        closed["state_reason"] = json!("not_planned");
+        fake.route("GET", "/repos/octo/wt-reason/issues/1", 200, closed);
+        refresh_link(&st, repo, 1).await;
+        let Json(v) = crate::tasks::update(State(st.clone()), axum::extract::Path(id.clone()), Json(json!({ "status": "done" }))).await.unwrap();
+        assert!(patches(&fake, repo).is_empty(), "GitHub's not planned isn't written over with completed");
+        assert_eq!((&v["status"], &v["github"]["state"]), (&json!("done"), &json!("closed")));
+        assert!(st.db.list_task_comments(&id, 20, None).unwrap().iter().any(|c| c.text == "GitHub #1 changed meanwhile: its version wins"));
+    }
+
+    #[tokio::test]
+    async fn a_fast_close_then_reopen_in_loft_reopens_on_github() {
+        let st = state();
+        let fake = own_fake(&st);
+        let repo = "octo/wt-flip";
+        let id = one_mirrored(&st, &fake, "wt-flip", repo, "2026-10-02T00:00:00Z").await;
+        let open = st.db.get_task(&id).unwrap().unwrap();
+        let done = Task { status: "done".into(), ..open.clone() };
+        // Done, then inbox again at once: both writes carry the link as it was at the edits. The close
+        // is written while the Loft issue is already open again.
+        fake.in_turn("GET", "/repos/octo/wt-flip/issues/1", vec![(200, gh(repo, 1, "Retry cap", "open", "2026-10-02T00:00:00Z")), (200, gh(repo, 1, "Retry cap", "closed", "2026-10-03T00:00:00Z"))]);
+        fake.in_turn("PATCH", "/repos/octo/wt-flip/issues/1", vec![(200, gh(repo, 1, "Retry cap", "closed", "2026-10-03T00:00:00Z")), (200, gh(repo, 1, "Retry cap", "open", "2026-10-04T00:00:00Z"))]);
+        write_through(&st, &open, &done).await;
+        write_through(&st, &done, &open).await;
+        assert_eq!(patches(&fake, repo).len(), 2);
+        assert_eq!(patches(&fake, repo)[1], json!({ "state": "open" }), "Loft's reopen reaches GitHub");
+        let t = st.db.get_task(&id).unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.github.unwrap().state.as_str()), ("inbox", "open"), "not undone as closed on GitHub");
+    }
+
+    #[tokio::test]
     async fn closed_on_github_while_being_worked_on_asks_the_user_instead() {
         let st = state();
         let fake = own_fake(&st);
@@ -1780,7 +2003,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
 
         // Someone closes it on GitHub mid-work.
         fake.route("GET", "/repos/octo/cw/issues", 200, json!([gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z")]));
@@ -1814,6 +2037,45 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_blocked_or_failed_issue_closed_on_github_closes_and_leaves_needs_you() {
+        for (status, reason, closed_as) in [("blocked", "completed", "done"), ("failed", "not_planned", "cancelled")] {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("cb-{status}");
+            let repo = format!("octo/{name}");
+            let id = one_mirrored(&st, &fake, &name, &repo, "2026-10-02T00:00:00Z").await;
+            let a = crate::tasks::tests::agent(&st, "Builder");
+            crate::tasks::tests::busy(&st, &a);
+            crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
+            let mut t = st.db.get_task(&id).unwrap().unwrap();
+            (t.status, t.error) = (status.into(), "Wrong agent: I can't touch code.".into());
+            st.db.save_task(&t).unwrap();
+            let mine = |st: &AppState| crate::needs_you::collect(st).unwrap().into_iter().filter(|i| i.task_id.as_deref() == Some(id.as_str())).map(|i| i.kind).collect::<Vec<_>>();
+            assert_eq!(mine(&st), [format!("task_{status}").as_str()]);
+
+            // Done elsewhere, and closed on GitHub: settled, so it closes in Loft, with no "closed on GitHub" question.
+            let mut closed = gh(&repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z");
+            closed["state_reason"] = json!(reason);
+            fake.route("GET", &format!("/repos/{repo}/issues"), 200, json!([closed.clone()]));
+            fake.route("GET", &format!("/repos/{repo}/issues/1"), 200, closed);
+            sync_project(&st, &name, true).await.unwrap();
+            assert_eq!(st.db.get_task(&id).unwrap().unwrap().status, closed_as, "{status}");
+            assert!(mine(&st).is_empty(), "{status}: {:?}", mine(&st));
+        }
+    }
+
+    #[test]
+    fn a_block_after_a_github_close_is_no_needs_you_item() {
+        // Closed on GitHub mid-work, then the agent marks it blocked: nobody works on it, and GitHub settled it.
+        let st = state();
+        let (mut t, _) = crate::tasks::create(&st, &json!({ "title": "Retry cap" }), "user").unwrap();
+        t.status = "blocked".into();
+        t.github = Some(GithubLink { repo: "octo/late".into(), number: 1, state: "closed".into(), ..Default::default() });
+        st.db.save_task(&t).unwrap();
+        assert!(crate::needs_you::collect(&st).unwrap().iter().all(|i| i.task_id.as_deref() != Some(t.id.as_str())));
+    }
+
+    #[tokio::test]
     async fn cancelling_after_a_github_close_leaves_githubs_reason_alone() {
         let st = state();
         let fake = own_fake(&st);
@@ -1821,7 +2083,7 @@ pub(crate) mod tests {
         let id = one_mirrored(&st, &fake, "cw2", repo, "2026-10-02T00:00:00Z").await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
-        crate::tasks::execute(&st, &id, Some(&a.id), "", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "", crate::tasks::By::User).unwrap();
         fake.route("GET", "/repos/octo/cw2/issues", 200, json!([]));
         fake.route("GET", "/repos/octo/cw2/issues/1", 200, gh(repo, 1, "Retry cap", "closed", "2026-10-05T00:00:00Z"));
         sync_project(&st, "cw2", true).await.unwrap();
@@ -1931,7 +2193,7 @@ pub(crate) mod tests {
         crate::tasks::tests::busy(&st, &a);
 
         // Handed over with a note, then a private note: in Loft, never queued for GitHub, never posted.
-        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", None).unwrap();
+        crate::tasks::execute(&st, &id, Some(&a.id), "The staging password is in 1Password", crate::tasks::By::User).unwrap();
         let body: crate::tasks::CommentBody = serde_json::from_value(json!({ "text": "Ask Tom about the deadline", "send": false })).unwrap();
         let _ = crate::tasks::add_comment(State(st.clone()), axum::extract::Path(id.clone()), Json(body)).await.unwrap();
         // A comment meant for the issue still goes (mode: all).
@@ -2005,14 +2267,14 @@ pub(crate) mod tests {
 
         // The spec is never handed to an agent as one task; nothing starts.
         let a = crate::tasks::tests::agent(&st, "Builder");
-        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).unwrap_err();
+        let err = crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).unwrap_err();
         assert!(err.1.starts_with("A spec is split into tickets"), "{}", err.1);
         assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, spec.status);
         // GitHub labels are case-insensitive: "Spec" is a spec too.
         let mut other = st.db.get_task(&spec.id).unwrap().unwrap();
         other.labels = vec!["SPEC".into()];
         st.db.save_task(&other).unwrap();
-        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", None).is_err());
+        assert!(crate::tasks::execute(&st, &spec.id, Some(&a.id), "", crate::tasks::By::User).is_err());
     }
 
     #[tokio::test]
@@ -2058,8 +2320,7 @@ pub(crate) mod tests {
 
     fn state_cursor(st: &AppState, repo: &str) -> Option<String> {
         let c = st.mirror.cursor(repo);
-        let since = c.try_lock().unwrap().since.clone();
-        since
+        c.try_lock().unwrap().since.clone()
     }
 
     #[tokio::test]

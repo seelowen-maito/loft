@@ -35,8 +35,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
-        guard let d = PushDestination.from(info) else { return }
         await MainActor.run {
+            guard let d = PushDestination.from(info, loftHost: PushRegistrar.shared.store?.api?.baseURL.host()) else { return }
             if let open = Self.open { open(d) } else { Self.pendingOpen = d }
         }
     }

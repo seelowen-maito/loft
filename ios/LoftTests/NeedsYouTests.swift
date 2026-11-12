@@ -6,6 +6,16 @@ final class NeedsYouTests: XCTestCase {
         try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
     }
 
+    func testAKillOffersAlwaysAllowOnlyWithARule() {
+        func request(_ tool: String, _ rule: String?) -> PermissionRequest {
+            PermissionRequest(id: "p", agentId: "a", source: "prompt", toolName: tool, input: nil, reason: nil, rule: rule, status: "pending", createdAt: Date())
+        }
+        XCTAssertTrue(request("Kill", "Kill(/d/*/App)").canAlwaysAllow)
+        for rule in [nil, ""] { XCTAssertFalse(request("Kill", rule).canAlwaysAllow, rule ?? "nil") }
+        XCTAssertTrue(request("Bash", "Bash(git *)").canAlwaysAllow)
+        XCTAssertTrue(request("Bash", nil).canAlwaysAllow)
+    }
+
     func testTheBackendsFixtureDecodes() throws {
         let l = try fixture()
         XCTAssertEqual(l.version, 1)
@@ -26,6 +36,20 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertEqual(approve.body(text: nil, clientId: "c2"), approve.body)
     }
 
+    /// An issue reply names the picked agent when nobody is on the issue (#145); other answers never carry one.
+    func testAnIssueReplyCarriesThePickedAgent() throws {
+        let l = try fixture()
+        let failed = try XCTUnwrap(l.items.first { $0.type == "task_failed" })
+        XCTAssertNil(failed.agent)
+        XCTAssertFalse(failed.actions.contains { $0.kind == "retry" }, "replying runs a failed issue again")
+        let reply = try XCTUnwrap(failed.answerAction)
+        guard case .object(let o)? = reply.body(text: "Go", clientId: "c1", agentId: "qa") else { return XCTFail() }
+        XCTAssertEqual(o["agent_id"], .string("qa"))
+        let q = try XCTUnwrap(l.items.first { $0.type == "question" }?.answerAction)
+        guard case .object(let m)? = q.body(text: "Go", clientId: "c1", agentId: "qa") else { return XCTFail() }
+        XCTAssertNil(m["agent_id"])
+    }
+
     /// Closed on GitHub while an agent works on it (#177): Cancel or Keep working, which reopens the GitHub issue.
     func testClosedOnGitHubAsksCancelOrKeepWorking() throws {
         let item = try XCTUnwrap(try fixture().items.first { $0.type == "closed_on_github" })
@@ -37,7 +61,7 @@ final class NeedsYouTests: XCTestCase {
     /// A comment waiting for GitHub (spec #65): Approve, "Edit and approve" starting from the comment's text, Keep in Loft.
     func testACommentApprovalEditsTheCommentItself() throws {
         let item = try XCTUnwrap(try fixture().items.first { $0.type == "comment_approval" })
-        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open task"])
+        XCTAssertEqual(item.actions.map(\.label), ["Approve", "Edit and approve", "Keep in Loft", "Open issue"])
         let edit = try XCTUnwrap(item.answerAction)
         XCTAssertEqual(edit.draft, item.text, "editing starts from the comment, not an empty box")
         guard case .object(let o)? = edit.body(text: "Edited", clientId: "c1") else { return XCTFail() }
@@ -117,5 +141,50 @@ final class NeedsYouTests: XCTestCase {
         let s = NeedsYouSection.build([item("x", "pr_ready", urgency: 1, project: "site"), item("y1", "pr_ready", urgency: 1, project: "app"),
                                        item("y2", "pr_ready", urgency: 1, project: "app")])
         XCTAssertEqual(s.map(\.id), ["project:app", "project:site"])
+    }
+
+    /// The seen mark (#395), shared with the web: the badge counts what no client has seen; a changed item (new id) is
+    /// unseen again; while the list is open, what was new when it appeared stays new.
+    func testTheSeenMarkDecodesAndOnlyUnseenItemsAreMarkedAndShownNew() throws {
+        var l = try fixture()
+        XCTAssertNil(l.new, "an older server sends no seen counts")
+        XCTAssertEqual(l.unseen, l.count, "so the badge is the whole list")
+        let json = #"{"version":1,"count":3,"urgent":1,"new":1,"new_urgent":0,"items":[]}"#
+        let decoded = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.unseen, 1)
+        XCTAssertEqual(decoded.newUrgent, 0)
+        XCTAssertEqual(decoded.headline, "Needs you · 1 new of 3")
+
+        l.items = Array(l.items.prefix(3))
+        l.items[0].seen = true
+        l.items[1].seen = false
+        XCTAssertEqual(NeedsYouSeen.unseen(l.items), [l.items[1].id, l.items[2].id])
+        var fresh = NeedsYouSeen.fresh(after: [], items: l.items)
+        XCTAssertEqual(fresh, [l.items[1].id, l.items[2].id])
+        // After marking: still new while the list is open; one that left the list drops out.
+        var after = Array(l.items.prefix(2))
+        after[1].seen = true
+        fresh = NeedsYouSeen.fresh(after: fresh, items: after)
+        XCTAssertEqual(fresh, [l.items[1].id])
+        XCTAssertEqual(NeedsYouSeen.body(["a"]), .object(["ids": .array([.string("a")])]))
+    }
+
+    /// Each item that can go has a Done check; a permission (it needs an answer) doesn't.
+    func testDoneIsTheCheckThatTakesAnItemOff() throws {
+        let l = try fixture()
+        XCTAssertNil(l.items.first { $0.type == "permission" }?.doneAction)
+        XCTAssertEqual(l.items.first { $0.type == "task_failed" }?.doneAction?.path?.hasSuffix("/dismiss"), true)
+    }
+
+    /// The fixture server keeps the seen mark like the real one: marking what's shown empties the badge.
+    func testMarkingSeenEmptiesTheBadge() async throws {
+        let api = FixtureAPI()
+        let before = try await api.needsYou()
+        XCTAssertEqual(before.new, before.count)
+        try await api.needsYouRequest(method: "POST", path: "/api/needs-you/seen", body: NeedsYouSeen.body(before.items.map(\.id)))
+        let after = try await api.needsYou()
+        XCTAssertEqual(after.new, 0)
+        XCTAssertEqual(after.count, before.count, "seen items stay in the list")
+        XCTAssertTrue(after.items.allSatisfy { $0.seen == true })
     }
 }
