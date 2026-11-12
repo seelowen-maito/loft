@@ -90,21 +90,23 @@ struct ConversationsView: View {
                 }
             }
 
-            Section("Direct with an agent") {
-                ForEach(store.sortedAgents.filter { $0.id != store.orchestratorId }) { a in
-                    NavigationLink(value: ChatRoute(agentId: a.id)) {
-                        HStack(spacing: 12) {
-                            if !typeSize.isAccessibilitySize {
-                                AgentAvatar(name: a.name, id: a.id, size: 36, state: store.state(of: a))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(a.name).font(.body.weight(.medium))
-                                Text(preview(a)).font(.footnote).foregroundStyle(.secondary).readableLineLimit(1)
-                            }
-                            Spacer()
-                            if let unsent = Optional(store.pending(for: a.id).filter(\.isFailed).count), unsent > 0 {
-                                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.failure)
-                                    .accessibilityLabel("\(unsent) unsent")
+            ForEach(Self.sections(store.sortedAgents, orchestratorId: store.orchestratorId)) { section in
+                Section(section.title) {
+                    ForEach(section.agents) { a in
+                        NavigationLink(value: ChatRoute(agentId: a.id)) {
+                            HStack(spacing: 12) {
+                                if !typeSize.isAccessibilitySize {
+                                    AgentAvatar(name: a.name, id: a.id, size: 36, state: store.state(of: a))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(a.name).font(.body.weight(.medium))
+                                    Text(preview(a)).font(.footnote).foregroundStyle(.secondary).readableLineLimit(1)
+                                }
+                                Spacer()
+                                if let unsent = Optional(store.pending(for: a.id).filter(\.isFailed).count), unsent > 0 {
+                                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.failure)
+                                        .accessibilityLabel("\(unsent) unsent")
+                                }
                             }
                         }
                     }
@@ -112,6 +114,11 @@ struct ConversationsView: View {
             }
         }
         .refreshable { try? await store.refresh() }
+    }
+
+    /// The direct conversations, grouped like the Agents tab; the orchestrator has its own section above.
+    static func sections(_ agents: [Agent], orchestratorId: String?) -> [AgentSection] {
+        AgentsListView.sections(agents.filter { $0.id != orchestratorId })
     }
 
     private func preview(_ a: Agent) -> String {
