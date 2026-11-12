@@ -545,6 +545,22 @@ final class LoftUITests: XCTestCase {
         XCTAssertEqual(all.label, "Start remaining 1")
     }
 
+    /// While one spec's Start delivery runs, Start all and the other specs' buttons wait, so a stale card from one
+    /// request can't replace the newer card from the other.
+    func testStartAllWaitsForASpecStarting() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-more-specs", "-fixture-slow-end-card"])
+        let all = app.buttons["endCardStartAll"]
+        XCTAssertTrue(all.appears(timeout: 5))
+        app.swipeUp()
+        let starts = app.buttons.matching(identifier: "endCardStart")
+        starts.element(boundBy: 0).tap()
+        XCTAssertFalse(all.isEnabled, "Start all waits")
+        XCTAssertFalse(starts.element(boundBy: 1).isEnabled, "so does another spec")
+        XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
+        XCTAssertTrue(all.isEnabled)
+        XCTAssertEqual(all.label, "Start remaining 2")
+    }
+
     /// While its request runs, each end-card button shows a spinner and can't be tapped again: Start delivery reads
     /// "Starting delivery…" until the card says it started, and Clear context waits for the session reset.
     func testEndCardButtonsShowTheyAreWorking() {

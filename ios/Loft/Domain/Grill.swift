@@ -123,8 +123,6 @@ struct EndCard: Codable, Hashable {
         }
         var repo: String
         var spec: Int
-        /// A standalone ticket: Start delivery opens its branch and draft PR.
-        var standalone: Bool? = nil
         var local: Bool? = nil
         var started: Started?
 

@@ -475,6 +475,8 @@ struct EndCardView: View {
     @State private var sendingSetup = false
     @State private var setupError: String?
     @State private var startingAll = false
+    /// One spec's own Start delivery is running: Start all waits, so a stale card can't replace the newer one.
+    @State private var startingOne = false
     /// Why a spec didn't start under Start all, by `Delivery.key`.
     @State private var failed: [String: String] = [:]
 
@@ -486,7 +488,7 @@ struct EndCardView: View {
                 .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             ForEach(Array(specs.enumerated()), id: \.offset) { i, spec in
                 if i > 0 { Divider() }
-                EndCardSpecView(message: message, spec: spec, showRepo: specs.count > 1, busy: startingAll,
+                EndCardSpecView(message: message, spec: spec, showRepo: specs.count > 1, busy: startingAll || startingOne, startingOne: $startingOne,
                                 failure: spec.delivery.flatMap { failed[$0.key] })
             }
             if card.setup != nil {
@@ -502,11 +504,11 @@ struct EndCardView: View {
                 }
                 .buttonStyle(.accent)
                 .font(.footnote)
-                .disabled(startingAll)
+                .disabled(startingAll || startingOne)
                 .accessibilityIdentifier("endCardStartAll")
             }
             HStack(spacing: 8) {
-                if specs.contains(where: { $0.delivery == nil }) {
+                if specs.allSatisfy({ $0.delivery == nil }) {
                     clearButton.buttonStyle(.accent)
                 } else {
                     clearButton.buttonStyle(.bordered)
@@ -593,8 +595,10 @@ private struct EndCardSpecView: View {
     let spec: EndCard.Spec
     /// Several specs: each names its repo.
     let showRepo: Bool
-    /// Start all is running.
+    /// Start all or another spec's Start delivery is running.
     let busy: Bool
+    /// Set while this spec's Start delivery runs.
+    @Binding var startingOne: Bool
     /// Why Start all didn't start it.
     let failure: String?
     @State private var starting = false
@@ -653,11 +657,13 @@ private struct EndCardSpecView: View {
 
     private func start(_ d: EndCard.Delivery, initGit: Bool) {
         starting = true
+        startingOne = true
         startError = nil
         Task {
             do { askGitDir = try await store.startDelivery(agentId: message.agentId, messageId: message.id, repo: d.repo, spec: d.spec, initGit: initGit) }
             catch { startError = error.localizedDescription }
             starting = false
+            startingOne = false
         }
     }
 
