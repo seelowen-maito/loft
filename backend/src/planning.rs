@@ -2847,6 +2847,11 @@ pub(crate) mod tests {
         crate::delivery::update(&st, slug, 40, |d| (d.tickets[0].state, d.tickets[0].wait_for) = ("started".into(), "#99".into()));
         crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
         assert_eq!(woken(&st, &lead).len(), wakes + 1);
+        // In review with a stale wait_for, it still holds the wake back.
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "review".into());
+        crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
+        assert_eq!(woken(&st, &lead).len(), wakes + 1);
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "started".into());
         // Building Store instead keeps the Delivery going: the Lead isn't woken.
         crate::delivery::update(&st, slug, 40, |d| {
             d.tickets[0].wait_for = String::new();

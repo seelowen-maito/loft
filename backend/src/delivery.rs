@@ -167,8 +167,8 @@ impl Step {
     /// Whether `d` still waits on this step: its call never came.
     fn waiting(&self, d: &Delivery) -> bool {
         match self {
-            // Tickets in flight keep the Delivery going, and their close wakes the Lead again.
-            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_in_flight(d),
+            // Tickets being worked keep the Delivery going, and their close wakes the Lead again; one whose Dev waits doesn't.
+            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_working(d),
             // A ticket its Dev reported as waiting (`wait_ticket`) waits on what it names, not on the Dev.
             Step::Build { ticket, round } => d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round && t.wait_for.is_empty()),
             Step::Review { ticket, role, round } => d.ticket(*ticket).is_some_and(|t| t.state == "review" && t.rounds == *round && t.verdicts.get(role).is_some_and(|v| v == "pending")),
@@ -531,15 +531,10 @@ pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     d.tickets.iter().find(|t| t.state == "open" && t.waiting_on.is_empty() && t.blocked_by.iter().all(closed))
 }
 
-/// Whether no ticket of `d` is in flight except ones whose Dev reported waiting (`wait_ticket`): that Dev is free.
+/// No ticket is being built, reviewed, waiting for its fix or waiting for the user: nothing will wake the
+/// Lead by closing. A ticket whose Dev reported waiting (`wait_ticket`) doesn't count: that Dev is free.
 fn none_working(d: &Delivery) -> bool {
     d.tickets.iter().all(|t| !matches!(t.state.as_str(), "review" | "changes" | "closing" | "needs_human") && !(t.state == "started" && t.wait_for.is_empty()))
-}
-
-/// No ticket is being built, reviewed, waiting for its fix or waiting for the user: nothing will wake the
-/// Lead by closing.
-fn none_in_flight(d: &Delivery) -> bool {
-    d.tickets.iter().all(|t| !matches!(t.state.as_str(), "started" | "review" | "changes" | "closing" | "needs_human"))
 }
 
 /// Whether Dev `id` is building one of `d`'s tickets: started, and not waiting.
@@ -554,7 +549,7 @@ fn free(d: &Delivery, id: &str) -> bool {
 
 /// A running Delivery of a team with a Lead that has tickets to hand out and nothing in flight: it waits on the Lead.
 fn waits_on_lead(state: &AppState, d: &Delivery) -> bool {
-    d.state == "running" && none_in_flight(d) && !ready_tickets(d).is_empty() && lead_of(state, d).is_some()
+    d.state == "running" && none_working(d) && !ready_tickets(d).is_empty() && lead_of(state, d).is_some()
 }
 
 /// The tickets ready to hand out: open, with every blocker closed, and nobody on them.
