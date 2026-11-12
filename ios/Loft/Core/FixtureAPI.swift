@@ -171,6 +171,17 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
                                 tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
             ]
+            // Offline mode (#50) and the end card's Pricing page (octo/site#40), not started, each with a ticket waiting
+            // on an open ticket of octo/api's Billing API spec (#7), which hasn't started either.
+            let waits = [WaitsOn(blocker: "octo/api#8", delivery: .init(repo: "octo/api", spec: 7, started: false, issueId: "api7"))]
+            var cache = ticket(56, "Offline cache", "open"); cache.waitingOn = ["octo/api#8"]
+            var plans = ticket(41, "Plans table", "open"); plans.waitingOn = ["octo/api#8"]
+            deliveryList += [
+                DeliverySummary(state: "planned", agentName: nil, repo: "octo/loft", spec: 50, specId: nil, local: false, current: nil,
+                                tickets: [cache, ticket(57, "Sync queue", "open")], waitsOn: waits),
+                DeliverySummary(state: "planned", agentName: nil, repo: "octo/site", spec: 40, specId: nil, local: false, current: nil,
+                                tickets: [plans, ticket(42, "Yearly toggle", "open")], waitsOn: waits),
+            ]
         }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
@@ -919,8 +930,8 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                   let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
             return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
                                  agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
-                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
-                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName, waitingOn: $0.waitingOn) },
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou, waitsOn: d.waitsOn)
         }
     }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {

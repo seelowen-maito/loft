@@ -107,7 +107,7 @@ private struct TicketRow: View {
                 if let n = ticket.number { Text("#\(n)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 Text(ticket.title).readableLineLimit(2)
                 Spacer(minLength: 4)
-                Text(SpecViews.ticketLabel(ticket.state)).font(.caption.weight(.medium)).foregroundStyle(tone)
+                Text(SpecViews.ticketLabel(ticket.state, waitingOn: ticket.waitingOn)).font(.caption.weight(.medium)).foregroundStyle(tone)
             }
             if !ticket.verdicts.isEmpty {
                 HStack(spacing: 8) {
@@ -126,7 +126,8 @@ private struct TicketRow: View {
     }
 
     private var tone: Color {
-        switch ticket.state {
+        if ticket.state == "open" && !ticket.waitingOn.isEmpty { return Theme.attention }
+        return switch ticket.state {
         case "closed": Theme.working
         case "needs_human": Theme.attention
         case "started", "review", "closing": Theme.accent

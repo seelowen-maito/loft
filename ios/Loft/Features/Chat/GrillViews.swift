@@ -618,6 +618,13 @@ private struct EndCardSpecView: View {
     /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
     @State private var askGitDir: String?
     @State private var declinedGit = false
+    /// Start delivery was tapped while its tickets wait on another spec: the warning shows in its place.
+    @State private var warn = false
+
+    /// What the spec's tickets wait on in another spec, from the Deliveries list.
+    private var waits: [WaitsOn] {
+        spec.delivery.flatMap { store.deliverySummaries["\($0.repo)#\($0.spec)"]?.waitsOn } ?? []
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -635,8 +642,11 @@ private struct EndCardSpecView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("endCardStarted")
+                } else if warn, !waits.isEmpty {
+                    StartWarning(waits: waits, onStart: { warn = false; start(d, initGit: false) }, onCancel: { warn = false },
+                                 onStarted: { store.loadDeliveries() })
                 } else {
-                    Button { start(d, initGit: false) } label: {
+                    Button { if waits.isEmpty { start(d, initGit: false) } else { warn = true } } label: {
                         Label {
                             Text(starting ? "Starting delivery…" : "Start delivery")
                         } icon: {
@@ -656,6 +666,8 @@ private struct EndCardSpecView: View {
                 }
             }
         }
+        // Reads what its tickets wait on before Start delivery is tapped.
+        .onAppear { if spec.delivery.map({ $0.started == nil }) == true { store.loadDeliveries() } }
         .confirmationDialog(
             "Set up git?",
             isPresented: Binding(get: { askGitDir != nil }, set: { if !$0 { askGitDir = nil } }),
