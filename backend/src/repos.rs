@@ -261,6 +261,9 @@ pub async fn github_repo(state: &AppState, project: &str) -> Result<String, Stri
         return Err(format!("The project folder {} isn't a git repo", state.settings.boot().projects_dir.join(project).display()));
     };
     if !dir.join(".git").exists() {
+        if project_hint(state, project).is_some() {
+            return Err(format!("The project folder {} holds several repos, not one git repo", dir.display()));
+        }
         return Err(format!("The project folder {} isn't a git repo", dir.display()));
     }
     if !own_git_dir(&dir) {
@@ -805,6 +808,11 @@ mod tests {
         let p = "loft/agent-local-storage/agent-1/evil";
         assert!(super::project_dir(&st, p).is_none(), "an agent's workspace is never a project");
         assert!(super::github_repo(&st, p).await.is_err());
+        // A folder of several repos says so, instead of "isn't a git repo".
+        std::fs::create_dir_all(projects.join("many/a/.git")).unwrap();
+        std::fs::create_dir_all(projects.join("plain")).unwrap();
+        assert!(super::github_repo(&st, "many").await.unwrap_err().contains("holds several repos, not one git repo"));
+        assert!(super::github_repo(&st, "plain").await.unwrap_err().ends_with("plain isn't a git repo"));
         // A real repo inside the projects folder still works.
         let real = projects.join("real");
         std::fs::create_dir_all(&real).unwrap();
