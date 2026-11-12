@@ -508,6 +508,8 @@ final class LoftUITests: XCTestCase {
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
         XCTAssertEqual(app.staticTexts["endCardTeamNote"].label, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
+        XCTAssertLessThan(app.staticTexts["endCardTeamNote"].frame.minY, app.buttons["endCardStart"].frame.minY,
+                          "as on the web: the issues, the team note, then Start delivery")
         setup.tap()
         let deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
@@ -530,6 +532,9 @@ final class LoftUITests: XCTestCase {
         app.swipeUp()
         XCTAssertEqual(all.label, "Start all 3")
         XCTAssertEqual(app.buttons.matching(identifier: "endCardStart").count, 3)
+        let note = app.staticTexts["endCardTeamNote"]
+        XCTAssertTrue(note.label.hasPrefix("octo/site: Delivery works with this team."), "the team note names its repo: \(note.label)")
+        XCTAssertGreaterThan(note.frame.minY, all.frame.minY, "after Start all, not under the last spec")
 
         app.buttons.matching(identifier: "endCardStart").element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
