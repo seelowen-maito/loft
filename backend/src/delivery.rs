@@ -409,7 +409,8 @@ pub async fn blocker_closed(state: &AppState, repo: &str, n: i64, held: &str) {
 
 /// The mirror's catch-up for blockers closed where Loft doesn't see it (an issue that isn't a ticket, in a repo
 /// that isn't a Loft project): each open blocker the unsettled Deliveries of `repo` wait on is read again, and
-/// one that is closed or gone stops being waited on. An unchanged one answers 304, which costs nothing.
+/// one that is closed stops being waited on. One that is gone or unreadable (404, 410) releases nothing: the
+/// running Deliveries waiting on it stall with `blocker_gone`. An unchanged one answers 304, which costs nothing.
 /// The caller holds `repo`'s publish lock.
 async fn clear_closed_blockers(state: &AppState, repo: &str) {
     let mut open: Vec<String> = vec![];
