@@ -2517,6 +2517,9 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
 pub struct StartQuery {
     /// The user said yes to setting up git in a project folder that has none.
     init_git: bool,
+    /// Which spec of a card with several, as `repo` and `spec` (two repos can each have a #1); the card's first one when absent.
+    spec: Option<i64>,
+    repo: Option<String>,
 }
 
 /// The project folder of a plan kept in Loft that hasn't started, when it has no git at all: a folder in
@@ -2535,7 +2538,17 @@ fn without_git(state: &AppState, d: &Delivery) -> Option<std::path::PathBuf> {
 /// whose folder has no git gets `needs_git` back instead, and `?init_git=true` sets git up first.
 pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Path<(String, i64)>, axum::extract::Query(q): axum::extract::Query<StartQuery>) -> ApiResult<Value> {
     let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
-    let card = &m.meta["grill"]["end_card"]["delivery"];
+    // The card's first spec sits at its top, the others in `more`.
+    let end = &m.meta["grill"]["end_card"];
+    let is = |d: &Value| q.spec.is_none_or(|n| d["spec"].as_i64() == Some(n)) && q.repo.as_deref().is_none_or(|r| d["repo"].as_str() == Some(r));
+    let entry = if is(&end["delivery"]) { None } else { end["more"].as_array().and_then(|a| a.iter().position(|e| is(&e["delivery"]))) };
+    let card = &match entry {
+        Some(i) => &end["more"][i],
+        None => end,
+    }["delivery"];
+    if !is(card) {
+        return Err(bad("This card has no such spec."));
+    }
     let (Some(repo), Some(spec)) = (card["repo"].as_str(), card["spec"].as_i64()) else {
         return Err(bad("This card has no Delivery."));
     };
@@ -2551,7 +2564,7 @@ pub async fn start_from_card(State(state): State<AppState>, Path((id, mid)): Pat
         let title = state.db.get_delivery(repo, spec)?.and_then(|d| d.tickets.into_iter().find(|t| t.number == s.ticket)).map(|t| t.title).unwrap_or_default();
         let started = json!({ "ticket": s.ticket, "title": title, "agent_id": s.agent.id, "agent_name": s.agent.name, "at": crate::db::now() });
         if card["started"].is_null() {
-            state.db.mark_delivery_started(&id, mid, &started)?;
+            state.db.mark_delivery_started(&id, mid, entry, &started)?;
         }
     }
     let m = state.db.get_message(&id, mid)?.ok_or_else(not_found)?;
