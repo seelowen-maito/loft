@@ -202,7 +202,7 @@ pub struct DeliveryTicket {
     /// agent's id. Empty while it's being built. Loft wakes the Dev when that issue closes or that agent
     /// messages it.
     #[serde(default)]
-    pub waiting_on: String,
+    pub wait_for: String,
     /// Why it waits, in the Dev's words.
     #[serde(default)]
     pub wait_reason: String,

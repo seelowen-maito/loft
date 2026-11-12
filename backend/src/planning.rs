@@ -5433,7 +5433,7 @@ pub(crate) mod tests {
         let w = woken(&st, &dev);
         assert_eq!(w.len(), before + 1);
         assert!(w.last().unwrap().contains("octo/api#7 closed, so ticket #41") && w.last().unwrap().contains("`mcp__loft__submit_ticket` with 41"), "{w:?}");
-        assert_eq!(delivery(&st, slug).ticket(41).unwrap().waiting_on, "");
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().wait_for, "");
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id)).await.unwrap().0;
         assert_eq!(shown["state_line"]["text"], "Running.");
 
@@ -5470,14 +5470,14 @@ pub(crate) mod tests {
         let before = woken(&st, &dev).len();
         let r = say(&team[0], "QA has a question about the layout of the page.").await;
         assert!(r.to_string().contains("Delivered as FYI"), "{r}");
-        assert_eq!((woken(&st, &dev).len(), delivery(&st, slug).ticket(41).unwrap().waiting_on.as_str()), (before, api.id.as_str()));
+        assert_eq!((woken(&st, &dev).len(), delivery(&st, slug).ticket(41).unwrap().wait_for.as_str()), (before, api.id.as_str()));
 
         let r = say(&api, "Use `valid_until`, it's on main now.").await;
         assert!(r.to_string().contains("was waiting on you for #41"), "{r}");
         let w = woken(&st, &dev);
         assert_eq!(w.len(), before + 1, "one wake, carrying the message");
         assert!(w.last().unwrap().contains("Api Dev messaged you") && w.last().unwrap().contains("ticket #41"), "{w:?}");
-        assert_eq!(delivery(&st, slug).ticket(41).unwrap().waiting_on, "");
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().wait_for, "");
     }
 
     #[tokio::test]
@@ -5496,7 +5496,7 @@ pub(crate) mod tests {
         assert!(wait(&team[0], 41, "#7").await.unwrap_err().contains("is with Builder"));
         let e = tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "#7" })).await.unwrap_err();
         assert!(e.contains("reason is required"), "{e}");
-        assert_eq!(st.db.get_delivery("octo/wt-no", 40).unwrap().unwrap().ticket(41).unwrap().waiting_on, "");
+        assert_eq!(st.db.get_delivery("octo/wt-no", 40).unwrap().unwrap().ticket(41).unwrap().wait_for, "");
     }
 
     #[tokio::test]
