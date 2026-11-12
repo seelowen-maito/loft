@@ -217,7 +217,7 @@ fn tool_error(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": true })
 }
 
-async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
+pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
@@ -479,6 +479,11 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 (true, "") => return tool_error(format!("Not sent: kind is required. Use {KINDS}")),
                 (true, k) => return tool_error(format!("Not sent: kind {k:?} isn't one of the two. Use {KINDS}")),
             };
+            // A Dev whose ticket waits on the sender is woken on that ticket, and reads the message there.
+            let woken = crate::delivery::agent_wrote(state, &from, &to, body.trim()).await;
+            if !woken.is_empty() {
+                return text(format!("Delivered. {} was waiting on you for {}: Loft woke it on that ticket with your message.", to.name, woken.join(", ")));
+            }
             if fyi {
                 agents::fyi_from_agent(state, &from, &to, body.trim());
                 return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));

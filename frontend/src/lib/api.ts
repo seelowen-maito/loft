@@ -126,7 +126,7 @@ export type IssueDelivery = {
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null; waiting?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */

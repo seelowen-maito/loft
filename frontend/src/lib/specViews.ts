@@ -7,7 +7,7 @@ export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
   spec: number;
   spec_id: string;
   local: boolean;
-  tickets: { number: number; id?: string; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null; verdicts?: Record<string, string> }[];
+  tickets: { number: number; id?: string; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; verdicts?: Record<string, string> }[];
 };
 
 export type Stage = "planned" | "delivery" | "ready" | "shipped" | "dropped";

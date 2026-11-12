@@ -198,6 +198,14 @@ pub struct DeliveryTicket {
     /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
     #[serde(default)]
     pub notes: String,
+    /// What a "started" ticket waits on, after its Dev called `wait_ticket`: an issue as `owner/repo#N`, or an
+    /// agent's id. Empty while it's being built. Loft wakes the Dev when that issue closes or that agent
+    /// messages it.
+    #[serde(default)]
+    pub waiting_on: String,
+    /// Why it waits, in the Dev's words.
+    #[serde(default)]
+    pub wait_reason: String,
 }
 
 impl DeliveryTicket {

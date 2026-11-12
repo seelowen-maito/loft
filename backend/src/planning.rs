@@ -4743,7 +4743,7 @@ pub(crate) mod tests {
         let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
         let shape: Vec<(i64, &str, Vec<i64>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone())).collect();
         assert_eq!(shape, vec![(41, "closed", vec![]), (42, "elsewhere", vec![]), (43, "open", vec![42]), (45, "started", vec![41])]);
-        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "agent_id": null, "agent_name": null }));
+        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "agent_id": null, "agent_name": null, "waiting": null }));
         assert_eq!(v["current"], json!({ "number": 45, "title": "Ticket 45" }));
 
         // Again, or on another device: who has it, and nothing started twice.
@@ -5393,6 +5393,110 @@ pub(crate) mod tests {
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.tickets[0].state.as_str()), ("running", "", "review"));
         assert!(stalled_items(&st).is_empty());
+    }
+
+    /// #430: a Dev reports its ticket as waiting on an issue in another repo. Its run ends without stalling the
+    /// Delivery, which shows what the ticket waits on, and Loft wakes the Dev on it when that issue closes.
+    #[tokio::test]
+    async fn a_ticket_waiting_on_an_issue_shows_waiting_and_wakes_its_dev_when_the_issue_closes() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/wt-issue";
+        let (dev, _) = building(&st, &fake, "wt-issue", &["qa"]).await;
+        let spec = spec_issue(&st, &fake, "wt-issue", slug);
+        fake.route("GET", "/repos/octo/api/issues/7", 200, gh_ticket("octo/api", 7, "open", "Field."));
+
+        run_starts(&st, &dev);
+        let out = tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "https://github.com/octo/api/issues/7", "reason": "Needs the gift card field" })).await.unwrap();
+        assert!(out.contains("#41 is waiting on octo/api#7") && out.contains("when octo/api#7 closes"), "{out}");
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "running", "a waiting ticket doesn't stall");
+        assert!(stalled_items(&st).is_empty(), "nothing in Needs you");
+
+        // The issue page, on the web and the iPhone, says what it waits on.
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id.clone())).await.unwrap().0;
+        assert_eq!(shown["state_line"], json!({ "tone": "running", "text": "Running. #41 is waiting on octo/api#7: Needs the gift card field." }));
+        assert_eq!(shown["tickets"][0]["waiting"], "waiting on octo/api#7: Needs the gift card field.");
+        assert_eq!(shown["tickets"][1]["waiting"], Value::Null);
+        let all = crate::delivery::summary_route(State(st.clone())).await.unwrap().0;
+        let mine = all.as_array().unwrap().iter().find(|d| d["repo"] == slug).unwrap();
+        assert_eq!(mine["tickets"][0]["waiting"], "waiting on octo/api#7: Needs the gift card field.", "the spec views show it too");
+
+        // Still open: nothing happens.
+        let before = woken(&st, &dev).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(woken(&st, &dev).len(), before);
+
+        // It closes: the Dev is woken on #41, which is being built again.
+        fake.route("GET", "/repos/octo/api/issues/7", 200, gh_ticket("octo/api", 7, "closed", "Field."));
+        crate::delivery::follow_all(&st).await;
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        assert!(w.last().unwrap().contains("octo/api#7 closed, so ticket #41") && w.last().unwrap().contains("`mcp__loft__submit_ticket` with 41"), "{w:?}");
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().waiting_on, "");
+        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(spec.id)).await.unwrap().0;
+        assert_eq!(shown["state_line"]["text"], "Running.");
+
+        // The run it woke ends without a call: that is still a stall.
+        run_starts(&st, &dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("stalled", "no_call"));
+    }
+
+    /// #430: a ticket waiting on an agent: a message from that agent (even an FYI) wakes the Dev on the
+    /// ticket with it, in one run; a message from anyone else is only delivered.
+    #[tokio::test]
+    async fn a_ticket_waiting_on_an_agent_wakes_its_dev_when_that_agent_messages_it() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/wt-agent";
+        let (dev, team) = building(&st, &fake, "wt-agent", &["qa"]).await;
+        let api = busy(&st, "Api Dev", "api", "dev");
+
+        run_starts(&st, &dev);
+        let out = tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "api dev", "reason": "Asked which field name to use." })).await.unwrap();
+        assert!(out.contains("waiting on Api Dev") && out.contains("when Api Dev messages you"), "{out}");
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+        let shown = crate::delivery::delivery_json(&st, &delivery(&st, slug));
+        assert_eq!(shown["tickets"][0]["waiting"], "waiting on Api Dev: Asked which field name to use.");
+
+        let say = |from: &Agent, text: &str| {
+            let (id, args) = (from.id.clone(), json!({ "agent": "Builder", "text": text, "kind": "fyi" }));
+            let st = st.clone();
+            async move { crate::mcp::call_tool(&st, &id, "message_agent", args).await }
+        };
+        let before = woken(&st, &dev).len();
+        let r = say(&team[0], "QA has a question about the layout of the page.").await;
+        assert!(r.to_string().contains("Delivered as FYI"), "{r}");
+        assert_eq!((woken(&st, &dev).len(), delivery(&st, slug).ticket(41).unwrap().waiting_on.as_str()), (before, api.id.as_str()));
+
+        let r = say(&api, "Use `valid_until`, it's on main now.").await;
+        assert!(r.to_string().contains("was waiting on you for #41"), "{r}");
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1, "one wake, carrying the message");
+        assert!(w.last().unwrap().contains("Api Dev messaged you") && w.last().unwrap().contains("ticket #41"), "{w:?}");
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().waiting_on, "");
+    }
+
+    #[tokio::test]
+    async fn wait_ticket_refuses_what_it_cant_wait_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, team) = building(&st, &fake, "wt-no", &["qa"]).await;
+        let wait = |a: &Agent, n: i64, on: &str| {
+            let (a, args, st) = (a.clone(), json!({ "number": n, "on": on, "reason": "x" }), st.clone());
+            async move { tool(&st, &a, "wait_ticket", args).await }
+        };
+        assert!(wait(&dev, 41, "#41").await.unwrap_err().contains("can't wait on itself"));
+        assert!(wait(&dev, 41, "nobody here").await.unwrap_err().contains("neither an issue"));
+        assert!(wait(&dev, 41, "Builder").await.unwrap_err().contains("can't wait on you"));
+        assert!(wait(&dev, 42, "#7").await.unwrap_err().contains("only a ticket being built can"));
+        assert!(wait(&team[0], 41, "#7").await.unwrap_err().contains("is with Builder"));
+        let e = tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "#7" })).await.unwrap_err();
+        assert!(e.contains("reason is required"), "{e}");
+        assert_eq!(st.db.get_delivery("octo/wt-no", 40).unwrap().unwrap().ticket(41).unwrap().waiting_on, "");
     }
 
     #[tokio::test]

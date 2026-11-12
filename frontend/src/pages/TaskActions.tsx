@@ -356,7 +356,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
             <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-mono text-fg-3">#{x.number}</span>
               <span>{x.title}</span>
-              <span className="text-fg-3">· {x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state} ·</span>
+              <span className="text-fg-3">· {x.waiting ?? (x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state)} ·</span>
               <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
             </li>
           ))}
