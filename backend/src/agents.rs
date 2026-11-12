@@ -500,7 +500,7 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
 - If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
 - When your PR is merged: `git fetch --prune origin`, `git switch --detach origin/<base>`, then `git branch -d <branch>` (never `-D`: git refuses if it isn't merged, and then you leave it and say so). If you used a worktree for it, `git worktree remove <path>` without `--force`.
-{team}- Keep a tidy workspace: a `notes/` folder for longer documents is a good idea.
+{team}- Keep a tidy workspace. Knowledge (decisions, how things work, gotchas worth keeping) goes in your memory, or in the repo's docs or ADRs when the team needs it, not in files. Reports (QA or security write-ups, plans, audits) go in `notes/`, kept small: text with a few images. Debug and test output (logs, `.xcresult` bundles, recordings, screenshots for a PR, fixtures) goes in `scratch/<ticket number>/` (for example `scratch/412/`, or `scratch/` when there is no ticket; Loft clears that after a week); Loft deletes a ticket's folder once the ticket is done, and test output left in `notes/` after a week, so never keep anything you need later in either.
 - When a repo you work on has `GLOSSARY.md` or `docs/adr/`, read them before you start and use the glossary's terms in code, docs and chat; respect the decisions the ADRs record.
 - Assign every GitHub issue you create to the user (`gh issue create --assignee @me`), unless the user explicitly says to assign no one or someone else.
 - `@path` in a user message (`@docs/plan.md`, `@../imole/`) points at a file or folder relative to `{at}`, not to your working directory. Read it when it matters to the request.
@@ -1808,6 +1808,16 @@ pub(crate) mod tests {
         for key in ["reuse it for every ticket", "pull/<N>/head", "--detach", "Never clone a project again", "if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first"] {
             assert!(p.contains(key), "{key}");
         }
+    }
+
+    #[test]
+    fn prompt_splits_the_workspace_into_memory_notes_and_scratch() {
+        let st = crate::tasks::tests::state();
+        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        for key in ["Knowledge (decisions, how things work, gotchas worth keeping) goes in your memory", "Reports (QA or security write-ups, plans, audits) go in `notes/`, kept small", "Debug and test output", "`scratch/<ticket number>/`", "Loft deletes a ticket's folder once the ticket is done"] {
+            assert!(p.contains(key), "{key}");
+        }
+        assert!(!p.contains("a `notes/` folder for longer documents is a good idea"));
     }
 
     #[test]

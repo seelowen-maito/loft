@@ -463,11 +463,13 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
+  /** For "restart": why the restart hasn't happened. */
+  why: string | null;
 };
 
 export type Settings = {
