@@ -261,9 +261,10 @@ fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&
     (value, sub)
 }
 
-/// The folders a git command changes, past its global options: its work tree (the folder, `-C`, `--work-tree`,
-/// `GIT_WORK_TREE`) and the checkout its repository is in (`--git-dir`, `GIT_DIR`). Every subcommand changes them but
-/// the ones that only read (`git_reads`).
+/// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
+/// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
+/// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
+/// it. Every subcommand changes them but the ones that only read (`git_reads`).
 fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
     let mut dirs = dirs.clone();
     let (mut tree, mut git_dir) = (None, None);
@@ -298,9 +299,15 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
     if git_reads(sub, &rest) {
         return vec![];
     }
+    let found = dirs.cwd.map(repo_root);
     // The checkout a `.git` folder belongs to.
-    let repo = git_dir.map(|d| d.map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d }));
-    [Some(tree.unwrap_or(dirs.cwd)), repo].into_iter().flatten().flatten().collect()
+    let repo = git_dir.unwrap_or(found.clone()).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
+    [tree.unwrap_or(found), repo].into_iter().flatten().collect()
+}
+
+/// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
+fn repo_root(folder: PathBuf) -> PathBuf {
+    folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
 /// Whether a git subcommand, with its arguments, only reads.
@@ -1533,6 +1540,31 @@ mod tests {
         ] {
             assert_eq!(asks(cmd, USER), None, "should run: {cmd}");
         }
+    }
+
+    #[test]
+    fn git_in_a_workspace_that_isnt_a_clone_changes_the_checkout_around_it() {
+        let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");
+        let ws = project.join("agent-local-storage/x");
+        let clone = ws.join("loft");
+        for d in [project.join(".git"), ws.join("notes"), clone.join(".git"), clone.join("backend")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        let at = |p: &Path| p.display().to_string();
+        for cwd in [&ws, &ws.join("notes")] {
+            for cmd in ["git checkout main", "git reset --hard origin/main", "git stash"] {
+                assert_eq!(asks(cmd, &at(cwd)), Some(project.clone()), "should ask: {cmd} (in {})", cwd.display());
+            }
+            assert_eq!(asks("git status", &at(cwd)), None);
+            assert_eq!(asks("git -C loft pull", &at(&ws)), None);
+        }
+        // In the agent's clone, or a folder of it: its own repository.
+        assert_eq!(asks("git checkout main", &at(&clone)), None);
+        assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
+        // A work tree given from the workspace: git still finds the user's repository from the folder.
+        assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
+        std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
