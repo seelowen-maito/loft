@@ -784,12 +784,14 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
     )
 }
 
-/// Who builds the tickets: the team's Dev, or the agent that planned the spec when the team has none.
+/// Who builds the tickets: the team's Dev, or the agent that planned the spec when the team has none, as long
+/// as it works in the project (or it can't hand the ticket in).
 fn builder(state: &AppState, d: &Delivery, fallback: &str) -> Option<crate::db::Agent> {
     let all = state.db.list_agents().ok()?;
     let project = d.project.trim();
-    let dev = all.iter().find(|a| !project.is_empty() && a.role == "dev" && (a.project.trim() == project || a.has_project(project)));
-    let planner = || all.iter().find(|a| a.id == d.planner).or_else(|| all.iter().find(|a| a.id == fallback));
+    let works_here = |a: &&crate::db::Agent| project.is_empty() || a.project.trim() == project || a.has_project(project);
+    let dev = all.iter().find(|a| !project.is_empty() && a.role == "dev" && works_here(a));
+    let planner = || all.iter().find(|a| a.id == d.planner).filter(works_here).or_else(|| all.iter().find(|a| a.id == fallback).filter(works_here));
     dev.or_else(planner).cloned()
 }
 
@@ -806,7 +808,7 @@ pub struct Started {
 pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> Result<Started, String> {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or_else(|| format!("Spec #{spec} on {repo} has no Delivery."))?;
-    let agent = builder(state, &d, fallback).ok_or("Nobody can build the tickets: the team has no Dev and the agent that planned the spec is gone.")?;
+    let agent = builder(state, &d, fallback).ok_or_else(|| format!("Nobody can build the tickets: {} has no Dev, and the agent that planned it is gone or doesn't work in it.", d.project.trim()))?;
     if d.state != "planned" {
         return Ok(Started { ticket: d.current.unwrap_or_default(), agent, already: true });
     }
@@ -1012,6 +1014,9 @@ async fn local_branch(dir: &std::path::Path, branch: &str) -> Result<String, Str
     }
     if git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_err() {
         git(dir, &["branch", branch, &base]).await.map_err(|e| format!("couldn't create the spec branch `{branch}`: {e}"))?;
+    } else if git(dir, &["rev-list", "--count", &format!("{base}..refs/heads/{branch}")]).await.map_err(|e| format!("couldn't read `{branch}`: {e}"))? != "0" {
+        // Numbers start at 1 in each project: an old branch of that name isn't this Delivery's work.
+        return Err(format!("`{}` already has a branch `{branch}` with commits not on `{base}`: rename or delete it, then start again", dir.display()));
     }
     Ok(base)
 }
@@ -2757,7 +2762,8 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
     if project.is_empty() {
         return Err(bad("Pick a project first: its Delivery runs in the project's own repo."));
     }
-    if local_of_issue(state, &t.id).is_none() {
+    let fresh = local_of_issue(state, &t.id).is_none();
+    if fresh {
         if t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec")) {
             return Err(bad("This spec has no Delivery yet: its tickets get one when they're published with publish_tickets."));
         }
@@ -2772,7 +2778,16 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
         record_local_standalone(state, project, &t.id, &t.title, planner);
     }
     let d = local_of_issue(state, &t.id).ok_or("The Delivery record couldn't be saved.").map_err(bad)?;
-    let s = start(state, &d.repo, d.spec, "").await.map_err(bad)?;
+    let s = match start(state, &d.repo, d.spec, "").await {
+        Ok(s) => s,
+        Err(e) => {
+            // A refused first start leaves no record, so the card offers Start again only for what can start.
+            if fresh && state.db.get_delivery(&d.repo, d.spec)?.is_some_and(|d| d.state == "planned") {
+                state.db.delete_delivery(&d.repo, d.spec)?;
+            }
+            return Err(bad(e));
+        }
+    };
     let mut v = delivery_json(state, &state.db.get_delivery(&d.repo, d.spec)?.ok_or_else(not_found)?);
     v["ok"] = json!(true);
     v["duplicate"] = json!(s.already);

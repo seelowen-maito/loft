@@ -5404,6 +5404,40 @@ pub(crate) mod tests {
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
+    /// #451 review: a refused first Start on a Loft issue leaves no record. It's refused when an old branch of
+    /// the same name has commits not on the base, and when only an agent that doesn't work in the project is
+    /// left to build it.
+    #[tokio::test]
+    async fn a_refused_start_on_a_loft_issue_leaves_no_delivery() {
+        let st = state();
+        let project = "loft-guard";
+        planner_on(&st, project, None);
+        let dir = st.settings.boot().projects_dir.join(project);
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        // An agent working elsewhere wrote the ticket; the project has no Dev.
+        let other = busy(&st, "Other", "elsewhere", "custom");
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Dark mode", "description": "x", "labels": ["ready-for-agent"], "project": project }), &other.id).unwrap();
+        let start = || crate::delivery::start_from_issue(State(st.clone()), Path(t.id.clone()));
+        let none_left = || {
+            assert!(st.db.all_deliveries().unwrap().is_empty(), "no record");
+        };
+        assert_eq!(start().await.unwrap_err().1, "Nobody can build the tickets: loft-guard has no Dev, and the agent that planned it is gone or doesn't work in it.");
+        none_left();
+        assert_eq!(crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0, Value::Null, "the card offers Start again");
+
+        // An old branch of the name it would take, with its own commits.
+        busy(&st, "dev agent", project, "dev");
+        git_in(&dir, &["checkout", "-q", "-b", "ticket/1-dark-mode"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "old work"]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+        let err = start().await.unwrap_err().1;
+        assert_eq!(err, format!("The Delivery didn't start: `{}` already has a branch `ticket/1-dark-mode` with commits not on `main`: rename or delete it, then start again.", dir.canonicalize().unwrap().display()));
+        none_left();
+        git_in(&dir, &["branch", "-q", "-D", "ticket/1-dark-mode"]);
+        assert_eq!(start().await.unwrap().0["agent_name"], "dev agent");
+    }
+
     /// #451 Web QA: a Loft issue whose project folder isn't a git repo of its own (no git, or a folder of several
     /// repos) says why on its card up front, instead of a Start that refuses after the press.
     #[tokio::test]
