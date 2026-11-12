@@ -100,8 +100,21 @@ export default function AgentsPage() {
     api.markRead(selectedId!).catch(() => {});
   }, [selected?.unread_reply, selectedId, visible]);
 
+  // The agent whose messages are shown: until it's the selected one, the chat says it's loading.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const current = useRef(selectedId);
+  current.current = selectedId;
   const loadMessages = useCallback(() => {
-    if (selectedId) api.messages(selectedId).then(setMessages);
+    if (!selectedId) return;
+    api.messages(selectedId).then(
+      (ms) => {
+        // A late answer for the agent the user left would show its chat in another's.
+        if (current.current !== selectedId) return;
+        setMessages(ms);
+        setLoadedFor(selectedId);
+      },
+      () => current.current === selectedId && setLoadedFor(selectedId),
+    );
   }, [selectedId]);
 
   useEffect(() => {
@@ -321,6 +334,7 @@ export default function AgentsPage() {
             agent={selected}
             agents={agents ?? []}
             messages={messages}
+            loading={loadedFor !== selected.id}
             perms={permMap}
             prs={agentPrs}
             grill={grill}

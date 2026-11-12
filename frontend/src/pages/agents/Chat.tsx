@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -38,6 +38,7 @@ import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, 
 import { FyiMark } from "./FyiMark";
 import { QUEUED_MARK, sendState } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
+import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 
 type Item =
@@ -110,11 +111,13 @@ const SUGGESTIONS = [
 ];
 
 export function Chat({
-  agent, agents, messages, perms, prs, grill, headerActions,
+  agent, agents, messages, loading = false, perms, prs, grill, headerActions,
 }: {
   agent: Agent;
   agents: Agent[];
   messages: Message[];
+  /** The messages are still on their way: an empty chat isn't a new one yet. */
+  loading?: boolean;
   perms: Map<string, PermissionRequest>;
   prs: PullRequest[];
   /** The agent's open interview, if any. */
@@ -499,7 +502,8 @@ export function Chat({
             const session = it.m.meta?.grill?.role === "round" ? grill : null;
             return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} />;
           })}
-          {(items.length === 0 || fresh) && (
+          {loading && items.length === 0 && <ChatLoading agent={agent} />}
+          {!loading && (items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
               <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={112} className="animate-rise" />
               <div className="mt-5 font-serif text-[30px] leading-tight">Say hello to {agent.name}.</div>
@@ -765,6 +769,26 @@ function MessageTags({ m }: { m: Message }) {
 function findAgent(agents: Agent[], key: string | undefined) {
   if (!key) return undefined;
   return agents.find((a) => a.id === key) ?? agents.find((a) => a.name.toLowerCase() === key.trim().toLowerCase());
+}
+
+/** While the messages load: the agent's sticker, a spinner, and a line that changes every couple of seconds. */
+function ChatLoading({ agent }: { agent: Agent }) {
+  const start = useMemo(() => Math.floor(Math.random() * CHAT_LOADING_LINES), [agent.id]);
+  const [turn, setTurn] = useState(0);
+  useEffect(() => {
+    setTurn(0);
+    const t = setInterval(() => setTurn((n) => n + 1), 2200);
+    return () => clearInterval(t);
+  }, [agent.id]);
+  return (
+    <div className="flex flex-col items-center py-16 text-center" role="status" aria-live="polite">
+      <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={112} className="animate-rise" />
+      <div className="mt-6 flex items-center gap-2.5 text-[14px] text-fg-2">
+        <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+        <span key={turn} className="animate-rise">{chatLoadingLine(agent.name, start, turn)}</span>
+      </div>
+    </div>
+  );
 }
 
 const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith }: {
