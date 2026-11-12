@@ -489,7 +489,7 @@ struct EndCardView: View {
             ForEach(Array(specs.enumerated()), id: \.offset) { i, spec in
                 if i > 0 { Divider() }
                 EndCardSpecView(message: message, spec: spec, showRepo: specs.count > 1, busy: startingAll || startingOne, startingOne: $startingOne,
-                                failure: spec.delivery.flatMap { failed[$0.key] }, note: specs.count == 1 ? AnyView(teamNote) : nil)
+                                failure: spec.delivery.flatMap { failed[$0.key] }, teamNote: specs.count == 1 && card.setup != nil ? card.teamNote : nil)
             }
             // Several specs: what follows is for the whole card, so it doesn't read as part of the last spec, and
             // the team note names the repo whose team it checked.
@@ -504,7 +504,7 @@ struct EndCardView: View {
                 .disabled(startingAll || startingOne)
                 .accessibilityIdentifier("endCardStartAll")
             }
-            if specs.count > 1 { teamNote }
+            if specs.count > 1, card.setup != nil { EndCardTeamNote(text: "\(card.repo.isEmpty ? "Loft" : card.repo): \(card.teamNote)") }
             HStack(spacing: 8) {
                 if specs.allSatisfy({ $0.delivery == nil }) {
                     clearButton.buttonStyle(.accent)
@@ -562,17 +562,6 @@ struct EndCardView: View {
         }
     }
 
-    /// The team check, when the team lacks a role.
-    @ViewBuilder private var teamNote: some View {
-        if card.setup != nil {
-            let repo = card.repo.isEmpty ? "Loft" : card.repo
-            Label(card.specs.count > 1 ? "\(repo): \(card.teamNote)" : card.teamNote, systemImage: "person.2")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("endCardTeamNote")
-        }
-    }
-
     /// Clear context, disabled while the session reset runs so it resets once.
     private var clearButton: some View {
         Button {
@@ -596,6 +585,18 @@ struct EndCardView: View {
     }
 }
 
+/// The end card's team check, when the team lacks a role.
+private struct EndCardTeamNote: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "person.2")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("endCardTeamNote")
+    }
+}
+
 /// One spec on the end card: its tickets and its own Start delivery, then who has it or why it didn't start.
 private struct EndCardSpecView: View {
     @Environment(LoftStore.self) private var store
@@ -611,7 +612,7 @@ private struct EndCardSpecView: View {
     /// Why Start all didn't start it.
     let failure: String?
     /// The team note, between the tickets and Start delivery, on a card with one spec.
-    var note: AnyView?
+    var teamNote: String?
     @State private var starting = false
     @State private var startError: String?
     /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
@@ -625,7 +626,7 @@ private struct EndCardSpecView: View {
             }
             if let s = spec.spec { issue(s, symbol: "doc.text") }
             ForEach(spec.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
-            if let note { note }
+            if let teamNote { EndCardTeamNote(text: teamNote) }
             if let d = spec.delivery {
                 if let s = d.started {
                     Label(s.ticket == 0 ? "Delivery started · \(s.agentName) hands out the tickets"
