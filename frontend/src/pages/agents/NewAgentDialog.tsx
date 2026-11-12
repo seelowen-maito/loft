@@ -3,7 +3,7 @@ import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { createPayload, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, TEMPLATES, withTeam } from "../../lib/newAgent";
-import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
+import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, PROJECTS_SUB, roleHint } from "./Inspector";
 import { GroupInput, ProjectsField } from "./ProjectsField";
 import { teamOf, withTyped } from "../../lib/team";
 
@@ -97,6 +97,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             </div>
             <div className="space-y-1.5">
               <span className="eyebrow">Projects</span>
+              <span className="block text-[11.5px] text-fg-3">{PROJECTS_SUB}</span>
               {/* Only an agent with a group can be Lead: clearing it drops it back to Custom. */}
               <ProjectsField value={form.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
             </div>

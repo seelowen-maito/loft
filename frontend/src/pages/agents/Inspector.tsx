@@ -83,15 +83,19 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, sub, hint, children }: { label: string; sub?: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <span className="eyebrow">{label}</span>
+      {sub && <span className="block text-[11.5px] text-fg-3">{sub}</span>}
       {children}
       {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
     </label>
   );
 }
+
+/** What a project is, under the Projects label of the agent's settings and the New agent dialog. */
+export const PROJECTS_SUB = "Git repositories from your projects folder";
 
 /** The Role field's hint, for the agent's settings and the New agent dialog. */
 export const roleHint = (team: string) =>
@@ -165,7 +169,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
       </Field>
 
-      <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
+      <Field label="Projects" sub={PROJECTS_SUB} hint="The repos it works in. The starred one is its main project: its issues go there by default.">
         <ProjectsField value={shown.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => set("projects", v)} />
         {agent.project_problems?.map((f) => <div key={f.project} className={cx("mt-2 text-[12px]", f.hint ? "text-fg-3" : "text-warn")}>{f.problem}</div>)}
       </Field>
