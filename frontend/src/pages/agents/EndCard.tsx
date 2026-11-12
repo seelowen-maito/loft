@@ -32,7 +32,7 @@ function startedOf(card: Card | undefined, d: { repo: string; spec: number }): D
 type Run = (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => Promise<void>;
 
 /** One published spec (or standalone ticket) with its tickets and its own Start delivery. */
-function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run; outcome?: DeliveryStarted | string }) {
+function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, note, extra }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run; outcome?: DeliveryStarted | string; showRepo: boolean; note?: React.ReactNode; extra?: React.ReactNode }) {
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
   // A plan kept in a folder with no git: Start delivery asks before setting it up.
   const [askGit, setAskGit] = useState<string | null>(null);
@@ -60,6 +60,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: 
   }, [delivery?.local, delivery?.repo, delivery?.spec, !!startedOn]);
   return (
     <div>
+      {showRepo && <div className="mb-1 font-mono text-[10.5px] text-fg-3">{item.repo || "kept in Loft"}</div>}
       <div className="space-y-0.5">
         {item.spec && <Issue i={item.spec} inLoft={!item.repo} icon={<FileText className="mt-0.5 size-3.5 shrink-0 text-accent" />} />}
         {item.tickets.map((t) => <Issue key={t.url} i={t} inLoft={!item.repo} icon={<CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" />} />)}
@@ -80,7 +81,8 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: 
         </div>
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      {note}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
           <StartDeliveryButton
             className="text-[12.5px]"
@@ -107,6 +109,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: 
         )}
         {typeof outcome === "string" && !startedOn && <span className="text-[12px] text-bad">{outcome}</span>}
         {delivery?.local && (merged || stage?.state === "merged") && <span className="font-mono text-[11.5px] text-good">{merged ?? `Merged ${stage?.branch} into ${stage?.base}`}</span>}
+        {extra}
       </div>
     </div>
   );
@@ -149,50 +152,65 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         setOutcome((o) => ({ ...o, [keyOf(delivery)]: result }));
       }
     });
+  const teamLine = setup && (
+    <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
+      <Users className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
+      {teamNote(card.missing_roles)}
+    </div>
+  );
+  const actions = (
+    <>
+      <button
+        className={cx("btn text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
+        disabled={busy !== null}
+        title={card.next_message ? `Starts a fresh session and leaves "${card.next_message}" in the composer.` : "Starts a fresh session."}
+        onClick={() => run("clear", () => onClear(card.next_message))}
+      >
+        {busy === "clear" ? <Loader2 className="size-3.5 animate-spin" /> : <Eraser className="size-3.5" />} Clear context
+      </button>
+      {setup && !shown && (
+        <button
+          className="btn text-[12.5px]"
+          disabled={busy !== null}
+          title={setup.message}
+          onClick={() => run("setup", async () => {
+            await api.sendTeamSetup(agentId, messageId);
+            setSent(true);
+          })}
+        >
+          {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with lofty
+        </button>
+      )}
+      {setup && shown && (
+        <Link to={`/agents/${setup.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
+          Sent to lofty · open its chat
+        </Link>
+      )}
+    </>
+  );
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       {/* No repo: the plan was kept as Loft issues. */}
       <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {[...new Set(items.map((i) => i.repo || "kept in Loft"))].join(" · ")}</div>
       <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
-        {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} />)}
+        {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} showRepo={items.length > 1} note={items.length === 1 ? teamLine : undefined} extra={items.length === 1 ? actions : undefined} />)}
       </div>
-      {setup && (
-        <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
-          <Users className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
-          {teamNote(card.missing_roles)}
+      {items.length > 1 && teamLine}
+      {items.length > 1 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {todo.length > 0 && (
+            <StartDeliveryButton
+              className="text-[12.5px]"
+              label={todo.length === items.length ? `Start all ${todo.length}` : `Start remaining ${todo.length}`}
+              pending={busy === "start"}
+              disabled={busy !== null}
+              title={todo.length === 1 ? "Starts the spec that isn't started yet, on its own Lead." : `Starts the ${todo.length} specs that aren't started yet, each on its own Lead.`}
+              onClick={startAll}
+            />
+          )}
+          {actions}
         </div>
       )}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {items.length > 1 && todo.length > 0 && (
-          <StartDeliveryButton className="text-[12.5px]" label={todo.length === items.length ? `Start all ${todo.length}` : `Start remaining ${todo.length}`} pending={busy === "start"} disabled={busy !== null} title={`Starts the ${todo.length} specs that aren't started yet, each on its own Lead.`} onClick={startAll} />
-        )}
-        <button
-          className={cx("btn text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
-          disabled={busy !== null}
-          title={card.next_message ? `Starts a fresh session and leaves "${card.next_message}" in the composer.` : "Starts a fresh session."}
-          onClick={() => run("clear", () => onClear(card.next_message))}
-        >
-          {busy === "clear" ? <Loader2 className="size-3.5 animate-spin" /> : <Eraser className="size-3.5" />} Clear context
-        </button>
-        {setup && !shown && (
-          <button
-            className="btn text-[12.5px]"
-            disabled={busy !== null}
-            title={setup.message}
-            onClick={() => run("setup", async () => {
-              await api.sendTeamSetup(agentId, messageId);
-              setSent(true);
-            })}
-          >
-            {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with lofty
-          </button>
-        )}
-        {setup && shown && (
-          <Link to={`/agents/${setup.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
-            Sent to lofty · open its chat
-          </Link>
-        )}
-      </div>
       {card.next_message && <div className="mt-2 font-mono text-[10.5px] text-fg-3">Next: {card.next_message}</div>}
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </div>
