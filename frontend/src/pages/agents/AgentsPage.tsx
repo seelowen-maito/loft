@@ -290,11 +290,6 @@ export default function AgentsPage() {
                               {a.queued_messages.length} queued
                             </span>
                           )}
-                          {a.project_problems?.some((f) => !f.hint) && (
-                            <span className="shrink-0 rounded-full border border-warn/60 px-1.5 font-mono text-[10px] text-warn" title={a.project_problems.filter((f) => !f.hint).map((f) => `${f.project}: ${f.problem}`).join("\n")}>
-                              missing project
-                            </span>
-                          )}
                           {(a.running || listedContext(a) != null) && (
                             <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] tabular-nums text-fg-3">
                               {listedContext(a) != null && (
