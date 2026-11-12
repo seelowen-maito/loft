@@ -127,3 +127,9 @@ test("the Issues column holds the issues that are no spec and no spec's ticket, 
   assert.deepEqual(boardIssues(all, ds, false, o, true), [], "nothing is decided before the Deliveries load, so no ticket flickers in");
   assert.deepEqual(boardIssues(all, [], true, o, false).map((x) => x.id), ["b", "a", "e"], "loaded with no Deliveries: all stay");
 });
+
+test("an open ticket waiting on another spec's ticket says which", () => {
+  assert.deepEqual(ticketLabel("open", ["o/ext#9", "o/ext#10"]), { text: "waiting on o/ext#9, o/ext#10", tone: "warn" });
+  assert.equal(ticketLabel("open", []).text, "open");
+  assert.equal(ticketLabel("started", ["o/ext#9"]).text, "building");
+});

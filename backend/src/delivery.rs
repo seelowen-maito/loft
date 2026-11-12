@@ -2540,12 +2540,15 @@ fn waits_on(state: &AppState, d: &Delivery) -> Vec<Value> {
     let mut all: Vec<&String> = d.tickets.iter().filter(|t| t.state != "closed").flat_map(|t| &t.waiting_on).collect();
     all.dedup();
     let others = state.db.all_deliveries().unwrap_or_default();
+    let tasks = state.db.list_tasks().unwrap_or_default();
     all.iter()
         .map(|w| {
             let (repo, n) = w.rsplit_once('#').unwrap_or((w, ""));
             let n: i64 = n.parse().unwrap_or_default();
             let of = others.iter().find(|o| o.repo.eq_ignore_ascii_case(repo) && o.tickets.iter().any(|t| t.number == n));
-            json!({ "blocker": w, "delivery": of.map(|o| json!({ "repo": o.repo, "spec": o.spec, "started": o.state != "planned" })) })
+            // `issue_id`: the spec's Loft issue, to start its Delivery from here.
+            let issue = of.and_then(|o| tasks.iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&o.repo) && g.number == o.spec)));
+            json!({ "blocker": w, "delivery": of.map(|o| json!({ "repo": o.repo, "spec": o.spec, "started": o.state != "planned", "issue_id": issue.map(|t| t.id.clone()) })) })
         })
         .collect()
 }

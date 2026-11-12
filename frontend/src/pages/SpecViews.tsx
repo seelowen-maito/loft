@@ -59,7 +59,7 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
 function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
-  const l = ticketLabel(t.state);
+  const l = ticketLabel(t.state, t.waiting_on);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>
