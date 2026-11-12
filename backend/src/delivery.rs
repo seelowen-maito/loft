@@ -427,10 +427,13 @@ async fn clear_closed_blockers(state: &AppState, repo: &str) {
         let closed = match crate::github::get_if_changed(state, &format!("/repos/{r}/issues/{n}"), etag.as_deref()).await {
             Ok(None) => false,
             Ok(Some((i, tag))) => {
-                if let Some(tag) = tag {
-                    state.mirror.wait_etags.lock().unwrap().insert(key, tag);
-                }
-                i["state"] == "closed"
+                // Kept only while it's open: a closed one is read again until every Delivery is cleared of it.
+                let closed = i["state"] == "closed";
+                match tag.filter(|_| !closed) {
+                    Some(tag) => state.mirror.wait_etags.lock().unwrap().insert(key, tag),
+                    None => state.mirror.wait_etags.lock().unwrap().remove(&key),
+                };
+                closed
             }
             Err(e) if crate::github::is_gone(&e) => true,
             Err(e) if crate::github::is_paused(&e) => return,

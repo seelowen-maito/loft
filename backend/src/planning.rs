@@ -2900,6 +2900,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_closed_blocker_is_read_again_until_a_busy_repos_delivery_is_cleared() {
+        let (fake, st) = (fake_github(), state());
+        let (a, b) = ("octo/dl-busy-a", "octo/dl-busy-b");
+        read_issue(&fake, "octo/ext-busy", 9, "open");
+        planned(&st, &fake, "dl-busy-a", vec![ticket("API", &["octo/ext-busy#9"])]).await;
+        planned(&st, &fake, "dl-busy-b", vec![ticket("API", &["octo/ext-busy#9"])]).await;
+        // Closed, with an ETag that must not be kept: a later read sending it back would get a 304 and never see it close.
+        fake.route("GET", "/repos/octo/ext-busy/issues/9", 200, json!({ "number": 9, "id": 900, "state": "closed" }));
+        fake.with_headers("GET", "/repos/octo/ext-busy/issues/9", &[("etag", "\"v2\"")]);
+        // b's lock is held by a step while a's poll runs: b is left for its own poll.
+        let busy = st.publish_locks.of(b).lock_owned().await;
+        crate::delivery::retry(&st, a).await;
+        drop(busy);
+        assert!(delivery(&st, a).tickets[0].waiting_on.is_empty());
+        assert_eq!(delivery(&st, b).tickets[0].waiting_on, ["octo/ext-busy#9"]);
+        assert!(st.mirror.wait_etags.lock().unwrap().is_empty(), "no ETag kept for a closed blocker");
+        crate::delivery::retry(&st, b).await;
+        assert!(delivery(&st, b).tickets[0].waiting_on.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_blocker_closed_by_hand_anywhere_stops_being_waited_on_at_the_next_poll() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/dl-hand";
