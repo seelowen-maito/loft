@@ -480,11 +480,13 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 (true, k) => return tool_error(format!("Not sent: kind {k:?} isn't one of the two. Use {KINDS}")),
             };
             // A Dev whose ticket waits on the sender is woken on that ticket, and reads the message there.
-            let woken = crate::delivery::agent_wrote(state, &from, &to, body.trim()).await;
-            if !woken.is_empty() {
-                return text(format!("Delivered. {} was waiting on you for {}: Loft woke it on that ticket with your message.", to.name, woken.join(", ")));
-            }
+            let woke = |w: Vec<String>| text(format!("Delivered. {} was waiting on you for {}: Loft woke it on that ticket with your message.", to.name, w.join(", ")));
             if fyi {
+                // An FYI names no ticket.
+                let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), None).await;
+                if !w.is_empty() {
+                    return woke(w);
+                }
                 agents::fyi_from_agent(state, &from, &to, body.trim());
                 return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));
             }
@@ -499,6 +501,10 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 Ok(t) => t,
                 Err(e) => return tool_error(e),
             };
+            let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), ticket.as_deref()).await;
+            if !w.is_empty() {
+                return woke(w);
+            }
             // The dashboard reads the message id off a queued result to show when it's delivered.
             text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),

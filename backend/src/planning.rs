@@ -5472,6 +5472,12 @@ pub(crate) mod tests {
         assert!(r.to_string().contains("Delivered as FYI"), "{r}");
         assert_eq!((woken(&st, &dev).len(), delivery(&st, slug).ticket(41).unwrap().wait_for.as_str()), (before, api.id.as_str()));
 
+        // A message from it about another ticket isn't the answer.
+        let r = crate::mcp::call_tool(&st, &api.id, "message_agent", json!({ "agent": "Builder", "text": "Unrelated: #42 needs a rebase.", "kind": "needs_action", "ticket": "octo/wt-agent#42" })).await;
+        assert!(!r.to_string().contains("was waiting on you"), "{r}");
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().wait_for, api.id);
+        let before = woken(&st, &dev).len();
+
         let r = say(&api, "Use `valid_until`, it's on main now.").await;
         assert!(r.to_string().contains("was waiting on you for #41"), "{r}");
         let w = woken(&st, &dev);
@@ -5497,6 +5503,77 @@ pub(crate) mod tests {
         let e = tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "#7" })).await.unwrap_err();
         assert!(e.contains("reason is required"), "{e}");
         assert_eq!(st.db.get_delivery("octo/wt-no", 40).unwrap().unwrap().ticket(41).unwrap().wait_for, "");
+    }
+
+    /// #430 review: a waiting ticket the Lead moves to another Dev is built again, not waiting: the new Dev's
+    /// run ending without a call stalls.
+    #[tokio::test]
+    async fn reassigning_a_waiting_ticket_ends_its_wait() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/wt-reassign";
+        let (a, m) = planned(&st, &fake, "wt-reassign", vec![ticket("Store", &[])]).await;
+        let lead = busy(&st, "Lofty", "wt-reassign", "lead");
+        let first = busy(&st, "First", "wt-reassign", "dev");
+        let second = busy(&st, "Second", "wt-reassign", "dev");
+        press(&st, &a, &m).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "First" })).await.unwrap();
+        tool(&st, &first, "wait_ticket", json!({ "number": 41, "on": "Lofty", "reason": "Which store?" })).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 41, "dev": "Second", "reassign": true })).await.unwrap();
+        let t = delivery(&st, slug).ticket(41).unwrap().clone();
+        assert_eq!((t.wait_for.as_str(), t.wait_reason.as_str()), ("", ""));
+        run_starts(&st, &second);
+        crate::delivery::run_ended(&st, &second.id, false).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stalled_on.clone()), ("stalled", vec![41]));
+    }
+
+    /// #430 review: `wait_ticket` reads the issue first, and refuses one it can't follow.
+    #[tokio::test]
+    async fn wait_ticket_refuses_an_issue_it_cant_follow() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "wt-read", &["qa"]).await;
+        fake.route("GET", "/repos/octo/api/issues/8", 200, gh_ticket("octo/api", 8, "closed", "Done."));
+        let wait = |on: &str, reason: String| {
+            let (dev, args, st) = (dev.clone(), json!({ "number": 41, "on": on, "reason": reason }), st.clone());
+            async move { tool(&st, &dev, "wait_ticket", args).await.unwrap_err() }
+        };
+        assert!(wait("octo/api#8", "x".into()).await.contains("already closed"));
+        assert!(wait("octo/api#9", "x".into()).await.contains("can't read octo/api#9"), "a 404");
+        assert!(wait("../../user?x=#1", "x".into()).await.contains("isn't an issue Loft can read"));
+        assert!(wait("OCTO/wt-read#41", "x".into()).await.contains("can't wait on itself"));
+        assert!(wait("octo/api#9", "y".repeat(301)).await.contains("too long"));
+        assert_eq!(delivery(&st, "octo/wt-read").ticket(41).unwrap().wait_for, "");
+    }
+
+    /// #430 review: a wait that can never end (its issue deleted, its agent deleted) stalls the Delivery, so the
+    /// user sees it; Resume then wakes the Dev on the ticket.
+    #[tokio::test]
+    async fn a_wait_on_something_gone_stalls_the_delivery() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/wt-gone";
+        let (dev, _) = building(&st, &fake, "wt-gone", &["qa"]).await;
+        fake.route("GET", "/repos/octo/api/issues/7", 200, gh_ticket("octo/api", 7, "open", "Field."));
+        tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "octo/api#7", "reason": "Needs the field" })).await.unwrap();
+        fake.route("GET", "/repos/octo/api/issues/7", 404, json!({ "message": "Not Found" }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "wait_gone", vec![41]));
+        assert_eq!(d.ticket(41).unwrap().wait_for, "", "it's built again once resumed");
+        assert!(stalled_items(&st)[0]["reason"].as_str().unwrap().starts_with("A ticket waited on an issue or agent that is gone"));
+
+        // An agent that's deleted.
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "wt-gone2", &["qa"]).await;
+        let api = busy(&st, "Api Dev", "api", "dev");
+        tool(&st, &dev, "wait_ticket", json!({ "number": 41, "on": "Api Dev", "reason": "Asked" })).await.unwrap();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, "octo/wt-gone2").state, "running", "the agent is still there");
+        st.db.delete_agent(&api.id).unwrap();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, "octo/wt-gone2").stall_reason, "wait_gone");
     }
 
     #[tokio::test]
