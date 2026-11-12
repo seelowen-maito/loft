@@ -5351,6 +5351,12 @@ pub(crate) mod tests {
         let under = crate::tasks::create(&st, &json!({ "title": "Part", "description": "x", "labels": ["ready-for-agent"], "project": project, "parent_id": idea.id }), "user").unwrap().0;
         assert_eq!(start(under.id.clone()).await.unwrap_err().1, "This ticket is part of a spec: its tickets go through the spec's Delivery, not one of their own.");
 
+        let shown = |id: String| {
+            let st = st.clone();
+            async move { crate::delivery::issue_delivery(State(st), Path(id)).await.unwrap().0 }
+        };
+        assert_eq!(shown(t.id.clone()).await, Value::Null, "a git repo: the card offers Start");
+
         let v = start(t.id.clone()).await.unwrap().0;
         assert_eq!((&v["ok"], &v["duplicate"], &v["agent_name"], &v["started"]), (&json!(true), &json!(false), &json!("dev agent"), &json!(true)), "{v:#}");
         assert_eq!(git_in(&dir, &["rev-parse", "ticket/1-dark-mode"]), git_in(&dir, &["rev-parse", "main"]), "the ticket branch starts at main");
@@ -5364,9 +5370,16 @@ pub(crate) mod tests {
         ] {
             assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
         }
-        let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!((&shown["started"], &shown["agent_name"]), (&json!(true), &json!("dev agent")), "its page shows it");
+        let v = shown(t.id.clone()).await;
+        assert_eq!((&v["started"], &v["agent_name"]), (&json!(true), &json!("dev agent")), "its page shows it");
         assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true, "a second press starts nothing");
+        // Published to GitHub meanwhile: it keeps its Delivery kept in Loft, and starts no second one.
+        let mut linked = st.db.get_task(&t.id).unwrap().unwrap();
+        linked.github = Some(crate::db::GithubLink { repo: "octo/solo".into(), number: 9, state: "open".into(), ..Default::default() });
+        st.db.save_task(&linked).unwrap();
+        assert_eq!(shown(t.id.clone()).await["agent_name"], "dev agent");
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        st.db.save_task(&crate::db::Task { github: None, ..linked }).unwrap();
         assert_eq!(woken(&st, dev).len(), 1);
 
         tool(&st, dev, "submit_ticket", json!({ "number": t.id, "commits": ["abc1234def"] })).await.unwrap();
@@ -5381,6 +5394,25 @@ pub(crate) mod tests {
         assert_eq!(merged, format!("Merged `ticket/1-dark-mode` into `main` in the Dev's clone `{}`.", clone.display()));
         assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().status, "done");
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    /// #451 Web QA: a Loft issue whose project folder isn't a git repo of its own (no git, or a folder of several
+    /// repos) says why on its card up front, instead of a Start that refuses after the press.
+    #[tokio::test]
+    async fn a_loft_issue_whose_project_isnt_a_repo_says_why_before_start() {
+        let st = state();
+        let projects = st.settings.boot().projects_dir.clone();
+        std::fs::create_dir_all(projects.join("plain")).unwrap();
+        std::fs::create_dir_all(projects.join("multi/api/.git")).unwrap();
+        std::fs::create_dir_all(projects.join("multi/web/.git")).unwrap();
+        for (project, why) in [
+            ("plain", "Start delivery can't run here: the project folder of plain isn't a git repo of its own in the projects folder, so Loft won't run git there."),
+            ("multi", "Start delivery can't run here: multi holds several repos, and its Delivery needs the project folder itself to be a git repo."),
+        ] {
+            let (t, _) = crate::tasks::create(&st, &json!({ "title": "Dark mode", "description": "x", "labels": ["ready-for-agent"], "project": project }), "user").unwrap();
+            let v = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
+            assert_eq!((&v["started"], &v["cannot_start"]), (&json!(false), &json!(why)), "{project}");
+        }
     }
 
     #[tokio::test]

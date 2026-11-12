@@ -646,9 +646,14 @@ fn refs(d: &Delivery, t: &DeliveryTicket) -> String {
 /// folder, never an agent's workspace, and a repo with its own `.git` folder, so Loft never runs git in a
 /// repo an agent made.
 fn project_dir(state: &AppState, d: &Delivery) -> Result<std::path::PathBuf, String> {
-    crate::repos::project_dir(state, &d.project)
+    own_repo(state, &d.project)
+}
+
+/// [`project_dir`] for `project`: its folder, or why a Delivery kept in Loft can't run git there, mid-sentence.
+fn own_repo(state: &AppState, project: &str) -> Result<std::path::PathBuf, String> {
+    crate::repos::project_dir(state, project)
         .filter(|dir| crate::repos::own_git_dir(dir))
-        .ok_or_else(|| crate::repos::project_hint(state, &d.project).map(|h| format!("{h}, and its Delivery needs the project folder itself to be a git repo")).unwrap_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", d.project.trim())))
+        .ok_or_else(|| crate::repos::project_hint(state, project).map(|h| format!("{h}, and its Delivery needs the project folder itself to be a git repo")).unwrap_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", project.trim())))
 }
 
 /// The project's folder as briefs name it.
@@ -2578,11 +2583,10 @@ fn delivery_of_issue(state: &AppState, id: &str) -> Result<Delivery, crate::api:
 }
 
 /// The Delivery of issue `t`: on GitHub by its number, or kept in Loft by its Loft issue id.
+/// One kept in Loft stays its Delivery after the issue is published to GitHub.
 fn delivery_of_task(state: &AppState, t: &crate::db::Task) -> Option<Delivery> {
-    match &t.github {
-        Some(g) => state.db.get_delivery(&g.repo, g.number).ok().flatten().filter(|d| !d.local),
-        None => local_of(state, &t.project, &t.id),
-    }
+    let github = t.github.as_ref().and_then(|g| state.db.get_delivery(&g.repo, g.number).ok().flatten().filter(|d| !d.local));
+    github.or_else(|| local_of(state, &t.project, &t.id))
 }
 
 /// A Delivery card button's answer: the Delivery as the card shows it now, and what the button did.
@@ -2702,7 +2706,8 @@ pub async fn resume_route(State(state): State<AppState>, Json(w): Json<Which>) -
 /// starts it like the end-of-planning card does: its branch, its draft PR with `Closes #N`, and the Dev.
 pub async fn start_from_issue(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
-    let Some(g) = t.github.clone() else {
+    // A Loft issue's Delivery stays kept in Loft once the issue is published: no second one on GitHub.
+    let Some(g) = t.github.clone().filter(|_| local_of(&state, &t.project, &t.id).is_none()) else {
         return start_loft_issue(&state, &t).await;
     };
     let (repo, n) = (g.repo.clone(), g.number);
@@ -2966,10 +2971,18 @@ fn waits_on(state: &AppState, d: &Delivery) -> Vec<Value> {
 }
 
 /// `GET /api/issues/{id}/delivery`: the Delivery of a standalone ticket's or a spec's Loft issue, for its
-/// page: whether it started, who has it and its PR, and a spec's tickets. `null` when it has none.
+/// page: whether it started, who has it and its PR, and a spec's tickets. `null` when it has none, or for a Loft
+/// issue whose project can't hold one, `started: false` with `cannot_start` saying why.
 pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let t = state.db.get_task(&id)?.ok_or_else(not_found)?;
     let Some(d) = delivery_of_task(&state, &t) else {
+        // A Loft issue whose project can't hold its Delivery says why up front, so the card offers no Start.
+        if t.github.is_none()
+            && !t.project.trim().is_empty()
+            && let Err(why) = own_repo(&state, &t.project)
+        {
+            return Ok(Json(json!({ "state": "planned", "started": false, "agent_id": null, "agent_name": null, "pr": null, "cannot_start": format!("Start delivery can't run here: {why}.") })));
+        }
         return Ok(Json(Value::Null));
     };
     Ok(Json(delivery_json(&state, &d)))

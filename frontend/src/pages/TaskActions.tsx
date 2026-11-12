@@ -287,7 +287,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
                 ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>. Its reviewers look at it next; it's done when you merge it from Loft.</>
                 : d?.started
                   ? "Started; the agent building it is gone. It's done when you merge it from Loft."
-                  : `Loft makes a ticket branch in ${t.project}'s own repo, then has the team's Dev build it and QA, Security and Code Review check it. You merge it from Loft: nothing goes to GitHub.`
+                  : d?.cannot_start ?? `Loft makes a ticket branch in ${t.project}'s own repo, then has the team's Dev build it and QA, Security and Code Review check it. You merge it from Loft: nothing goes to GitHub.`
               : started
                 ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
                 : d?.started
@@ -296,7 +296,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           </div>
           <DeliveryState d={d} />
         </div>
-        {!d?.started && (
+        {!d?.started && !d?.cannot_start && (
           <StartDeliveryButton pending={busy} onClick={start} />
         )}
         {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
