@@ -2948,13 +2948,14 @@ pub struct StartQuery {
 }
 
 /// The project folder of a plan kept in Loft that hasn't started, when it has no git at all: a folder in
-/// the projects folder, never an agent's workspace, with no `.git` (not even a file or a link).
+/// the projects folder, never an agent's workspace, with no `.git` (not even a file or a link) and not holding repos.
 fn without_git(state: &AppState, d: &Delivery) -> Option<std::path::PathBuf> {
     if !d.local || !d.base.is_empty() {
         return None;
     }
     let dir = crate::repos::project_dir(state, &d.project)?;
-    std::fs::symlink_metadata(dir.join(".git")).is_err().then_some(dir)
+    // A folder of several repos isn't set up as one: starting says why instead.
+    std::fs::symlink_metadata(dir.join(".git")).is_err().then_some(dir).filter(|_| crate::repos::project_hint(state, &d.project).is_none())
 }
 
 /// `POST /api/agents/{id}/messages/{mid}/start-delivery`: the end-of-planning card's "Start delivery".
