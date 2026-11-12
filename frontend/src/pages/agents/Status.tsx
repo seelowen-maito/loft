@@ -23,7 +23,8 @@ export function runWatch(a: Agent, lastMessageAt: string | undefined, now: numbe
     const more = tasks.length > 1 ? ` (+${tasks.length - 1} more)` : "";
     return { kind: "waiting", minutes: mins(a.waiting_since), text: `Waiting on a background task: ${tasks[0]}${more}` };
   }
-  const last = [a.last_output_at, lastMessageAt].filter(Boolean).sort().pop();
+  // The run's start counts too: a quiet run (a Redraw, a grill) posts nothing to the chat.
+  const last = [a.last_output_at, a.last_run_at, lastMessageAt].filter(Boolean).sort().pop();
   const m = mins(last);
   return last && m >= QUIET_MINUTES ? { kind: "quiet", minutes: m, text: `No activity for ${m} min` } : null;
 }
