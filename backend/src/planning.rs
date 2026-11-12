@@ -676,7 +676,7 @@ pub(crate) async fn close_ticket(state: &AppState, project: &str, by: &Agent, sl
 /// when it was the spec's last ticket ([`after_tickets`]). Some(line) for the reply when it did. The
 /// caller holds the repo's publish lock.
 pub(crate) async fn ready_when_last(state: &AppState, slug: &str, number: i64, ticket_body: &str) -> Result<Option<String>, String> {
-    crate::delivery::blocker_closed(state, slug, number);
+    crate::delivery::blocker_closed(state, slug, number, slug).await;
     let d = crate::delivery::ticket_closed(state, slug, number).or_else(|| {
         let pr = spec_pr_in(ticket_body, slug)?;
         state.db.deliveries(slug, false).ok()?.into_iter().find(|d| d.pr == Some(pr))
@@ -975,6 +975,19 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
     let scope = spec.map_or("standalone".to_string(), |s| format!("#{s}"));
     let retry = "What was published so far stays: call publish_tickets again with the same tickets to finish without duplicates.";
     let shown = |repo: &str, n: i64| if repo == slug { format!("#{n}") } else { format!("{repo}#{n}") };
+    // A ticket that exists already can't wait on a blocker that waits on it. Read from the Deliveries, before
+    // anything is created: a new ticket has nothing waiting on it yet.
+    for (i, t) in ts.iter().enumerate().filter(|(_, t)| !t.external.is_empty()) {
+        let repo = slugs[i].as_str();
+        let k = if repo == slug { format!("{scope}/{}", key(&t.title)) } else { format!("{slug}{scope}/{}", key(&t.title)) };
+        let recorded = state.db.published_issue(repo, "ticket", &k).ok().flatten().filter(|n| spec.is_some() || find(repo, *n).is_some());
+        let Some(n) = recorded.or_else(|| listed.iter().find(|l| same_repo(&l.0, repo) && l.3 == key(&t.title)).map(|l| l.1)) else { continue };
+        for (br, bn) in &t.external {
+            if let Some(ring) = crate::delivery::wait_loop(state, (repo, n), (br, *bn)) {
+                return Err(format!("\"{}\" can't be blocked by {br}#{bn}: they would wait on each other in a loop ({repo}#{n} → {}).", t.title, ring.join(" → ")));
+            }
+        }
+    }
     // Each published ticket: its repo, number and, once known, database id.
     let mut made: Vec<Option<(String, i64, Option<i64>)>> = vec![None; ts.len()];
     // GitHub's answer for each ticket created now, to bring it in without reading it again.
@@ -1056,9 +1069,6 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             if matches!(state.db.published_issue(repo, "blocked_by", &dk), Ok(Some(_))) {
                 continue;
             }
-            if at.is_none() {
-                blocks_back(state, (&brepo, bn), (repo, n)).await?;
-            }
             let bid = issue_id(state, &brepo, bn, bid).await.map_err(|e| format!("{e} {retry}"))?;
             if let Some(b) = at {
                 made[b] = Some((brepo.clone(), bn, Some(bid)));
@@ -1086,34 +1096,6 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
     let none_new = if fresh == 0 { "\nNothing new was created: every ticket was already published." } else { "" };
     let msg = format!("{head}, labelled `ready-for-agent` and assigned to {login}:\n{}{none_new}", lines.join("\n"));
     Ok(msg)
-}
-
-/// Refuses `blocker` as a blocker of `ticket` when it already waits, directly or through others, on that
-/// ticket: they would wait on each other for ever. Both are (repo, number); reads at most 30 issues.
-async fn blocks_back(state: &AppState, blocker: (&str, i64), ticket: (&str, i64)) -> Result<(), String> {
-    let name = |r: &str, n: i64| format!("{r}#{n}");
-    // Chains of issues, each blocked by the next, from the blocker on.
-    let mut queue = vec![vec![(blocker.0.to_string(), blocker.1)]];
-    let mut seen = 1;
-    while let Some(chain) = queue.pop() {
-        let (r, n) = chain.last().cloned().unwrap_or_default();
-        let v = crate::github::get(state, &format!("/repos/{r}/issues/{n}/dependencies/blocked_by?per_page=100")).await.unwrap_or(Value::Null);
-        for d in v.as_array().into_iter().flatten() {
-            let Some(dn) = d["number"].as_i64() else { continue };
-            let dr = repo_of(d, &r);
-            if same_repo(&dr, ticket.0) && dn == ticket.1 {
-                let ring: Vec<String> = std::iter::once(name(ticket.0, ticket.1)).chain(chain.iter().map(|(r, n)| name(r, *n))).chain([name(ticket.0, ticket.1)]).collect();
-                return Err(format!("{} can't be blocked by {}: they would block each other in a loop ({}).", name(ticket.0, ticket.1), name(blocker.0, blocker.1), ring.join(" → ")));
-            }
-            if seen < 30 && !chain.iter().any(|(cr, cn)| same_repo(cr, &dr) && *cn == dn) {
-                seen += 1;
-                let mut next = chain.clone();
-                next.push((dr, dn));
-                queue.push(next);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The published tickets as Loft issues right away, as in a project without a repo: each in its own
@@ -2841,11 +2823,11 @@ pub(crate) mod tests {
         // Closing ticket #9 of another repo, or another repo's #9, frees nothing; the right one does, in any case.
         crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "closed".into());
         assert_eq!(crate::delivery::ready_tickets(&delivery(&st, slug)).iter().map(|t| t.number).collect::<Vec<_>>(), [43]);
-        crate::delivery::blocker_closed(&st, "octo/ext-done", 9);
-        crate::delivery::blocker_closed(&st, slug, 9);
+        crate::delivery::blocker_closed(&st, "octo/ext-done", 9, slug).await;
+        crate::delivery::blocker_closed(&st, slug, 9, slug).await;
         assert_eq!(delivery(&st, slug).tickets[1].waiting_on, ["octo/ext-api#9"]);
         st.rt.lock().unwrap().queued.clear();
-        crate::delivery::blocker_closed(&st, "Octo/Ext-API", 9);
+        crate::delivery::blocker_closed(&st, "Octo/Ext-API", 9, slug).await;
         let d = delivery(&st, slug);
         assert!(d.tickets[1].waiting_on.is_empty());
         assert_eq!(crate::delivery::ready_tickets(&d).iter().map(|t| t.number).collect::<Vec<_>>(), [42, 43]);
@@ -2883,16 +2865,58 @@ pub(crate) mod tests {
         assert_eq!(posts(&fake, slug, "issues").len(), 1, "only the spec");
     }
 
+    #[test]
+    fn a_blocker_that_already_waits_on_the_ticket_is_found_from_the_deliveries() {
+        let st = state();
+        // octo/b#2 waits on octo/c#3, which waits on octo/A#1 (any case): a#1 can't wait on b#2.
+        for (repo, ticket, on) in [("octo/b", 2, "octo/c#3"), ("octo/c", 3, "octo/A#1")] {
+            crate::delivery::record_spec(&st, repo, 1, "p", "pl", "");
+            crate::delivery::record_ticket_waiting(&st, repo, 1, ticket, "T", vec![], vec![on.into()]);
+        }
+        assert_eq!(crate::delivery::wait_loop(&st, ("octo/a", 1), ("octo/b", 2)), Some(vec!["octo/b#2".to_string(), "octo/c#3".into(), "octo/a#1".into()]));
+        assert_eq!(crate::delivery::wait_loop(&st, ("octo/z", 9), ("octo/b", 2)), None);
+    }
+
     #[tokio::test]
-    async fn a_blocker_that_already_waits_on_the_ticket_is_refused_naming_the_loop() {
+    async fn publishing_an_existing_ticket_again_with_a_blocker_that_waits_on_it_is_refused_before_anything_is_made() {
         let (fake, st) = (fake_github(), state());
-        // octo/b#2 is blocked by octo/c#3, which is blocked by octo/a#1: a#1 can't wait on b#2.
-        let dep = |n: i64, repo: &str| json!({ "number": n, "repository_url": format!("{}/repos/{repo}", crate::github::api_base()) });
-        fake.route("GET", "/repos/octo/b/issues/2/dependencies/blocked_by", 200, json!([dep(3, "octo/c")]));
-        fake.route("GET", "/repos/octo/c/issues/3/dependencies/blocked_by", 200, json!([dep(1, "octo/A")]));
-        let err = blocks_back(&st, ("octo/b", 2), ("octo/a", 1)).await.unwrap_err();
-        assert_eq!(err, "octo/a#1 can't be blocked by octo/b#2: they would block each other in a loop (octo/a#1 → octo/b#2 → octo/c#3 → octo/a#1).");
-        assert!(blocks_back(&st, ("octo/b", 2), ("octo/z", 9)).await.is_ok());
+        let slug = "octo/dl-loop";
+        read_issue(&fake, "octo/ext-loop", 9, "open");
+        let (a, _m) = planned(&st, &fake, "dl-loop", vec![ticket("API", &["octo/ext-loop#9"])]).await;
+        // octo/ext-loop#9 is a ticket of another Delivery that waits on the API ticket (#41) of this one.
+        crate::delivery::record_spec(&st, "octo/ext-loop", 1, "p", "pl", "");
+        crate::delivery::record_ticket_waiting(&st, "octo/ext-loop", 1, 9, "Ext", vec![], vec![format!("{slug}#41")]);
+        let before = posts(&fake, slug, "issues").len();
+        let err = publish_tickets(&st, &a, Some(40), vec![ticket("API", &["octo/ext-loop#9"])]).await.unwrap_err();
+        assert_eq!(err, format!("\"API\" can't be blocked by octo/ext-loop#9: they would wait on each other in a loop ({slug}#41 → octo/ext-loop#9 → {slug}#41)."));
+        assert_eq!(posts(&fake, slug, "issues").len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_blocker_closed_by_hand_anywhere_stops_being_waited_on_at_the_next_poll() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-hand";
+        // Not a ticket of any Loft project: no mirror event ever tells Loft it closed.
+        read_issue(&fake, "octo/ext-hand", 9, "open");
+        let (_a, _m) = planned(&st, &fake, "dl-hand", vec![ticket("API", &["octo/ext-hand#9"])]).await;
+        crate::delivery::retry(&st, slug).await;
+        assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"], "still open");
+        read_issue(&fake, "octo/ext-hand", 9, "closed");
+        // Another repo's lock is held by a step: its Delivery is left for the poll.
+        let busy = st.publish_locks.of(slug).lock_owned().await;
+        crate::delivery::blocker_closed(&st, "octo/ext-hand", 9, "octo/elsewhere").await;
+        drop(busy);
+        assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"]);
+        crate::delivery::retry(&st, slug).await;
+        assert!(delivery(&st, slug).tickets[0].waiting_on.is_empty());
+        // Gone (404) counts too.
+        read_issue(&fake, "octo/ext-gone", 4, "open");
+        let (_a, _m) = planned(&st, &fake, "dl-gone", vec![ticket("API", &["octo/ext-gone#4"])]).await;
+        let gone = "octo/dl-gone";
+        assert_eq!(delivery(&st, gone).tickets[0].waiting_on, ["octo/ext-gone#4"]);
+        fake.route("GET", "/repos/octo/ext-gone/issues/4", 404, json!({ "message": "Not Found" }));
+        crate::delivery::retry(&st, gone).await;
+        assert!(delivery(&st, gone).tickets[0].waiting_on.is_empty());
     }
 
     #[tokio::test]

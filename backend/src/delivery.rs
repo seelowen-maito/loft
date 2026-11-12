@@ -380,12 +380,22 @@ fn blocker_name(repo: &str, n: i64) -> String {
 
 /// Issue #n of `repo` closed: no ticket waits on it any more. Wakes the Lead of a running Delivery that
 /// has a ticket to hand out now; a team without a Lead gets it from the mirror's next poll ([`retry`]).
-pub fn blocker_closed(state: &AppState, repo: &str, n: i64) {
+/// The caller holds `held`'s publish lock; a Delivery of another repo changes under its own lock, and when
+/// that is busy it is left for [`retry`] (waiting for it could deadlock two repos on each other).
+pub async fn blocker_closed(state: &AppState, repo: &str, n: i64, held: &str) {
     let blocker = blocker_name(repo, n);
     for d in state.db.all_deliveries().unwrap_or_default() {
         if !d.tickets.iter().any(|t| t.waiting_on.iter().any(|w| w.eq_ignore_ascii_case(&blocker))) {
             continue;
         }
+        let _lock = if d.repo.eq_ignore_ascii_case(held) {
+            None
+        } else {
+            match state.publish_locks.of(&d.repo).try_lock_owned() {
+                Ok(l) => Some(l),
+                Err(_) => continue,
+            }
+        };
         let Some(d) = update(state, &d.repo, d.spec, |d| d.tickets.iter_mut().for_each(|t| t.waiting_on.retain(|w| !w.eq_ignore_ascii_case(&blocker)))) else { continue };
         if let Some(lead) = lead_of(state, &d)
             && d.state == "running"
@@ -395,6 +405,75 @@ pub fn blocker_closed(state: &AppState, repo: &str, n: i64) {
             wake_lead(state, &d, &lead, &format!("{blocker} closed: tickets that waited on it are ready."));
         }
     }
+}
+
+/// The mirror's catch-up for blockers closed where Loft doesn't see it (an issue that isn't a ticket, in a repo
+/// that isn't a Loft project): each open blocker the unsettled Deliveries of `repo` wait on is read again, and
+/// one that is closed or gone stops being waited on. An unchanged one answers 304, which costs nothing.
+/// The caller holds `repo`'s publish lock.
+async fn clear_closed_blockers(state: &AppState, repo: &str) {
+    let mut open: Vec<String> = vec![];
+    for d in state.db.deliveries(repo, true).unwrap_or_default() {
+        for w in d.tickets.iter().filter(|t| t.state != "closed").flat_map(|t| &t.waiting_on) {
+            if !open.iter().any(|o| o.eq_ignore_ascii_case(w)) {
+                open.push(w.clone());
+            }
+        }
+    }
+    for w in open {
+        let Some((r, n)) = w.rsplit_once('#').and_then(|(r, n)| Some((r, n.parse::<i64>().ok()?))) else { continue };
+        let key = w.to_lowercase();
+        let etag = state.mirror.wait_etags.lock().unwrap().get(&key).cloned();
+        let closed = match crate::github::get_if_changed(state, &format!("/repos/{r}/issues/{n}"), etag.as_deref()).await {
+            Ok(None) => false,
+            Ok(Some((i, tag))) => {
+                if let Some(tag) = tag {
+                    state.mirror.wait_etags.lock().unwrap().insert(key, tag);
+                }
+                i["state"] == "closed"
+            }
+            Err(e) if crate::github::is_gone(&e) => true,
+            Err(e) if crate::github::is_paused(&e) => return,
+            Err(e) => {
+                tracing::warn!("delivery {repo}: couldn't read {w}: {e}");
+                false
+            }
+        };
+        if closed {
+            blocker_closed(state, r, n, repo).await;
+        }
+    }
+}
+
+/// The tickets by which `blocker` already waits, directly or through others, on `ticket` (both `(repo, number)`),
+/// as `owner/repo#n` from the blocker on; None when it doesn't. Read from the Deliveries' records, so a loop is
+/// found before anything is created: a ticket waiting on a blocker that waits on it would wait for ever.
+pub fn wait_loop(state: &AppState, ticket: (&str, i64), blocker: (&str, i64)) -> Option<Vec<String>> {
+    let all = state.db.all_deliveries().unwrap_or_default();
+    let mut seen: Vec<(String, i64)> = vec![];
+    let mut stack = vec![vec![(blocker.0.to_lowercase(), blocker.1)]];
+    while let Some(path) = stack.pop() {
+        let (r, n) = path.last().cloned().unwrap_or_default();
+        if r == ticket.0.to_lowercase() && n == ticket.1 {
+            return Some(path.iter().map(|(r, n)| blocker_name(r, *n)).collect());
+        }
+        if seen.contains(&(r.clone(), n)) {
+            continue;
+        }
+        seen.push((r.clone(), n));
+        for d in all.iter().filter(|d| d.repo.eq_ignore_ascii_case(&r)) {
+            for t in d.tickets.iter().filter(|t| t.number == n && t.state != "closed") {
+                let outside = t.waiting_on.iter().filter_map(|w| w.rsplit_once('#').and_then(|(r, n)| Some((r.to_lowercase(), n.parse().ok()?))));
+                let inside = t.blocked_by.iter().map(|b| (r.clone(), *b));
+                for next in outside.chain(inside) {
+                    let mut p = path.clone();
+                    p.push(next);
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// What a ticket of `d` still waits on, as the briefs name it: its open blockers in the spec (`#7`) and
@@ -2036,6 +2115,7 @@ pub(crate) async fn follow_all(state: &AppState) {
 /// running Delivery on when it builds nothing (a start that failed).
 pub(crate) async fn retry(state: &AppState, repo: &str) {
     let _held = state.publish_locks.of(repo).lock_owned().await;
+    clear_closed_blockers(state, repo).await;
     for d in state.db.deliveries_in(repo, "running").unwrap_or_default() {
         for t in d.tickets.iter().filter(|t| t.state == "closing") {
             match finish(state, &d, t.number).await {
