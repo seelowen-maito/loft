@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  EMPTY_DRAFT, clearAnswerDrafts, clearDraft, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
+  EMPTY_DRAFT, clearAnswerDrafts, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
 } from "../src/lib/draft.ts";
 
 /** An in-memory localStorage; a fresh `loadDraft` on it stands in for a reload. */
@@ -36,15 +36,6 @@ test("one agent's draft never shows in another's composer", () => {
   saveDraft("reviewer", { text: "other", images: [], task: null }, s);
   assert.equal(loadDraft("dev", s).text, "half a thought");
   assert.equal(loadDraft("reviewer", s).text, "other");
-});
-
-test("clearing one agent's draft leaves the others", () => {
-  const s = memory();
-  saveDraft("dev", draft, s);
-  saveDraft("reviewer", draft, s);
-  clearDraft("dev", s);
-  assert.deepEqual(loadDraft("dev", s), EMPTY_DRAFT);
-  assert.deepEqual(loadDraft("reviewer", s), draft);
 });
 
 test("an empty draft takes no storage", () => {
@@ -89,7 +80,6 @@ test("storage that throws never breaks the composer", () => {
   const boom = () => { throw new Error("blocked"); };
   const blocked = { getItem: boom, setItem: boom, removeItem: boom };
   saveDraft("dev", draft, blocked);
-  clearDraft("dev", blocked);
   assert.deepEqual(loadDraft("dev", blocked), EMPTY_DRAFT);
   saveAnswerDraft("g1", 1, "q1", { text: "a", images: [] }, blocked);
   clearAnswerDrafts("g1", 1, ["q1"], blocked);

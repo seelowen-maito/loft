@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCheck, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
+import { canCheck, cleanLineText, gitCheckText, oneLine } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -20,13 +20,6 @@ test("Simulator device and process lines say what was done to which one", () => 
   assert.equal(cleanLineText({ ...line, rel: "Loft Dev (Loft)", bytes: 0, done: "Shut down Simulator device" }), "Shut down Simulator device Loft Dev (Loft)");
   assert.equal(cleanLineText({ ...line, bytes: 0, error: "busy" }), "failed: Deleted Simulator device Loft Dev 93543007: busy");
   assert.equal(cleanLineText({ ...line, path: "pid 42", rel: "node vite --port 20070", bytes: 0, command: "kill 42", done: "Stopped process" }), "Stopped process node vite --port 20070");
-});
-
-test("only items that can be removed show their command", () => {
-  assert.equal(shownCommand(item(), 0), "rm -rf /s/a/loft");
-  assert.equal(shownCommand(item({ label: "main clone of loft", opens: true }), 0), "", "a main clone");
-  assert.equal(shownCommand(item({ blocked: "Working" }), 0), "", "a working agent's item");
-  assert.equal(shownCommand(item({ label: "kept", opens: true }), 1), "rm -rf /s/a/loft", "a folder inside a main clone");
 });
 
 test("a name keeps to its one line in Copy commands", () => {

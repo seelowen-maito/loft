@@ -1193,7 +1193,7 @@ mod tests {
         st.db.save_task(&t).unwrap();
         let id = format!("task:{}:blocked", t.id);
         snapshot(&st).unwrap();
-        mark_seen(State(st.clone()), Json(json!({ "ids": [id] }))).await.unwrap();
+        let _ = mark_seen(State(st.clone()), Json(json!({ "ids": [id] }))).await.unwrap();
         assert_eq!(snapshot(&st).unwrap()["new"], json!(0));
 
         // Answered: it runs again and leaves the list (the watcher's next look)...
@@ -1228,7 +1228,7 @@ mod tests {
         let mut events = || std::iter::from_fn(|| rx.try_recv().ok()).filter(|e| matches!(e, Event::NeedsYou { .. })).count();
         assert_eq!(events(), 1, "the watcher tells clients about the new item");
 
-        mark_seen(State(st.clone()), Json(json!({ "ids": [format!("task:{}:failed", t.id)] }))).await.unwrap();
+        let _ = mark_seen(State(st.clone()), Json(json!({ "ids": [format!("task:{}:failed", t.id)] }))).await.unwrap();
         let (_, v) = tick_lists(&st).unwrap();
         emit_if_changed(&st, &v);
         assert_eq!(events(), 1, "the mark emits at once, and the next tick doesn't send it again");
