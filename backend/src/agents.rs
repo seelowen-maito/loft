@@ -377,6 +377,8 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     if req.tool_name == "Kill" && decision == "allow_always" {
         anyhow::ensure!(crate::processes::kill_spec(&req.rule).is_some(), "there is no rule for this kill: allow it once");
     }
+    // A change to a user's checkout is allowed one command at a time: a saved rule would turn the guard off there.
+    anyhow::ensure!(!(req.tool_name == "Checkout" && decision == "allow_always"), "a change to your checkout can only be allowed once");
     let persist = decision == "allow_always" || (allow && req.source == "request");
     req.status = match (allow, persist) {
         (false, _) => "denied",
@@ -1127,8 +1129,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     );
     let mcp_config = json!({ "mcpServers": servers }).to_string();
 
-    // `Kill(<path>)` and `Checkout(<folder>)` rules are Loft's own (processes.rs, kill_guard.rs), not claude tools.
-    let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(") && !r.starts_with("Checkout(")).cloned().collect();
+    // `Kill(<path>)` rules are Loft's own (see processes.rs), not claude tools.
+    let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(")).cloned().collect();
     allowed.push("mcp__loft".into());
     let mut disallowed = a.disallowed_tools.clone();
     if a.max_subagents == Some(0) {

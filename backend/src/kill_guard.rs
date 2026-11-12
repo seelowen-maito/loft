@@ -1116,7 +1116,7 @@ pub struct GuardRequest {
 
 /// Asks the user about each change to a checkout under the projects folder (that isn't an agent's workspace), one
 /// after the other within one `ASK_TIMEOUT` (the hook's own timeout covers one), and answers the hook with whether
-/// the command may run. The user's "Always allow" saves `Checkout(<folder>)`, which covers the folders in it too.
+/// the command may run. It is Allow once or Deny only: there is no rule to save.
 pub async fn handle(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
@@ -1128,16 +1128,14 @@ pub async fn handle(
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
         let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
-        let allowed = |r: &String| r.strip_prefix("Checkout(").and_then(|r| r.strip_suffix(')')).is_some_and(|p| change.folder.starts_with(p));
-        if !change.folder.starts_with(&projects) || in_agent_storage(&change.folder) || a.allowed_tools.iter().any(allowed) {
+        if !change.folder.starts_with(&projects) || in_agent_storage(&change.folder) {
             continue;
         }
         let folder = change.folder.display().to_string();
         let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
         let input = json!({ "command": change.command, "folder": folder });
-        let rule = format!("Checkout({folder})");
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, rule, wait).await;
+        let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
         if d.allow {
             continue;
         }
@@ -1643,19 +1641,23 @@ mod tests {
         assert_eq!(v["allow"], false);
         assert!(v["message"].as_str().unwrap().contains("Work in your own clone in your workspace"), "{v}");
 
-        // Always allowed: it saves the folder's rule, and the next change there runs without asking.
+        // No rule to save: Always allow is refused, even with a rule posted, and the agent's tools stay as they were.
         let asking = guard(user.clone());
         crate::agents::tests::until("a second permission request", 5, || pending().len() == 1).await;
-        crate::agents::decide(&st, &pending()[0].id, "allow_always", None, None).unwrap();
+        let id = pending()[0].id.clone();
+        assert_eq!(pending()[0].rule, "");
+        let tools = st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools;
+        assert!(crate::agents::decide(&st, &id, "allow_always", None, None).is_err());
+        assert!(crate::agents::decide(&st, &id, "allow_always", Some(format!("Checkout({})", user.display())), None).is_err());
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, tools);
+
+        // Allowed once: this command runs, and the next change there asks again.
+        crate::agents::decide(&st, &id, "allow_once", None, None).unwrap();
         assert_eq!(asking.await.unwrap()["allow"], true);
-        assert_eq!(guard(user.clone()).await.unwrap()["allow"], true);
-        // The rule covers the folders in the checkout, not a sibling that starts the same.
-        assert_eq!(guard(user.join("frontend")).await.unwrap()["allow"], true);
-        assert!(pending().is_empty());
-        let sibling = guard(projects.join("loft-old"));
-        crate::agents::tests::until("a question about another checkout", 5, || pending().len() == 1).await;
+        let again = guard(user.join("frontend"));
+        crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None).unwrap();
-        assert_eq!(sibling.await.unwrap()["allow"], false);
+        assert_eq!(again.await.unwrap()["allow"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]
