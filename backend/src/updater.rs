@@ -205,9 +205,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
         };
         if newer_build_on_disk(started) {
             let n = running_agents(&state);
-            set(&state, |s| {
-                *s = UpdateStatus { phase: Phase::Restart, current: short(&head), running_agents: n, why: (n > 0).then(|| format!("{n} agent{} running; restart is refused until they finish", if n == 1 { " is" } else { "s are" })), ..Default::default() };
-            });
+            set(&state, |s| *s = restart_status(&head, n, s.why.take()));
             tokio::time::sleep(IDLE_POLL).await;
             continue;
         }
@@ -250,11 +248,27 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
+/// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
+/// doesn't check upstream while in this phase: the next update comes after the restart.
+fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
+    let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
+        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restart is refused until they finish", if running_agents == 1 { " is" } else { "s are" }))
+    });
+    UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
+}
+
 /// Replace this process with the build on disk (same args and env): after an update, the new build, which
 /// signs its own copy again. If exec fails, the old build keeps running and the status says why.
 pub fn restart(state: &AppState) {
-    let Ok(exe) = std::env::current_exe() else { return };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => return restart_failed(state, err),
+    };
     let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
+    restart_failed(state, err)
+}
+
+fn restart_failed(state: &AppState, err: std::io::Error) {
     tracing::error!("restart: exec failed: {err}");
     // Stay up on the running build and say why it didn't switch.
     set(state, |s| {
@@ -267,11 +281,20 @@ pub fn restart(state: &AppState) {
 mod tests {
     #[test]
     fn the_running_commit_is_the_one_built_in() {
-        let head = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap();
+        if super::BUILT_FROM.is_empty() {
+            return;
+        }
         // Built from a checkout, so the embedded commit is a full sha; it's what `current` shows (7 chars).
         assert_eq!(super::BUILT_FROM.len(), 40, "{:?}", super::BUILT_FROM);
         assert_eq!(super::short(super::BUILT_FROM).len(), 7);
-        let _ = head;
+    }
+
+    #[test]
+    fn a_failed_restart_keeps_its_reason_across_loop_ticks() {
+        let failed = Some("restart failed: boom".to_string());
+        assert_eq!(super::restart_status("abcdef012", 2, failed.clone()).why, failed);
+        assert_eq!(super::restart_status("abcdef012", 0, None).why, None);
+        assert!(super::restart_status("abcdef012", 1, Some("1 agent is running".into())).why.unwrap().starts_with("1 agent is"));
     }
 
     #[test]
