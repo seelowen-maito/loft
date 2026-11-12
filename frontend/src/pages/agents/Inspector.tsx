@@ -95,7 +95,7 @@ function Field({ label, sub, hint, children }: { label: string; sub?: string; hi
 }
 
 /** What a project is, under the Projects label of the agent's settings and the New agent dialog. */
-export const PROJECTS_SUB = "Git repositories from your projects folder";
+export const PROJECTS_SUB = "Folders or git repositories from your projects folder";
 
 /** The Role field's hint, for the agent's settings and the New agent dialog. */
 export const roleHint = (team: string) =>
