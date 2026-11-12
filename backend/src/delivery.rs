@@ -1399,7 +1399,7 @@ const MAX_WAIT_REASON: usize = 300;
 
 /// Whether `repo` is a plain `owner/name`: letters, digits, `_`, `.` and `-`, neither part `.` or `..`. It goes
 /// into a GitHub API path.
-fn plain_repo(repo: &str) -> bool {
+pub(crate) fn plain_repo(repo: &str) -> bool {
     let part = |p: &str| !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
     repo.split_once('/').is_some_and(|(o, n)| part(o) && part(n))
 }

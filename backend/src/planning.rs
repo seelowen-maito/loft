@@ -842,9 +842,8 @@ fn tickets_in(all: &Agent, me: &Agent, args: &Value) -> Result<Vec<Ticket>, Stri
 /// `owner/repo#n`, the way a blocker outside these tickets is named.
 fn issue_named(s: &str) -> Option<(String, i64)> {
     let (repo, n) = s.trim().split_once('#')?;
-    let (owner, name) = repo.split_once('/')?;
-    let ok = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    (ok(owner) && ok(name)).then_some(())?;
+    // It goes into a GitHub API path: `..` as owner or repo would walk out of it.
+    crate::delivery::plain_repo(repo).then_some(())?;
     Some((repo.to_string(), n.parse::<i64>().ok().filter(|n| *n > 0)?))
 }
 
@@ -2863,6 +2862,14 @@ pub(crate) mod tests {
         let err = publish_tickets(&st, &a, Some(40), vec![ticket("API", &["other#4"])]).await.unwrap_err();
         assert_eq!(err, "\"API\" is blocked by \"other#4\", which isn't one of these tickets");
         assert_eq!(posts(&fake, slug, "issues").len(), 1, "only the spec");
+    }
+
+    #[test]
+    fn a_blocker_is_named_owner_repo_number_and_dot_segments_are_not_names() {
+        assert_eq!(issue_named(" octo/ext-api#9"), Some(("octo/ext-api".to_string(), 9)));
+        for bad in ["../..#5", "./x#5", "octo/..#5", "octo/x/y#5", "octo/x#0", "octo/x", "x#5", "octo/x y#5"] {
+            assert_eq!(issue_named(bad), None, "{bad}");
+        }
     }
 
     #[test]
