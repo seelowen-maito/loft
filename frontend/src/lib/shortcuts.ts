@@ -171,11 +171,11 @@ export function saveRecent(id: string, storage?: Store) {
   }
 }
 
-type Searchable = { id: string; name: string; title: string; group?: string; project?: string; projects?: string[] };
+type Searchable = { id: string; name: string; group?: string; project?: string; projects?: string[] };
 
 /** The switcher's list. Empty query: the agents opened most recently first, then the rest in their order.
- * Otherwise every word must appear in the name, title, group or a project; names that start with the query come first, then names containing it. */
-export function switcherAgents<T extends Searchable>(agents: T[], query: string, recent: string[]): T[] {
+ * Otherwise every word must appear in the name, Role label (`label`), group or a project; names that start with the query come first, then names containing it. */
+export function switcherAgents<T extends Searchable>(agents: T[], query: string, recent: string[], label: (a: T) => string): T[] {
   const q = query.trim().toLowerCase();
   if (!q) {
     const rank = (a: T) => (recent.includes(a.id) ? recent.indexOf(a.id) : recent.length);
@@ -188,7 +188,7 @@ export function switcherAgents<T extends Searchable>(agents: T[], query: string,
   };
   return agents
     .filter((a) => {
-      const text = [a.name, a.title, a.group ?? "", a.project ?? "", ...(a.projects ?? [])].join(" ").toLowerCase();
+      const text = [a.name, label(a), a.group ?? "", a.project ?? "", ...(a.projects ?? [])].join(" ").toLowerCase();
       return words.every((w) => text.includes(w));
     })
     .map((a, i) => ({ a, i }))

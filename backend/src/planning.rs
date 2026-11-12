@@ -5464,35 +5464,35 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_team_check_goes_by_stored_roles_not_names() {
         let st = state();
-        let add = |name: &str, title: &str, role: &str, project: &str| {
+        let add = |name: &str, role: &str, project: &str| {
             let mut x = crate::tasks::tests::agent(&st, name);
-            (x.title, x.role, x.group) = (title.into(), role.into(), project.into());
+            (x.role, x.group) = (role.into(), project.into());
             st.db.save_agent(&x).unwrap();
             x
         };
         let all = ["dev", "code_reviewer", "qa", "security"];
         assert_eq!(missing_roles(&st, "team-a"), all);
-        add("Lead", "Team lead", "lead", "team-a");
-        add("Dev", "Feature developer", "custom", "team-a");
-        add("Builder", "", "dev", "team-b");
-        assert_eq!(missing_roles(&st, "team-a"), all, "names, titles, the Lead and other projects don't count");
+        add("Lead", "lead", "team-a");
+        add("Dev", "custom", "team-a");
+        add("Builder", "dev", "team-b");
+        assert_eq!(missing_roles(&st, "team-a"), all, "names, the Lead and other projects don't count");
         // A QA engineer is QA: it doesn't make the team's Dev or its other reviewers.
-        add("QA", "QA engineer", "qa", "team-a");
+        add("QA", "qa", "team-a");
         assert_eq!(missing_roles(&st, "team-a"), ["dev", "code_reviewer", "security"]);
-        add("Reviewer", "", "code_reviewer", "team-a");
-        add("Guard", "", "security", "team-a");
+        add("Reviewer", "code_reviewer", "team-a");
+        add("Guard", "security", "team-a");
         // A renamed Dev still counts.
-        let mut dev = add("Dev", "Feature developer", "dev", "team-a");
-        (dev.name, dev.title) = ("Ana".into(), "Frontend".into());
+        let mut dev = add("Dev", "dev", "team-a");
+        dev.name = "Ana".into();
         st.db.save_agent(&dev).unwrap();
         assert!(missing_roles(&st, "team-a").is_empty(), "a full team");
         assert_eq!(missing_roles(&st, " "), all, "no project, no team");
         // A group is one team across its projects; its agents leave their projects' teams.
-        let mut b = add("Web", "", "qa", "team-b");
+        let mut b = add("Web", "qa", "team-b");
         b.group = "Acme".into();
         st.db.save_agent(&b).unwrap();
         for (name, role) in [("Api", "dev"), ("Rev", "code_reviewer"), ("Sec", "security")] {
-            let mut c = add(name, "", role, "team-c");
+            let mut c = add(name, role, "team-c");
             c.group = "Acme".into();
             st.db.save_agent(&c).unwrap();
         }
@@ -5540,12 +5540,13 @@ pub(crate) mod tests {
         let mut ids = vec![];
         for (i, (name, title, lead, role)) in old.iter().enumerate() {
             let mut a = crate::tasks::tests::agent(&st, name);
-            (a.title, a.project, a.interval_minutes) = (title.to_string(), "team".into(), 60 * (i as i64 + 1));
+            (a.project, a.interval_minutes) = ("team".into(), 60 * (i as i64 + 1));
             a.next_run_at = Some(format!("2026-11-0{}T10:00:00Z", i % 9 + 1));
             st.db.save_agent(&a).unwrap();
             let mut raw = serde_json::to_value(&a).unwrap();
             let o = raw.as_object_mut().unwrap();
             o.insert("lead".into(), json!(lead));
+            o.insert("title".into(), json!(title));
             match role {
                 Some(r) => o.insert("role".into(), json!(r)),
                 None => o.remove("role"),

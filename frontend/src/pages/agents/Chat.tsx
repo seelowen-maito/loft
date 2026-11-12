@@ -6,7 +6,7 @@ import { permCard } from "../../lib/pending";
 import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
-import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
+import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
@@ -419,7 +419,7 @@ export function Chat({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="min-w-[7ch] truncate text-[17px] font-medium tracking-tight">{agent.name}</h2>
-            {agent.title && <span className="truncate text-[13px] text-fg-3 max-md:hidden">{agent.title}</span>}
+            <span className="truncate text-[13px] text-fg-3 max-md:hidden">{roleLabel(agent.role)}</span>
             {teamOf(agent) && (
               <HoverTip
                 left

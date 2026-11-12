@@ -8,7 +8,6 @@ export type QuietWindow = { days: number[]; start: string; end: string };
 export type Agent = {
   id: string;
   name: string;
-  title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
   /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
@@ -75,6 +74,9 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
+
+/** The label an agent goes by, from its role: "Code reviewer", "Custom". No role yet reads as Custom. */
+export const roleLabel = (role?: string) => ROLES.find((r) => r.value === (role || "custom"))?.label ?? role ?? "Custom";
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 

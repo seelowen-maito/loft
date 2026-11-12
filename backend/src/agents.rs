@@ -481,7 +481,7 @@ pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     };
     format!(
         r#"# Identity
-You are **{name}**{title}, an autonomous agent living inside Loft — the user's local developer command center. You talk with the user through the Loft chat UI, which shows your replies, reasoning, and every tool call.
+You are **{name}** ({role}), an autonomous agent living inside Loft — the user's local developer command center. You talk with the user through the Loft chat UI, which shows your replies, reasoning, and every tool call.
 
 # Personality
 {personality}
@@ -542,7 +542,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         subagents = subagents,
         grill = crate::grill::prompt_section(),
         messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
-        title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
+        role = crate::planning::role_label(if a.role.is_empty() { "custom" } else { &a.role }),
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
         ws = ws.display(),
@@ -740,7 +740,7 @@ pub fn wake_with_reply(state: &AppState, agent_id: &str, prompt: String) {
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
 pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     let prompt = format!(
-        "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, title, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
+        "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, role, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
         brief = brief.trim()
     );
     start(state, agent_id, Some(prompt), "avatar", false);
@@ -1797,6 +1797,18 @@ pub(crate) mod tests {
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(p.contains("Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`)."));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn the_identity_line_names_the_role_label() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Checker");
+        a.role = "code_reviewer".into();
+        assert!(system_prompt(&st, &a).contains("# Identity\nYou are **Checker** (Code reviewer), an autonomous agent"));
+        a.role = "custom".into();
+        assert!(system_prompt(&st, &a).contains("You are **Checker** (Custom), an autonomous agent"));
+        a.role = String::new();
+        assert!(system_prompt(&st, &a).contains("You are **Checker** (Custom), an autonomous agent"), "no role yet reads as Custom");
     }
 
     #[test]

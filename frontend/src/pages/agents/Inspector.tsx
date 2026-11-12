@@ -103,12 +103,12 @@ export const FRESH_CONTEXT_HINT =
   "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k (the smart zone) or a higher threshold only once its context reaches it. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
 
 
-type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "title" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; groups: string[]; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
-      name: agent.name, title: agent.title, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
+      name: agent.name, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
       model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", fresh_context: agent.fresh_context ?? "above_80k", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
@@ -148,14 +148,9 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Name">
-          <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
-        </Field>
-        <Field label="Title">
-          <input className="input" value={draft.title} placeholder="e.g. Release captain" onChange={(e) => set("title", e.target.value)} />
-        </Field>
-      </div>
+      <Field label="Name">
+        <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
+      </Field>
 
       <Field label="Group" hint="Its team, such as Acme: agents in the same group are listed together and share one Lead. Empty: no team, so it can't be Lead.">
         <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />

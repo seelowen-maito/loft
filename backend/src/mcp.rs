@@ -151,7 +151,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
+            "description": "List the other Loft agents: id, name, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -400,7 +400,6 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                     .iter()
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
-                        let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let group = if a.group.trim().is_empty() { String::new() } else { format!(" · group {}", a.group.trim()) };
                         let project = match a.projects.as_slice() {
                             [] if a.project.trim().is_empty() => String::new(),
@@ -413,7 +412,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{group}{project}{role} · {}", a.name, title, a.id, doing)
+                        format!("- {} · id {}{group}{project}{role} · {}", a.name, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -637,6 +636,7 @@ mod tests {
         let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
         assert!(line("Checker").contains(" · role Code reviewer · "), "{t}");
         assert!(line("Plain").contains(" · role Custom · "), "{t}");
+        assert!(line("Checker").starts_with("- Checker · id "), "the name, then no title: {t}");
     }
 
     #[tokio::test]

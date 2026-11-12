@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
-import { api, type Agent, type IssueDelivery, type Task } from "../lib/api";
+import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
@@ -34,7 +34,7 @@ function AgentSelect({ agents, value, onChange, placeholder }: { agents: Agent[]
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13px]">
       <option value="">{placeholder}</option>
-      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}{a.title ? ` · ${a.title}` : ""}</option>)}
+      {agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {roleLabel(a.role)}</option>)}
     </select>
   );
 }
