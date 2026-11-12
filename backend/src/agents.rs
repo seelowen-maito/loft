@@ -876,7 +876,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         }
         if rt.running.contains_key(agent_id) {
             if throwaway {
-                rt.redraw_queued.insert(agent_id.to_string());
+                // One drawing run at a time: a Redraw already running or queued covers this click.
+                if !rt.redrawing.contains(agent_id) {
+                    rt.redraw_queued.insert(agent_id.to_string());
+                }
                 // It waits for the run as it is: background work the agent waits on isn't stopped for it.
                 return;
             } else if trigger == "grill" {
@@ -900,6 +903,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         }
         let kill = Arc::new(Notify::new());
         rt.running.insert(agent_id.to_string(), kill.clone());
+        if throwaway {
+            rt.redrawing.insert(agent_id.to_string());
+        }
         if let Some(w) = delivery {
             rt.delivery_running.entry(agent_id.to_string()).or_default().push(w);
         }
@@ -942,6 +948,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             crate::delivery::run_ended(&state, &agent_id, failed).await;
             let (next, delivered) = {
                 let mut rt = state.rt.lock().unwrap();
+                rt.redrawing.remove(&agent_id);
                 // The run that takes the queue delivers its agent messages.
                 let delivered = rt.queued_messages.remove(&agent_id).is_some();
                 let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
@@ -956,7 +963,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     }
                     (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
                     // A Redraw waits for everything else.
-                    _ if rt.redraw_queued.remove(&agent_id) => Some((REDRAW_PROMPT.to_string(), "avatar", false, true)),
+                    _ if rt.redraw_queued.remove(&agent_id) => {
+                        rt.redrawing.insert(agent_id.clone());
+                        Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
+                    }
                     _ => {
                         // Saved before the run stops counting as running, so a restart keeps the idle time.
                         let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
@@ -3166,6 +3176,24 @@ esac
         assert!(!log.contains("was stopped when new messages arrived"), "{log}");
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(!msgs.iter().any(|m| m.content.contains("Stopped background work")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clicking_redraw_again_while_it_draws_draws_once() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(prompts(&st, &a.id).matches("redraw your sticker").count(), 1);
+
+        // Once it has drawn, Redraw draws again.
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(prompts(&st, &a.id).matches("redraw your sticker").count(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

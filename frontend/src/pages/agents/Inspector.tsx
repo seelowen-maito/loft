@@ -141,7 +141,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       <div className="flex items-center gap-4">
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
-          <button className="btn" onClick={() => api.redrawAvatar(agent.id).catch((e) => setErr((e as Error).message))}>
+          <button
+            className="btn"
+            // One drawing run at a time: a second click would pay for another.
+            disabled={agent.status === "running" && agent.status_text === "Drawing its avatar…"}
+            onClick={() => api.redrawAvatar(agent.id).catch((e) => setErr((e as Error).message))}
+          >
             <Paintbrush className="size-3.5" /> Redraw
           </button>
           <p className="text-[11.5px] leading-snug text-fg-3">{agent.name} draws a new sticker from its role, instructions and main project. Its chat and context stay as they are.</p>
