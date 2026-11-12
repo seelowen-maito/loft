@@ -1743,6 +1743,11 @@ pub(crate) mod tests {
         let (plain, _) = crate::tasks::create(&st, &json!({ "title": "Plain", "project": "pub-plain" }), "user").unwrap();
         let err = publish_route(State(st.clone()), axum::extract::Path(plain.id.clone())).await.unwrap_err();
         assert!(err.1.contains("isn't a git repo, so there's no GitHub repo to publish it to"), "{}", err.1);
+        // A folder of several repos says why, in the words of the hint.
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("pub-many/a/.git")).unwrap();
+        let (many, _) = crate::tasks::create(&st, &json!({ "title": "Many", "project": "pub-many" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(many.id.clone())).await.unwrap_err();
+        assert!(err.1.starts_with("pub-many holds several repos, so issues and Deliveries need one of them"), "{}", err.1);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(st.db.get_task(&plain.id).unwrap().unwrap().github.is_none());
         assert_eq!(fake.seen("/repos/").len(), 1, "only the one auto-published issue");

@@ -632,7 +632,7 @@ fn refs(d: &Delivery, t: &DeliveryTicket) -> String {
 fn project_dir(state: &AppState, d: &Delivery) -> Result<std::path::PathBuf, String> {
     crate::repos::project_dir(state, &d.project)
         .filter(|dir| crate::repos::own_git_dir(dir))
-        .ok_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", d.project.trim()))
+        .ok_or_else(|| crate::repos::project_hint(state, &d.project).unwrap_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", d.project.trim())))
 }
 
 /// The project's folder as briefs name it.

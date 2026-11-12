@@ -210,7 +210,7 @@ pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
 }
 
 /// A folder holding several repos is allowed, but issues and Deliveries need one repo: a hint, not a problem.
-fn project_hint(state: &AppState, project: &str) -> Option<String> {
+pub(crate) fn project_hint(state: &AppState, project: &str) -> Option<String> {
     let dir = project_dir(state, project).filter(|d| d.is_dir())?;
     let holds_repos = !dir.join(".git").exists()
         && std::fs::read_dir(&dir).is_ok_and(|rd| rd.flatten().any(|e| e.path().is_dir() && e.path().join(".git").exists()));
@@ -261,8 +261,8 @@ pub async fn github_repo(state: &AppState, project: &str) -> Result<String, Stri
         return Err(format!("The project folder {} isn't a git repo", state.settings.boot().projects_dir.join(project).display()));
     };
     if !dir.join(".git").exists() {
-        if project_hint(state, project).is_some() {
-            return Err(format!("The project folder {} holds several repos, not one git repo", dir.display()));
+        if let Some(hint) = project_hint(state, project) {
+            return Err(hint);
         }
         return Err(format!("The project folder {} isn't a git repo", dir.display()));
     }
@@ -811,7 +811,7 @@ mod tests {
         // A folder of several repos says so, instead of "isn't a git repo".
         std::fs::create_dir_all(projects.join("many/a/.git")).unwrap();
         std::fs::create_dir_all(projects.join("plain")).unwrap();
-        assert!(super::github_repo(&st, "many").await.unwrap_err().contains("holds several repos, not one git repo"));
+        assert!(super::github_repo(&st, "many").await.unwrap_err().ends_with("many holds several repos, so issues and Deliveries need one of them"));
         assert!(super::github_repo(&st, "plain").await.unwrap_err().ends_with("plain isn't a git repo"));
         // A real repo inside the projects folder still works.
         let real = projects.join("real");
