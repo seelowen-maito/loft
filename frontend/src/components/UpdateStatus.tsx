@@ -3,6 +3,20 @@ import { api, type UpdateStatus as Status } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
 
+/** After a restart the old status is stale until the new process answers: ask again, a few times. */
+async function refetchUntilNew(set: (s: Status) => void) {
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const s = await api.update();
+      set(s);
+      if (s.phase !== "restart") return;
+    } catch {
+      /* still restarting */
+    }
+  }
+}
+
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
   const [s, setS] = useState<Status | null>(null);
@@ -23,7 +37,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
     up_to_date: ["bg-good", "up to date", `Running ${s.current}, the latest commit.`],
     waiting: ["bg-warn animate-pulse-soft", "update available, waiting for agents", `${s.latest} is available. Installs once ${agents} finish.`],
     updating: ["bg-warn animate-pulse-soft", "updating…", `Building ${s.latest}; loft restarts when done.`],
-    restart: ["bg-warn animate-pulse-soft", "built, restart to run it", s.why ?? "A newer build is on disk than the one running."],
+    restart: ["bg-warn animate-pulse-soft", "restart to update", s.why ?? "A newer build is on disk than the one running."],
     error: ["bg-bad", "update failed", s.error ?? "Update failed."],
   };
   // Hidden when disabled, and for anything unexpected (e.g. an older backend without /api/update).
@@ -33,7 +47,11 @@ export function UpdateStatus({ live }: { live: boolean }) {
 
   const restart = () => {
     setBusy(true);
-    api.restart().catch((e) => alert((e as Error).message)).finally(() => setBusy(false));
+    api
+      .restart()
+      .then(() => refetchUntilNew(setS))
+      .catch((e) => alert((e as Error).message))
+      .finally(() => setBusy(false));
   };
   return (
     <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-3" title={title}>

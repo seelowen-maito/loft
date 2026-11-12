@@ -14,6 +14,8 @@ use crate::state::{AppState, Event};
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5);
 /// How soon turning auto-update on in Settings takes effect.
+const RESTART_BACKOFF: Duration = Duration::from_secs(30);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(600);
 const OFF_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -186,6 +188,9 @@ pub async fn updater(state: AppState, root: PathBuf) {
     let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
     // A commit whose build failed; skipped until upstream moves on.
     let mut failed: Option<String> = None;
+    // After a failed exec: when to try again, and how long to wait after the next failure.
+    let mut retry_at: Option<std::time::Instant> = None;
+    let mut backoff = RESTART_BACKOFF;
     loop {
         if !state.settings.get().auto_update {
             set(&state, |s| *s = UpdateStatus::default());
@@ -206,6 +211,13 @@ pub async fn updater(state: AppState, root: PathBuf) {
         if newer_build_on_disk(started) {
             let n = running_agents(&state);
             set(&state, |s| *s = restart_status(&head, n, s.why.take()));
+            // Restart by itself once agents are idle, as an update does; `restart` only returns when exec failed.
+            if n == 0 && retry_at.is_none_or(|t| std::time::Instant::now() >= t) {
+                before_restart(&state).await;
+                restart(&state);
+                retry_at = Some(std::time::Instant::now() + backoff);
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
             tokio::time::sleep(IDLE_POLL).await;
             continue;
         }
@@ -249,10 +261,11 @@ pub async fn updater(state: AppState, root: PathBuf) {
 }
 
 /// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
-/// doesn't check upstream while in this phase: the next update comes after the restart.
+/// doesn't check upstream in this phase (the commit it would compare is the old one, so it would rebuild what's
+/// already on disk): it restarts when idle, and the new process checks.
 fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
     let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
-        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restart is refused until they finish", if running_agents == 1 { " is" } else { "s are" }))
+        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }))
     });
     UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
 }
