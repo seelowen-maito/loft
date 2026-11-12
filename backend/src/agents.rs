@@ -877,6 +877,8 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         if rt.running.contains_key(agent_id) {
             if throwaway {
                 rt.redraw_queued.insert(agent_id.to_string());
+                // It waits for the run as it is: background work the agent waits on isn't stopped for it.
+                return;
             } else if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
@@ -3141,6 +3143,29 @@ esac
         assert!(prompts.find("busy").unwrap() < prompts.find("redraw your sticker").unwrap(), "{prompts}");
         assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s1\n", "only the busy run resumed the Session");
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_does_not_stop_background_work_the_agent_waits_on() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("start the suite, linger".into()), "user");
+        until("the reply", 10, || status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite")).await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        tokio::time::sleep(EXIT_GRACE * 3).await;
+        assert!(is_running(&st, &a.id) && !ws.join("terminated").exists(), "the background work keeps going");
+        assert_eq!(prompts(&st, &a.id).matches("\n---\n").count(), 1, "no run starts before the busy one ends");
+        assert!(status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite"));
+
+        stop(&st, &a.id);
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        let log = prompts(&st, &a.id);
+        assert_eq!(log.matches("\n---\n").count(), 2, "only the Redraw ran after it: {log}");
+        assert!(!log.contains("was stopped when new messages arrived"), "{log}");
+        let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
+        assert!(!msgs.iter().any(|m| m.content.contains("Stopped background work")));
     }
 
     #[tokio::test(flavor = "multi_thread")]
