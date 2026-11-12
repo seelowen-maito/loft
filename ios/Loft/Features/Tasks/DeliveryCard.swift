@@ -9,6 +9,8 @@ struct DeliveryCardSection: View {
     let task: HBTask
     @State private var busy: IssueDeliveryAction?
     @State private var said: (ok: Bool, text: String)?
+    /// Start delivery was tapped on a spec whose tickets wait on another spec: the warning shows in its place.
+    @State private var warn = false
 
     var body: some View {
         let d = store.deliveries[task.id]
@@ -40,7 +42,12 @@ struct DeliveryCardSection: View {
                 }
             }
             if d?.started != true {
-                button(.start, "Start delivery", "Starting delivery…", symbol: "play.fill")
+                if warn, let waits = d?.waitsOn, !waits.isEmpty {
+                    StartWarning(waits: waits, onStart: { warn = false; run(.start) }, onCancel: { warn = false },
+                                 onStarted: { Task { try? await store.loadDelivery(task.id) } })
+                } else {
+                    button(.start, "Start delivery", "Starting delivery…", symbol: "play.fill")
+                }
             }
             if d?.showsPause == true {
                 button(.pause, "Pause", "Pausing…", symbol: "pause.fill")
@@ -87,7 +94,9 @@ struct DeliveryCardSection: View {
 
     /// A card button: a spinner in place of its icon while its request runs, and every button disabled meanwhile.
     private func button(_ action: IssueDeliveryAction, _ title: String, _ pendingTitle: String, symbol: String) -> some View {
-        Button { run(action) } label: {
+        Button {
+            if action == .start, store.deliveries[task.id]?.waitsOn?.isEmpty == false { warn = true; said = nil } else { run(action) }
+        } label: {
             Label {
                 Text(busy == action ? pendingTitle : title)
             } icon: {
