@@ -51,6 +51,8 @@ export type Agent = {
   /** The agent that created this one, if an agent did. */
   created_by?: string | null;
   running?: boolean;
+  /** A Redraw waits behind its current run or is drawing now. Missing from servers before Redraw showed it. */
+  redrawing?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */
   last_output_at?: string | null;

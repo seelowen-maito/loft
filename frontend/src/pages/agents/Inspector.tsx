@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
+import { pendingClick, redrawBusy, redrawClick, type RedrawClick } from "../../lib/redraw";
 import { cx, fmtBytes, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
@@ -116,6 +117,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const [draft, setDraft] = useState<Draft>(initial);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).
+  const [click, setClick] = useState<RedrawClick>(null);
+  useEffect(() => {
+    if (click && !pendingClick(click, agent)) setClick(null);
+  }, [click, agent]);
+  const redrawing = redrawBusy(agent, click);
   const [notice, setNotice] = useState<string | null>(null);
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
@@ -144,10 +151,16 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
           <button
             className="btn"
             // One drawing run at a time: a second click would pay for another.
-            disabled={agent.status === "running" && agent.status_text === "Drawing its avatar…"}
-            onClick={() => api.redrawAvatar(agent.id).catch((e) => setErr((e as Error).message))}
+            disabled={redrawing}
+            onClick={() => {
+              setClick(redrawClick(agent));
+              api.redrawAvatar(agent.id).catch((e) => {
+                setClick(null);
+                setErr((e as Error).message);
+              });
+            }}
           >
-            <Paintbrush className="size-3.5" /> Redraw
+            {redrawing ? <><Loader2 className="size-3.5 animate-spin" /> Drawing…</> : <><Paintbrush className="size-3.5" /> Redraw</>}
           </button>
           <p className="text-[11.5px] leading-snug text-fg-3">{agent.name} draws a new sticker from its role, instructions and main project. Its chat and context stay as they are.</p>
         </div>

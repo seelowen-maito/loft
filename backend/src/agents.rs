@@ -94,6 +94,8 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
     v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
     v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(&vec![], |q| q));
+    // A Redraw waiting behind the current run or drawing now: the Redraw button shows it's busy.
+    v["redrawing"] = json!(rt.redraw_queued.contains(agent_id) || rt.redrawing.contains(agent_id));
 }
 
 /// Pushes the agent's run fields after they changed outside a database update.
@@ -877,10 +879,13 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         if rt.running.contains_key(agent_id) {
             if throwaway {
                 // One drawing run at a time: a Redraw already running or queued covers this click.
-                if !rt.redrawing.contains(agent_id) {
-                    rt.redraw_queued.insert(agent_id.to_string());
-                }
+                let queued = !rt.redrawing.contains(agent_id) && rt.redraw_queued.insert(agent_id.to_string());
                 // It waits for the run as it is: background work the agent waits on isn't stopped for it.
+                drop(rt);
+                if queued {
+                    // Clients hear it's queued (`redrawing`) before the run it waits for ends.
+                    emit_run(state, agent_id);
+                }
                 return;
             } else if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
@@ -946,9 +951,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 }
             };
             crate::delivery::run_ended(&state, &agent_id, failed).await;
-            let (next, delivered) = {
+            let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
-                rt.redrawing.remove(&agent_id);
+                let drew = rt.redrawing.remove(&agent_id);
                 // The run that takes the queue delivers its agent messages.
                 let delivered = rt.queued_messages.remove(&agent_id).is_some();
                 let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
@@ -974,9 +979,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                         None
                     }
                 };
-                (next, delivered)
+                let push = delivered || (drew && next.is_some());
+                (next, push)
             };
-            if delivered {
+            // Delivered agent messages leave `queued_messages`; a Redraw that ended with more work queued after it
+            // turns `redrawing` false now, not when the next run ends (with nothing queued, the event after the loop says it).
+            if push {
                 emit_run(&state, &agent_id);
             }
             match next {
@@ -2717,7 +2725,7 @@ esac
         let r = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert!(r.is_ok());
         until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
-        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [], "queued_messages": [] }));
+        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [], "queued_messages": [], "redrawing": false }));
         let log = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
         assert!(log.contains("restarted your last run (it was waiting on Run the QA suite)"), "{log}");
     }
@@ -3131,6 +3139,73 @@ esac
         // The next run resumes the agent's own Session (the Redraw's system prompt is the first).
         run(&st, &a.id, "hello", 2).await;
         assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s-own\n");
+    }
+
+    async fn redrawing(st: &AppState, id: &str) -> bool {
+        let got = crate::api::get_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string())).await.ok().unwrap().0;
+        got["redrawing"].as_bool().unwrap()
+    }
+
+    /// The last `redrawing` an agent event for `id` carried, of those received so far.
+    fn heard_redrawing(events: &mut tokio::sync::broadcast::Receiver<crate::state::Event>, id: &str) -> Option<bool> {
+        let mut last = None;
+        while let Ok(ev) = events.try_recv() {
+            if let crate::state::Event::AgentUpdated { agent } = ev
+                && agent["id"] == id {
+                    last = agent["redrawing"].as_bool();
+                }
+        }
+        last
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_agent_says_redrawing_while_a_redraw_waits_or_draws() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "hello", 1).await;
+        assert!(!redrawing(&st, &a.id).await);
+
+        // Queued behind a busy run: the agent JSON and an event say so straight away.
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the busy run", 10, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("busy")).await;
+        let mut events = st.events.subscribe();
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        assert!(redrawing(&st, &a.id).await, "a queued Redraw counts");
+        assert_eq!(heard_redrawing(&mut events, &a.id), Some(true), "other tabs hear it's queued");
+
+        // Drawing: still true.
+        stop(&st, &a.id);
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        assert!(redrawing(&st, &a.id).await, "a Redraw drawing counts");
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert!(!redrawing(&st, &a.id).await, "false once it has drawn");
+        assert_eq!(heard_redrawing(&mut events, &a.id), Some(false), "the last event says it's done");
+
+        // A Redraw that ends without a sticker (stopped) clears it too.
+        std::fs::remove_file(ws.join("go")).unwrap();
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        assert!(redrawing(&st, &a.id).await);
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(!redrawing(&st, &a.id).await, "false once a stopped Redraw ends");
+        assert_eq!(heard_redrawing(&mut events, &a.id), Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_redraw_ending_with_work_queued_after_it_says_so_before_that_work_ends() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        let _ = send(&st, &a.id, "after").await.ok().unwrap();
+        let mut events = st.events.subscribe();
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the next run", 10, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
+        assert!(!redrawing(&st, &a.id).await);
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|ev| matches!(&ev, crate::state::Event::AgentUpdated { agent } if agent["id"] == a.id && agent["redrawing"] == false)));
+        idle(&st, &a.id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
