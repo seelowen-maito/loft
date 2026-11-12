@@ -473,12 +473,12 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error" | "blocked";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
-  /** For "restart": why the restart hasn't happened. */
+  /** For "restart": why the restart hasn't happened. For "blocked": why the checkout can't update. */
   why: string | null;
 };
 
