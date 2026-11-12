@@ -2840,13 +2840,18 @@ pub(crate) mod tests {
         read_issue(&fake, "octo/ext-free", 9, "open");
         let (a, m) = planned(&st, &fake, "dl-free", vec![ticket("Store", &[]), ticket("API", &["octo/ext-free#9"])]).await;
         let lead = busy(&st, "Lofty", "dl-free", "lead");
-        busy(&st, "Builder", "dl-free", "dev");
+        let dev = busy(&st, "Builder", "dl-free", "dev");
         press(&st, &a, &m).await.unwrap();
         let wakes = woken(&st, &lead).len();
         // Store is started but its Dev reported waiting: that Dev is free, so the Lead hands out API.
-        crate::delivery::update(&st, slug, 40, |d| (d.tickets[0].state, d.tickets[0].wait_for) = ("started".into(), "#99".into()));
+        crate::delivery::update(&st, slug, 40, |d| {
+            d.tickets[0].state = "started".into();
+            (d.tickets[0].agent, d.tickets[0].wait_for, d.tickets[0].wait_reason) = (dev.id.clone(), "#99".into(), "Which schema?".into());
+        });
         crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
         assert_eq!(woken(&st, &lead).len(), wakes + 1);
+        let brief = woken(&st, &lead).pop().unwrap();
+        assert!(brief.contains("Builder: free (#41 waiting on #99: Which schema?.)"), "{brief}");
         // In review with a stale wait_for, it still holds the wake back.
         crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "review".into());
         crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;

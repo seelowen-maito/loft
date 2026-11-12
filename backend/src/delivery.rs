@@ -835,8 +835,13 @@ fn lead_brief(state: &AppState, d: &Delivery, why: &str) -> String {
         .iter()
         .filter(|a| is_team_dev(d, a))
         .map(|a| {
-            let on: Vec<String> = d.tickets.iter().filter(|t| t.agent == a.id && matches!(t.state.as_str(), "started" | "review" | "changes" | "closing" | "needs_human")).map(|t| format!("{} ({})", tag(d, t), t.state)).collect();
-            format!("  - {}: {}", a.name, if on.is_empty() { "free".to_string() } else { format!("on {}", on.join(", ")) })
+            let mine = d.tickets.iter().filter(|t| t.agent == a.id);
+            // A ticket whose Dev reported waiting (`wait_ticket`) isn't work: that Dev is free.
+            let working = |t: &&DeliveryTicket| matches!(t.state.as_str(), "review" | "changes" | "closing" | "needs_human") || t.state == "started" && t.wait_for.is_empty();
+            let on: Vec<String> = mine.clone().filter(working).map(|t| format!("{} ({})", tag(d, t), t.state)).collect();
+            let waits: Vec<String> = mine.filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| format!("{} {}", tag(d, t), waiting_text(state, d, t))).collect();
+            let free = if waits.is_empty() { "free".to_string() } else { format!("free ({})", waits.join(", ")) };
+            format!("  - {}: {}", a.name, if on.is_empty() { free } else { format!("on {}", on.join(", ")) })
         })
         .collect();
     format!(
