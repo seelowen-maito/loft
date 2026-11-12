@@ -54,9 +54,15 @@ pub fn newer_build_on_disk(started: SystemTime) -> bool {
     std::fs::metadata(crate::signing::build_of(&exe)).and_then(|m| m.modified()).is_ok_and(|t| t > started)
 }
 
-/// True while an update is queued or being installed; the scheduler holds autonomous wake-ups then.
+/// True while an update is queued, being installed or about to be restarted into; the scheduler holds
+/// autonomous wake-ups then. Not after a failed exec: that would hold them for as long as the retries fail.
 pub fn pending(state: &AppState) -> bool {
-    matches!(state.update.lock().unwrap().phase, Phase::Waiting | Phase::Updating)
+    let s = state.update.lock().unwrap();
+    match s.phase {
+        Phase::Waiting | Phase::Updating => true,
+        Phase::Restart => !s.why.as_deref().is_some_and(|w| w.starts_with("restart failed")),
+        _ => false,
+    }
 }
 
 fn set(state: &AppState, f: impl FnOnce(&mut UpdateStatus)) {
@@ -306,6 +312,19 @@ mod tests {
         // Built from a checkout, so the embedded commit is a full sha; it's what `current` shows (7 chars).
         assert_eq!(super::BUILT_FROM.len(), 40, "{:?}", super::BUILT_FROM);
         assert_eq!(super::short(super::BUILT_FROM).len(), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wake_ups_are_held_until_the_restart_unless_it_failed() {
+        let st = crate::tasks::tests::state();
+        let phase = |p: super::Phase, why: Option<&str>| {
+            *st.update.lock().unwrap() = super::UpdateStatus { phase: p, why: why.map(Into::into), ..Default::default() };
+            super::pending(&st)
+        };
+        assert!(phase(super::Phase::Restart, None));
+        assert!(phase(super::Phase::Restart, Some("1 agent is running; restarts when they finish")));
+        assert!(!phase(super::Phase::Restart, Some("restart failed: boom")));
+        assert!(!phase(super::Phase::UpToDate, None));
     }
 
     #[test]
