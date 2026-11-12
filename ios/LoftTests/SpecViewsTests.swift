@@ -113,6 +113,8 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertNil(SpecViews.waitingOnYouLine([]))
         XCTAssertEqual(SpecViews.waitingOnYouLine([47]), "Waiting on you: #47")
         XCTAssertEqual(SpecViews.ticketLabel("needs_human"), "Waiting on you")
+        XCTAssertEqual(SpecViews.ticketLabel("open", waitingOn: ["octo/api#12"]), "waiting on octo/api#12")
+        XCTAssertEqual(SpecViews.ticketLabel("started", waitingOn: ["octo/api#12"]), "building", "only an open ticket waits")
     }
 
     /// #181: the summary names every started ticket's agent and the ready tickets waiting for the Lead.
@@ -122,5 +124,13 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(d.tickets.map(\.agentName), ["Dev 1", "Dev 2", nil])
         XCTAssertEqual(d.waitingForLead, [3])
         XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.current), [true, true, false], "every running ticket is current")
+    }
+
+    /// #434: the summary's tickets carry what they wait on in another spec, and the spec's detail labels them.
+    func testDecodesWhatTicketsWaitOnInAnotherSpec() throws {
+        let json = ###"[{"state":"planned","agent_id":null,"agent_name":null,"current":null,"repo":"o/r","spec":9,"spec_id":null,"local":false,"waits_on":[{"blocker":"o/api#12","delivery":{"repo":"o/api","spec":10,"started":false,"issue_id":"i10"}}],"tickets":[{"number":1,"id":null,"title":"A","state":"open","skipped":"","waiting_on":["o/api#12"],"agent_id":null,"agent_name":null,"verdicts":{}}]}]"###
+        let d = try JSONCoding.decoder.decode([DeliverySummary].self, from: Data(json.utf8))[0]
+        XCTAssertEqual(d.waitsOn?.first?.delivery?.issueId, "i10")
+        XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.waitingOn), [["o/api#12"]])
     }
 }

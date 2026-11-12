@@ -15,6 +15,8 @@ struct DeliverySummary: Codable, Hashable {
     /// Ready tickets nobody has yet, while the Lead hands them out.
     var waitingForLead: [Int]? = nil
     var waitingOnYou: [Int]? = nil
+    /// What its tickets wait on outside it.
+    var waitsOn: [WaitsOn]? = nil
 
     struct Current: Codable, Hashable { var number: Int; var title: String }
     struct Ticket: Codable, Hashable {
@@ -27,6 +29,8 @@ struct DeliverySummary: Codable, Hashable {
         var agentName: String? = nil
         /// Review role (qa, security…) to `pass` or still waiting.
         var verdicts: [String: String]? = nil
+        /// Open tickets in another spec or repo it waits on (`owner/repo#n`).
+        var waitingOn: [String]? = nil
     }
 }
 
@@ -126,6 +130,7 @@ enum SpecViews {
         var taskId: String?
         var verdicts: [String: String]
         var current: Bool
+        var waitingOn: [String] = []
     }
 
     /// A spec's tickets: its Delivery's when it has them, else its sub-issues in Loft (the web's `ticketsOf`).
@@ -135,7 +140,7 @@ enum SpecViews {
                 let own = t.id.flatMap { id in tasks.first { $0.id == id } }
                     ?? tasks.first { x in spec.github.map { x.github?.repo == $0.repo && x.github?.number == t.number } ?? false }
                 return TicketLine(id: "\(t.number)", number: own?.github?.number ?? t.number, title: t.title, state: t.state,
-                                  taskId: own?.id, verdicts: t.verdicts ?? [:], current: t.agentName != nil)
+                                  taskId: own?.id, verdicts: t.verdicts ?? [:], current: t.agentName != nil, waitingOn: t.waitingOn ?? [])
             }
         }
         return tasks.filter { $0.parentId == spec.id && $0.state != .cancelled }.map { x in
@@ -144,9 +149,11 @@ enum SpecViews {
         }
     }
 
-    /// A ticket's state in a few words (the web's `ticketLabel`).
-    static func ticketLabel(_ state: String) -> String {
-        switch state {
+    /// A ticket's state in a few words (the web's `ticketLabel`): an open one waiting on tickets in another spec
+    /// says which.
+    static func ticketLabel(_ state: String, waitingOn: [String] = []) -> String {
+        if state == "open" && !waitingOn.isEmpty { return "waiting on " + waitingOn.joined(separator: ", ") }
+        return switch state {
         case "closed": "done"
         case "started": "building"
         case "review": "in review"

@@ -168,6 +168,8 @@ fn app(state: &AppState, dist: &std::path::Path) -> Router {
         .route("/mcp/{agent_id}", post(mcp::handle).layer(axum::middleware::from_fn(guard::local_host)))
         // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
         .route("/kill/{agent_id}", post(processes::handle).layer(axum::middleware::from_fn(guard::local_host)))
+        // The Bash hook asking before an agent changes a user's checkout (kill_guard.rs). JSON only, likewise.
+        .route("/guard/{agent_id}", post(kill_guard::handle).layer(axum::middleware::from_fn(guard::local_host)))
         // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.

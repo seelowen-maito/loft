@@ -2834,6 +2834,39 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_blocker_closing_wakes_the_lead_while_the_only_ticket_in_flight_waits() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/dl-free";
+        read_issue(&fake, "octo/ext-free", 9, "open");
+        let (a, m) = planned(&st, &fake, "dl-free", vec![ticket("Store", &[]), ticket("API", &["octo/ext-free#9"])]).await;
+        let lead = busy(&st, "Lofty", "dl-free", "lead");
+        let dev = busy(&st, "Builder", "dl-free", "dev");
+        press(&st, &a, &m).await.unwrap();
+        let wakes = woken(&st, &lead).len();
+        // Store is started but its Dev reported waiting: that Dev is free, so the Lead hands out API.
+        crate::delivery::update(&st, slug, 40, |d| {
+            d.tickets[0].state = "started".into();
+            (d.tickets[0].agent, d.tickets[0].wait_for, d.tickets[0].wait_reason) = (dev.id.clone(), "#99".into(), "Which schema?".into());
+        });
+        crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
+        assert_eq!(woken(&st, &lead).len(), wakes + 1);
+        let brief = woken(&st, &lead).pop().unwrap();
+        assert!(brief.contains("Builder: free (#41 waiting on #99: Which schema?)"), "{brief}");
+        // In review with a stale wait_for, it still holds the wake back.
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "review".into());
+        crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
+        assert_eq!(woken(&st, &lead).len(), wakes + 1);
+        crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "started".into());
+        // Building Store instead keeps the Delivery going: the Lead isn't woken.
+        crate::delivery::update(&st, slug, 40, |d| {
+            d.tickets[0].wait_for = String::new();
+            d.tickets[1].waiting_on = vec!["octo/ext-free#9".into()];
+        });
+        crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
+        assert_eq!(woken(&st, &lead).len(), wakes + 1);
+    }
+
+    #[tokio::test]
     async fn starting_a_delivery_that_only_waits_says_what_for() {
         let (fake, st) = (fake_github(), state());
         read_issue(&fake, "octo/ext-only", 5, "open");

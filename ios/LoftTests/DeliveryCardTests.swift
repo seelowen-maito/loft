@@ -36,6 +36,35 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertEqual(SpecViews.waitingLine(d.waitingForLead), "Waiting for the Lead to assign #343")
     }
 
+    /// #434: a spec whose tickets wait on tickets in another spec: what they wait on, and which spec to start first.
+    func testDecodesWhatItsTicketsWaitOnAndWhichSpecToStartFirst() throws {
+        let d = try delivery(#"""
+        {"state":"planned","started":false,"agent_id":null,"agent_name":null,"pr":null,"spec":true,"current":null,
+         "tickets":[{"number":5,"title":"Screen","state":"open","skipped":"","waiting_on":["octo/api#12","octo/api#13"]},
+                    {"number":6,"title":"Docs","state":"open","skipped":"","waiting_on":[]}],
+         "waits_on":[{"blocker":"octo/api#12","delivery":{"repo":"octo/api","spec":10,"started":false,"issue_id":"api10"}},
+                     {"blocker":"octo/api#13","delivery":{"repo":"octo/api","spec":10,"started":false,"issue_id":"api10"}},
+                     {"blocker":"octo/web#3","delivery":{"repo":"octo/web","spec":1,"started":true,"issue_id":"web1"}},
+                     {"blocker":"octo/x#4","delivery":{"repo":"octo/x","spec":2,"started":false,"issue_id":null}},
+                     {"blocker":"octo/y#5","delivery":null}]}
+        """#)
+        XCTAssertEqual(d.tickets?.map(\.waitingOn), [["octo/api#12", "octo/api#13"], []])
+        XCTAssertEqual(d.waitsOn?.map(\.blocker), ["octo/api#12", "octo/api#13", "octo/web#3", "octo/x#4", "octo/y#5"])
+        XCTAssertEqual(d.waitsOn?.first?.delivery?.issueId, "api10")
+        XCTAssertNil(d.waitsOn?.last?.delivery)
+        // Once each, only specs not started yet, and only those Loft can start (with a Loft issue).
+        XCTAssertEqual(WaitsOn.specsToStartFirst(d.waitsOn), [.init(repo: "octo/api", spec: 10, issueId: "api10")])
+        XCTAssertEqual(WaitsOn.specsToStartFirst(nil), [])
+    }
+
+    func testTheStartWarningReadsLikeTheWebs() throws {
+        let one = [WaitsOn(blocker: "octo/api#12", delivery: nil)]
+        XCTAssertEqual(StartWarning.text(one, canStartFirst: true),
+                       "Tickets of this spec wait on octo/api#12, which isn't done yet. Start the spec that builds it first, or start this one and let those tickets wait.")
+        XCTAssertEqual(StartWarning.text(one + [WaitsOn(blocker: "octo/web#3", delivery: nil)], canStartFirst: false),
+                       "Tickets of this spec wait on octo/api#12, octo/web#3, which aren't done yet. Start anyway and those tickets wait until it closes.")
+    }
+
     func testEachStateReadsLikeTheWebCard() throws {
         func line(_ state: String, _ extra: String = "") throws -> String? {
             try delivery(#"{"state":"\#(state)","started":\#(state != "planned"),"agent_id":null,"agent_name":null,"pr":null\#(extra)}"#).line?.text
