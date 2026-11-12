@@ -4,7 +4,7 @@ import XCTest
 /// Scriptable server for store tests.
 final class MockAPI: LoftAPI, @unchecked Sendable {
     let baseURL = URL(string: "https://mock.invalid")!
-    var agentList: [Agent] = [Agent(id: "a1", name: "Orchestrator Bot", title: nil, project: "p", model: nil, effort: nil, permissionMode: nil,
+    var agentList: [Agent] = [Agent(id: "a1", name: "Orchestrator Bot", project: "p", model: nil, effort: nil, permissionMode: nil,
                                     intervalMinutes: 0, status: "idle", statusText: nil, running: false, lastRunAt: nil, nextRunAt: nil,
                                     createdAt: nil, totalCostUsd: nil, contextTokens: nil, prompt: nil)]
     var features = ["tasks", "activity", "idempotent_messages"]

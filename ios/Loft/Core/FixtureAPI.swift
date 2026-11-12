@@ -70,11 +70,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         self.grill = grill && mode != .empty
         let now = Date()
         func ago(_ m: Double) -> Date { now.addingTimeInterval(-m * 60) }
-        func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil) -> Agent {
-            Agent(id: id, name: name, title: nil, project: project, model: "opus", effort: nil, permissionMode: "auto",
+        func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil, role: String = "custom") -> Agent {
+            Agent(id: id, name: name, project: project, model: "opus", effort: nil, permissionMode: "auto",
                   intervalMinutes: 60, status: status, statusText: text, running: running, lastRunAt: ago(last),
                   nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil,
-                  sessionId: ctx == nil ? nil : "s-\(id)", freshContext: "above_80k", freshContextApplies: true)
+                  role: role, sessionId: ctx == nil ? nil : "s-\(id)", freshContext: "above_80k", freshContextApplies: true)
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
@@ -89,9 +89,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
         agentList = [
             agent("orch", "Orchestrator", "loft", "running", "Planning the settings work", running: true, last: 12, ctx: 182_000),
-            agent("be", "Backend Agent", "loft", "running", "Running cargo test", running: true, last: 8, ctx: 64_000),
-            agent("ios", "iOS Agent", "loft", "waiting", "Waiting for permission: Bash", running: true, last: 5, ctx: 214_000),
-            agent("qa", "QA Agent", "loft", "idle", "", running: false, last: 90, ctx: 12_000),
+            agent("be", "Backend Agent", "loft", "running", "Running cargo test", running: true, last: 8, ctx: 64_000, role: "dev"),
+            agent("ios", "iOS Agent", "loft", "waiting", "Waiting for permission: Bash", running: true, last: 5, ctx: 214_000, role: "dev"),
+            agent("qa", "QA Agent", "loft", "idle", "", running: false, last: 90, ctx: 12_000, role: "qa"),
             agent("docs", "Docs Agent", "website", "error", "Last run failed", running: false, last: 30),
         ]
         // The loft agents are the group "Loft"; the Orchestrator also works on the website.

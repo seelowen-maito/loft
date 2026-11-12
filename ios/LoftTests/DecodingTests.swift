@@ -27,6 +27,14 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(a.freshContextApplies, false)
     }
 
+    /// Agents have no Title: a server that still sends one decodes, and so does one that doesn't; the Role is its label.
+    func testAgentWithOrWithoutTitle() throws {
+        let titled = agentJSON.replacingOccurrences(of: #""title":"","#, with: #""title":"Builds the web","role":"dev","#)
+        XCTAssertEqual(try JSONCoding.decoder.decode(Agent.self, from: Data(titled.utf8)).roleLabel, "Dev")
+        let untitled = agentJSON.replacingOccurrences(of: #""title":"","#, with: #""role":"qa","#)
+        XCTAssertEqual(try JSONCoding.decoder.decode(Agent.self, from: Data(untitled.utf8)).roleLabel, "QA")
+    }
+
     /// An agent's group and projects (main first); an older server sends only `project`, which then is its one project; with no group it has no team.
     func testAgentGroupAndProjects() throws {
         let with = agentJSON.replacingOccurrences(of: #""project":"loft","#, with: #""project":"api","group":" Dineout ","projects":["api","pos"],"#)
