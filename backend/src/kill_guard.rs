@@ -301,8 +301,27 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
         }
     };
     let rest: Vec<&str> = it.map(String::as_str).collect();
-    if git_reads(sub, &rest) {
+    if git_reads(sub, &rest) || (sub == "config" && rest.iter().any(|a| matches!(*a, "--global" | "--system"))) {
         return vec![];
+    }
+    // `clone` and `init` make a new repository: in the folder they name, or the folder they run in, not the one around it.
+    if let Some(valued) = match sub {
+        "clone" => Some(&["-b", "--branch", "-o", "--origin", "-c", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "-u", "--upload-pack", "-j", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri"][..]),
+        "init" => Some(&["-b", "--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format"][..]),
+        _ => None,
+    } {
+        let mut words = vec![];
+        let mut it = rest.iter();
+        while let Some(a) = it.next() {
+            if valued.contains(a) {
+                it.next();
+            } else if !a.starts_with('-') {
+                words.push(*a);
+            }
+        }
+        // `clone <repository> [<folder>]`, `init [<folder>]`
+        let target = words.get(if sub == "clone" { 1 } else { 0 });
+        return target.map_or(dirs.cwd.clone(), |t| dirs.at(t)).into_iter().collect();
     }
     let found = dirs.cwd.map(repo_root);
     // The checkout a `.git` folder belongs to.
@@ -311,7 +330,9 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
 }
 
 /// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
+/// Symlinks are followed first, as git does.
 fn repo_root(folder: PathBuf) -> PathBuf {
+    let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
     folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
@@ -1564,6 +1585,20 @@ mod tests {
             assert_eq!(asks("git status", &at(cwd)), None);
             assert_eq!(asks("git -C loft pull", &at(&ws)), None);
         }
+        // A new repository is where it's made, not in the checkout around it; global config is no checkout's.
+        for cmd in ["git clone /nowhere/dev/loft", "git clone https://github.com/x/loft.git", "git clone -b main /src loft2", "git init scratch-repo", "git init", "git config --global user.name x", "git config --system core.x y"] {
+            assert_eq!(asks(cmd, &at(&ws)), None, "should run: {cmd}");
+        }
+        assert_eq!(asks(&format!("git clone /src {}", at(&project.join("sub"))), &at(&ws)), Some(project.join("sub")));
+        assert_eq!(asks("git init", &at(&project)), Some(project.clone()));
+        assert_eq!(asks("git config user.name x", &at(&ws)), Some(project.clone()));
+        // A symlink in the workspace to a folder of another checkout: git acts on the checkout around the target.
+        let other = project.parent().unwrap().join("other");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        std::fs::create_dir_all(other.join("src")).unwrap();
+        std::os::unix::fs::symlink(other.join("src"), ws.join("link")).unwrap();
+        assert_eq!(asks("cd link && git reset --hard", &at(&ws)), Some(other.clone()));
+        assert_eq!(asks("git -C link checkout main", &at(&ws)), Some(other.clone()));
         // Before this command, the shell may have been anywhere: the workspace stands for it.
         for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
             assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
