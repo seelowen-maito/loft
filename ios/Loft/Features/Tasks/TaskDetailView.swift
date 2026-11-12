@@ -108,7 +108,9 @@ struct TaskDetailView: View {
                         }
                     }
                 }
-                if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
+                if let o = t.ownerLogin {
+                    LabeledContent("Owner") { OwnerBadge(login: o, size: 22, relativeTo: .body) }
+                }
             }
 
             if t.state.isActive && !t.note.isEmpty {
