@@ -222,7 +222,6 @@ impl DeliveryTicket {
 pub struct Agent {
     pub id: String,
     pub name: String,
-    pub title: String,
     /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
     /// none), so clients that only know one project keep working.
     #[serde(default)]

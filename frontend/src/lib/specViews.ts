@@ -23,6 +23,9 @@ export const DROPPED = { key: "dropped" as Stage, label: "Dropped" };
 /** Where a spec comes from, so a spec mirrored from both a fork and its upstream reads as two: `owner/repo#12`, or the Loft project of a plan kept in Loft. */
 export const specRef = (spec: Task) => (spec.github ? `${spec.github.repo}#${spec.github.number}` : `Loft${spec.project ? ` · ${spec.project}` : ""}`);
 
+/** What a spec card's meta line says: where the spec lives, then its project, unless the ref already names it (a plan kept in Loft). */
+export const specMeta = (spec: Task): { ref: string; project: string | null } => ({ ref: specRef(spec), project: spec.github && spec.project ? spec.project : null });
+
 /** The Delivery of a spec's issue: a GitHub spec by repo and number, a plan kept in Loft by its issue. */
 export function deliveryOf(spec: Task, all: DeliverySummary[]): DeliverySummary | null {
   return all.find((d) => (d.local ? d.spec_id === spec.id : !!spec.github && d.repo === spec.github.repo && d.spec === spec.github.number)) ?? null;

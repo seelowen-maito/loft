@@ -8,7 +8,6 @@ export type QuietWindow = { days: number[]; start: string; end: string };
 export type Agent = {
   id: string;
   name: string;
-  title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
   /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
@@ -52,6 +51,8 @@ export type Agent = {
   /** The agent that created this one, if an agent did. */
   created_by?: string | null;
   running?: boolean;
+  /** A Redraw waits behind its current run or is drawing now. Missing from servers before Redraw showed it. */
+  redrawing?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */
   last_output_at?: string | null;
@@ -75,6 +76,9 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
+
+/** The label an agent goes by, from its role: "Code reviewer", "Custom". No role yet reads as Custom. */
+export const roleLabel = (role?: string) => ROLES.find((r) => r.value === (role || "custom"))?.label ?? role ?? "Custom";
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -797,7 +801,8 @@ export const api = {
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
-  randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
+  /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
+  redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),

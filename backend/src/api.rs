@@ -228,7 +228,6 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         }
         a.name = v.trim().into();
     }
-    if let Some(v) = str_field("title") { a.title = v; }
     if let Some(v) = str_field("group") {
         let g = v.trim();
         if g.chars().count() > 100 || g.chars().any(char::is_control) {
@@ -373,7 +372,6 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
     let mut a = Agent {
         id: id.clone(),
         name: "New agent".into(),
-        title: String::new(),
         project: String::new(),
         group: String::new(),
         projects: vec![],
@@ -735,14 +733,11 @@ pub async fn clear_messages(State(state): State<AppState>, Path(id): Path<String
     Ok(Json(json!({ "ok": true })))
 }
 
-pub async fn randomize_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let seed = format!("{id}-{}", now());
-    let a = state
-        .db
-        .update_agent(&id, |a| a.avatar = Avatar::generate(&seed))?
-        .ok_or_else(not_found)?;
-    emit_agent(&state, &a);
-    Ok(Json(agent_json(&state, &a)))
+/// Redraw: the agent draws itself a new sticker in a quiet run; the sticker arrives with the agent event.
+pub async fn redraw_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    agents::redraw_avatar(&state, &id);
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- memories ---------------------------------------------------------
@@ -1091,6 +1086,23 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn agents_have_no_title_and_one_stored_with_a_title_still_loads() {
+        use axum::{Json, extract::{Path, State}};
+        let st = crate::tasks::tests::state();
+        let Json(v) = super::create_agent(State(st.clone()), Json(serde_json::json!({ "name": "Ana", "title": "Frontend", "role": "dev" }))).await.ok().unwrap();
+        assert!(v.get("title").is_none() && v["role"] == "dev", "{v}");
+        let id = v["id"].as_str().unwrap().to_string();
+        let Json(v) = super::update_agent(State(st.clone()), Path(id.clone()), Json(serde_json::json!({ "title": "Backend" }))).await.ok().unwrap();
+        assert!(v.get("title").is_none(), "a title sent is ignored: {v}");
+        // As stored before titles went away.
+        let mut raw = serde_json::to_value(st.db.get_agent(&id).unwrap().unwrap()).unwrap();
+        raw["title"] = serde_json::json!("Feature developer");
+        st.db.conn().execute("UPDATE agents SET data = ?1 WHERE id = ?2", rusqlite::params![raw.to_string(), id]).unwrap();
+        let Json(v) = super::get_agent(State(st.clone()), Path(id)).await.ok().unwrap();
+        assert!(v.get("title").is_none() && v["name"] == "Ana", "{v}");
+    }
+
+    #[tokio::test]
     async fn settings_never_return_the_github_token_and_only_accept_a_runnable_claude_command() {
         use axum::{Json, extract::State};
         let st = crate::tasks::tests::state();
@@ -1413,7 +1425,7 @@ pub(crate) mod tests {
         // An agent that already has them keeps them, flagged; saving its other fields still works.
         a.projects = vec!["Dineout".into(), "Passora".into(), "solo".into()];
         a.project = "Dineout".into();
-        apply_patch(&st, &mut a, &serde_json::json!({ "title": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
+        apply_patch(&st, &mut a, &serde_json::json!({ "name": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
         assert_eq!(a.projects, ["Dineout", "Passora", "solo"]);
         let flags = super::agent_json(&st, &a)["project_problems"].clone();
         let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| f["project"].as_str().unwrap()).collect();

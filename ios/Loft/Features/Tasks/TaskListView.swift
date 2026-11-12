@@ -260,18 +260,23 @@ struct TaskRow: View {
             task.isPersonalTodo && task.agentId == nil ? "Personal" : nil,
             children.isEmpty ? nil : "\(children.filter { $0.state == .done }.count)/\(children.count) sub-issues",
             children.isEmpty ? task.github?.subIssues : nil,
-            task.ownerLogin.map { "@\($0)" },
             task.dueAt.map { "Due \($0.formatted(.dateTime.month(.abbreviated).day()))" },
             task.github == nil && !task.project.isEmpty ? task.project : nil,
         ].compactMap { $0 }
         return VStack(alignment: .leading, spacing: 2) {
-            if !parts.isEmpty || task.github != nil {
+            if !parts.isEmpty || task.github != nil || task.ownerLogin != nil {
                 HStack(spacing: 4) {
                     // Where it lives: on GitHub (its repo and number), or only in Loft (the project, as before).
                     if let g = task.github {
                         IssueOriginMark(link: g)
                     }
-                    Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                    if !parts.isEmpty {
+                        Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                    }
+                    if let o = task.ownerLogin {
+                        if !parts.isEmpty { Text("·").font(.caption).foregroundStyle(.secondary) }
+                        OwnerBadge(login: o).font(.caption).foregroundStyle(.secondary).layoutPriority(1)
+                    }
                 }
             }
             if let labels = task.labels, !labels.isEmpty {
