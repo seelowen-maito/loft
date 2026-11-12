@@ -131,7 +131,7 @@ export type IssueDelivery = {
   current?: { number: number; title: string } | null;
   /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
   waits_on?: WaitsOn[];
-  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null }[];
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
