@@ -84,6 +84,11 @@ export function canTick(i: CleanItem, depth: number): boolean {
   return !i.blocked && !(i.opens && depth === 0 && !!i.label);
 }
 
+/** Clean: the `rm -rf` shown under an item; none when it can't be removed. */
+export function shownCommand(i: CleanItem, depth: number): string {
+  return canTick(i, depth) ? i.command : "";
+}
+
 /** `s` without control characters, so a name stays on its one line (Clean's `# <agent>` in Copy commands). */
 export function oneLine(s: string): string {
   return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
