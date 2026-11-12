@@ -61,8 +61,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// The demo's answers come from `demoReply` instead of one fixed line.
     private let scripted: Bool
 
-    /// `grillEnded` and `setupSent` are `-fixture-grill-ended` and `-fixture-setup-sent` for unit tests.
-    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, scripted: Bool = false, grillEnded: Bool = false, setupSent: Bool = false) {
+    /// `grillEnded`, `setupSent` and `moreSpecs` are `-fixture-grill-ended`, `-fixture-setup-sent` and `-fixture-more-specs` for unit tests.
+    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, scripted: Bool = false, grillEnded: Bool = false, setupSent: Bool = false,
+         moreSpecs: Bool = false) {
         self.mode = mode
         self.replies = replies || scripted
         self.scripted = scripted
@@ -218,7 +219,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         // `-fixture-grill-ended`: the interview is over and its end-of-planning card is in the chat
         // (`-fixture-setup-sent`: the web already sent its team setup message).
         if self.grill, grillEnded || args.contains("-fixture-grill-ended"), var s = grillState {
-            endGrill(&s, setupSent: setupSent || args.contains("-fixture-setup-sent"))
+            endGrill(&s, setupSent: setupSent || args.contains("-fixture-setup-sent"), moreSpecs: moreSpecs || args.contains("-fixture-more-specs"))
             grillState = s
         }
         if args.contains("-fixture-risky-permission") {
@@ -327,8 +328,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     /// Ends the interview with a summary and the end-of-planning card: a spec, two tickets, no reviewer on the team.
-    /// `setupSent`: the web already sent the team setup message.
-    private func endGrill(_ s: inout GrillSession, setupSent: Bool = false) {
+    /// `setupSent`: the web already sent the team setup message. `moreSpecs`: the grill also published a spec in
+    /// another repo and one whose Delivery can't start.
+    private func endGrill(_ s: inout GrillSession, setupSent: Bool = false, moreSpecs: Bool = false) {
         s.state = .ended
         grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
         // `-fixture-plan-in-loft`: a plan kept in Loft, its issues linked as `/tasks/<id>` (the fixture's t1, t2, t3).
@@ -340,9 +342,19 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            nextMessage: inLoft ? "Implement the plan: hand its ready Loft issues to the team" : "", missingRoles: ["code_reviewer", "qa"],
                            setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no Code reviewer or QA yet.",
                                         sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil),
-                           delivery: inLoft ? nil : .init(repo: "octo/site", spec: 40))
+                           delivery: inLoft ? nil : .init(repo: "octo/site", spec: 40),
+                           more: moreSpecs ? Self.moreSpecs : nil)
         grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
                      GrillMeta(sessionId: s.sessionId, role: .summary, final: true, endCard: card), role: "assistant")
+    }
+
+    private static var moreSpecs: [EndCard.Spec] {
+        let spec = { (repo: String, n: Int, t: String, tickets: [(Int, String)]) in
+            let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/\(repo)/issues/\(n)")!) }
+            return EndCard.Spec(repo: repo, spec: issue(n, t), tickets: tickets.map(issue), delivery: .init(repo: repo, spec: n))
+        }
+        return [spec("octo/api", 7, "Billing API", [(8, "Plans endpoint"), (9, "Stripe webhooks")]),
+                spec("octo/docs", 3, "Pricing docs", [(4, "Plans page")])]
     }
 
     private func grillMessage(_ text: String, _ g: GrillMeta, role: String = "assistant") {
@@ -381,18 +393,28 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
-    /// Like the backend: starts the card's Delivery once, on the fixture's Dev; a repeat is a duplicate.
-    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
+    /// Like the backend: starts the card's spec `repo`#`spec` once, the first on the fixture's Dev and the others on a
+    /// Lead that hands out their tickets; a repeat is a duplicate. octo/docs has no team, so it never starts.
+    func startDelivery(agentId: String, messageId: Int64, repo: String, spec: Int, initGit: Bool) async throws -> SendMessageResponse {
         try check()
         await slowEndCard()
         return try locked {
             guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
                 throw APIError.server(status: 404, message: "not found")
             }
-            guard var g = m.grill, var d = g.endCard?.delivery else { throw APIError.server(status: 400, message: "This card has no Delivery.") }
-            if d.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
-            d.started = .init(ticket: 41, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
-            g.endCard?.delivery = d
+            guard var g = m.grill, var card = g.endCard else { throw APIError.server(status: 400, message: "This card has no Delivery.") }
+            let key = "\(repo)#\(spec)"
+            if repo == "octo/docs" { throw APIError.server(status: 409, message: "octo/docs has no Dev agent.") }
+            if card.delivery?.key == key {
+                if card.delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+                card.delivery?.started = .init(ticket: 41, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
+            } else if let j = card.more?.firstIndex(where: { $0.delivery?.key == key }) {
+                if card.more?[j].delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+                card.more?[j].delivery?.started = .init(ticket: 0, agentId: "lead", agentName: "Lead", at: JSONCoding.formatDate(Date()))
+            } else {
+                throw APIError.server(status: 400, message: "This card has no Delivery.")
+            }
+            g.endCard = card
             m.meta = ["grill": Self.wire(g)]
             msgs[agentId]?[i] = m
             deliveriesStarted += 1

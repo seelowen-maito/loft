@@ -30,6 +30,8 @@ pub enum Phase {
     /// A newer build is on disk than the one running; a restart starts it.
     Restart,
     Error,
+    /// The checkout can't be fast-forwarded (detached, no upstream, local commits, failed fetch); `why` says so.
+    Blocked,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -41,7 +43,7 @@ pub struct UpdateStatus {
     pub latest: Option<String>,
     pub running_agents: usize,
     pub error: Option<String>,
-    /// Why a restart hasn't happened, e.g. "2 agents are running".
+    /// Why a restart hasn't happened, e.g. "2 agents are running", or why the checkout can't update.
     pub why: Option<String>,
 }
 
@@ -96,17 +98,39 @@ async fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String> {
 
 /// Upstream commit when it is strictly ahead of the running build and fast-forwardable.
 /// Compares against `running` rather than HEAD: a failed build leaves HEAD pulled but the old binary live.
-async fn check(root: &Path, running: &str) -> Result<Option<String>> {
-    run(root, "git", &["fetch", "--quiet"]).await?;
-    let upstream = run(root, "git", &["rev-parse", "@{u}"]).await?;
+/// `Err` is why the checkout can't be updated, worded for the Update status.
+async fn check(root: &Path, running: &str) -> Result<Option<String>, String> {
+    let Ok(branch) = run(root, "git", &["symbolic-ref", "--quiet", "--short", "HEAD"]).await else {
+        let at = run(root, "git", &["rev-parse", "--short=8", "HEAD"]).await.unwrap_or_default();
+        let main = run(root, "git", &["rev-parse", "--abbrev-ref", "origin/HEAD"]).await;
+        let main = main.as_deref().ok().and_then(|m| m.strip_prefix("origin/")).unwrap_or("main");
+        return Err(format!("Loft's checkout is on commit {at}, not on {main}. Switch it back to {main} to get updates."));
+    };
+    let Ok(upstream_name) = run(root, "git", &["rev-parse", "--abbrev-ref", "@{u}"]).await else {
+        return Err(format!("Loft's checkout is on branch {branch}, which has no upstream. Set one (git branch -u origin/{branch}) or switch back to main to get updates."));
+    };
+    if let Err(e) = run(root, "git", &["fetch", "--quiet"]).await {
+        return Err(format!("Couldn't fetch updates: {e}"));
+    }
+    let upstream = run(root, "git", &["rev-parse", "@{u}"]).await.map_err(|e| e.to_string())?;
+    let local = run(root, "git", &["rev-list", "--count", "@{u}..HEAD"]).await.map_err(|e| e.to_string())?;
+    if local != "0" {
+        let s = if local == "1" { "" } else { "s" };
+        return Err(format!("Loft's checkout has {local} commit{s} on {branch} that aren't on {upstream_name}. Push or drop them to get updates."));
+    }
     if upstream == running {
         return Ok(None);
     }
     if run(root, "git", &["merge-base", "--is-ancestor", running, &upstream]).await.is_err() {
-        // Local commits not on the upstream: nothing to fast-forward to.
+        // The running build isn't on the upstream: nothing to fast-forward to.
         return Ok(None);
     }
     Ok(Some(upstream))
+}
+
+/// The status while the checkout can't be updated. It clears on the first check that passes.
+fn blocked(state: &AppState, head: &str, why: String) {
+    set(state, |s| *s = UpdateStatus { phase: Phase::Blocked, current: short(head), why: Some(why), ..Default::default() });
 }
 
 /// The pinned pnpm (`packageManager` in frontend/package.json): an installed pnpm, else corepack's, else fetched
@@ -192,8 +216,8 @@ pub async fn updater(state: AppState, root: PathBuf) {
     // The commit this process was built from, not the checkout's HEAD: a pull or a build the restart never
     // followed leaves HEAD ahead of the running binary.
     let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
-    // A commit whose build failed; skipped until upstream moves on.
-    let mut failed: Option<String> = None;
+    // A commit whose build failed, and why; skipped until upstream moves on.
+    let mut failed: Option<(String, String)> = None;
     // After a failed exec: when to try again, and how long to wait after the next failure.
     let mut retry_at: Option<std::time::Instant> = None;
     let mut backoff = RESTART_BACKOFF;
@@ -228,43 +252,48 @@ pub async fn updater(state: AppState, root: PathBuf) {
             tokio::time::sleep(IDLE_POLL).await;
             continue;
         }
-        match check(&root, &head).await {
-            Err(e) => set(&state, |s| {
-                s.phase = Phase::Error;
-                s.current = short(&head);
-                s.error = Some(e.to_string());
-            }),
-            Ok(None) => set(&state, |s| {
-                *s = UpdateStatus { phase: Phase::UpToDate, current: short(&head), ..Default::default() };
-            }),
-            Ok(Some(up)) if failed.as_deref() == Some(up.as_str()) => {}
-            Ok(Some(up)) => {
-                set(&state, |s| {
-                    *s = UpdateStatus { phase: Phase::Waiting, current: short(&head), latest: Some(short(&up)), ..Default::default() };
-                });
-                if !wait_for_idle(&state).await {
-                    continue;
+        if let Some(up) = checked(&state, &head, check(&root, &head).await, failed.as_ref()) {
+            if !wait_for_idle(&state).await {
+                continue;
+            }
+            set(&state, |s| s.phase = Phase::Updating);
+            tracing::info!("updating {} -> {}", short(&head), short(&up));
+            match install(&root).await {
+                Ok(()) => {
+                    before_restart(&state).await;
+                    restart(&state);
                 }
-                set(&state, |s| s.phase = Phase::Updating);
-                tracing::info!("updating {} -> {}", short(&head), short(&up));
-                match install(&root).await {
-                    Ok(()) => {
-                        before_restart(&state).await;
-                        restart(&state);
-                    }
-                    Err(e) => {
-                        tracing::error!("update failed: {e:#}");
-                        failed = Some(up);
-                        set(&state, |s| {
-                            s.phase = Phase::Error;
-                            s.error = Some(e.to_string());
-                        });
-                    }
+                Err(e) => {
+                    tracing::error!("update failed: {e:#}");
+                    set(&state, |s| {
+                        s.phase = Phase::Error;
+                        s.error = Some(e.to_string());
+                    });
+                    failed = Some((up, e.to_string()));
                 }
             }
         }
         tokio::time::sleep(CHECK_EVERY).await;
     }
+}
+
+/// Sets the status for one check's result, and returns the commit to install. A commit whose build failed isn't
+/// installed again: its error shows again, also after the checkout was blocked meanwhile.
+fn checked(state: &AppState, head: &str, result: Result<Option<String>, String>, failed: Option<&(String, String)>) -> Option<String> {
+    match result {
+        Err(why) => blocked(state, head, why),
+        Ok(None) => set(state, |s| *s = UpdateStatus { phase: Phase::UpToDate, current: short(head), ..Default::default() }),
+        Ok(Some(up)) => match failed.filter(|(f, _)| *f == up) {
+            Some((_, error)) => set(state, |s| {
+                *s = UpdateStatus { phase: Phase::Error, current: short(head), latest: Some(short(&up)), error: Some(error.clone()), ..Default::default() }
+            }),
+            None => {
+                set(state, |s| *s = UpdateStatus { phase: Phase::Waiting, current: short(head), latest: Some(short(&up)), ..Default::default() });
+                return Some(up);
+            }
+        },
+    }
+    None
 }
 
 fn next_backoff(b: Duration) -> Duration {
@@ -395,5 +424,109 @@ mod tests {
         super::before_restart(&st).await;
         assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");
         assert!(st.rt.lock().unwrap().clean.at.is_some());
+    }
+
+    /// Runs git in `dir` without the user's config; returns stdout.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare origin with one commit on main and a clone of it; returns (tempdir, clone, head sha).
+    fn checkout() -> (crate::testdir::TempDir, std::path::PathBuf, String) {
+        let tmp = crate::testdir::TempDir::new("updater");
+        let (origin, clone) = (tmp.join("origin.git"), tmp.join("loft"));
+        git(&tmp, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(&tmp, &["clone", "-q", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&clone, &["push", "-q", "-u", "origin", "main"]);
+        git(&clone, &["remote", "set-head", "origin", "main"]);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+        (tmp, clone, head)
+    }
+
+    /// One check of `clone`, applied as the loop applies it, read back through GET /api/update.
+    async fn status(clone: &std::path::Path, head: &str) -> serde_json::Value {
+        let st = crate::tasks::tests::state();
+        status_in(&st, clone, head, None).await
+    }
+
+    async fn status_in(st: &crate::state::AppState, clone: &std::path::Path, head: &str, failed: Option<&(String, String)>) -> serde_json::Value {
+        super::checked(st, head, super::check(clone, head).await, failed);
+        crate::api::update_status(axum::extract::State(st.clone())).await.0
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_build_shows_its_error_again_once_the_checkout_is_back_on_main() {
+        let (tmp, clone, head) = checkout();
+        let other = tmp.join("other");
+        git(&tmp, &["clone", "-q", tmp.join("origin.git").to_str().unwrap(), other.to_str().unwrap()]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&other, &["push", "-q"]);
+        // The build of the upstream commit failed; then the checkout went detached, then back on main.
+        let failed = (git(&other, &["rev-parse", "HEAD"]), "`cargo build` failed: error[E0425]".to_string());
+        let st = crate::tasks::tests::state();
+        git(&clone, &["checkout", "-q", "--detach", &head]);
+        assert_eq!(status_in(&st, &clone, &head, Some(&failed)).await["phase"], "blocked");
+        git(&clone, &["switch", "-q", "main"]);
+        let s = status_in(&st, &clone, &head, Some(&failed)).await;
+        assert_eq!(s["phase"], "error", "{s}");
+        assert_eq!(s["error"], failed.1);
+        assert_eq!(s["why"], serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_detached_checkout_says_which_commit_its_on_and_to_switch_back_to_main() {
+        let (_tmp, clone, head) = checkout();
+        git(&clone, &["checkout", "-q", "--detach", &head]);
+        let s = status(&clone, &head).await;
+        assert_eq!(s["phase"], "blocked");
+        assert_eq!(s["why"], format!("Loft's checkout is on commit {}, not on main. Switch it back to main to get updates.", &head[..8]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_branch_with_no_upstream_says_so() {
+        let (_tmp, clone, head) = checkout();
+        git(&clone, &["switch", "-q", "-c", "scratch"]);
+        let s = status(&clone, &head).await;
+        assert_eq!(s["phase"], "blocked");
+        assert!(s["why"].as_str().unwrap().starts_with("Loft's checkout is on branch scratch, which has no upstream."), "{s}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_commits_not_on_the_upstream_say_how_many() {
+        let (_tmp, clone, head) = checkout();
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "local"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "local 2"]);
+        let s = status(&clone, &head).await;
+        assert_eq!(s["phase"], "blocked");
+        assert_eq!(s["why"], "Loft's checkout has 2 commits on main that aren't on origin/main. Push or drop them to get updates.");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_fetch_says_it_couldnt_fetch() {
+        let (tmp, clone, head) = checkout();
+        std::fs::rename(tmp.join("origin.git"), tmp.join("gone.git")).unwrap();
+        let s = status(&clone, &head).await;
+        assert_eq!(s["phase"], "blocked");
+        assert!(s["why"].as_str().unwrap().starts_with("Couldn't fetch updates:"), "{s}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn updates_resume_once_the_checkout_is_back_on_main() {
+        let (tmp, clone, head) = checkout();
+        git(&clone, &["checkout", "-q", "--detach", &head]);
+        assert_eq!(status(&clone, &head).await["phase"], "blocked");
+        git(&clone, &["switch", "-q", "main"]);
+        assert_eq!(status(&clone, &head).await["phase"], "up_to_date");
+        // A newer commit on origin is picked up again.
+        let other = tmp.join("other");
+        git(&tmp, &["clone", "-q", tmp.join("origin.git").to_str().unwrap(), other.to_str().unwrap()]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&other, &["push", "-q"]);
+        let s = status(&clone, &head).await;
+        assert_eq!(s["phase"], "waiting");
+        assert_eq!(s["latest"], git(&other, &["rev-parse", "--short=7", "HEAD"]));
     }
 }

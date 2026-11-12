@@ -508,6 +508,8 @@ final class LoftUITests: XCTestCase {
         app.swipeUp()
         XCTAssertEqual(setup.label, "Set up the team with loft")
         XCTAssertEqual(app.staticTexts["endCardTeamNote"].label, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
+        XCTAssertLessThan(app.staticTexts["endCardTeamNote"].frame.minY, app.buttons["endCardStart"].frame.minY,
+                          "as on the web: the issues, the team note, then Start delivery")
         setup.tap()
         let deadline = Date().addingTimeInterval(5)
         while setup.label != "Sent to loft", Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
@@ -519,6 +521,49 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(started.appears(timeout: 5))
         XCTAssertEqual(started.label, "Delivery started · #41 with Dev")
         XCTAssertFalse(app.buttons["endCardStart"].exists)
+    }
+
+    /// A grill that published three specs: each has its own Start delivery, and Start all starts the ones not started
+    /// yet, each on its own Lead; the one that can't start says why under it and keeps its button.
+    func testEndCardStartsEverySpec() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-more-specs"])
+        let all = app.buttons["endCardStartAll"]
+        XCTAssertTrue(all.appears(timeout: 5))
+        app.swipeUp()
+        XCTAssertEqual(all.label, "Start all 3")
+        XCTAssertEqual(app.buttons.matching(identifier: "endCardStart").count, 3)
+        let note = app.staticTexts["endCardTeamNote"]
+        XCTAssertTrue(note.label.hasPrefix("octo/site: Delivery works with this team."), "the team note names its repo: \(note.label)")
+        XCTAssertGreaterThan(note.frame.minY, all.frame.minY, "after Start all, not under the last spec")
+
+        app.buttons.matching(identifier: "endCardStart").element(boundBy: 0).tap()
+        XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
+        XCTAssertEqual(all.label, "Start remaining 2")
+
+        all.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while app.staticTexts.matching(identifier: "endCardStarted").count < 2, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        XCTAssertEqual(app.staticTexts.matching(identifier: "endCardStarted").allElementsBoundByIndex.map(\.label),
+                       ["Delivery started · #41 with Dev", "Delivery started · Lead hands out the tickets"])
+        XCTAssertTrue(app.staticTexts["endCardNotStarted"].appears(timeout: 5))
+        XCTAssertEqual(app.staticTexts["endCardNotStarted"].label, "Not started: octo/docs has no Dev agent.")
+        XCTAssertEqual(all.label, "Start remaining 1")
+    }
+
+    /// While one spec's Start delivery runs, Start all and the other specs' buttons wait, so a stale card from one
+    /// request can't replace the newer card from the other.
+    func testStartAllWaitsForASpecStarting() {
+        let app = openGrillChat(["-fixture-grill-ended", "-fixture-more-specs", "-fixture-slow-end-card"])
+        let all = app.buttons["endCardStartAll"]
+        XCTAssertTrue(all.appears(timeout: 5))
+        app.swipeUp()
+        let starts = app.buttons.matching(identifier: "endCardStart")
+        starts.element(boundBy: 0).tap()
+        XCTAssertFalse(all.isEnabled, "Start all waits")
+        XCTAssertFalse(starts.element(boundBy: 1).isEnabled, "so does another spec")
+        XCTAssertTrue(app.staticTexts["endCardStarted"].appears(timeout: 5))
+        XCTAssertTrue(all.isEnabled)
+        XCTAssertEqual(all.label, "Start remaining 2")
     }
 
     /// While its request runs, each end-card button shows a spinner and can't be tapped again: Start delivery reads

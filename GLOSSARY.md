@@ -36,6 +36,10 @@ _Avoid_: Build, run, pipeline
 A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled, and tells only the user, until the user resumes it.
 _Avoid_: Stuck, failed, paused
 
+**Waiting** (ticket):
+A ticket its Dev reported, with `wait_ticket`, as unable to go on until an issue closes or another agent answers. Its Delivery keeps running and shows "waiting on …" with the reason, not a stall. Loft wakes the Dev on it when that issue closes or that agent messages it, and the Dev may take another ready ticket meanwhile.
+_Avoid_: Blocked (a ticket's blockers are set when it's published), parked
+
 **Paused**:
 A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
 _Avoid_: Stopped, cancelled, on hold

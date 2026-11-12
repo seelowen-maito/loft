@@ -105,6 +105,9 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
+/** An open ticket outside a spec that one of its tickets waits on (`owner/repo#n`), and the Delivery that owns it (null when it has none). */
+export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number; started: boolean; issue_id: string | null } | null };
+
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
@@ -126,7 +129,9 @@ export type IssueDelivery = {
   pr: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
+  waits_on?: WaitsOn[];
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
@@ -468,12 +473,12 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error" | "blocked";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
-  /** For "restart": why the restart hasn't happened. */
+  /** For "restart": why the restart hasn't happened. For "blocked": why the checkout can't update. */
   why: string | null;
 };
 

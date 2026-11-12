@@ -33,6 +33,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
     updating: ["bg-warn animate-pulse-soft", "updating…", `Building ${s.latest}; loft restarts when done.`],
     restart: ["bg-warn animate-pulse-soft", "restart to update", s.why ?? "A newer build is on disk than the one running."],
     error: ["bg-bad", "update failed", s.error ?? "Update failed."],
+    blocked: ["bg-warn", "can't update", s.why ?? "Loft's checkout can't be updated."],
   };
   // Hidden when disabled, and for anything unexpected (e.g. an older backend without /api/update).
   const view = views[s.phase];

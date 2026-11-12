@@ -9,6 +9,7 @@ import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/menti
 import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
+import { StartWarning } from "../components/StartWarning";
 import { deliveryButtons, deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { latestOnly } from "../lib/latest";
@@ -303,12 +304,14 @@ export function DeliveryCard({ task: t }: { task: Task }) {
  *  has which ticket, and the tickets it skips because they're being built elsewhere. */
 export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
+  const [warn, setWarn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD, reload] = useIssueDelivery(t);
   const r = useDeliveryActions(t, setD);
   const start = async () => {
     setBusy(true);
+    setWarn(false);
     setError(null);
     try {
       setD(await api.startIssueDelivery(t.id));
@@ -345,10 +348,11 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
           <DeliveryState d={started} />
         </div>
         {!started && (
-          <StartDeliveryButton pending={busy} onClick={start} />
+          <StartDeliveryButton pending={busy} onClick={d?.waits_on?.length ? () => setWarn(true) : start} />
         )}
         <DeliveryButtons d={started} a={r} />
       </div>
+      {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} onCancel={() => setWarn(false)} onStarted={reload} />}
       <Said said={r.said} />
       {running.length > 0 && (
         <ul className="mt-3 space-y-1 text-[12.5px]">
@@ -356,7 +360,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
             <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-mono text-fg-3">#{x.number}</span>
               <span>{x.title}</span>
-              <span className="text-fg-3">· {x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state} ·</span>
+              <span className="text-fg-3">· {x.waiting ?? (x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state)} ·</span>
               <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
             </li>
           ))}

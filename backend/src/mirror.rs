@@ -43,6 +43,8 @@ pub struct Mirror {
     skipped: std::sync::Mutex<HashMap<String, String>>,
     /// ETag of each issue of another repo last read by number (`repo#n`), so an unchanged one answers 304.
     etags: std::sync::Mutex<HashMap<String, String>>,
+    /// The same for the blockers a Delivery waits on (`repo#n`, lower case), kept apart: reading one here must not make the other poll see 304.
+    pub(crate) wait_etags: std::sync::Mutex<HashMap<String, String>>,
     /// Other repos already logged as unreadable this run, so the log says it once.
     unreadable: std::sync::Mutex<HashSet<String>>,
 }

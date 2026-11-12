@@ -169,7 +169,8 @@ impl Step {
         match self {
             // Tickets in flight keep the Delivery going, and their close wakes the Lead again.
             Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_in_flight(d),
-            Step::Build { ticket, round } => d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round),
+            // A ticket its Dev reported as waiting (`wait_ticket`) waits on what it names, not on the Dev.
+            Step::Build { ticket, round } => d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round && t.wait_for.is_empty()),
             Step::Review { ticket, role, round } => d.ticket(*ticket).is_some_and(|t| t.state == "review" && t.rounds == *round && t.verdicts.get(role).is_some_and(|v| v == "pending")),
             // A pass whose ready call failed waits on Loft's retry, not on the Code reviewer.
             Step::FinalReview { round } => d.step_state() == "final_review" && d.final_rounds == *round && !d.ready_retry,
@@ -333,10 +334,11 @@ pub fn stall_lost_runs(state: &AppState) {
 }
 
 /// Whether ticket `t` waits on an agent's run: being built, or in review with a reviewer's verdict to come.
-/// One that only waits for its CI waits on Loft, which follows it again after a restart.
+/// One that only waits for its CI waits on Loft, which follows it again after a restart, and so does one
+/// waiting on an issue or an agent.
 fn lost_run(t: &DeliveryTicket) -> bool {
     let only_ci = t.verdicts.get("ci").is_some_and(|v| v == "pending") && t.verdicts.iter().all(|(r, v)| r == "ci" || v == "pass");
-    t.state == "started" || t.state == "review" && !only_ci
+    t.state == "started" && t.wait_for.is_empty() || t.state == "review" && !only_ci
 }
 
 /// The call a stalled Delivery waited on for ticket #n came after all (say the user nudged the agent): it
@@ -350,11 +352,159 @@ fn unstalled(state: &AppState, d: Delivery, n: i64) -> Delivery {
 
 /// Adds a published ticket to its spec's Delivery, after the tickets that block it. One already there is left as it is.
 pub fn record_ticket(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, blocked_by: Vec<i64>) {
+    record_ticket_waiting(state, repo, spec, number, title, blocked_by, vec![]);
+}
+
+/// [`record_ticket`] for a ticket that also waits on open blockers outside its spec, as `owner/repo#n`. A
+/// blocker that is a ticket of this same Delivery counts as one of its own.
+pub fn record_ticket_waiting(state: &AppState, repo: &str, spec: i64, number: i64, title: &str, mut blocked_by: Vec<i64>, waiting_on: Vec<String>) {
     update(state, repo, spec, |d| {
-        if !d.tickets.iter().any(|t| t.number == number) {
-            d.tickets.push(DeliveryTicket::new(number, title, blocked_by, "open"));
+        if d.tickets.iter().any(|t| t.number == number) {
+            return;
         }
+        let mut waiting = vec![];
+        for w in waiting_on {
+            match w.rsplit_once('#').filter(|(r, _)| r.eq_ignore_ascii_case(&d.repo)).and_then(|(_, n)| n.parse::<i64>().ok()) {
+                Some(n) if d.ticket(n).is_some() => blocked_by.push(n),
+                _ => waiting.push(w),
+            }
+        }
+        d.tickets.push(DeliveryTicket { waiting_on: waiting, ..DeliveryTicket::new(number, title, blocked_by, "open") });
     });
+}
+
+/// `owner/repo#n`: how a blocker outside the spec is named.
+fn blocker_name(repo: &str, n: i64) -> String {
+    format!("{repo}#{n}")
+}
+
+/// Issue #n of `repo` closed: no ticket waits on it any more. Wakes the Lead of a running Delivery that
+/// has a ticket to hand out now; a team without a Lead gets it from the mirror's next poll ([`retry`]).
+/// The caller holds `held`'s publish lock; a Delivery of another repo changes under its own lock, and when
+/// that is busy it is left for [`retry`] (waiting for it could deadlock two repos on each other).
+pub async fn blocker_closed(state: &AppState, repo: &str, n: i64, held: &str) {
+    let blocker = blocker_name(repo, n);
+    for d in state.db.all_deliveries().unwrap_or_default() {
+        if !d.tickets.iter().any(|t| t.waiting_on.iter().any(|w| w.eq_ignore_ascii_case(&blocker))) {
+            continue;
+        }
+        let _lock = if d.repo.eq_ignore_ascii_case(held) {
+            None
+        } else {
+            match state.publish_locks.of(&d.repo).try_lock_owned() {
+                Ok(l) => Some(l),
+                Err(_) => continue,
+            }
+        };
+        let Some(d) = update(state, &d.repo, d.spec, |d| d.tickets.iter_mut().for_each(|t| t.waiting_on.retain(|w| !w.eq_ignore_ascii_case(&blocker)))) else { continue };
+        if let Some(lead) = lead_of(state, &d)
+            && d.state == "running"
+            && none_in_flight(&d)
+            && !ready_tickets(&d).is_empty()
+        {
+            wake_lead(state, &d, &lead, &format!("{blocker} closed: tickets that waited on it are ready."));
+        }
+    }
+}
+
+/// The mirror's catch-up for blockers closed where Loft doesn't see it (an issue that isn't a ticket, in a repo
+/// that isn't a Loft project): each open blocker the unsettled Deliveries of `repo` wait on is read again, and
+/// one that is closed stops being waited on. One that is gone or unreadable (404, 410) releases nothing: the
+/// running Deliveries waiting on it stall with `blocker_gone`. An unchanged one answers 304, which costs nothing.
+/// The caller holds `repo`'s publish lock.
+async fn clear_closed_blockers(state: &AppState, repo: &str) {
+    let mut open: Vec<String> = vec![];
+    for d in state.db.deliveries(repo, true).unwrap_or_default() {
+        for w in d.tickets.iter().filter(|t| t.state != "closed").flat_map(|t| &t.waiting_on) {
+            if !open.iter().any(|o| o.eq_ignore_ascii_case(w)) {
+                open.push(w.clone());
+            }
+        }
+    }
+    for w in open {
+        // The name was checked when it was stored, but it goes into an API path: check it again.
+        let Some((r, n)) = w.rsplit_once('#').and_then(|(r, n)| Some((r, n.parse::<i64>().ok()?))).filter(|(r, _)| plain_repo(r)) else {
+            tracing::warn!("delivery {repo}: {w} isn't a blocker name, left alone");
+            continue;
+        };
+        let key = w.to_lowercase();
+        let etag = state.mirror.wait_etags.lock().unwrap().get(&key).cloned();
+        let closed = match crate::github::get_if_changed(state, &format!("/repos/{r}/issues/{n}"), etag.as_deref()).await {
+            Ok(None) => false,
+            Ok(Some((i, tag))) => {
+                // Kept only while it's open: a closed one is read again until every Delivery is cleared of it.
+                let closed = i["state"] == "closed";
+                match tag.filter(|_| !closed) {
+                    Some(tag) => state.mirror.wait_etags.lock().unwrap().insert(key, tag),
+                    None => state.mirror.wait_etags.lock().unwrap().remove(&key),
+                };
+                closed
+            }
+            // Gone, or no longer readable (access lost): not the same as closed, so nothing is released. The
+            // running Deliveries waiting on it stall, and Needs you shows why.
+            Err(e) if crate::github::is_gone(&e) => {
+                stall_on_lost_blocker(state, repo, &w);
+                false
+            }
+            Err(e) if crate::github::is_paused(&e) => return,
+            Err(e) => {
+                tracing::warn!("delivery {repo}: couldn't read {w}: {e}");
+                false
+            }
+        };
+        if closed {
+            blocker_closed(state, r, n, repo).await;
+        }
+    }
+}
+
+/// Stalls each running Delivery of `repo` with a ticket waiting on `blocker`, which Loft can't read any more.
+fn stall_on_lost_blocker(state: &AppState, repo: &str, blocker: &str) {
+    for d in state.db.deliveries(repo, true).unwrap_or_default() {
+        let waiting: Vec<i64> = d.tickets.iter().filter(|t| t.state != "closed" && t.waiting_on.iter().any(|w| w.eq_ignore_ascii_case(blocker))).map(|t| t.number).collect();
+        if !waiting.is_empty() {
+            stall(state, &d, "blocker_gone", waiting, None, None);
+        }
+    }
+}
+
+/// The tickets by which `blocker` already waits, directly or through others, on `ticket` (both `(repo, number)`),
+/// as `owner/repo#n` from the blocker on; None when it doesn't. Read from the Deliveries' records, so a loop is
+/// found before anything is created: a ticket waiting on a blocker that waits on it would wait for ever.
+pub fn wait_loop(state: &AppState, ticket: (&str, i64), blocker: (&str, i64)) -> Option<Vec<String>> {
+    let all = state.db.all_deliveries().unwrap_or_default();
+    let mut seen: Vec<(String, i64)> = vec![];
+    let mut stack = vec![vec![(blocker.0.to_lowercase(), blocker.1)]];
+    while let Some(path) = stack.pop() {
+        let (r, n) = path.last().cloned().unwrap_or_default();
+        if r == ticket.0.to_lowercase() && n == ticket.1 {
+            return Some(path.iter().map(|(r, n)| blocker_name(r, *n)).collect());
+        }
+        if seen.contains(&(r.clone(), n)) {
+            continue;
+        }
+        seen.push((r.clone(), n));
+        for d in all.iter().filter(|d| d.repo.eq_ignore_ascii_case(&r)) {
+            for t in d.tickets.iter().filter(|t| t.number == n && t.state != "closed") {
+                let outside = t.waiting_on.iter().filter_map(|w| w.rsplit_once('#').and_then(|(r, n)| Some((r.to_lowercase(), n.parse().ok()?))));
+                let inside = t.blocked_by.iter().map(|b| (r.clone(), *b));
+                for next in outside.chain(inside) {
+                    let mut p = path.clone();
+                    p.push(next);
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// What a ticket of `d` still waits on, as the briefs name it: its open blockers in the spec (`#7`) and
+/// the ones outside it (`owner/repo#7`).
+fn open_blockers(d: &Delivery, t: &DeliveryTicket) -> Vec<String> {
+    let mut out: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
+    out.extend(t.waiting_on.iter().cloned());
+    out
 }
 
 /// The Delivery that ticket #number on `repo` belongs to.
@@ -378,7 +528,7 @@ pub fn ticket_closed(state: &AppState, repo: &str, number: i64) -> Option<Delive
 /// The next ticket to build: the first open one whose blockers are all closed.
 pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
     let closed = |n: &i64| d.tickets.iter().any(|t| t.number == *n && t.state == "closed");
-    d.tickets.iter().find(|t| t.state == "open" && t.blocked_by.iter().all(closed))
+    d.tickets.iter().find(|t| t.state == "open" && t.waiting_on.is_empty() && t.blocked_by.iter().all(closed))
 }
 
 /// No ticket is being built, reviewed, waiting for its fix or waiting for the user: nothing will wake the
@@ -387,14 +537,14 @@ fn none_in_flight(d: &Delivery) -> bool {
     d.tickets.iter().all(|t| !matches!(t.state.as_str(), "started" | "review" | "changes" | "closing" | "needs_human"))
 }
 
-/// Whether Dev `id` is building one of `d`'s tickets.
+/// Whether Dev `id` is building one of `d`'s tickets: started, and not waiting.
 fn building(d: &Delivery, id: &str) -> bool {
-    d.tickets.iter().any(|t| t.state == "started" && builder_id(d, t) == id)
+    d.tickets.iter().any(|t| t.state == "started" && t.wait_for.is_empty() && builder_id(d, t) == id)
 }
 
-/// Whether Dev `id` can take a new ticket: it builds none and has at most one in review.
+/// Whether Dev `id` can take a new ticket: it builds none and has at most one in review or waiting.
 fn free(d: &Delivery, id: &str) -> bool {
-    !building(d, id) && d.tickets.iter().filter(|t| t.state == "review" && builder_id(d, t) == id).count() <= 1
+    !building(d, id) && d.tickets.iter().filter(|t| (t.state == "review" || !t.wait_for.is_empty()) && builder_id(d, t) == id).count() <= 1
 }
 
 /// A running Delivery of a team with a Lead that has tickets to hand out and nothing in flight: it waits on the Lead.
@@ -403,9 +553,9 @@ fn waits_on_lead(state: &AppState, d: &Delivery) -> bool {
 }
 
 /// The tickets ready to hand out: open, with every blocker closed, and nobody on them.
-fn ready_tickets(d: &Delivery) -> Vec<&DeliveryTicket> {
+pub(crate) fn ready_tickets(d: &Delivery) -> Vec<&DeliveryTicket> {
     let closed = |n: &i64| d.tickets.iter().any(|t| t.number == *n && t.state == "closed");
-    d.tickets.iter().filter(|t| t.state == "open" && t.agent.is_empty() && t.blocked_by.iter().all(closed)).collect()
+    d.tickets.iter().filter(|t| t.state == "open" && t.agent.is_empty() && t.waiting_on.is_empty() && t.blocked_by.iter().all(closed)).collect()
 }
 
 /// The agent building ticket `t`: the one it was handed to, else the Delivery's Dev.
@@ -501,6 +651,8 @@ fn stall_why(reason: &str) -> &'static str {
     match reason {
         "run_failed" => "the run Loft woke for its step failed",
         "restart" => "its run was lost when Loft restarted",
+        "wait_gone" => "a ticket waited on an issue or agent that is gone (deleted, or Loft can no longer read it): tell its Dev what to do, then Resume",
+        "blocker_gone" => "a ticket waits on an issue in another spec or repo that is gone or that Loft can no longer read: restore access to it, then Resume",
         "ci_missing" => "its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume",
         _ => "the run Loft woke for its step ended without its call",
     }
@@ -544,6 +696,7 @@ pub(crate) fn stalled_reason(state: &AppState, d: &Delivery) -> String {
         "final_fixes" => "the fixes from the final Code Review".to_string(),
         _ if in_flight.is_empty() => "its next step".to_string(),
         _ => list_of(&in_flight.iter().map(|t| match t.state.as_str() {
+            "started" if !t.wait_for.is_empty() => format!("{} {}", tag(d, t), waiting_text(state, d, t)),
             "started" => format!("building {} on {}", tag(d, t), builder_name(state, d, t)),
             "closing" => format!("closing {}", tag(d, t)),
             _ => format!("the review of {}", tag(d, t)),
@@ -594,7 +747,8 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
          - Other Devs may push to the branch while you work: pull it again right before you push.\n\
          - One or more commits, each message ending with `{refs}`.\n\
          - {own}\n\
-         - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass and the CI is green: never close it yourself.",
+         - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass and the CI is green: never close it yourself.\n\
+         - If the ticket can't go on until another issue closes or another agent answers, push what you have and call `mcp__loft__wait_ticket` with {arg}, what it waits on and why, then end your run. Never end your run mid-ticket without `submit_ticket` or `wait_ticket`: Loft would report the Delivery as stalled. Loft wakes you on the ticket when that issue closes or that agent messages you.",
         about = subject(d),
         ticket = ticket_ref(d, t),
         refs = refs(d, t),
@@ -643,7 +797,11 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     if d.branch.is_empty() {
         return Err(format!("Spec #{spec} has no spec branch yet: call publish_spec again with the same title to make it."));
     }
-    let n = next_ticket(&d).map(|t| t.number).ok_or_else(|| format!("Spec #{spec} has no ticket ready to start: every open ticket is blocked, or none was published."))?;
+    let n = next_ticket(&d).map(|t| t.number).ok_or_else(|| {
+        let waits: Vec<String> = d.tickets.iter().filter(|t| t.state == "open").flat_map(|t| t.waiting_on.clone()).collect();
+        let by = if waits.is_empty() { String::new() } else { format!(" It waits on {}: start the Delivery that owns {} first.", list_of(&waits), if waits.len() == 1 { "it" } else { "them" }) };
+        format!("Spec #{spec} has no ticket ready to start: every open ticket is blocked, or none was published.{by}")
+    })?;
     if let Some(lead) = lead_of(state, &d) {
         // The Lead hands the tickets out (`assign`); the Delivery keeps the bookkeeping.
         let d = update(state, repo, spec, |d| d.state = "running".into()).ok_or("The Delivery record couldn't be saved.")?;
@@ -662,7 +820,7 @@ fn lead_brief(state: &AppState, d: &Delivery, why: &str) -> String {
         .tickets
         .iter()
         .map(|t| {
-            let blockers: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
+            let blockers = open_blockers(d, t);
             let state = match t.state.as_str() {
                 "open" if !blockers.is_empty() => format!("blocked by {}", blockers.join(", ")),
                 "open" => "ready, nobody on it".to_string(),
@@ -745,7 +903,7 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             _ => "already with a Dev".to_string(),
         }));
     }
-    let open: Vec<String> = t.blocked_by.iter().filter(|b| d.ticket(**b).is_some_and(|b| b.state != "closed")).map(|b| format!("#{b}")).collect();
+    let open = open_blockers(&d, t);
     if !reassign && !open.is_empty() {
         return Err(format!("{name} is blocked by {}: assign it once they close.", open.join(", ")));
     }
@@ -777,6 +935,8 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
             }
             if let Some(x) = d.ticket_mut(n) {
                 x.agent = dev.id.clone();
+                // The new Dev builds it: whatever the old one waited on is theirs to find out again.
+                (x.wait_for, x.wait_reason) = (String::new(), String::new());
             }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
@@ -888,13 +1048,14 @@ async fn advance(state: &AppState, repo: &str, spec: i64) -> String {
         wake_lead(state, &d, &lead, &format!("Ready to hand out now: {}.", ready.join(", ")));
         return format!("{out}\nReady: {}. {} hands them out.", ready.join(", "), lead.name);
     }
-    if !out.is_empty() || d.tickets.iter().any(|t| t.state == "started") {
+    if !out.is_empty() || d.tickets.iter().any(|t| t.state == "started" && t.wait_for.is_empty()) {
         return out;
     }
     if let Some(t) = d.tickets.iter().find(|t| t.state == "needs_human") {
         return format!("\n{} waits for the user, so no new ticket starts.", tag(&d, t));
     }
-    let in_review = d.tickets.iter().filter(|t| t.state == "review").count();
+    // A waiting ticket counts as one in review.
+    let in_review = d.tickets.iter().filter(|t| t.state == "review" || !t.wait_for.is_empty()).count();
     if in_review > 1 {
         return String::new();
     }
@@ -1026,6 +1187,14 @@ pub fn mcp_tools() -> Vec<Value> {
             "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of all the ticket's commits, oldest first." }
         }, "required": ["number", "commits"] }
     }), json!({
+        "name": "wait_ticket",
+        "description": "As the Dev on a Delivery: report that the ticket you're building can't go on until an issue closes (in any repo) or another agent answers. Push what you have first. Loft shows the ticket as waiting, not stalled, may hand you another ready ticket meanwhile, and wakes you on this ticket when that issue closes or that agent messages you. End your run after calling it. The issue must be open and readable by Loft; if it's deleted, or the agent is, the Delivery stalls so the user can step in.",
+        "inputSchema": { "type": "object", "properties": {
+            "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft." },
+            "on": { "type": "string", "description": "What it waits on: an issue as `owner/repo#N`, `#N` (on the ticket's repo) or its link, or an agent's name." },
+            "reason": { "type": "string", "description": "Why, in one sentence: what the ticket needs from it." }
+        }, "required": ["number", "on", "reason"] }
+    }), json!({
         "name": "review_ticket",
         "description": "As QA or Security on a Delivery: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket and its CI is green, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
         "inputSchema": { "type": "object", "properties": {
@@ -1041,6 +1210,7 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
     match name {
         "assign_ticket" => Some(assign(state, me, args).await),
         "submit_ticket" => Some(submit(state, me, args).await),
+        "wait_ticket" => Some(wait(state, me, args).await),
         "review_ticket" => Some(review(state, me, args).await),
         _ => None,
     }
@@ -1203,6 +1373,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let d = update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.state = "review".into();
+            (t.wait_for, t.wait_reason) = (String::new(), String::new());
             t.commits = commits.clone();
             t.verdicts = reviewers.iter().map(|(r, _)| (r.to_string(), "pending".to_string())).collect();
             if ci {
@@ -1233,6 +1404,220 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let names = reviewers.iter().map(|(r, a)| format!("{} ({})", a.name, crate::planning::role_label(r))).collect::<Vec<_>>().join(" and ");
     let (and_ci, fails, green) = if ci { (", and Loft follows its CI", " or the CI fails", " and the CI is green") } else { ("", "", "") };
     Ok(format!("Submitted {name}: {names} are reviewing it{and_ci}. Loft wakes you if they ask for changes{fails}, and closes it when they pass{green}.{next}"))
+}
+
+/// How a waiting ticket says what it waits on, mid-sentence: `waiting on octo/api#12: needs its field.` with
+/// an agent by its name.
+fn waiting_text(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
+    let on = if t.wait_for.contains('#') {
+        t.wait_for.strip_prefix(&format!("{}#", d.repo)).map_or_else(|| t.wait_for.clone(), |n| format!("#{n}"))
+    } else {
+        state.db.get_agent(&t.wait_for).ok().flatten().map_or_else(|| t.wait_for.clone(), |a| a.name)
+    };
+    let reason = t.wait_reason.trim_end_matches('.');
+    format!("waiting on {on}: {reason}.")
+}
+
+/// The longest reason `wait_ticket` takes: it's shown on the Delivery's state line.
+const MAX_WAIT_REASON: usize = 300;
+
+/// Whether `repo` is a plain `owner/name`: letters, digits, `_`, `.` and `-`, neither part `.` or `..`. It goes
+/// into a GitHub API path.
+pub(crate) fn plain_repo(repo: &str) -> bool {
+    let part = |p: &str| !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
+    repo.split_once('/').is_some_and(|(o, n)| part(o) && part(n))
+}
+
+/// `wait_ticket`: the Dev reports the ticket it's building as waiting on an issue or an agent. Its run can end
+/// without stalling the Delivery, and the Dev is free for another ticket meanwhile. An issue is read first
+/// (without the lock): one that's missing, unreadable or already closed is refused.
+async fn wait(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result<String, String> {
+    let reason = args["reason"].as_str().map(|r| r.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|r| !r.is_empty()).ok_or("reason is required: what the ticket needs from what it waits on, in one sentence")?;
+    if reason.chars().count() > MAX_WAIT_REASON {
+        return Err(format!("reason is too long: say it in one sentence, at most {MAX_WAIT_REASON} characters."));
+    }
+    let on = args["on"].as_str().map(str::trim).filter(|o| !o.is_empty()).ok_or("on is required: the issue it waits on (owner/repo#N, #N or its link) or the agent's name")?;
+    // First pass under the lock: the ticket, and what `on` names.
+    let (issue, slug) = {
+        let (slug, n, d, _held) = ticket_of(state, me, args, "wait_ticket").await?;
+        waitable(state, me, &d, n)?;
+        let issue = crate::agents::message_ticket_key(on, (!d.local).then_some(d.repo.as_str())).ok().flatten().filter(|k| k.contains('#') && !k.starts_with('#'));
+        if let Some(k) = &issue {
+            let repo = k.rsplit_once('#').map_or("", |(r, _)| r);
+            if !plain_repo(repo) {
+                return Err(format!("`{on}` isn't an issue Loft can read: name it as owner/repo#N, #N or its link."));
+            }
+            if k.eq_ignore_ascii_case(&ticket_key(&d, Some(n))) {
+                return Err(format!("{} can't wait on itself.", tag(&d, d.ticket(n).expect("of_ticket found it"))));
+            }
+        }
+        (issue, slug)
+    };
+    if let Some(k) = &issue {
+        let (repo, num) = k.rsplit_once('#').expect("checked above");
+        match crate::github::get(state, &format!("/repos/{repo}/issues/{num}")).await {
+            Ok(v) if v["state"] == "closed" => return Err(format!("{k} is already closed: carry on with the ticket.")),
+            Ok(_) => {}
+            Err(e) => return Err(format!("Loft can't read {k} ({e}), so it couldn't tell when it closes: check the issue, or wait on an agent instead.")),
+        }
+    }
+    let (_, n, d, _held) = ticket_of(state, me, args, "wait_ticket").await?;
+    waitable(state, me, &d, n)?;
+    let name = tag(&d, d.ticket(n).expect("of_ticket found it"));
+    let (wait_for, shown, when) = match issue {
+        Some(k) => (k.clone(), k.clone(), format!("{k} closes")),
+        None => {
+            let mut all = state.db.list_agents().map_err(|e| e.to_string())?;
+            // Like message_agent: the caller's own team first.
+            all.sort_by_key(|a| a.team() != me.team());
+            let a = all.iter().find(|a| a.id == on).or_else(|| all.iter().find(|a| a.name.eq_ignore_ascii_case(on))).ok_or_else(|| format!("`{on}` is neither an issue (owner/repo#N, #N or its link) nor an agent's name."))?;
+            if a.id == me.id {
+                return Err(format!("{name} can't wait on you: name the issue or the other agent it waits on."));
+            }
+            (a.id.clone(), a.name.clone(), format!("{} messages you", a.name))
+        }
+    };
+    let d = unstalled(state, d, n);
+    update(state, &slug, d.spec, |d| {
+        if let Some(t) = d.ticket_mut(n) {
+            (t.wait_for, t.wait_reason) = (wait_for.clone(), reason.clone());
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    let next = advance(state, &slug, d.spec).await;
+    Ok(format!("{name} is waiting on {shown}: the Delivery shows it as waiting, not stalled. End your run now: Loft wakes you on {name} when {when}.{next}"))
+}
+
+/// Refuses `wait_ticket` on ticket #n unless `me` is building it in a Delivery that isn't paused.
+fn waitable(state: &AppState, me: &crate::db::Agent, d: &Delivery, n: i64) -> Result<(), String> {
+    refuse_paused(d)?;
+    let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+    let name = tag(d, t);
+    if t.state != "started" {
+        return Err(format!("{name} can't wait: only a ticket being built can, and it's {}.", t.state));
+    }
+    if builder_id(d, t) != me.id {
+        let who = state.db.get_agent(builder_id(d, t)).ok().flatten().map_or("another agent".to_string(), |a| a.name);
+        return Err(format!("{name} is with {who}: only the agent building it reports it waiting."));
+    }
+    Ok(())
+}
+
+/// Clears the wait of ticket #n. The Delivery as saved, while the ticket still waited on `on`; None otherwise
+/// (another call got there first, or the save failed). The caller holds the repo's publish lock.
+fn clear_wait(state: &AppState, d: &Delivery, n: i64, on: &str) -> Option<Delivery> {
+    let mut cleared = false;
+    let d = update(state, &d.repo, d.spec, |d| {
+        if let Some(t) = d.ticket_mut(n).filter(|t| t.state == "started" && t.wait_for == on) {
+            (t.wait_for, t.wait_reason, cleared) = (String::new(), String::new(), true);
+        }
+    })?;
+    cleared.then_some(d)
+}
+
+/// Wakes the Dev of ticket #n, whose wait ended because `what` happened (its issue closed, or its agent wrote).
+fn wake_after_wait(state: &AppState, d: &Delivery, n: i64, what: &str) {
+    let Some(t) = d.ticket(n) else { return };
+    tracing::info!("delivery {}#{}: {} no longer waits: {what}", d.repo, d.spec, tag(d, t));
+    let prompt = format!(
+        "[Loft Delivery: {about}] This is not a message from the user. {what}, so ticket {ticket} no longer waits: carry on building it on the {branch} `{b}`. When it's done, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first; if it has to wait again, call `mcp__loft__wait_ticket`.",
+        about = subject(d),
+        ticket = ticket_ref(d, t),
+        branch = branch_name(d),
+        b = d.branch,
+        arg = ticket_arg(d, t),
+    );
+    let step = Step::Build { ticket: n, round: t.rounds };
+    crate::agents::wake_on_ticket(state, builder_id(d, t), &ticket_key(d, Some(n)), true, prompt, wake_for(d, step));
+}
+
+/// What a tick finds a waiting ticket's wait on: closed (or answered), gone, or still open.
+enum WaitNow {
+    Ended(String),
+    Gone(String),
+    Open,
+}
+
+/// One tick, for each ticket of a running Delivery that waits: its issue closed wakes its Dev; an issue that's
+/// gone (deleted, or no longer readable) or an agent that was deleted stalls the Delivery, so the user sees it.
+/// GitHub is read before the lock is taken.
+async fn wake_closed_waits(state: &AppState) {
+    for d in state.db.deliveries_in_state("running").unwrap_or_default() {
+        let waits: Vec<(i64, String)> = d.tickets.iter().filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| (t.number, t.wait_for.clone())).collect();
+        let mut found = vec![];
+        for (n, on) in waits {
+            let now = match on.rsplit_once('#') {
+                Some((repo, num)) => match crate::github::get(state, &format!("/repos/{repo}/issues/{num}")).await {
+                    Ok(v) if v["state"] == "closed" => WaitNow::Ended(format!("{on} closed")),
+                    Ok(_) => WaitNow::Open,
+                    Err(e) if crate::github::is_gone(&e) => WaitNow::Gone(format!("{on} is gone or Loft can no longer read it")),
+                    Err(e) => {
+                        tracing::warn!("delivery {}#{}: couldn't read {on}: {e}", d.repo, d.spec);
+                        WaitNow::Open
+                    }
+                },
+                None if state.db.get_agent(&on).ok().flatten().is_none() => WaitNow::Gone("the agent it waited on was deleted".into()),
+                None => WaitNow::Open,
+            };
+            found.push((n, on, now));
+        }
+        if found.iter().all(|(_, _, now)| matches!(now, WaitNow::Open)) {
+            continue;
+        }
+        let _held = state.publish_locks.of(&d.repo).lock_owned().await;
+        for (n, on, now) in found {
+            let Some(d) = state.db.get_delivery(&d.repo, d.spec).ok().flatten() else { break };
+            match now {
+                WaitNow::Open => {}
+                WaitNow::Ended(what) => {
+                    if let Some(d) = clear_wait(state, &d, n, &on) {
+                        wake_after_wait(state, &d, n, &what);
+                    }
+                }
+                WaitNow::Gone(why) => {
+                    if let Some(d) = clear_wait(state, &d, n, &on) {
+                        tracing::info!("delivery {}#{}: #{n} stalls: {why}", d.repo, d.spec);
+                        let dev = d.ticket(n).map(|t| builder_id(&d, t).to_string());
+                        stall(state, &d, "wait_gone", vec![n], dev.as_deref(), None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether a message's ticket `k` names ticket `t`: by its key (`owner/repo#N`), or in a plan kept in Loft by
+/// its Loft issue id, whichever form the sender used.
+fn names_ticket(d: &Delivery, t: &DeliveryTicket, k: &str) -> bool {
+    k.eq_ignore_ascii_case(&ticket_key(d, Some(t.number))) || (!t.id.is_empty() && k.eq_ignore_ascii_case(&t.id))
+}
+
+/// Agent `from` messages `to`, about `ticket` if it names one: each ticket `to` builds that waits on `from`
+/// (only that ticket, when the message names one) stops waiting, and `to` is woken on it. The message goes as
+/// an FYI, read at the start of that wake, so it isn't a second run. The tickets woken, as `#7`; empty when
+/// none waited on `from`, and then nothing is delivered.
+pub async fn agent_wrote(state: &AppState, from: &crate::db::Agent, to: &crate::db::Agent, text: &str, ticket: Option<&str>) -> Vec<String> {
+    let waits = |d: &Delivery, t: &DeliveryTicket| {
+        t.state == "started" && t.wait_for == from.id && builder_id(d, t) == to.id && ticket.is_none_or(|k| names_ticket(d, t, k))
+    };
+    let mut woken = vec![];
+    for d in state.db.deliveries_in_state("running").unwrap_or_default() {
+        if !d.tickets.iter().any(|t| waits(&d, t)) {
+            continue;
+        }
+        let _held = state.publish_locks.of(&d.repo).lock_owned().await;
+        let Some(d) = state.db.get_delivery(&d.repo, d.spec).ok().flatten() else { continue };
+        for n in d.tickets.iter().filter(|t| waits(&d, t)).map(|t| t.number).collect::<Vec<_>>() {
+            let Some(d) = clear_wait(state, &d, n, &from.id) else { continue };
+            // Before the wake, so the run it starts reads the message first.
+            if woken.is_empty() {
+                crate::agents::fyi_from_agent(state, from, to, text);
+            }
+            wake_after_wait(state, &d, n, &format!("{} messaged you (its message is above)", from.name));
+            woken.push(d.ticket(n).map_or_else(|| format!("#{n}"), |t| tag(&d, t)));
+        }
+    }
+    woken
 }
 
 /// Changes rounds after which a ticket waits for the user instead of going back to the Dev.
@@ -1733,6 +2118,7 @@ pub async fn ci_poller(state: AppState) {
 
 /// One tick of `ci_poller`.
 pub(crate) async fn follow_all(state: &AppState) {
+    wake_closed_waits(state).await;
     for d in state.db.deliveries_in_state("running").unwrap_or_default() {
         if d.local || !d.tickets.iter().any(waits_for_ci) {
             continue;
@@ -1753,6 +2139,7 @@ pub(crate) async fn follow_all(state: &AppState) {
 /// running Delivery on when it builds nothing (a start that failed).
 pub(crate) async fn retry(state: &AppState, repo: &str) {
     let _held = state.publish_locks.of(repo).lock_owned().await;
+    clear_closed_blockers(state, repo).await;
     for d in state.db.deliveries_in(repo, "running").unwrap_or_default() {
         for t in d.tickets.iter().filter(|t| t.state == "closing") {
             match finish(state, &d, t.number).await {
@@ -2343,9 +2730,12 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
         for x in subs.iter().filter(|x| x["issue_dependencies_summary"]["blocked_by"].as_i64().or(x["issue_dependencies_summary"]["total_blocked_by"].as_i64()).unwrap_or(0) > 0) {
             let n = x["number"].as_i64().unwrap_or_default();
             let v = read(format!("/issues/{n}/dependencies/blocked_by?per_page=100")).await?;
-            // Only blockers among the spec's tickets: the Delivery can't tell when another issue closes.
-            let by: Vec<i64> = v.as_array().into_iter().flatten().filter_map(|b| b["number"].as_i64()).filter(|b| numbers.contains(b) && *b != n).collect();
-            blockers.insert(n, by);
+            let all = v.as_array().cloned().unwrap_or_default();
+            let ours = |b: &Value| crate::planning::repo_of(b, repo).eq_ignore_ascii_case(repo);
+            let by: Vec<i64> = all.iter().filter(|b| ours(b)).filter_map(|b| b["number"].as_i64()).filter(|b| numbers.contains(b) && *b != n).collect();
+            // An open blocker anywhere else: the Delivery waits for it to close.
+            let out: Vec<String> = all.iter().filter(|b| b["state"] != "closed" && !(ours(b) && b["number"].as_i64().is_some_and(|b| numbers.contains(&b)))).filter_map(|b| Some(blocker_name(&crate::planning::repo_of(b, repo), b["number"].as_i64()?))).collect();
+            blockers.insert(n, (by, out));
         }
         let mut prs: Vec<Value> = vec![];
         for page in 1..=10 {
@@ -2389,11 +2779,11 @@ async fn start_spec(state: &AppState, t: &crate::db::Task, repo: &str, spec: i64
                     (Some(_), _) => "elsewhere",
                     (None, _) => "open",
                 };
-                let blocked_by = blockers.remove(&n).unwrap_or_default();
+                let (blocked_by, waiting_on) = blockers.remove(&n).unwrap_or_default();
                 let title = x["title"].as_str().unwrap_or_default().to_string();
                 match d.ticket_mut(n) {
-                    Some(k) => (k.title, k.blocked_by, k.state, k.skipped) = (title, blocked_by, state.into(), skipped.unwrap_or_default()),
-                    None => d.tickets.push(DeliveryTicket { skipped: skipped.unwrap_or_default(), ..DeliveryTicket::new(n, title, blocked_by, state) }),
+                    Some(k) => (k.title, k.blocked_by, k.waiting_on, k.state, k.skipped) = (title, blocked_by, waiting_on, state.into(), skipped.unwrap_or_default()),
+                    None => d.tickets.push(DeliveryTicket { skipped: skipped.unwrap_or_default(), waiting_on, ..DeliveryTicket::new(n, title, blocked_by, state) }),
                 }
             }
             // A ticket taken off the spec on GitHub isn't the Delivery's any more.
@@ -2427,7 +2817,7 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
 /// A Delivery card's state line, `{ tone, text }`, or null before it started: the web and iOS cards show it as
 /// is and only map its tone (running, stalled, paused, needs_you, final or done) to a colour. Waiting for the
 /// user (a ticket after too many change rounds, or the final review) wins over running.
-fn state_line(d: &Delivery) -> Value {
+fn state_line(state: &AppState, d: &Delivery) -> Value {
     let stalled;
     let (tone, text) = match d.state.as_str() {
         "planned" => return Value::Null,
@@ -2442,7 +2832,16 @@ fn state_line(d: &Delivery) -> Value {
         "ready" | "settled" if reopenable(d) => ("done", "Done, but tickets published since are open: Reopen delivery builds them."),
         "ready" | "settled" | "merged" => ("done", "Done: every review passed."),
         _ if d.tickets.iter().any(|t| t.state == "needs_human") => ("needs_you", "Needs you: a ticket had too many rounds of changes."),
-        _ => ("running", "Running."),
+        _ => {
+            // Waiting tickets say what they wait on; the Delivery still runs.
+            let waits: Vec<String> = d.tickets.iter().filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| format!("{} is {}", tag(d, t), waiting_text(state, d, t))).collect();
+            if waits.is_empty() {
+                ("running", "Running.")
+            } else {
+                stalled = format!("Running. {}", waits.join(" "));
+                ("running", stalled.as_str())
+            }
+        }
     };
     json!({ "tone": tone, "text": text })
 }
@@ -2455,7 +2854,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
-        "state_line": state_line(d),
+        "state_line": state_line(state, d),
         "can_pause": pausable(d),
         "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
         "can_reopen": can_reopen(state, d),
@@ -2470,7 +2869,8 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         v["spec"] = json!(true);
         v["current"] = json!(current.map(|t| json!({ "number": t.number, "title": t.title })));
         let agent = |t: &DeliveryTicket| state.db.get_agent(builder_id(d, t)).ok().flatten().filter(|_| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing"));
-        v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped, "agent_id": agent(t).map(|a| a.id), "agent_name": agent(t).map(|a| a.name) })).collect::<Vec<_>>());
+        v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": agent(t).map(|a| a.id), "agent_name": agent(t).map(|a| a.name), "waiting": (t.state == "started" && !t.wait_for.is_empty()).then(|| waiting_text(state, d, t)) })).collect::<Vec<_>>());
+        v["waits_on"] = json!(waits_on(state, d));
         // Ready tickets nobody has yet, while the Lead hands them out.
         let waiting: Vec<i64> = if d.state == "running" && lead_of(state, d).is_some() { ready_tickets(d).iter().map(|t| t.number).collect() } else { vec![] };
         v["waiting_for_lead"] = json!(waiting);
@@ -2478,6 +2878,25 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         v["waiting_on_you"] = json!(d.tickets.iter().filter(|t| t.state == "needs_human").map(|t| t.number).collect::<Vec<_>>());
     }
     v
+}
+
+/// The open blockers outside `d`'s spec that its tickets wait on, each with the Delivery it belongs to
+/// (null when it has none), so the user can start that one first.
+fn waits_on(state: &AppState, d: &Delivery) -> Vec<Value> {
+    let mut all: Vec<&String> = d.tickets.iter().filter(|t| t.state != "closed").flat_map(|t| &t.waiting_on).collect();
+    all.dedup();
+    let others = state.db.all_deliveries().unwrap_or_default();
+    let tasks = state.db.list_tasks().unwrap_or_default();
+    all.iter()
+        .map(|w| {
+            let (repo, n) = w.rsplit_once('#').unwrap_or((w, ""));
+            let n: i64 = n.parse().unwrap_or_default();
+            let of = others.iter().find(|o| o.repo.eq_ignore_ascii_case(repo) && o.tickets.iter().any(|t| t.number == n));
+            // `issue_id`: the spec's Loft issue, to start its Delivery from here.
+            let issue = of.and_then(|o| tasks.iter().find(|t| t.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&o.repo) && g.number == o.spec)));
+            json!({ "blocker": w, "delivery": of.map(|o| json!({ "repo": o.repo, "spec": o.spec, "started": o.state != "planned", "issue_id": issue.map(|t| t.id.clone()) })) })
+        })
+        .collect()
 }
 
 /// `GET /api/issues/{id}/delivery`: the Delivery of a standalone ticket's or a spec's Loft issue, for its
@@ -2505,7 +2924,7 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
             v["spec_id"] = json!(d.spec_id);
             v["local"] = json!(d.local);
             let tickets = v["tickets"].take();
-            v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "verdicts": t.verdicts })).collect::<Vec<_>>());
+            v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "waiting": j["waiting"], "verdicts": t.verdicts })).collect::<Vec<_>>());
             v
         })
         .collect();

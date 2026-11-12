@@ -59,7 +59,8 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
 function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
-  const l = ticketLabel(t.state);
+  // A ticket its Dev reported waiting says so, with what on in its tooltip.
+  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state, t.waiting_on);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>
@@ -71,7 +72,7 @@ function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number
       {Object.entries(t.verdicts ?? {}).map(([role, v]) => (
         <span key={role} className={cx("font-mono text-[10px]", v === "pass" ? "text-good" : "text-fg-3")} title={`${role}: ${v}`}>{role} {v === "pass" ? "✓" : "…"}</span>
       ))}
-      <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[l.tone])}>{l.text}</span>
+      <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[l.tone])} title={t.waiting ?? undefined}>{l.text}</span>
     </>
   );
   return <li>{open ? <button onClick={open} className={cx(row, "rounded-md hover:bg-white/[0.04]")}>{body}</button> : <div className={row}>{body}</div>}</li>;
