@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type UpdateStatus as Status } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
+import { restartDisabled } from "../lib/restartButton";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
@@ -50,7 +51,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
       <span className={cx("size-1.5 rounded-full", dot)} />
       {label}
       {s.phase === "restart" && (
-        <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={(busy && !s.why?.startsWith("restart failed")) || s.running_agents > 0} onClick={restart}>
+        <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={restartDisabled(s, busy)} onClick={restart}>
           Restart
         </button>
       )}
