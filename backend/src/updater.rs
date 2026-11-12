@@ -13,9 +13,9 @@ use crate::state::{AppState, Event};
 
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5);
-/// How soon turning auto-update on in Settings takes effect.
 const RESTART_BACKOFF: Duration = Duration::from_secs(30);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// How soon turning auto-update on in Settings takes effect.
 const OFF_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -212,7 +212,8 @@ pub async fn updater(state: AppState, root: PathBuf) {
             let n = running_agents(&state);
             set(&state, |s| *s = restart_status(&head, n, s.why.take()));
             // Restart by itself once agents are idle, as an update does; `restart` only returns when exec failed.
-            if n == 0 && retry_at.is_none_or(|t| std::time::Instant::now() >= t) {
+            let now = std::time::Instant::now();
+            if should_restart(n, now, retry_at) {
                 before_restart(&state).await;
                 restart(&state);
                 retry_at = Some(std::time::Instant::now() + backoff);
@@ -260,6 +261,11 @@ pub async fn updater(state: AppState, root: PathBuf) {
     }
 }
 
+/// Restart now: no agent runs, and a failed exec's backoff is over.
+fn should_restart(running_agents: usize, now: std::time::Instant, retry_at: Option<std::time::Instant>) -> bool {
+    running_agents == 0 && retry_at.is_none_or(|t| now >= t)
+}
+
 /// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
 /// doesn't check upstream in this phase (the commit it would compare is the old one, so it would rebuild what's
 /// already on disk): it restarts when idle, and the new process checks.
@@ -300,6 +306,28 @@ mod tests {
         // Built from a checkout, so the embedded commit is a full sha; it's what `current` shows (7 chars).
         assert_eq!(super::BUILT_FROM.len(), 40, "{:?}", super::BUILT_FROM);
         assert_eq!(super::short(super::BUILT_FROM).len(), 7);
+    }
+
+    #[test]
+    fn a_restart_waits_for_idle_and_for_its_backoff() {
+        use std::time::Instant;
+        let now = Instant::now();
+        assert!(!super::should_restart(1, now, None));
+        assert!(super::should_restart(0, now, None));
+        assert!(!super::should_restart(0, now, Some(now + Duration::from_secs(5))));
+        assert!(super::should_restart(0, now, Some(now)));
+        assert!(!super::should_restart(2, now, Some(now)));
+    }
+
+    #[test]
+    fn the_restart_backoff_doubles_up_to_its_cap() {
+        let mut b = super::RESTART_BACKOFF;
+        let mut seen = vec![b.as_secs()];
+        for _ in 0..6 {
+            b = (b * 2).min(super::RESTART_BACKOFF_MAX);
+            seen.push(b.as_secs());
+        }
+        assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600]);
     }
 
     #[test]

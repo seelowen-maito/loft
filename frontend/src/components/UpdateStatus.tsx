@@ -2,20 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type UpdateStatus as Status } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
-
-/** After a restart the old status is stale until the new process answers: ask again, a few times. */
-async function refetchUntilNew(set: (s: Status) => void) {
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    try {
-      const s = await api.update();
-      set(s);
-      if (s.phase !== "restart") return;
-    } catch {
-      /* still restarting */
-    }
-  }
-}
+import { refetchUntilNew } from "../lib/updateRefetch";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
@@ -49,7 +36,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
     setBusy(true);
     api
       .restart()
-      .then(() => refetchUntilNew(setS))
+      .then(() => refetchUntilNew(api.update, setS))
       .catch((e) => alert((e as Error).message))
       .finally(() => setBusy(false));
   };
