@@ -255,7 +255,7 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $pickAgent) {
             NavigationStack {
-                AgentPickerList(title: t.state.canSendAgain ? "Send to…" : "Run with…") { a in
+                AgentPickerList(title: t.state.canSendAgain ? "Send to…" : "Run with…", issueProject: t.project) { a in
                     pickAgent = false
                     run(t, agentId: a.id)
                 }
@@ -332,10 +332,12 @@ struct AgentPickerList: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let title: String
+    /// Set for an issue's picker: its project's agents first, Devs first (`Agent.issuePickerOrder`).
+    var issueProject: String? = nil
     let pick: (Agent) -> Void
 
     var body: some View {
-        List(store.sortedAgents) { a in
+        List(issueProject.map { Agent.issuePickerOrder(store.agents, project: $0) } ?? store.sortedAgents) { a in
             Button { pick(a) } label: { AgentRow(agent: a) }
                 .buttonStyle(.plain)
         }

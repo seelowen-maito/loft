@@ -73,3 +73,11 @@ export function groupAgents<A extends GroupAgent>(group: string, agents: A[]): A
 export function agentInGroup(agentId: string, group: string, agents: GroupAgent[]): string {
   return agentId && groupAgents(group, agents).some((a) => a.id === agentId) ? agentId : "";
 }
+
+/** The order of every agent picker for an issue: those working in its `project` first, Devs first within each
+ *  part, then by name. The first one is the picker's default, so pressing Start goes to an agent that builds. */
+export function issuePickerOrder<T extends Teamed & Pick<Agent, "name"> & Partial<Pick<Agent, "role">>>(agents: T[], project = ""): T[] {
+  const p = project.trim();
+  const rank = (a: T) => (p && projectsOf(a).includes(p) ? 0 : 2) + (a.role === "dev" ? 0 : 1);
+  return [...agents].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}

@@ -6,7 +6,7 @@ import { cx } from "../lib/format";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
-import { outsideWarning, projectChoices, projectsOf } from "../lib/team";
+import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
 import { StartWarning } from "../components/StartWarning";
@@ -112,9 +112,9 @@ export function publishBlocked(t: { project: string }, repo: string | undefined)
 
 /** On an open issue nobody is working on: pick an agent and hand it over, from the issue itself. */
 export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }) {
-  // The agents working in its project first: they're on its repo.
+  // The agents working in its project first, Devs first: they're on its repo and build.
   const has = (a: Agent) => projectsOf(a).includes(t.project);
-  const sorted = [...agents].sort((a, b) => Number(has(b)) - Number(has(a)) || a.name.localeCompare(b.name));
+  const sorted = issuePickerOrder(agents, t.project);
   const [agentId, setAgentId] = useState(sorted[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -551,7 +551,9 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
 }
 
 function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; onClose: () => void }) {
-  const [agentId, setAgentId] = useState(t.agent_id ?? "");
+  const ordered = issuePickerOrder(agents, t.project);
+  // The agent already on it stays picked; otherwise the first in the order.
+  const [agentId, setAgentId] = useState(t.agent_id || ordered[0]?.id || "");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -573,7 +575,7 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
   const again = STUCK.includes(t.status);
   return (
     <Modal title={again ? `Send “${t.title}” to…` : `Run “${t.title}”`} onClose={onClose}>
-      <AgentSelect agents={agents} value={agentId} onChange={setAgentId} placeholder="Pick an agent" />
+      <AgentSelect agents={ordered} value={agentId} onChange={setAgentId} placeholder="Pick an agent" />
       <textarea
         value={note}
         onChange={(e) => setNote(e.target.value)}
@@ -760,7 +762,7 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
           {!onIt && (
             <select value={picked} onChange={(e) => setPicked(e.target.value)} className="chip bg-ink-850 text-[11px]" aria-label="Agent to send it to">
               <option value="">Nobody: keep it as a note</option>
-              {agents.map((a) => <option key={a.id} value={a.id}>Send to {a.name}</option>)}
+              {issuePickerOrder(agents, t.project).map((a) => <option key={a.id} value={a.id}>Send to {a.name}</option>)}
             </select>
           )}
           {onIt && (
@@ -841,7 +843,7 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
     <Modal title="New Loft issue" onClose={onClose}>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing" className={field} />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
-      <AgentSelect agents={agents} value={agentId} onChange={pickAgent} placeholder="No agent (a to-do for you)" />
+      <AgentSelect agents={issuePickerOrder(agents, project)} value={agentId} onChange={pickAgent} placeholder="No agent (a to-do for you)" />
       <div className="flex gap-2">
         <select value={priority} onChange={(e) => setPriority(e.target.value as Task["priority"])} className={field} aria-label="Priority">
           {["low", "normal", "high", "urgent"].map((p) => <option key={p} value={p}>{p} priority</option>)}

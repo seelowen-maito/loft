@@ -68,6 +68,17 @@ struct Agent: Codable, Identifiable, Hashable {
         if let projects, !projects.isEmpty { return projects }
         return (project ?? "").isEmpty ? [] : [project!]
     }
+
+    /// The order of every agent picker for an issue: those working in its `project` first, Devs first within each
+    /// part, then by name (web `issuePickerOrder`). The first one is the default, so a hand-off goes to an agent that builds.
+    static func issuePickerOrder(_ agents: [Agent], project: String) -> [Agent] {
+        let p = project.trimmingCharacters(in: .whitespaces)
+        func rank(_ a: Agent) -> Int { (!p.isEmpty && a.allProjects.contains(p) ? 0 : 2) + (a.role == "dev" ? 0 : 1) }
+        return agents.sorted {
+            let a = rank($0), b = rank($1)
+            return a != b ? a < b : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
 }
 
 /// One of an agent's past Sessions, from Claude Code's transcripts (`/agents/{id}/sessions`).
