@@ -5420,6 +5420,16 @@ pub(crate) mod tests {
         assert!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err().starts_with("Nothing was merged: the project folder of gitdir-file isn't a git repo of its own"));
     }
 
+    #[tokio::test]
+    async fn a_project_folder_of_several_repos_is_refused_with_the_hint_wording() {
+        let st = state();
+        let (a, m, dev, dir) = plan_without_git(&st, "many-repos").await;
+        std::fs::create_dir_all(dir.join("api/.git")).unwrap();
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert_eq!(err.1, "The Delivery didn't start: many-repos holds several repos, so issues and Deliveries need one of them.");
+        assert!(woken(&st, &dev).is_empty());
+    }
+
     #[test]
     fn spec_prs_recorded_before_deliveries_become_delivery_records() {
         let dir = crate::testdir::for_this_test("test");

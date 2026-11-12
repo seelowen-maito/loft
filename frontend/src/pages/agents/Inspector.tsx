@@ -8,7 +8,7 @@ import { cx, fmtBytes, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
-import { projectsOf } from "../../lib/team";
+import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 
@@ -83,15 +83,19 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, sub, hint, children }: { label: string; sub?: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <span className="eyebrow">{label}</span>
+      {sub && <span className="block text-[11.5px] text-fg-3">{sub}</span>}
       {children}
       {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
     </label>
   );
 }
+
+/** What a project is, under the Projects label of the agent's settings and the New agent dialog. */
+export const PROJECTS_SUB = "Folders or git repositories from your projects folder";
 
 /** The Role field's hint, for the agent's settings and the New agent dialog. */
 export const roleHint = (team: string) =>
@@ -113,12 +117,15 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     }),
     [agent],
   );
-  const [draft, setDraft] = useState<Draft>(initial);
+  const [typed, setTyped] = useState("");
+  const [shown, setDraft] = useState<Draft>(initial);
+  const draft = withTyped(shown, typed);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
+  const discard = () => (setDraft(initial), setTyped(""));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
   const team = draft.group.trim();
 
@@ -128,6 +135,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     setNotice(null);
     try {
       const saved = await api.updateAgent(agent.id, draft);
+      setTyped("");
       setNotice(saved.notice ?? null);
     } catch (e) {
       setErr((e as Error).message);
@@ -161,14 +169,9 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
       </Field>
 
-      <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
-        <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
-        {agent.project_problems?.length ? (
-          <div className="mt-2 space-y-1 text-[12px] text-warn">
-            <div>Pick this agent's projects: each must be one repo.</div>
-            {agent.project_problems.map((f) => <div key={f.project}>{f.problem}</div>)}
-          </div>
-        ) : null}
+      <Field label="Projects" sub={PROJECTS_SUB} hint="The repos it works in. The starred one is its main project: its issues go there by default.">
+        <ProjectsField value={shown.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => set("projects", v)} />
+        {agent.project_problems?.map((f) => <div key={f.project} className={cx("mt-2 text-[12px]", f.hint ? "text-fg-3" : "text-warn")}>{f.problem}</div>)}
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">
@@ -279,7 +282,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
           <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
         </button>
-        {dirty && <button className="btn-ghost" onClick={() => setDraft(initial)}>Discard</button>}
+        {dirty && <button className="btn-ghost" onClick={discard}>Discard</button>}
         {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
