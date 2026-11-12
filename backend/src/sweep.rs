@@ -19,9 +19,10 @@
 //! build output: the idle timeout (4 h by default) stops such processes long before output is 3 days old.
 //!
 //! Agents keep debug and test output in `scratch/<ticket>/` and reports in `notes/`. The sweep removes
-//! `scratch/<n>/` once issue or PR `<n>` of the agent's main project is closed or merged; a `scratch/` entry with no
+//! `scratch/<n>/` once issue or PR `<n>` of the agent's main project is closed or merged and the folder has been
+//! unchanged for a day; a `scratch/` entry that is or holds a git clone is never swept; a `scratch/` entry with no
 //! number, one for a number GitHub doesn't know, and any when GitHub can't be reached, goes after `TEST_IDLE`
-//! unchanged. Test output stray in `notes/` (`.xcresult`, `.logarchive`, `.ips`, Maestro runs, `*.log`, `*.txt` over
+//! unchanged. Test output stray in `notes/` (`.xcresult`, `.logarchive`, `.ips`, `*.log`, `*.txt` over
 //! 10 MB) goes after `TEST_IDLE` too; Clean lists all of those ticked. Reports and images in `notes/` are never swept.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
@@ -526,7 +527,7 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
                 i
             })
             .collect();
-        for e in std::fs::read_dir(ws.join("scratch")).into_iter().flatten().flatten() {
+        for e in real_dir(&ws.join("scratch")).then(|| std::fs::read_dir(ws.join("scratch"))).into_iter().flatten().flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let mut i = item(&id, format!("scratch/{name}"), e.path());
             i.name = i.rel.clone();
@@ -537,6 +538,8 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
             i.warning.clear();
             if working {
                 (i.blocked, i.ticked) = ("Working".into(), false);
+            } else if holds_git(&e.path(), 3) {
+                (i.blocked, i.ticked) = ("Holds a git clone: move it or delete it by hand".into(), false);
             }
             items.push(i);
         }
@@ -556,14 +559,21 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
     out
 }
 
+/// Whether `path` is a real folder, not a symlink to one.
+fn real_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_dir())
+}
+
 /// What GitHub says about an issue or PR.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Ticket {
     Open,
     Closed,
     Merged,
-    /// No such number, or GitHub can't be reached.
+    /// GitHub has no such number.
     Unknown,
+    /// GitHub didn't answer (a rate limit, an outage): no verdict.
+    Unreachable,
 }
 
 impl Ticket {
@@ -582,7 +592,11 @@ fn ticket_number(name: &str) -> Option<u64> {
 
 /// Issue or PR `n` of `repo` (`owner/repo`) on GitHub.
 async fn ticket(state: &AppState, repo: &str, n: u64) -> Ticket {
-    let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await else { return Ticket::Unknown };
+    let v = match crate::github::get(state, &format!("/repos/{repo}/issues/{n}")).await {
+        Ok(v) => v,
+        Err(e) if crate::github::is_gone(&e) => return Ticket::Unknown,
+        Err(_) => return Ticket::Unreachable,
+    };
     match v["state"].as_str() {
         Some("open") => Ticket::Open,
         Some("closed") if v["pull_request"]["merged_at"].is_string() => Ticket::Merged,
@@ -618,13 +632,15 @@ async fn ticketed(state: &AppState, mut items: Vec<Item>) -> Vec<Item> {
             Ticket::Closed => (format!("#{n} closed"), true),
             Ticket::Merged => (format!("#{n} merged"), true),
             Ticket::Unknown => (format!("#{n}: no ticket found, goes after 7 days"), true),
+            Ticket::Unreachable => (format!("#{n}: couldn't check GitHub, goes after 7 days"), true),
         };
     }
     items
 }
 
 /// Whether `path` is test output Clean lists ticked and the sweep removes when old: a `.xcresult`, `.logarchive` or
-/// `.ips`, a Maestro run folder, a `.log`, or a `.txt` over 10 MB. Reports (`.md`, `.html`, `.json`) and images are not.
+/// `.ips`, a `.log` (Maestro's `maestro.log` too), or a `.txt` over 10 MB. Other folders, reports (`.md`, `.html`,
+/// `.json`) and images are not: a folder is never taken for its name, as it may hold a report.
 fn is_test_output(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     let Ok(m) = path.symlink_metadata() else { return false };
@@ -635,10 +651,30 @@ fn is_test_output(path: &Path) -> bool {
     if ends(".xcresult") || ends(".logarchive") || ends(".ips") {
         return true;
     }
-    if m.is_dir() {
-        return name.starts_with("maestro") || path.join("maestro.log").symlink_metadata().is_ok_and(|l| l.is_file());
-    }
     m.is_file() && (ends(".log") || (ends(".txt") && m.len() > BIG_TXT))
+}
+
+/// Whether `path` is or holds (up to 3 folders down) a `.git`: a clone, which only Clean's git check may clear.
+fn holds_git(path: &Path, depth: usize) -> bool {
+    if path.file_name().is_some_and(|n| n == ".git") || path.join(".git").symlink_metadata().is_ok() {
+        return true;
+    }
+    depth > 0 && std::fs::read_dir(path).into_iter().flatten().flatten().any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && holds_git(&e.path(), depth - 1))
+}
+
+/// When `path` last changed: its newest file's mtime or ctime, whichever is later. A copy that kept old mtimes
+/// (`cp -p`, `tar x`) still has a ctime of the day it arrived.
+fn changed_of(path: &Path) -> SystemTime {
+    fn ctime(path: &Path) -> SystemTime {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(m) = path.symlink_metadata() else { return SystemTime::UNIX_EPOCH };
+        let own = SystemTime::UNIX_EPOCH + Duration::new(m.ctime().max(0) as u64, m.ctime_nsec().clamp(0, 999_999_999) as u32);
+        if !m.is_dir() {
+            return own;
+        }
+        std::fs::read_dir(path).into_iter().flatten().flatten().map(|e| ctime(&e.path())).fold(own, SystemTime::max)
+    }
+    measure(path).1.max(ctime(path))
 }
 
 /// The test output in a workspace's `notes/`, at most four folders down; a match isn't opened.
@@ -648,7 +684,7 @@ fn test_output_in(notes: &Path) -> Vec<PathBuf> {
             let path = e.path();
             if is_test_output(&path) {
                 out.push(path);
-            } else if depth > 0 && e.file_type().is_ok_and(|t| t.is_dir()) {
+            } else if depth > 0 && e.file_type().is_ok_and(|t| t.is_dir()) && !path.join(".git").exists() {
                 walk(&path, depth - 1, out);
             }
         }
@@ -673,23 +709,33 @@ fn plan_scratch(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool,
         let ws = e.path();
         let rel = |path: &Path| path.strip_prefix(&ws).unwrap_or(path).to_string_lossy().to_string();
         let old = |path: PathBuf, p: &mut Plan| {
-            let (_, changed) = measure(&path);
+            let changed = changed_of(&path);
             if now.duration_since(changed).unwrap_or_default() >= TEST_IDLE {
                 folder(&root, &id, &rel(&path), path, changed, p);
             } else {
                 p.skipped.push(skip(&id, &rel(&path), "younger than 7 days"));
             }
         };
-        for (name, path) in std::fs::read_dir(ws.join("scratch")).into_iter().flatten().flatten().map(|e| (e.file_name().to_string_lossy().to_string(), e.path())) {
+        let scratch = ws.join("scratch");
+        for (name, path) in real_dir(&scratch).then(|| std::fs::read_dir(&scratch)).into_iter().flatten().flatten().flatten().map(|e| (e.file_name().to_string_lossy().to_string(), e.path())) {
             if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
                 p.skipped.push(skip(&id, &rel(&path), "symlink"));
                 continue;
             }
+            if holds_git(&path, 3) {
+                p.skipped.push(skip(&id, &rel(&path), "holds a git clone"));
+                continue;
+            }
             match ticket_number(&name).map(|n| (n, ticket(&id, n))) {
                 Some((n, Ticket::Open)) => p.skipped.push(skip(&id, &rel(&path), &format!("#{n} is open"))),
+                // A day unchanged too: the number may belong to another project's ticket.
                 Some((_, t)) if t.done() => {
-                    let (_, changed) = measure(&path);
-                    folder(&root, &id, &rel(&path), path, changed, p);
+                    let changed = changed_of(&path);
+                    if now.duration_since(changed).unwrap_or_default() >= Duration::from_secs(24 * 60 * 60) {
+                        folder(&root, &id, &rel(&path), path, changed, p);
+                    } else {
+                        p.skipped.push(skip(&id, &rel(&path), "younger than 1 day"));
+                    }
                 }
                 _ => old(path, p),
             }
@@ -822,6 +868,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
         (2, _) => Ok(()),
         (_, true) if p.is_dir() => Ok(()),
         (_, true) => Err("not a folder"),
+        (3, false) if parts[1] == "scratch" && holds_git(&p, 3) => Err("holds a git clone"),
         (3, false) if parts[1] == "scratch" => Ok(()),
         (_, false) if parts[1] == "notes" && is_test_output(&p) => Ok(()),
         (_, false) => Err("not inside a main clone"),
@@ -2179,54 +2226,137 @@ mod tests {
         file(&ws.join("scratch/loose.txt"));
 
         let l = run(&st, None, None, IDLE).await;
-        // Merged and closed go at once; open stays; unknown, unreachable and unnumbered stay while young.
-        assert_eq!(removed_rels(&l), ["scratch/412", "scratch/414"], "{:?}", l.lines);
+        // Fresh folders stay, even for a closed ticket (it may be another project's number).
+        assert!(l.lines.is_empty(), "{:?}", l.lines);
         assert!(l.skipped.contains(&skip(&a.id, "scratch/413", "#413 is open")));
-        for n in ["413", "415", "999", "foo"] {
+        assert!(l.skipped.contains(&skip(&a.id, "scratch/412", "younger than 1 day")));
+        for n in ["412", "413", "414", "415", "999", "foo"] {
             assert!(ws.join("scratch").join(n).exists(), "{n}");
         }
         assert!(fake.seen("/repos/octo/loft/issues/412").len() == 1);
 
+        // Two days unchanged: the closed and merged go. The mtime and ctime both count, so the files are aged by
+        // moving `now` on, not their mtime.
+        let mut p = Plan::default();
+        let later = SystemTime::now() + Duration::from_secs(2 * 24 * 3600);
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, later, &ticket_of, &mut p);
+        assert_eq!(planned(&p), ["scratch/412", "scratch/414"]);
+
         // A week unchanged: all but the open ticket's.
-        for n in ["413", "415", "999", "foo", "loose.txt"] {
-            let p = ws.join("scratch").join(n);
-            if p.is_dir() {
-                age_by(&p, Duration::from_secs(8 * 24 * 3600));
-            } else {
-                fs::File::open(&p).unwrap().set_modified(SystemTime::now() - Duration::from_secs(8 * 24 * 3600)).unwrap();
-            }
+        let mut p = Plan::default();
+        let week = SystemTime::now() + Duration::from_secs(8 * 24 * 3600);
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, week, &ticket_of, &mut p);
+        assert_eq!(planned(&p), ["scratch/412", "scratch/414", "scratch/415", "scratch/999", "scratch/foo", "scratch/loose.txt"]);
+    }
+
+    fn ticket_of(_: &str, n: u64) -> Ticket {
+        match n {
+            412 => Ticket::Merged,
+            413 => Ticket::Open,
+            414 => Ticket::Closed,
+            415 => Ticket::Unreachable,
+            _ => Ticket::Unknown,
         }
-        let l = run(&st, None, None, IDLE).await;
-        assert_eq!(removed_rels(&l), ["scratch/415", "scratch/999", "scratch/foo", "scratch/loose.txt"], "{:?}", l.lines);
-        assert!(ws.join("scratch/413/out.log").exists(), "an open ticket's scratch stays");
+    }
+
+    fn planned(p: &Plan) -> Vec<String> {
+        let mut v: Vec<_> = p.folders.iter().map(|f| f.rel.clone()).collect();
+        v.sort();
+        v
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_output_in_notes_goes_after_7_days_and_reports_and_images_stay() {
         let st = crate::tasks::tests::state();
         let (a, ws, _fake) = scratch_agent(&st, "Tester");
-        let out = ["a.xcresult/Info.plist", "logs.logarchive/x", "qa/crash.ips", "maestro-run/commands.json", "runs/1/maestro.log", "dev.log"];
-        let keep = ["report.md", "page.html", "data.json", "shot.png", "small.txt", "qa/notes.md"];
+        let out = ["a.xcresult/Info.plist", "logs.logarchive/x", "qa/crash.ips", "runs/1/maestro.log", "dev.log"];
+        // A folder named for Maestro, or next to a maestro.log, may hold a report: only the log goes.
+        let keep = ["report.md", "page.html", "data.json", "shot.png", "small.txt", "qa/notes.md", "runs/1/report.md", "runs/1/shot.png", "maestro-findings/audit.md", "maestro-run/commands.json"];
         for f in out.iter().chain(&keep) {
             file(&ws.join("notes").join(f));
         }
         fs::File::create(ws.join("notes/big.txt")).unwrap().set_len(BIG_TXT + 1).unwrap();
-        age_by(&ws.join("notes"), Duration::from_secs(8 * 24 * 3600));
         file(&ws.join("notes/new.log"));
 
-        let l = run(&st, None, None, IDLE).await;
-        let mut want: Vec<String> = ["a.xcresult", "big.txt", "dev.log", "logs.logarchive", "maestro-run", "qa/crash.ips", "runs/1/maestro.log"].iter().map(|f| format!("notes/{f}")).collect();
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now() + Duration::from_secs(8 * 24 * 3600), &ticket_of, &mut p);
+        let mut want: Vec<String> = ["a.xcresult", "big.txt", "dev.log", "logs.logarchive", "new.log", "qa/crash.ips", "runs/1/maestro.log"].iter().map(|f| format!("notes/{f}")).collect();
         want.sort();
-        // `runs/1/maestro.log` is a log; the folder holding it is a Maestro run, so it goes whole.
-        want.retain(|w| w != "notes/runs/1/maestro.log");
-        want.push("notes/runs/1".into());
-        want.sort();
-        assert_eq!(removed_rels(&l), want, "{:?}", l.lines);
+        assert_eq!(planned(&p), want);
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now(), &ticket_of, &mut p);
+        assert!(p.folders.is_empty(), "young test output stays: {:?}", p.folders);
+        // Run for real: nothing is removed, and no report is ever.
+        run(&st, None, None, IDLE).await;
         for f in keep {
             assert!(ws.join("notes").join(f).exists(), "{f}");
         }
-        assert!(ws.join("notes/new.log").exists(), "young test output stays");
         let _ = a;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_in_scratch_or_notes_is_never_swept_nor_listed_ticked() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, _fake) = scratch_agent(&st, "Cloner");
+        git(&ws.join("scratch/412/repo"), &["init", "-q"]);
+        git(&ws.join("scratch/pra"), &["init", "-q"]);
+        file(&ws.join("scratch/412/repo/out.log"));
+        file(&ws.join("scratch/412/other.log"));
+        git(&ws.join("notes/clone"), &["init", "-q"]);
+        file(&ws.join("notes/clone/dev.log"));
+        file(&ws.join("scratch/plain/out.log"));
+
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now() + Duration::from_secs(8 * 24 * 3600), &ticket_of, &mut p);
+        assert_eq!(planned(&p), ["scratch/plain"], "{:?}", p.skipped);
+        assert!(p.skipped.contains(&skip(&a.id, "scratch/412", "holds a git clone")));
+        assert!(p.skipped.contains(&skip(&a.id, "scratch/pra", "holds a git clone")));
+
+        let items = preview_of(&st, Some(&a.id)).await;
+        for rel in ["scratch/412", "scratch/pra"] {
+            let i = items.iter().find(|i| i.rel == rel).unwrap();
+            assert!(!i.ticked && i.blocked.starts_with("Holds a git clone"), "{rel}");
+        }
+        assert!(!items.iter().any(|i| i.rel.starts_with("notes/clone/")), "a clone in notes isn't opened");
+        // Not even by path.
+        let log = clean_paths(&st, Some(&a.id), vec![ws.join("scratch/412"), ws.join("scratch/pra")]).await;
+        assert!(log.lines.iter().all(|l| l.error.is_some()), "{:?}", log.lines);
+        assert!(ws.join("scratch/412/repo/.git").exists() && ws.join("scratch/pra/.git").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_symlinked_scratch_is_not_read_and_copied_old_files_are_not_old() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, _fake) = scratch_agent(&st, "Linker");
+        let elsewhere = ws.join("other");
+        file(&elsewhere.join("412/out.log"));
+        std::os::unix::fs::symlink(&elsewhere, ws.join("scratch")).unwrap();
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now() + Duration::from_secs(30 * 24 * 3600), &ticket_of, &mut p);
+        assert!(p.folders.is_empty() && p.skipped.is_empty(), "{:?}", p.folders);
+        let items = preview_of(&st, Some(&a.id)).await;
+        assert!(!items.iter().any(|i| i.rel.starts_with("scratch/")), "{:?}", items.iter().map(|i| &i.rel).collect::<Vec<_>>());
+
+        // A file copied with a week-old mtime arrived today: its ctime says so.
+        fs::remove_file(ws.join("scratch")).unwrap();
+        file(&ws.join("scratch/misc/out.log"));
+        age_by(&ws.join("scratch/misc"), Duration::from_secs(8 * 24 * 3600));
+        let mut p = Plan::default();
+        plan_scratch(&st.cfg.storage_dir, Some(&a.id), &|_| false, SystemTime::now(), &ticket_of, &mut p);
+        assert!(p.folders.is_empty(), "{:?}", p.folders);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rate_limited_ticket_reads_as_couldn_t_check_not_no_ticket() {
+        let st = crate::tasks::tests::state();
+        let (a, ws, fake) = scratch_agent(&st, "Limited");
+        fake.route("GET", "/repos/octo/loft/issues/416", 429, serde_json::json!({ "message": "rate limit" }));
+        file(&ws.join("scratch/416/out.log"));
+        file(&ws.join("scratch/999/out.log"));
+        let items = preview_of(&st, Some(&a.id)).await;
+        let by = |rel: &str| items.iter().find(|i| i.rel == rel).unwrap().label.clone();
+        assert_eq!(by("scratch/416"), "#416: couldn't check GitHub, goes after 7 days");
+        assert_eq!(by("scratch/999"), "#999: no ticket found, goes after 7 days");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2237,9 +2367,9 @@ mod tests {
         file(&ws.join("notes/old.log"));
         age_by(&ws.join("notes"), Duration::from_secs(8 * 24 * 3600));
         let mut p = Plan::default();
-        plan_scratch(&st.cfg.storage_dir, None, &|id| id == a.id, SystemTime::now(), &|_, _| Ticket::Merged, &mut p);
+        plan_scratch(&st.cfg.storage_dir, None, &|id| id == a.id, SystemTime::now() + Duration::from_secs(8 * 24 * 3600), &|_, _| Ticket::Merged, &mut p);
         assert!(p.folders.is_empty());
-        plan_scratch(&st.cfg.storage_dir, None, &|_| false, SystemTime::now(), &|_, _| Ticket::Merged, &mut p);
+        plan_scratch(&st.cfg.storage_dir, None, &|_| false, SystemTime::now() + Duration::from_secs(8 * 24 * 3600), &|_, _| Ticket::Merged, &mut p);
         assert_eq!(p.folders.len(), 2);
     }
 
