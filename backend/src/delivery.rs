@@ -167,8 +167,8 @@ impl Step {
     /// Whether `d` still waits on this step: its call never came.
     fn waiting(&self, d: &Delivery) -> bool {
         match self {
-            // Tickets in flight keep the Delivery going, and their close wakes the Lead again.
-            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_in_flight(d),
+            // Tickets being worked keep the Delivery going, and their close wakes the Lead again; one whose Dev waits doesn't.
+            Step::Assign => d.state == "running" && !ready_tickets(d).is_empty() && none_working(d),
             // A ticket its Dev reported as waiting (`wait_ticket`) waits on what it names, not on the Dev.
             Step::Build { ticket, round } => d.ticket(*ticket).is_some_and(|t| t.state == "started" && t.rounds == *round && t.wait_for.is_empty()),
             Step::Review { ticket, role, round } => d.ticket(*ticket).is_some_and(|t| t.state == "review" && t.rounds == *round && t.verdicts.get(role).is_some_and(|v| v == "pending")),
@@ -399,7 +399,7 @@ pub async fn blocker_closed(state: &AppState, repo: &str, n: i64, held: &str) {
         let Some(d) = update(state, &d.repo, d.spec, |d| d.tickets.iter_mut().for_each(|t| t.waiting_on.retain(|w| !w.eq_ignore_ascii_case(&blocker)))) else { continue };
         if let Some(lead) = lead_of(state, &d)
             && d.state == "running"
-            && none_in_flight(&d)
+            && none_working(&d)
             && !ready_tickets(&d).is_empty()
         {
             wake_lead(state, &d, &lead, &format!("{blocker} closed: tickets that waited on it are ready."));
@@ -532,9 +532,9 @@ pub(crate) fn next_ticket(d: &Delivery) -> Option<&DeliveryTicket> {
 }
 
 /// No ticket is being built, reviewed, waiting for its fix or waiting for the user: nothing will wake the
-/// Lead by closing.
-fn none_in_flight(d: &Delivery) -> bool {
-    d.tickets.iter().all(|t| !matches!(t.state.as_str(), "started" | "review" | "changes" | "closing" | "needs_human"))
+/// Lead by closing. A ticket whose Dev reported waiting (`wait_ticket`) doesn't count: that Dev is free.
+fn none_working(d: &Delivery) -> bool {
+    d.tickets.iter().all(|t| !matches!(t.state.as_str(), "review" | "changes" | "closing" | "needs_human") && !(t.state == "started" && t.wait_for.is_empty()))
 }
 
 /// Whether Dev `id` is building one of `d`'s tickets: started, and not waiting.
@@ -549,7 +549,7 @@ fn free(d: &Delivery, id: &str) -> bool {
 
 /// A running Delivery of a team with a Lead that has tickets to hand out and nothing in flight: it waits on the Lead.
 fn waits_on_lead(state: &AppState, d: &Delivery) -> bool {
-    d.state == "running" && none_in_flight(d) && !ready_tickets(d).is_empty() && lead_of(state, d).is_some()
+    d.state == "running" && none_working(d) && !ready_tickets(d).is_empty() && lead_of(state, d).is_some()
 }
 
 /// The tickets ready to hand out: open, with every blocker closed, and nobody on them.
@@ -835,8 +835,13 @@ fn lead_brief(state: &AppState, d: &Delivery, why: &str) -> String {
         .iter()
         .filter(|a| is_team_dev(d, a))
         .map(|a| {
-            let on: Vec<String> = d.tickets.iter().filter(|t| t.agent == a.id && matches!(t.state.as_str(), "started" | "review" | "changes" | "closing" | "needs_human")).map(|t| format!("{} ({})", tag(d, t), t.state)).collect();
-            format!("  - {}: {}", a.name, if on.is_empty() { "free".to_string() } else { format!("on {}", on.join(", ")) })
+            let mine = d.tickets.iter().filter(|t| t.agent == a.id);
+            // A ticket whose Dev reported waiting (`wait_ticket`) isn't work: that Dev is free.
+            let working = |t: &&DeliveryTicket| matches!(t.state.as_str(), "review" | "changes" | "closing" | "needs_human") || t.state == "started" && t.wait_for.is_empty();
+            let on: Vec<String> = mine.clone().filter(working).map(|t| format!("{} ({})", tag(d, t), t.state)).collect();
+            let waits: Vec<String> = mine.filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| format!("{} {}", tag(d, t), waiting_text(state, d, t))).collect();
+            let free = if waits.is_empty() { "free".to_string() } else { format!("free ({})", waits.join(", ")) };
+            format!("  - {}: {}", a.name, if on.is_empty() { free } else { format!("on {}", on.join(", ")) })
         })
         .collect();
     format!(
@@ -1415,7 +1420,8 @@ fn waiting_text(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         state.db.get_agent(&t.wait_for).ok().flatten().map_or_else(|| t.wait_for.clone(), |a| a.name)
     };
     let reason = t.wait_reason.trim_end_matches('.');
-    format!("waiting on {on}: {reason}.")
+    let stop = if reason.ends_with(['?', '!']) { "" } else { "." };
+    format!("waiting on {on}: {reason}{stop}")
 }
 
 /// The longest reason `wait_ticket` takes: it's shown on the Delivery's state line.
