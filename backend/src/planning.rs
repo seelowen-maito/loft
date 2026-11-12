@@ -2851,7 +2851,7 @@ pub(crate) mod tests {
         crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;
         assert_eq!(woken(&st, &lead).len(), wakes + 1);
         let brief = woken(&st, &lead).pop().unwrap();
-        assert!(brief.contains("Builder: free (#41 waiting on #99: Which schema?.)"), "{brief}");
+        assert!(brief.contains("Builder: free (#41 waiting on #99: Which schema?)"), "{brief}");
         // In review with a stale wait_for, it still holds the wake back.
         crate::delivery::update(&st, slug, 40, |d| d.tickets[0].state = "review".into());
         crate::delivery::blocker_closed(&st, "octo/ext-free", 9, slug).await;

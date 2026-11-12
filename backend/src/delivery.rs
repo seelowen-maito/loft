@@ -1420,7 +1420,8 @@ fn waiting_text(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         state.db.get_agent(&t.wait_for).ok().flatten().map_or_else(|| t.wait_for.clone(), |a| a.name)
     };
     let reason = t.wait_reason.trim_end_matches('.');
-    format!("waiting on {on}: {reason}.")
+    let stop = if reason.ends_with(['?', '!']) { "" } else { "." };
+    format!("waiting on {on}: {reason}{stop}")
 }
 
 /// The longest reason `wait_ticket` takes: it's shown on the Delivery's state line.
