@@ -733,14 +733,11 @@ pub async fn clear_messages(State(state): State<AppState>, Path(id): Path<String
     Ok(Json(json!({ "ok": true })))
 }
 
-pub async fn randomize_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let seed = format!("{id}-{}", now());
-    let a = state
-        .db
-        .update_agent(&id, |a| a.avatar = Avatar::generate(&seed))?
-        .ok_or_else(not_found)?;
-    emit_agent(&state, &a);
-    Ok(Json(agent_json(&state, &a)))
+/// Redraw: the agent draws itself a new sticker in a quiet run; the sticker arrives with the agent event.
+pub async fn redraw_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    agents::redraw_avatar(&state, &id);
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- memories ---------------------------------------------------------

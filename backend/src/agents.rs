@@ -659,14 +659,14 @@ fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool
 /// `wake` is the step it's for: when the run that takes it ends, Loft checks the step moved on.
 pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String, wake: crate::delivery::Wake) {
     let fresh = ticket_boundary(state, agent_id, ticket, builder);
-    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake), None);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake), None, false);
 }
 
 /// A Resume wake on `ticket`, the one its Delivery stalled on: the agent carries on with it, so it's never a
 /// ticket boundary, whatever the agent worked on meanwhile.
 pub fn resume_on_ticket(state: &AppState, agent_id: &str, ticket: &str, prompt: String, wake: crate::delivery::Wake) {
     let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
-    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake), None);
+    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake), None, false);
 }
 
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
@@ -746,6 +746,14 @@ pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     start(state, agent_id, Some(prompt), "avatar", false);
 }
 
+/// Redraw: have the agent draw a new sticker that fits who it is, in a quiet run on a throwaway session, so its
+/// own Session (chat and context) stays as it was. On a busy agent it waits for the rest of the queue.
+pub fn redraw_avatar(state: &AppState, agent_id: &str) {
+    start_with(state, agent_id, Some(REDRAW_PROMPT.into()), "avatar", false, false, None, None, true);
+}
+
+const REDRAW_PROMPT: &str = "[Loft: redraw your sticker] This is not a message from the user. The user asked you to draw a new sticker avatar.\n\nRead your role, personality and standing instructions, then your main project's README and top-level files: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.";
+
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
 #[allow(clippy::too_many_arguments)]
 fn run_msg(quiet: bool, state: &AppState, agent_id: &str, rid: Option<&str>, role: &str, kind: &str, content: &str, meta: Value) -> Option<Message> {
@@ -793,7 +801,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         name = from.name,
         id = from.id,
     );
-    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg);
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
     let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
     if queued.is_some() {
         emit_run(state, &to.id);
@@ -845,15 +853,16 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
 
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
-    start_with(state, agent_id, text, trigger, for_user, false, None, None);
+    start_with(state, agent_id, text, trigger, for_user, false, None, None, false);
 }
 
 /// `start`; `fresh`: the prompt starts a new Delivery ticket, so the run that delivers it first applies
 /// the agent's Fresh context setting (`fresh_if_due`). `delivery`: the Delivery step the prompt wakes the
 /// agent for, kept with the prompt (queued with it, then on the run that takes it). `msg`: the agent message
-/// the prompt carries, shown as queued while it waits (`Runtime::queued_messages`).
+/// the prompt carries, shown as queued while it waits (`Runtime::queued_messages`). `throwaway`: a Redraw, run on
+/// a session of its own (`redraw_avatar`).
 #[allow(clippy::too_many_arguments)]
-fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>, msg: Option<i64>) {
+fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>, msg: Option<i64>, throwaway: bool) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -866,7 +875,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             rt.fresh_before.insert(agent_id.to_string());
         }
         if rt.running.contains_key(agent_id) {
-            if trigger == "grill" {
+            if throwaway {
+                rt.redraw_queued.insert(agent_id.to_string());
+            } else if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt.clone());
@@ -898,9 +909,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         let mut prompt = prompt;
         let mut trigger = trigger;
         let mut for_user = for_user;
+        let mut throwaway = throwaway;
         loop {
-            // Only between runs: a ticket boundary queued behind a run waits for it to end.
-            fresh_boundary(&state, &agent_id);
+            // Only between runs: a ticket boundary queued behind a run waits for it to end. A Redraw leaves the Session alone.
+            if !throwaway {
+                fresh_boundary(&state, &agent_id);
+            }
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
@@ -908,7 +922,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
-            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
@@ -936,9 +950,11 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                         }
                         let u = rt.queued_for_user.remove(&agent_id);
                         take_delivery_queue(&mut rt, &agent_id);
-                        Some((q.join("\n\n"), "user", u))
+                        Some((q.join("\n\n"), "user", u, false))
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
+                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
+                    // A Redraw waits for everything else.
+                    _ if rt.redraw_queued.remove(&agent_id) => Some((REDRAW_PROMPT.to_string(), "avatar", false, true)),
                     _ => {
                         // Saved before the run stops counting as running, so a restart keeps the idle time.
                         let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
@@ -952,10 +968,11 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 emit_run(&state, &agent_id);
             }
             match next {
-                Some((p, t, u)) => {
+                Some((p, t, u, w)) => {
                     prompt = p;
                     trigger = t;
                     for_user = u;
+                    throwaway = w;
                 }
                 None => break,
             }
@@ -1228,10 +1245,12 @@ fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
 
 /// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
 /// Whether the run failed: claude reported an error, or exited without a result when nobody stopped it.
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
-    let mut resume = true;
+/// `throwaway`: run on a new session that isn't saved, leaving the agent's own Session as it was.
+#[allow(clippy::too_many_arguments)]
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, throwaway: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
+    let mut resume = !throwaway;
     loop {
-        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
+        match run_process(state, agent_id, prompt, trigger, for_user, throwaway, kill.clone(), resume, delivered).await? {
             RunOutcome::Done { failed } => return Ok(failed),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
@@ -1271,12 +1290,14 @@ async fn run_process(
     prompt: &str,
     trigger: &str,
     for_user: bool,
+    throwaway: bool,
     kill: Arc<Notify>,
     resume: bool,
     delivered: &mut bool,
 ) -> Result<RunOutcome> {
     let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-    if !resume || agent.session_id.is_none() || agent.memory_index.is_none() {
+    // A throwaway run leaves the frozen memories to the agent's Session (its prompt builds them if there are none).
+    if !throwaway && (!resume || agent.session_id.is_none() || agent.memory_index.is_none()) {
         // A new Session (or the first run since Clear or Compact): freeze its memories for the runs to come.
         let block = memory_block(state, agent_id);
         agent = state.db.update_agent(agent_id, |a| a.memory_index = Some(block))?.unwrap_or(agent);
@@ -1309,6 +1330,10 @@ async fn run_process(
 
     let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
     let mut cmd = build_command(state, &agent, resume)?;
+    if throwaway {
+        // Not saved, so it isn't listed among the agent's past Sessions either.
+        cmd.arg("--no-session-persistence");
+    }
     if image_line.is_some() {
         cmd.args(["--input-format", "stream-json"]);
     }
@@ -1422,12 +1447,12 @@ async fn run_process(
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
-                    if let Some(sid) = ev["session_id"].as_str() {
+                    if let Some(sid) = ev["session_id"].as_str().filter(|_| !throwaway) {
                         set_session(state, agent_id, sid)?;
                     }
                 }
                 // Manual /compact and Claude Code's own auto-compaction both land here.
-                Some("compact_boundary") => {
+                Some("compact_boundary") if !throwaway => {
                     let m = &ev["compact_metadata"];
                     run_msg(quiet, state, agent_id, rid, "system", "compact", "Context compacted.", json!({
                         "trigger": m["trigger"], "pre_tokens": m["pre_tokens"], "post_tokens": m["post_tokens"],
@@ -1501,7 +1526,7 @@ async fn run_process(
                 }
                 // Everything sent as input this turn is the context: fresh, cache-read and cache-written tokens.
                 let u = &ev["message"]["usage"];
-                if sub.is_none() && u.is_object() {
+                if sub.is_none() && u.is_object() && !throwaway {
                     let n = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum();
                     set_context_tokens(state, agent_id, Some(n));
                 }
@@ -1621,7 +1646,10 @@ async fn run_process(
                 // On --resume Claude Code reports the session's running total; the run cost what it added.
                 let total = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
                 let mut cost = total;
-                if let Some(sid) = ev["session_id"].as_str() {
+                if throwaway {
+                    // A session of its own: all of it is this run's, and only the agent's total cost moves.
+                    state.db.update_agent(agent_id, |a| a.total_cost_usd += total)?;
+                } else if let Some(sid) = ev["session_id"].as_str() {
                     set_session(state, agent_id, sid)?;
                     state.db.update_agent(agent_id, |a| {
                         cost = crate::db::run_cost(total, a.session_cost_usd);
@@ -1992,6 +2020,7 @@ pub(crate) mod tests {
 /// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
+    /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
     /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
     /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
@@ -2018,8 +2047,10 @@ printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
 printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
+case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
 : "${cost:=0}" "${sid:=s1}"
 echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
@@ -3046,6 +3077,70 @@ esac
         wake(&st, &a.id, "[Loft: grill] next round".into(), "grill");
         idle(&st, &a.id).await;
         assert!(!unread(&st, &a.id), "avatar and grill runs are quiet");
+    }
+
+    fn redraw(st: &AppState, id: &str) -> impl std::future::Future<Output = crate::api::ApiResult<Value>> {
+        crate::api::redraw_avatar(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_draws_in_a_quiet_run_on_a_throwaway_session() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        st.db
+            .update_agent(&a.id, |a| {
+                a.session_id = Some("s-own".into());
+                (a.session_cost_usd, a.total_cost_usd) = (1.0, 1.0);
+                a.context_tokens = Some(5000);
+                a.memory_index = Some("- #1 frozen".into());
+            })
+            .unwrap();
+        let (runs, spend) = st.db.all_time_spend().unwrap();
+        assert_eq!(redraw(&st, &a.id).await.ok().unwrap().0, json!({ "ok": true }));
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+
+        let prompts = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
+        assert!(prompts.contains("main project's README") && prompts.contains("mcp__loft__set_avatar"), "{prompts}");
+        assert!(!prompts.contains("just created"), "{prompts}");
+        assert!(!ws.join("resumed.log").exists(), "it doesn't resume the agent's Session");
+        assert!(std::fs::read_to_string(ws.join("argv.log")).unwrap().contains("--no-session-persistence"));
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!(now.session_id.as_deref(), Some("s-own"), "the saved session stays");
+        assert_eq!((now.session_cost_usd, now.context_tokens, now.memory_index.as_deref()), (1.0, Some(5000), Some("- #1 frozen")));
+        assert!((now.total_cost_usd - 1.25).abs() < 1e-9, "{}", now.total_cost_usd);
+        let (runs_now, spend_now) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs_now, runs + 1);
+        assert!((spend_now - spend - 0.25).abs() < 1e-9, "the run counts in All-time spend");
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().is_empty(), "only errors reach the chat");
+        assert!(!unread(&st, &a.id));
+
+        // The next run resumes the agent's own Session (the Redraw's system prompt is the first).
+        run(&st, &a.id, "hello", 2).await;
+        assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s-own\n");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_on_a_busy_agent_waits_for_its_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "hello", 1).await;
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the busy run", 10, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("busy")).await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("redraw your sticker"), "it waits for the run");
+        assert_ne!(status_text(&st, &a.id), "Drawing its avatar…");
+
+        stop(&st, &a.id);
+        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        let prompts = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
+        assert!(prompts.find("busy").unwrap() < prompts.find("redraw your sticker").unwrap(), "{prompts}");
+        assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s1\n", "only the busy run resumed the Session");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

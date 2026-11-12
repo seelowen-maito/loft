@@ -114,6 +114,8 @@ pub struct Runtime {
     pub queued_for_user: std::collections::HashSet<String>,
     /// agent id -> grill prompts waiting for the current run; run quietly after user work
     pub grill_queued: HashMap<String, Vec<String>>,
+    /// agents whose Redraw waits for the current run; it runs after the rest of the queue
+    pub redraw_queued: std::collections::HashSet<String>,
     /// agent id -> wake-up for a run that has replied but waits on a Claude Code background task;
     /// new work stops the task so the queue isn't held up behind it
     pub waiting: HashMap<String, Arc<Notify>>,
