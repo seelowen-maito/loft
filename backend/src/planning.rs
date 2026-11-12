@@ -4882,6 +4882,34 @@ pub(crate) mod tests {
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
+    /// #430 review: in a plan kept in Loft, a message naming the waiting ticket by its Loft issue id ends the
+    /// wait; one naming another ticket doesn't.
+    #[tokio::test]
+    async fn a_plan_kept_in_loft_ends_a_wait_on_a_message_naming_the_ticket_by_its_loft_id() {
+        let st = state();
+        let _fake = own_fake(&st);
+        let project = "local-wait";
+        let (a, m, team, _dir) = local_plan(&st, project, &["dev"]).await;
+        let dev = &team[0];
+        let api = busy(&st, "Api Dev", "api", "dev");
+        press(&st, &a, &m).await.unwrap();
+        let (store, other) = (loft_ticket(&st, project, "Store"), loft_ticket(&st, project, "API"));
+        tool(&st, dev, "wait_ticket", json!({ "number": store.id, "on": "Api Dev", "reason": "Which schema?" })).await.unwrap();
+        let waits = || crate::delivery::local_of(&st, project, &loft_ticket(&st, project, "Offline mode").id).unwrap().tickets.iter().find(|t| t.id == store.id).unwrap().wait_for.clone();
+        assert_eq!(waits(), api.id);
+
+        let say = |ticket: &str| {
+            let (st, id, args) = (st.clone(), api.id.clone(), json!({ "agent": "dev agent", "text": "Use v2.", "kind": "needs_action", "ticket": ticket }));
+            async move { crate::mcp::call_tool(&st, &id, "message_agent", args).await.to_string() }
+        };
+        assert!(!say(&other.id).await.contains("was waiting on you"), "another ticket");
+        assert_eq!(waits(), api.id);
+        let r = say(&store.id).await;
+        assert!(r.contains("was waiting on you for \\\"Store\\\""), "{r}");
+        assert_eq!(waits(), "");
+        assert!(woken(&st, dev).last().unwrap().contains("Api Dev messaged you"));
+    }
+
     #[tokio::test]
     async fn a_plan_kept_in_loft_posts_verdicts_as_notes_closes_tickets_and_offers_merge() {
         let st = state();

@@ -1433,13 +1433,19 @@ async fn wake_closed_waits(state: &AppState) {
     }
 }
 
+/// Whether a message's ticket `k` names ticket `t`: by its key (`owner/repo#N`), or in a plan kept in Loft by
+/// its Loft issue id, whichever form the sender used.
+fn names_ticket(d: &Delivery, t: &DeliveryTicket, k: &str) -> bool {
+    k.eq_ignore_ascii_case(&ticket_key(d, Some(t.number))) || (!t.id.is_empty() && k.eq_ignore_ascii_case(&t.id))
+}
+
 /// Agent `from` messages `to`, about `ticket` if it names one: each ticket `to` builds that waits on `from`
 /// (only that ticket, when the message names one) stops waiting, and `to` is woken on it. The message goes as
 /// an FYI, read at the start of that wake, so it isn't a second run. The tickets woken, as `#7`; empty when
 /// none waited on `from`, and then nothing is delivered.
 pub async fn agent_wrote(state: &AppState, from: &crate::db::Agent, to: &crate::db::Agent, text: &str, ticket: Option<&str>) -> Vec<String> {
     let waits = |d: &Delivery, t: &DeliveryTicket| {
-        t.state == "started" && t.wait_for == from.id && builder_id(d, t) == to.id && ticket.is_none_or(|k| k.eq_ignore_ascii_case(&ticket_key(d, Some(t.number))))
+        t.state == "started" && t.wait_for == from.id && builder_id(d, t) == to.id && ticket.is_none_or(|k| names_ticket(d, t, k))
     };
     let mut woken = vec![];
     for d in state.db.deliveries_in_state("running").unwrap_or_default() {
