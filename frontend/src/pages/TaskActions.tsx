@@ -169,14 +169,16 @@ function useIssueDelivery(t: Task) {
   }, [latest, reload]);
   const repo = t.github?.repo.toLowerCase();
   const number = t.github?.number;
+  // A Loft issue's Delivery is numbered in its project (`loft:<project>`): any of the project's reloads it.
+  const local = t.github ? null : `loft:${t.project.trim()}`;
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {
-        if (e.type !== "delivery" || e.repo.toLowerCase() !== repo || e.spec !== number) return;
+        if (e.type !== "delivery" || (local ? e.repo !== local : e.repo.toLowerCase() !== repo || e.spec !== number)) return;
         clearTimeout(timer.current);
         timer.current = setTimeout(reload, 150);
       },
-      [repo, number, reload],
+      [repo, number, local, reload],
     ),
   );
   return [d, latest.set, reload] as const;
@@ -254,7 +256,7 @@ function Said({ said }: { said: { ok: boolean; text: string } | null }) {
   return <div className={cx("mt-2 text-[12px]", said.ok ? "text-fg-3" : "text-bad")}>{said.text}</div>;
 }
 
-/** On a standalone ticket: Start delivery, which makes its branch and draft PR and hands it to the team's Dev. */
+/** On a standalone ticket: Start delivery, which makes its branch (and on GitHub its draft PR) and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -280,11 +282,17 @@ export function DeliveryCard({ task: t }: { task: Task }) {
         <div className="min-w-0 flex-1">
           <div className="text-[14px]">Start delivery</div>
           <div className="mt-0.5 text-[12.5px] text-fg-3">
-            {started
-              ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
-              : d?.started
-                ? `Started${d.pr ? ` on PR #${d.pr}` : ""}; the agent building it is gone. #${n} closes when the PR merges.`
-                : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
+            {!n
+              ? started
+                ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>. Its reviewers look at it next; it's done when you merge it from Loft.</>
+                : d?.started
+                  ? "Started; the agent building it is gone. It's done when you merge it from Loft."
+                  : `Loft makes a ticket branch in ${t.project}'s own repo, then has the team's Dev build it and QA, Security and Code Review check it. You merge it from Loft: nothing goes to GitHub.`
+              : started
+                ? <>With <Link to={`/agents/${started.agent_id}`} className="text-accent hover:underline">{started.agent_name}</Link>{started.pr ? ` on PR #${started.pr}` : ""}. Its reviewers look at it next; #{n} closes when the PR merges.</>
+                : d?.started
+                  ? `Started${d.pr ? ` on PR #${d.pr}` : ""}; the agent building it is gone. #${n} closes when the PR merges.`
+                  : `Loft opens a ticket/${n} branch and a draft PR that closes #${n}, then has the team's Dev build it and QA, Security and Code Review check it.`}
           </div>
           <DeliveryState d={d} />
         </div>

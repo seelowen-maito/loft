@@ -1437,7 +1437,7 @@ pub(crate) mod tests {
         st.db.save_agent(&a).unwrap();
         let problems = super::agent_json(&st, &a)["project_problems"].clone();
         assert_eq!(problems, serde_json::json!([
-            { "project": "dine", "problem": "dine holds several repos, so issues and Deliveries need one of them", "hint": true },
+            { "project": "dine", "problem": "dine holds several repos, so its issues stay in Loft", "hint": true },
             { "project": "gone", "problem": "There's no folder gone in the projects folder", "hint": false },
         ]), "short, without the Mac's paths");
 
