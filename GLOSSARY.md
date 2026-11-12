@@ -17,7 +17,7 @@ The agents of one group. A team has at most one Lead.
 _Avoid_: Squad, crew
 
 **Project**:
-One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is never a project.
+One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is allowed on an agent, but issues and Deliveries need one repo, so Loft only hints at it.
 _Avoid_: Workspace (that is the agent's private folder), group
 
 **Lead**:

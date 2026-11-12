@@ -8,7 +8,7 @@ import { cx, fmtBytes, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
-import { projectsOf } from "../../lib/team";
+import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 
@@ -113,12 +113,15 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     }),
     [agent],
   );
-  const [draft, setDraft] = useState<Draft>(initial);
+  const [typed, setTyped] = useState("");
+  const [shown, setDraft] = useState<Draft>(initial);
+  const draft = withTyped(shown, typed);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
+  const discard = () => (setDraft(initial), setTyped(""));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
   const team = draft.group.trim();
 
@@ -128,6 +131,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     setNotice(null);
     try {
       const saved = await api.updateAgent(agent.id, draft);
+      setTyped("");
       setNotice(saved.notice ?? null);
     } catch (e) {
       setErr((e as Error).message);
@@ -162,13 +166,8 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       </Field>
 
       <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
-        <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
-        {agent.project_problems?.length ? (
-          <div className="mt-2 space-y-1 text-[12px] text-warn">
-            <div>Pick this agent's projects: each must be one repo.</div>
-            {agent.project_problems.map((f) => <div key={f.project}>{f.problem}</div>)}
-          </div>
-        ) : null}
+        <ProjectsField value={shown.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => set("projects", v)} />
+        {agent.project_problems?.map((f) => <div key={f.project} className={cx("mt-2 text-[12px]", f.hint ? "text-fg-3" : "text-warn")}>{f.problem}</div>)}
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">
@@ -279,7 +278,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
           <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
         </button>
-        {dirty && <button className="btn-ghost" onClick={() => setDraft(initial)}>Discard</button>}
+        {dirty && <button className="btn-ghost" onClick={discard}>Discard</button>}
         {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
