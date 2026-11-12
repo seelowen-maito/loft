@@ -17,16 +17,27 @@
 //! (`loft kill-guard`) and before any runtime starts. It looks through wrappers (`xargs`, `find -exec`, `watch`,
 //! `env -S`, ...), `sh -c`, `eval`, and shells that read their script from a heredoc or a piped `echo`.
 //!
+//! It also asks the user before a command changes one of the user's own project checkouts, which agents must leave
+//! alone: they work in their own clones under `agent-local-storage`. A git command that moves or changes a checkout
+//! (`checkout`, `switch`, `reset`, `pull`, `merge`, `rebase`, `commit`, `stash`, `clean`) or a build or install
+//! (`cargo build`, `pnpm install`, `xcodebuild`) in a folder outside `agent-local-storage` goes to Loft
+//! (`POST /guard/<agent id>`), which asks the user when that folder is under the projects folder. The folder is the
+//! command's working directory, as `cd` and `git -C` leave it. Reading runs.
+//!
 //! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
 //! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
 //! (osascript, python, node). It fails open: input it can't read lets the command run.
 
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
 /// The argument that makes this binary run as the hook.
 pub const ARG: &str = "kill-guard";
+/// Where the hook asks Loft about a change to a user's checkout: `http://127.0.0.1:<port>/guard/<agent id>`, in
+/// claude's environment.
+pub const URL_VAR: &str = "LOFT_GUARD_URL";
 
 const REFUSAL: &str = "Loft refused this command: it runs kill, pkill or killall by path, through sudo, `command` \
 or `builtin`, as another shell's `kill`, with PATH changed, or after unsetting or redefining Loft's kill, where Loft \
@@ -34,7 +45,8 @@ can't tell whose processes it stops. Run kill, pkill or killall by name, right i
 your own processes, and asks the user before stopping any other.";
 
 /// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows stderr to
-/// the agent, for a kill that skips Loft's. Input it can't read passes.
+/// the agent, for a kill that skips Loft's or a change to a user's checkout the user didn't allow. Input it can't
+/// read passes, and so does a change when Loft doesn't answer.
 pub fn hook() -> ! {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -42,13 +54,31 @@ pub fn hook() -> ! {
         eprintln!("{why}");
         std::process::exit(2);
     }
+    if let (Some(change), Ok(url)) = (outside_change(&input), std::env::var(URL_VAR)) {
+        let body = json!({ "command": change.command, "folder": change.folder });
+        if let Ok(v) = crate::processes::post(&url, &body.to_string())
+            && v["allow"] == false
+        {
+            eprintln!("{}", v["message"].as_str().unwrap_or_default());
+            std::process::exit(2);
+        }
+    }
     std::process::exit(0)
 }
 
-/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`.
+/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`. It may wait for the user that long.
 pub fn hooks(exe: &std::path::Path) -> Value {
     let command = format!("'{}' {ARG}", exe.to_string_lossy().replace('\'', r"'\''"));
-    json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] }] })
+    let timeout = crate::agents::TOOL_WAIT.as_secs();
+    json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
+}
+
+/// The change a hook input's command makes to a checkout outside `agent-local-storage`, if any.
+fn outside_change(input: &str) -> Option<Change> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let command = v["tool_input"]["command"].as_str()?;
+    let cwd = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok())?;
+    checkout_change(command, &cwd).filter(|c| !in_agent_storage(&c.folder))
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -63,6 +93,142 @@ fn check(input: &str) -> Result<(), &'static str> {
 pub fn unscoped(command: &str) -> bool {
     let f = scan(command, 0, false);
     f.unscoped || (f.kill && f.path)
+}
+
+// ---- changes to a checkout ----------------------------------------------
+
+/// A command that changes the checkout in `folder`.
+#[derive(Debug, PartialEq)]
+pub struct Change {
+    pub folder: PathBuf,
+    /// The simple command that does it, as its words.
+    pub command: String,
+}
+
+/// git commands that move or change a checkout.
+const GIT_CHANGES: &[&str] = &["checkout", "switch", "reset", "pull", "merge", "rebase", "commit", "stash", "clean", "restore", "cherry-pick", "revert", "am"];
+/// Package manager commands that build or install into the folder they run in.
+const PM_CHANGES: &[&str] = &["install", "i", "ci", "add", "remove", "rm", "uninstall", "update", "up", "build"];
+/// cargo commands that write into the folder (`target/`, `Cargo.lock`).
+const CARGO_CHANGES: &[&str] = &["build", "b", "run", "r", "test", "t", "check", "c", "clean", "update", "install", "add", "remove"];
+
+/// The first change `command`, run in `cwd`, makes to a checkout (see the module docs). A folder the guard can't
+/// tell (`cd "$dir"`) lets the commands after it run.
+pub fn checkout_change(command: &str, cwd: &Path) -> Option<Change> {
+    let mut cwd = Some(cwd.to_path_buf());
+    let change = changes(command, &mut cwd, 0)?;
+    // A symlink into a user's checkout counts as that checkout.
+    Some(Change { folder: std::fs::canonicalize(&change.folder).unwrap_or(change.folder), ..change })
+}
+
+fn changes(text: &str, cwd: &mut Option<PathBuf>, depth: usize) -> Option<Change> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let cmds = parse(text);
+    for i in 0..cmds.len() {
+        let words = match unwrap(&cmds[i].words, &mut false) {
+            Run::Words(words) => words.to_vec(),
+            Run::Text(text) => {
+                if let Some(c) = changes(&text, cwd, depth + 1) {
+                    return Some(c);
+                }
+                continue;
+            }
+        };
+        let Some((name, args)) = words.split_first() else { continue };
+        let first = |args: &[String]| args.iter().find(|a| !a.starts_with(['-', '+'])).cloned();
+        let folder = match base(name) {
+            "cd" | "pushd" => {
+                *cwd = match first(args) {
+                    Some(dir) => cwd.as_deref().and_then(|c| resolve(c, &dir)),
+                    None => dirs::home_dir(),
+                };
+                continue;
+            }
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
+                if let Some(c) = shell_script(&cmds, i, args).and_then(|t| changes(&t, &mut cwd.clone(), depth + 1)) {
+                    return Some(c);
+                }
+                continue;
+            }
+            "eval" => {
+                if let Some(c) = changes(&args.join(" "), cwd, depth + 1) {
+                    return Some(c);
+                }
+                continue;
+            }
+            "git" => git_change(cwd.clone(), args),
+            "cargo" => first(args).filter(|s| CARGO_CHANGES.contains(&s.as_str())).and(cwd.clone()),
+            "npm" | "pnpm" | "yarn" | "bun" => match first(args) {
+                Some(s) if PM_CHANGES.contains(&s.as_str()) => cwd.clone(),
+                None if base(name) == "yarn" => cwd.clone(), // a bare `yarn` installs
+                _ => None,
+            },
+            "xcodebuild" => {
+                let reads = ["-list", "-showBuildSettings", "-version", "-showsdks", "-showdestinations", "-help"];
+                (!args.iter().any(|a| reads.contains(&a.as_str()))).then(|| cwd.clone()).flatten()
+            }
+            _ => None,
+        };
+        if let Some(folder) = folder {
+            return Some(Change { folder, command: words.join(" ") });
+        }
+    }
+    None
+}
+
+/// The folder a git command changes, past its global options (`-C <dir>`, `--work-tree`), when it changes one.
+fn git_change(mut dir: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-C" => dir = it.next().and_then(|d| resolve(dir.as_deref()?, d)),
+            "--work-tree" => dir = it.next().and_then(|d| resolve(dir.as_deref()?, d)),
+            o if o.starts_with("--work-tree=") => dir = resolve(dir.as_deref()?, &o["--work-tree=".len()..]),
+            "-c" | "--git-dir" | "--namespace" | "--exec-path" => {
+                it.next();
+            }
+            o if o.starts_with('-') => {}
+            sub => {
+                let rest: Vec<&str> = it.map(String::as_str).collect();
+                let reads_stash = sub == "stash" && rest.first().is_some_and(|s| matches!(*s, "list" | "show"));
+                let dry_clean = sub == "clean" && rest.iter().any(|s| *s == "-n" || *s == "--dry-run");
+                return (GIT_CHANGES.contains(&sub) && !reads_stash && !dry_clean).then_some(dir).flatten();
+            }
+        }
+    }
+    None
+}
+
+/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded. None when it holds another variable or a substitution.
+fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
+    let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let path = match path {
+        p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
+        p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
+        p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
+        p => p.to_string(),
+    };
+    if path.contains(['$', '`']) {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for c in cwd.join(path).components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// Whether `folder` is in an agent's workspace: under a folder named `agent-local-storage`.
+pub fn in_agent_storage(folder: &Path) -> bool {
+    folder.components().any(|c| c.as_os_str() == "agent-local-storage")
 }
 
 /// What a piece of shell text, or one simple command in it, does that the guard cares about.
@@ -752,6 +918,50 @@ fn read_heredocs(p: &mut Parse, c: &[char], mut i: usize, heredocs: &mut Vec<(St
     i.min(c.len())
 }
 
+// ---- Loft's side: `POST /guard/<agent id>` ------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct GuardRequest {
+    command: String,
+    folder: PathBuf,
+}
+
+/// Asks the user about a change to a checkout under the projects folder (that isn't an agent's workspace), and
+/// answers the hook with whether it may run. The user's "Always allow" saves `Checkout(<folder>)` for the agent.
+pub async fn handle(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<GuardRequest>,
+) -> axum::Json<Value> {
+    let Ok(Some(a)) = state.db.get_agent(&agent_id) else { return axum::Json(json!({ "allow": true })) };
+    let projects = state.settings.get().projects_dir;
+    let projects = std::fs::canonicalize(&projects).unwrap_or(projects);
+    let rule = format!("Checkout({})", req.folder.display());
+    if !req.folder.starts_with(&projects) || in_agent_storage(&req.folder) || a.allowed_tools.contains(&rule) {
+        return axum::Json(json!({ "allow": true }));
+    }
+    let folder = req.folder.display().to_string();
+    let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, req.command);
+    let input = json!({ "command": req.command, "folder": folder });
+    let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, rule, ASK_TIMEOUT).await;
+    if d.allow {
+        return axum::Json(json!({ "allow": true }));
+    }
+    let why = d.message.unwrap_or_else(|| "The user denied it.".into());
+    let ws = crate::agents::workspace(&state, &a.id);
+    let message = format!(
+        "Loft didn't run this: it changes {folder}, the user's own checkout, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
+        ws.display()
+    );
+    axum::Json(json!({ "allow": false, "message": message }))
+}
+
+/// How long a change to a user's checkout waits for the user.
+#[cfg(not(test))]
+const ASK_TIMEOUT: std::time::Duration = crate::agents::PERMISSION_TIMEOUT;
+#[cfg(test)]
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,5 +1177,122 @@ mod tests {
         let hook = &hooks["PreToolUse"][0];
         assert_eq!(hook["matcher"], "Bash");
         assert_eq!(hook["hooks"][0]["command"], r"'/Apps/it'\''s here/loft' kill-guard");
+        // It may wait for the user about a change to their checkout.
+        assert_eq!(hook["hooks"][0]["timeout"], crate::agents::TOOL_WAIT.as_secs());
+    }
+
+    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo.
+    const USER: &str = "/nowhere/dev/loft";
+    const CLONE: &str = "/nowhere/dev/loft/agent-local-storage/abc/loft";
+
+    /// The folder the hook would ask Loft about, for `cmd` run in `cwd`.
+    fn asks(cmd: &str, cwd: &str) -> Option<PathBuf> {
+        let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
+        outside_change(&input).map(|c| c.folder)
+    }
+
+    #[test]
+    fn changes_to_a_users_checkout_go_to_loft_with_the_folder() {
+        let user = Some(PathBuf::from(USER));
+        for (cmd, cwd) in [
+            // What happened on 2026-11-12.
+            ("cd /nowhere/dev/loft; git checkout --detach 3ddf495c", CLONE),
+            ("cd ../../..; git checkout main", CLONE),
+            ("cd ../../.. && cargo build", CLONE),
+            ("git -C /nowhere/dev/loft switch main", CLONE),
+            ("git -C ../../.. pull --ff-only", CLONE),
+            ("git --work-tree=/nowhere/dev/loft reset --hard", CLONE),
+            ("git reset --hard origin/main", USER),
+            ("git pull", USER),
+            ("git merge feat", USER),
+            ("git rebase main", USER),
+            ("git commit -am wip", USER),
+            ("git stash", USER),
+            ("git stash pop", USER),
+            ("git clean -fdx", USER),
+            ("git -c core.pager=cat checkout -b x", USER),
+            ("cargo build --release", USER),
+            ("cargo test", USER),
+            ("pnpm install", USER),
+            ("npm ci", USER),
+            ("yarn", USER),
+            ("xcodebuild -scheme Loft -destination 'platform=iOS Simulator,id=1' build", USER),
+            ("sh -c 'cd /nowhere/dev/loft && git pull'", CLONE),
+            ("eval 'git checkout main'", USER),
+            ("git status && git checkout main", USER),
+        ] {
+            assert_eq!(asks(cmd, cwd), user, "should ask: {cmd} (in {cwd})");
+        }
+        assert_eq!(asks("cd frontend && pnpm install", USER), Some(PathBuf::from("/nowhere/dev/loft/frontend")));
+    }
+
+    #[test]
+    fn the_agents_own_clone_and_reading_run_without_asking() {
+        for (cmd, cwd) in [
+            // In the agent's own clone.
+            ("git checkout --detach 3ddf495c", CLONE),
+            ("git reset --hard origin/main && cargo build", CLONE),
+            ("cd /nowhere/dev/loft/agent-local-storage/abc/loft && pnpm install", USER),
+            ("git -C /nowhere/dev/loft/agent-local-storage/abc/loft switch main", USER),
+            ("cd ..; git clone /nowhere/dev/loft", CLONE),
+            // Reading the user's checkout.
+            ("git status", USER),
+            ("git log --oneline -5", USER),
+            ("git diff HEAD~1", USER),
+            ("git fetch origin", USER),
+            ("git stash list", USER),
+            ("git clean -n", USER),
+            ("git -C /nowhere/dev/loft show HEAD", CLONE),
+            ("cat README.md && rg checkout backend/src", USER),
+            ("cargo --version", USER),
+            ("xcodebuild -list", USER),
+            ("pnpm run dev", USER),
+            // A folder the guard can't tell.
+            ("cd \"$DIR\" && git pull", CLONE),
+        ] {
+            assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
+        }
+        assert!(asks("git pull", USER).is_some());
+        assert!(outside_change("not json").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_asks_the_user_about_a_change_under_the_projects_folder() {
+        use axum::extract::{Path as P, State};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Web QA");
+        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let user = projects.join("loft");
+        let guard = |folder: PathBuf| {
+            let (st, id) = (st.clone(), a.id.clone());
+            let req = GuardRequest { command: "git checkout --detach 3ddf495c".into(), folder };
+            tokio::spawn(async move { handle(State(st), P(id), axum::Json(req)).await.0 })
+        };
+        let pending = || st.db.list_permissions(Some(&a.id)).unwrap().into_iter().filter(|p| p.status == "pending").collect::<Vec<_>>();
+
+        // Outside the projects folder, or in an agent's workspace there: no question.
+        assert_eq!(guard(PathBuf::from("/tmp/elsewhere")).await.unwrap()["allow"], true);
+        assert_eq!(guard(user.join("agent-local-storage/x/loft")).await.unwrap()["allow"], true);
+        assert!(pending().is_empty());
+
+        // Denied: the agent is told to use its own clone.
+        let asking = guard(user.clone());
+        crate::agents::tests::until("a permission request", 5, || pending().len() == 1).await;
+        let req = pending().remove(0);
+        assert_eq!(req.tool_name, "Checkout");
+        assert_eq!(req.input["folder"], user.display().to_string());
+        assert!(req.reason.contains("git checkout --detach 3ddf495c"), "{}", req.reason);
+        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        let v = asking.await.unwrap();
+        assert_eq!(v["allow"], false);
+        assert!(v["message"].as_str().unwrap().contains("Work in your own clone in your workspace"), "{v}");
+
+        // Always allowed: it saves the folder's rule, and the next change there runs without asking.
+        let asking = guard(user.clone());
+        crate::agents::tests::until("a second permission request", 5, || pending().len() == 1).await;
+        crate::agents::decide(&st, &pending()[0].id, "allow_always", None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["allow"], true);
+        assert_eq!(guard(user.clone()).await.unwrap()["allow"], true);
+        assert!(pending().is_empty());
     }
 }

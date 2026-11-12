@@ -1127,8 +1127,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     );
     let mcp_config = json!({ "mcpServers": servers }).to_string();
 
-    // `Kill(<path>)` rules are Loft's own (see processes.rs), not claude tools.
-    let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(")).cloned().collect();
+    // `Kill(<path>)` and `Checkout(<folder>)` rules are Loft's own (processes.rs, kill_guard.rs), not claude tools.
+    let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(") && !r.starts_with("Checkout(")).cloned().collect();
     allowed.push("mcp__loft".into());
     let mut disallowed = a.disallowed_tools.clone();
     if a.max_subagents == Some(0) {
@@ -1166,6 +1166,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
         .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
+        .env(crate::kill_guard::URL_VAR, format!("http://127.0.0.1:{}/guard/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
