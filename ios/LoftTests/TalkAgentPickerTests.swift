@@ -2,10 +2,10 @@ import XCTest
 @testable import Loft
 
 final class TalkAgentPickerTests: XCTestCase {
-    private func agent(_ name: String, group: String? = nil, title: String? = nil, project: String? = nil) -> Agent {
+    private func agent(_ name: String, group: String? = nil, role: String? = nil, project: String? = nil) -> Agent {
         var a = Agent(id: name, name: name, status: "idle")
         a.group = group
-        a.title = title
+        a.role = role
         a.project = project
         return a
     }
@@ -46,14 +46,27 @@ final class TalkAgentPickerTests: XCTestCase {
         XCTAssertEqual(sections[1].agents.map(\.name), ["Agent 2", "Agent 4", "Agent 6", "Agent 8"])
     }
 
-    func testSearchMatchesNameTitleGroupOrProject() {
-        let agents = [agent("Menu Dev", group: "Dineout", project: "menu"), agent("QA Agent", title: "Runs the iOS suite"),
-                      agent("Docs Agent", project: "website")]
+    func testSearchMatchesNameRoleGroupOrProject() {
+        let agents = [agent("Menu Dev", group: "Dineout", role: "dev", project: "menu"), agent("Checker", role: "code_reviewer"),
+                      agent("Docs Agent", role: "custom", project: "website")]
         func names(_ q: String) -> [String] { TalkAgentPicker.sections(agents, query: q).flatMap(\.agents).map(\.name) }
         XCTAssertEqual(names("menu"), ["Menu Dev"])
         XCTAssertEqual(names("DINEOUT"), ["Menu Dev"])
-        XCTAssertEqual(names("ios suite"), ["QA Agent"])
+        XCTAssertEqual(names("code rev"), ["Checker"], "the Role label, not its id")
+        XCTAssertEqual(names("CUSTOM"), ["Docs Agent"])
         XCTAssertEqual(names("websi"), ["Docs Agent"])
         XCTAssertEqual(names("nobody"), [])
+        XCTAssertEqual(names("code_reviewer"), [])
+    }
+
+    /// The role label table follows the backend's roles; no role (an older server) reads as Custom, an unknown one as it is.
+    func testRoleLabels() {
+        XCTAssertEqual(Agent.roles.map(\.id), ["lead", "dev", "code_reviewer", "qa", "security", "custom"])
+        XCTAssertEqual(Agent.roles.map(\.label), ["Lead", "Dev", "Code reviewer", "QA", "Security", "Custom"])
+        XCTAssertEqual(agent("A", role: "code_reviewer").roleLabel, "Code reviewer")
+        XCTAssertEqual(agent("A", role: "custom").roleLabel, "Custom")
+        XCTAssertEqual(agent("A").roleLabel, "Custom")
+        XCTAssertEqual(agent("A", role: "").roleLabel, "Custom")
+        XCTAssertEqual(agent("A", role: "designer").roleLabel, "designer")
     }
 }

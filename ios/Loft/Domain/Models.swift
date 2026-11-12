@@ -6,7 +6,6 @@ import Foundation
 struct Agent: Codable, Identifiable, Hashable {
     let id: String
     var name: String
-    var title: String?
     var project: String?
     var model: String?
     var effort: String?
@@ -47,6 +46,19 @@ struct Agent: Codable, Identifiable, Hashable {
 
     /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
+
+    /// Every role and how the user sees it, in the backend's order (`planning::ROLES`).
+    static let roles: [(id: String, label: String)] = [("lead", "Lead"), ("dev", "Dev"), ("code_reviewer", "Code reviewer"),
+                                                       ("qa", "QA"), ("security", "Security"), ("custom", "Custom")]
+
+    /// The label a role goes by: "Code reviewer", "Custom". No role (an older server) reads as Custom; an unknown one as it is.
+    static func roleLabel(_ role: String?) -> String {
+        let r = (role ?? "").isEmpty ? "custom" : role!
+        return roles.first { $0.id == r }?.label ?? r
+    }
+
+    /// The label it goes by, in place of the Title agents used to have.
+    var roleLabel: String { Agent.roleLabel(role) }
 
     /// Its team: the group; empty when it has none (backend `Agent::team`).
     var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
