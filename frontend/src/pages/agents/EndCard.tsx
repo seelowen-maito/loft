@@ -21,10 +21,15 @@ function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; in
   return inLoft ? <Link to={i.url} className={cls}>{inner}</Link> : <a href={i.url} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>;
 }
 
+/** Who started `spec`, read from the card the backend sends back. */
+function startedOf(card: Card | undefined, spec: number): DeliveryStarted | null {
+  return [card, ...(card?.more ?? [])].find((c) => c?.delivery?.spec === spec)?.delivery?.started ?? null;
+}
+
 type Run = (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => Promise<void>;
 
 /** One published spec (or standalone ticket) with its tickets and its own Start delivery. */
-function SpecBlock({ agentId, messageId, item, busy, run }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run }) {
+function SpecBlock({ agentId, messageId, item, busy, run, outcome }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run; outcome?: DeliveryStarted | string }) {
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
   // A plan kept in a folder with no git: Start delivery asks before setting it up.
   const [askGit, setAskGit] = useState<string | null>(null);
@@ -36,11 +41,9 @@ function SpecBlock({ agentId, messageId, item, busy, run }: { agentId: string; m
       const r = await api.startDelivery(agentId, messageId, delivery.spec, initGit);
       if (r.needs_git) return setAskGit(r.dir ?? "the project folder");
       setAskGit(null);
-      const card = r.message.meta?.grill?.end_card;
-      const mine = [card, ...(card?.more ?? [])].find((c) => c?.delivery?.spec === delivery.spec);
-      setStarted(mine?.delivery?.started ?? null);
+      setStarted(startedOf(r.message.meta?.grill?.end_card, delivery.spec));
     });
-  const startedOn = started ?? delivery?.started ?? null;
+  const startedOn = started ?? (typeof outcome === "object" ? outcome : null) ?? delivery?.started ?? null;
   // A plan kept in Loft ends with Merge, once its reviews passed.
   const [stage, setStage] = useState<{ state: string; branch: string; base: string } | null>(null);
   const [merged, setMerged] = useState<string | null>(null);
@@ -99,6 +102,7 @@ function SpecBlock({ agentId, messageId, item, busy, run }: { agentId: string; m
             {busy === "merge" ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />} Merge
           </button>
         )}
+        {typeof outcome === "string" && !startedOn && <span className="text-[12px] text-bad">{outcome}</span>}
         {delivery?.local && (merged || stage?.state === "merged") && <span className="font-mono text-[11.5px] text-good">{merged ?? `Merged ${stage?.branch} into ${stage?.base}`}</span>}
       </div>
     </div>
@@ -125,12 +129,29 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const setup = card.setup;
   const shown = sent || !!setup?.sent_at;
   const items: CardSpec[] = [card, ...(card.more ?? [])];
+  // Start every spec: one after the other, each on its own Lead; a spec that can't start says why, the rest go on.
+  const [outcome, setOutcome] = useState<Record<number, DeliveryStarted | string>>({});
+  const todo = items.filter((i) => i.delivery && !i.delivery.started && typeof outcome[i.delivery.spec] !== "object");
+  const startAll = () =>
+    run("start", async () => {
+      for (const { delivery } of todo) {
+        if (!delivery) continue;
+        let result: DeliveryStarted | string;
+        try {
+          const r = await api.startDelivery(agentId, messageId, delivery.spec);
+          result = r.needs_git ? "Has no git yet: start it on its own." : (startedOf(r.message.meta?.grill?.end_card, delivery.spec) ?? "Didn't start.");
+        } catch (e) {
+          result = (e as Error).message;
+        }
+        setOutcome((o) => ({ ...o, [delivery.spec]: result }));
+      }
+    });
   return (
     <div className="ml-9 rounded-2xl border border-line-strong bg-ink-850 p-4">
       {/* No repo: the plan was kept as Loft issues. */}
       <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done · {[...new Set(items.map((i) => i.repo || "kept in Loft"))].join(" · ")}</div>
       <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
-        {items.map((item, i) => <SpecBlock key={item.delivery?.spec ?? item.spec?.url ?? i} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} />)}
+        {items.map((item, i) => <SpecBlock key={item.delivery?.spec ?? item.spec?.url ?? i} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={outcome[item.delivery?.spec ?? 0]} />)}
       </div>
       {setup && (
         <div className="mt-3 flex items-start gap-2 text-[12.5px] text-fg-2">
@@ -139,6 +160,9 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
+        {items.length > 1 && todo.length > 0 && (
+          <StartDeliveryButton className="text-[12.5px]" label={todo.length === items.length ? `Start all ${todo.length}` : `Start remaining ${todo.length}`} pending={busy === "start"} disabled={busy !== null} title={`Starts the ${todo.length} specs that aren't started yet, each on its own Lead.`} onClick={startAll} />
+        )}
         <button
           className={cx("btn text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
           disabled={busy !== null}

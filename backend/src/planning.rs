@@ -2694,6 +2694,22 @@ pub(crate) mod tests {
         assert_eq!(st.db.get_delivery(slug, 50).unwrap().unwrap().state, "running");
         assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "planned");
         assert!(press_with(&st, &a, &m, json!({ "spec": 99 })).await.is_err());
+
+        // Start all presses each spec in turn: the started one is a duplicate and wakes nobody again, the other starts.
+        let dev = st.db.list_agents().unwrap().into_iter().find(|x| x.name == "Builder").unwrap();
+        let woke = woken(&st, &dev).len();
+        let again = press_with(&st, &a, &m, json!({ "spec": 50 })).await.unwrap();
+        assert_eq!(again["duplicate"], true);
+        assert_eq!(woken(&st, &dev).len(), woke);
+        let first = press_with(&st, &a, &m, json!({ "spec": 40 })).await.unwrap();
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["message"]["meta"]["grill"]["end_card"]["delivery"]["started"]["ticket"], 41);
+        assert_eq!(woken(&st, &dev).len(), woke + 1);
+        // Pressed again, nothing more starts on either spec.
+        for spec in [40, 50] {
+            assert_eq!(press_with(&st, &a, &m, json!({ "spec": spec })).await.unwrap()["duplicate"], true);
+        }
+        assert_eq!(woken(&st, &dev).len(), woke + 1);
     }
 
     #[tokio::test]
