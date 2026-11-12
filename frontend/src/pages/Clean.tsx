@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
-import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, gitCheckText, inBatches, reasonLines, selectable, sortClean, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
+import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 
 /** Clean: every agent's workspace items in a full-screen table at `/settings/clean`, to filter, tick and delete. */
@@ -22,7 +22,7 @@ export default function CleanPage() {
       const [{ items }, l, sizes] = await Promise.all([api.cleanPreview(), api.leftRunning(), api.workspaces()]);
       setLeft(l);
       setS(sizes);
-      setTable({ items, ticked: new Set() });
+      setTable({ items, ticked: initialTicks(items) });
     } catch (e) {
       setErr((e as Error).message);
     } finally {

@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCheck, cleanState, filterClean, inBatches, selectable, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
+import { canCheck, cleanState, filterClean, inBatches, initialTicks, selectable, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -117,4 +117,12 @@ test("inBatches runs at most `limit` at once and reports progress", async () => 
   await inBatches([1, 2, 3, 4, 5, 6, 7], 3, async () => { peak = Math.max(peak, ++live); await new Promise((r) => setTimeout(r, 5)); live--; }, (n) => seen.push(n));
   assert.equal(peak, 3);
   assert.deepEqual(seen, [1, 2, 3, 4, 5, 6, 7]);
+});
+
+test("Clean starts with the rows the API ticks, but not clones, locked rows or what the API leaves unticked", () => {
+  const out = { ...item(), path: "/s/a/dev.log", kind: "file" as const, ticked: true };
+  const open = { ...item(), path: "/s/a/scratch/413", kind: "folder" as const, ticked: false };
+  const clone = { ...item(), ticked: true };
+  const working = { ...out, path: "/s/b/x.log", blocked: "Working" };
+  assert.deepEqual([...initialTicks([out, open, clone, working])], ["/s/a/dev.log"]);
 });

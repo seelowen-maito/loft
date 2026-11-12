@@ -131,6 +131,12 @@ export function selectable(items: CleanItem[], checks: Map<string, GitCheck | nu
   return items.filter((i) => !cleanStatus(i, 0).locked && (!canCheck(i, 0) || checks.get(i.path)?.state === "safe"));
 }
 
+/** Clean's starting ticks: what the API marks ticked (test output, closed scratch) and the table may tick. A clone
+ * isn't, whatever the API says, until a Check git finds it safe. */
+export function initialTicks(items: CleanItem[]): Set<string> {
+  return new Set(items.filter((i) => i.ticked && !cleanStatus(i, 0).locked && !canCheck(i, 0)).map((i) => i.path));
+}
+
 /** Runs `fn` over `xs`, at most `limit` at a time; `onDone(n)` after each finishes. `fn` must not throw. */
 export async function inBatches<T>(xs: T[], limit: number, fn: (x: T) => Promise<void>, onDone: (n: number) => void = () => {}): Promise<void> {
   let next = 0;
