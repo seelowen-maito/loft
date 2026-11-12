@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCheck, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
+import { canCheck, cleanState, filterClean, inBatches, selectable, cleanLineText, gitCheckText, oneLine, shownCommand } from "../src/lib/format.ts";
 
 const item = (o: Partial<{ label: string; blocked: string; opens: boolean }> = {}) => ({
   agent: "a", path: "/s/a/loft", rel: "loft", name: "loft", kind: "clone" as const, bytes: 1, changed: "", command: "rm -rf /s/a/loft",
@@ -91,4 +91,30 @@ test("a locked reason splits into its lines, and the filters keep one agent, one
   assert.deepEqual(filterClean([a, b], { ...all, agent: "b" }).map((i) => i.name), ["y"]);
   assert.deepEqual(filterClean([a, b], { ...all, type: "build output" }).map((i) => i.name), ["y"]);
   assert.deepEqual(filterClean([a, b], { ...all, deletable: true }).map((i) => i.name), ["x"]);
+});
+
+test("a clone is Deletable only after a clean check; select all skips unchecked and locked rows", () => {
+  const clone = item({});
+  const folder = { ...item(), path: "/s/a/out", kind: "build" as const };
+  const working = { ...item(), path: "/s/b/x", blocked: "Working" };
+  assert.equal(cleanState(clone, 0).text, "Check git first");
+  assert.equal(cleanState(clone, 0, { state: "unsafe", lines: [] }).text, "Check git first");
+  assert.equal(cleanState(clone, 0, { state: "safe", lines: [] }).text, "Deletable · checked");
+  assert.equal(cleanState(folder, 0).text, "Deletable");
+  const checks = new Map<string, any>();
+  assert.deepEqual(selectable([clone, folder, working], checks).map((i) => i.path), ["/s/a/out"]);
+  checks.set(clone.path, { state: "safe", lines: [] });
+  checks.set(working.path, { state: "safe", lines: [] });
+  assert.deepEqual(selectable([clone, folder, working], checks).map((i) => i.path), ["/s/a/loft", "/s/a/out"]);
+  // Only what the filters show is offered.
+  const shown = filterClean([clone, folder, { ...folder, path: "/s/z", agent: "z" }], { agent: "a", type: "", deletable: false });
+  assert.equal(selectable(shown, checks).length, 2);
+});
+
+test("inBatches runs at most `limit` at once and reports progress", async () => {
+  let live = 0, peak = 0;
+  const seen: number[] = [];
+  await inBatches([1, 2, 3, 4, 5, 6, 7], 3, async () => { peak = Math.max(peak, ++live); await new Promise((r) => setTimeout(r, 5)); live--; }, (n) => seen.push(n));
+  assert.equal(peak, 3);
+  assert.deepEqual(seen, [1, 2, 3, 4, 5, 6, 7]);
 });

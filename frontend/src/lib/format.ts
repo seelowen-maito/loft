@@ -118,6 +118,32 @@ export function cleanStatus(i: CleanItem, depth: number): { text: string; locked
   return { text: "Deletable", locked: false };
 }
 
+/** Clean's Status once git is known: a clone or worktree is "Deletable · checked" only after a clean Check, and says
+ * "Check git first" until then. Locked items and plain folders keep `cleanStatus`. */
+export function cleanState(i: CleanItem, depth: number, check?: GitCheck | null): { text: string; locked: boolean } {
+  const s = cleanStatus(i, depth);
+  if (s.locked || !canCheck(i, depth)) return s;
+  return { text: check?.state === "safe" ? "Deletable · checked" : "Check git first", locked: false };
+}
+
+/** Clean's select all: the visible rows that may be ticked (not locked, and a clone only once checked safe). */
+export function selectable(items: CleanItem[], checks: Map<string, GitCheck | null>): CleanItem[] {
+  return items.filter((i) => !cleanStatus(i, 0).locked && (!canCheck(i, 0) || checks.get(i.path)?.state === "safe"));
+}
+
+/** Runs `fn` over `xs`, at most `limit` at a time; `onDone(n)` after each finishes. `fn` must not throw. */
+export async function inBatches<T>(xs: T[], limit: number, fn: (x: T) => Promise<void>, onDone: (n: number) => void = () => {}): Promise<void> {
+  let next = 0;
+  let done = 0;
+  const worker = async () => {
+    while (next < xs.length) {
+      await fn(xs[next++]);
+      onDone(++done);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, xs.length) }, worker));
+}
+
 /** Clean's Type column: a clone says "git clone", build output says "build output". */
 export function cleanType(i: CleanItem): string {
   return i.kind === "clone" ? "git clone" : i.kind === "build" ? "build output" : i.kind;
