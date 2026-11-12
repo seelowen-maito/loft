@@ -1158,9 +1158,21 @@ final class LoftUITests: XCTestCase {
         let app = launch(["-fixture-specs"])
         openSpec("Offline mode", app)
         XCTAssertTrue(any("delivery-start", app).appears(timeout: 5), "the card's Start delivery")
-        XCTAssertFalse(any("deliveryProgress", app).exists, "no Delivery yet, so no progress")
-        XCTAssertFalse(any("deliveryState", app).exists, "nor a state")
+        XCTAssertEqual(any("deliveryProgress", app).label, "0 of 2 tickets done", "a planned Delivery")
+        XCTAssertFalse(any("deliveryState", app).exists, "not started, so no state")
+        XCTAssertFalse(any("specPRLink", app).exists, "no spec PR yet")
         XCTAssertFalse(any("mergeDelivery", app).exists)
+        // #434: a ticket waits on octo/api#8, so Start delivery warns first and Cancel puts the button back.
+        for _ in 0..<3 where !any("ticketRow-Offline cache", app).exists { app.swipeUp() }
+        XCTAssertTrue(any("ticketRow-Offline cache", app).label.contains("waiting on octo/api#8"))
+        for _ in 0..<3 where !any("delivery-start", app).isHittable { app.swipeDown() }
+        any("delivery-start", app).tap()
+        XCTAssertTrue(any("startWarning", app).appears(timeout: 3))
+        XCTAssertTrue(any("startFirst-octo/api#7", app).exists, "it offers to start the spec that builds it")
+        XCTAssertTrue(any("startAnyway", app).exists)
+        any("startWarningCancel", app).tap()
+        XCTAssertTrue(any("delivery-start", app).appears(timeout: 3))
+        XCTAssertFalse(any("startWarning", app).exists)
         back(app)
 
         // Ready on GitHub: it merges there, and the spec panel still shows its progress and Spec PR.

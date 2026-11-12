@@ -95,7 +95,7 @@ struct DeliveryCardSection: View {
     /// A card button: a spinner in place of its icon while its request runs, and every button disabled meanwhile.
     private func button(_ action: IssueDeliveryAction, _ title: String, _ pendingTitle: String, symbol: String) -> some View {
         Button {
-            if action == .start, store.deliveries[task.id]?.waitsOn?.isEmpty == false { warn = true } else { run(action) }
+            if action == .start, store.deliveries[task.id]?.waitsOn?.isEmpty == false { warn = true; said = nil } else { run(action) }
         } label: {
             Label {
                 Text(busy == action ? pendingTitle : title)

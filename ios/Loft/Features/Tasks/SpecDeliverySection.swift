@@ -22,18 +22,21 @@ struct SpecDeliverySection: View {
         Group {
             if let d {
                 Section {
-                    HStack {
-                        if !underCard {
-                            Text(SpecViews.deliveryLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
-                                .accessibilityIdentifier("deliveryState")
-                        }
-                        Spacer()
-                        if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
-                            Link(destination: url) {
-                                HStack(spacing: 4) { Image(systemName: "arrow.triangle.pull"); Text("Spec PR #\(pr)") }.font(.subheadline)
+                    // Under the card with no spec PR yet, the row would be empty.
+                    if !underCard || d.pr != nil {
+                        HStack {
+                            if !underCard {
+                                Text(SpecViews.deliveryLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
+                                    .accessibilityIdentifier("deliveryState")
                             }
-                            .buttonStyle(.borderless)
-                                .accessibilityIdentifier("specPRLink")
+                            Spacer()
+                            if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
+                                Link(destination: url) {
+                                    HStack(spacing: 4) { Image(systemName: "arrow.triangle.pull"); Text("Spec PR #\(pr)") }.font(.subheadline)
+                                }
+                                .buttonStyle(.borderless)
+                                    .accessibilityIdentifier("specPRLink")
+                            }
                         }
                     }
                     if !underCard {

@@ -418,7 +418,10 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             if repo == "octo/docs" { throw APIError.server(status: 409, message: "octo/docs has no Dev agent.") }
             if card.delivery?.key == key {
                 if card.delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
-                card.delivery?.started = .init(ticket: 41, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
+                // The first ticket that waits on nothing outside the spec, like the backend's ready tickets.
+                let waiting = deliveryList.first { $0.repo == repo && $0.spec == spec }?.tickets.filter { !($0.waitingOn ?? []).isEmpty }.map(\.number) ?? []
+                let first = card.tickets.map(\.number).first { !waiting.contains($0) } ?? 41
+                card.delivery?.started = .init(ticket: first, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
             } else if let j = card.more?.firstIndex(where: { $0.delivery?.key == key }) {
                 if card.more?[j].delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
                 card.more?[j].delivery?.started = .init(ticket: 0, agentId: "lead", agentName: "Lead", at: JSONCoding.formatDate(Date()))

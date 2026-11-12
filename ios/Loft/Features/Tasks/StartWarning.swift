@@ -33,17 +33,18 @@ struct StartWarning: View {
                     }
                 }
                 .buttonStyle(.accent)
+                .disabled(busy != nil || !store.canWrite)
                 .accessibilityIdentifier("startFirst-\(key)")
             }
             HStack(spacing: 16) {
-                Button("Start anyway", action: onStart).accessibilityIdentifier("startAnyway")
-                Button("Cancel", action: onCancel).accessibilityIdentifier("startWarningCancel")
+                Button("Start anyway", action: onStart).disabled(busy != nil || !store.canWrite).accessibilityIdentifier("startAnyway")
+                // Cancel changes nothing, so it stays on when the connection is read-only.
+                Button("Cancel", action: onCancel).disabled(busy != nil).accessibilityIdentifier("startWarningCancel")
             }
             .buttonStyle(.borderless)
             .font(.footnote)
             if let error { Text(error).font(.caption2).foregroundStyle(Theme.failureInk) }
         }
-        .disabled(busy != nil || !store.canWrite)
         .padding(.vertical, 2)
     }
 
