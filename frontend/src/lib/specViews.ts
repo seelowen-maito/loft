@@ -40,6 +40,16 @@ export function stageOf(spec: Task, d: DeliverySummary | null): Stage {
   return "delivery";
 }
 
+/** A spec card's badge: its stage, and while In Delivery what it's at: the final review, fixes, needs you, or
+ *  "Waiting for CI" in place of the stage when no agent is at work and only CI is left (the server's `ci` tone). */
+export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "state_line"> | null): string {
+  const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
+  if (stage !== "delivery") return label;
+  if (d?.state_line?.tone === "ci") return "Waiting for CI";
+  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : d?.state === "needs_human" ? " · needs you" : "";
+  return label + sub;
+}
+
 /** A ticket's state in a few words and a tone. An open one waiting on tickets outside its spec says which (`owner/repo#n`); one in review whose reviewers all passed is waiting for CI. */
 export function ticketLabel(state: string, waitingOn: string[] = [], waitingForCi = false): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
   if (state === "open" && waitingOn.length) return { text: `waiting on ${waitingOn.join(", ")}`, tone: "warn" };

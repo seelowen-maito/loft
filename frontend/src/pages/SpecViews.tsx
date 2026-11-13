@@ -3,7 +3,8 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { badgeText, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { DeliveryLine } from "../components/DeliveryLine";
 
 /* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
 
@@ -20,9 +21,7 @@ export function progressOf(spec: Task, d: DeliverySummary | null, tasks: Task[])
 }
 
 export function Badge({ stage, d }: { stage: Stage; d: DeliverySummary | null }) {
-  const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
-  const sub = stage === "delivery" && d?.state === "final_review" ? " · final review" : stage === "delivery" && d?.state === "final_fixes" ? " · fixing" : stage === "delivery" && d?.state === "needs_human" ? " · needs you" : "";
-  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && d?.state === "needs_human" && "text-warn")}>{label}{sub}</span>;
+  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && d?.state === "needs_human" && "text-warn")}>{badgeText(stage, d)}</span>;
 }
 
 export function Bar({ done, total, stage }: { done: number; total: number; stage: Stage }) {
@@ -106,6 +105,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
         <div className="text-[13px] text-fg-3">Not started: no ticket has been handed to an agent yet.</div>
       ) : (
         <>
+          {d.state_line?.tone === "ci" && <DeliveryLine d={d} />}
           <Who d={d} agentById={c.agentById} />
           {verdicts.length > 0 && (
             <div className="space-y-1 rounded-xl border border-line bg-ink-950/40 p-3">

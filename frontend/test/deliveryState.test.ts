@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deliveryButtons, deliveryStateLine } from "../src/lib/deliveryState.ts";
+import { ciSince, deliveryButtons, deliveryStateLine, fmtWait } from "../src/lib/deliveryState.ts";
 
 const at = (state: string, more: { stall_reason?: string | null; needs_human?: boolean; started?: boolean } = {}) =>
   deliveryStateLine({ state, started: more.started ?? true, stall_reason: more.stall_reason ?? null, needs_human: more.needs_human ?? false });
@@ -75,4 +75,27 @@ test("Pause shows only while the Delivery runs, Resume while it's paused", () =>
   for (const s of ["running", "final_review", "final_fixes"]) assert.deepEqual(card(true, false), { pause: true, resume: false, reopen: false }, s);
   assert.deepEqual(card(false, true), { pause: false, resume: true, reopen: false }, "paused");
   assert.deepEqual(card(true, false, false), { pause: false, resume: false, reopen: false }, "not started");
+});
+
+test("waiting for CI counts from the earliest ticket waiting and links to the checks", () => {
+  const now = Date.parse("2026-11-13T10:06:30Z");
+  const tickets = [
+    { waiting_for_ci: true, ci_since: "2026-11-13T10:02:00Z" },
+    { waiting_for_ci: true, ci_since: "2026-11-13T10:00:10Z" },
+    { waiting_for_ci: false, ci_since: "2026-11-13T09:00:00Z" },
+  ];
+  const d = { state: "running", started: true, state_line: { tone: "ci", text: "Waiting for CI on #412, #413" }, checks_url: "https://github.com/o/r/pull/9/checks", tickets };
+  assert.equal(ciSince(d), "2026-11-13T10:00:10Z", "a ticket not waiting for CI doesn't count");
+  assert.deepEqual(deliveryStateLine(d, now), { tone: "ci", text: "Waiting for CI on #412, #413 · 6 min", href: "https://github.com/o/r/pull/9/checks" });
+  assert.deepEqual(deliveryStateLine({ ...d, checks_url: null, tickets: [] }, now), { tone: "ci", text: "Waiting for CI on #412, #413" }, "no start time, no checks page: the line alone");
+  assert.equal(deliveryStateLine({ ...d, state_line: { tone: "running", text: "Running." } }, now)?.href, undefined, "only waiting for CI links");
+  assert.equal(ciSince({ tickets: [{ waiting_for_ci: true, ci_since: null }] }), null);
+});
+
+test("how long CI has run reads in minutes, then hours", () => {
+  assert.equal(fmtWait(20_000), "<1 min");
+  assert.equal(fmtWait(-5_000), "<1 min", "clock skew");
+  assert.equal(fmtWait(6 * 60_000 + 59_000), "6 min");
+  assert.equal(fmtWait(60 * 60_000), "1 h");
+  assert.equal(fmtWait(125 * 60_000), "2 h 5 min");
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -141,6 +141,16 @@ test("a ticket in review whose reviewers all passed reads waiting for CI", () =>
   const s = task({ id: "s", github: { repo: "o/r", number: 9 } });
   const d = del({ tickets: [{ number: 10, title: "A", state: "review", skipped: "", agent_id: null, waiting_for_ci: true, ci_since: "2026-11-13T10:00:00Z", verdicts: { qa: "pass", ci: "pending" } }] });
   assert.deepEqual(ticketsOf(s, d, [s]).map((t) => [t.waitingForCi, t.current, t.agentId]), [[true, false, null]]);
+});
+
+test("the spec card badge reads Waiting for CI when only CI is left", () => {
+  const ci = { tone: "ci", text: "Waiting for CI on #10" };
+  assert.equal(badgeText("delivery", del({ state_line: ci })), "Waiting for CI");
+  assert.equal(badgeText("delivery", del({ state_line: { tone: "running", text: "Running." } })), "In Delivery", "an agent is at work on another ticket");
+  assert.equal(badgeText("delivery", del({ state: "final_review", state_line: { tone: "final", text: "Final review" } })), "In Delivery · final review");
+  assert.equal(badgeText("delivery", del({ state: "needs_human" })), "In Delivery · needs you");
+  assert.equal(badgeText("ready", del({ state: "ready", state_line: ci })), "Ready to merge", "only while In Delivery");
+  assert.equal(badgeText("planned", null), "Planned");
 });
 
 test("an open ticket waiting on another spec's ticket says which", () => {

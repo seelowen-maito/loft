@@ -3033,8 +3033,9 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
 }
 
 /// A Delivery card's state line, `{ tone, text }`, or null before it started: the web and iOS cards show it as
-/// is and only map its tone (running, stalled, paused, needs_you, final or done) to a colour. Waiting for the
-/// user (a ticket after too many change rounds, or the final review) wins over running.
+/// is and only map its tone (running, ci, stalled, paused, needs_you, final or done) to a colour. Waiting for the
+/// user (a ticket after too many change rounds, or the final review) wins over running. A running Delivery with no
+/// agent at work and tickets waiting for CI says which, with the `ci` tone.
 fn state_line(state: &AppState, d: &Delivery) -> Value {
     let stalled;
     let (tone, text) = match d.state.as_str() {
@@ -3053,7 +3054,13 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
         _ => {
             // Waiting tickets say what they wait on; the Delivery still runs.
             let waits: Vec<String> = d.tickets.iter().filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| format!("{} is {}", tag(d, t), waiting_text(state, d, t))).collect();
-            if waits.is_empty() {
+            // No agent at work and only CI left on some tickets: the Delivery waits for CI. Clients add how long.
+            let on_ci: Vec<String> = d.tickets.iter().filter(|t| waiting_for_ci(t)).map(|t| tag(d, t)).collect();
+            let at_work = d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing") && !waiting_for_ci(t));
+            if !on_ci.is_empty() && !at_work {
+                stalled = format!("Waiting for CI on {}", on_ci.join(", "));
+                ("ci", stalled.as_str())
+            } else if waits.is_empty() {
                 ("running", "Running.")
             } else {
                 stalled = format!("Running. {}", waits.join(" "));
@@ -3884,6 +3891,19 @@ mod tests {
         for done in ["ready", "settled", "merged"] {
             assert_eq!(line(done, "", vec![]).await, says("done", "Done: every review passed."), "{done}");
         }
+        // Only CI left: the Delivery waits for CI on those tickets, until an agent works on another one.
+        let on_ci = |n: i64| {
+            let mut t = ticket(n, "", "review");
+            t.verdicts = [("qa".to_string(), "pass".to_string()), ("ci".to_string(), "pending".to_string())].into_iter().collect();
+            t
+        };
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "open")]).await, says("ci", "Waiting for CI on #10"));
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "closed"), on_ci(12)]).await, says("ci", "Waiting for CI on #10, #12"));
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "started")]).await, says("running", "Running."), "an agent builds #11");
+        let mut reviewing = on_ci(11);
+        reviewing.verdicts.insert("qa".into(), "pending".into());
+        assert_eq!(line("running", "", vec![on_ci(10), reviewing]).await, says("running", "Running."), "a reviewer is on #11");
+        assert_eq!(line("paused", "", vec![on_ci(10)]).await, says("paused", "Paused: Loft sends no wakes until you resume it."));
     }
 
     /// With two tickets in flight, a stalled Delivery's reason names both and their agents, the Merge item
