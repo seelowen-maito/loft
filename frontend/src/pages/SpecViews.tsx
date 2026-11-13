@@ -90,7 +90,7 @@ function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number
 export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTicket: (id: string) => void }) {
   const d = deliveryOf(spec, c.deliveries), stage = stageOf(spec, d), p = progressOf(spec, d, c.tasks), url = prUrl(spec, d);
   const own = d?.tickets.length ? ticketsOf(spec, d, c.tasks) : []; // same order as d.tickets, each with its own issue
-  const verdicts = (d?.tickets ?? []).filter((t) => t.state === "review");
+  const verdicts = (d?.tickets ?? []).filter((t) => t.state === "review" && !t.waiting_for_ci);
   return (
     <section className="panel space-y-4 p-4" aria-label="Delivery">
       <div className="flex flex-wrap items-center gap-2">
