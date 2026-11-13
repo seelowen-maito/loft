@@ -135,6 +135,8 @@ export type IssueDelivery = {
   pr: number | null;
   /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
   checks_url?: string | null;
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
+  ci_since?: string | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
   /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */

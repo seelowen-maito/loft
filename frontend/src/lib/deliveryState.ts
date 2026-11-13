@@ -13,12 +13,6 @@ export function fmtWait(ms: number): string {
   return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`;
 }
 
-/** When the Delivery's earliest ticket waiting for CI started waiting (RFC 3339), or null when none is. */
-export function ciSince(d: { tickets?: { waiting_for_ci?: boolean; ci_since?: string | null }[] } | null): string | null {
-  const at = (d?.tickets ?? []).filter((t) => t.waiting_for_ci && t.ci_since && !Number.isNaN(Date.parse(t.ci_since))).map((t) => t.ci_since!);
-  return at.length ? at.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a)) : null;
-}
-
 /** Why a Delivery stalled, as the card says it (only for an older server that sends no `state_line`). */
 function stallWhy(reason: string | null | undefined): string {
   switch (reason) {
@@ -32,11 +26,11 @@ function stallWhy(reason: string | null | undefined): string {
 }
 
 /** A Delivery card's state line, or null before it started: the server's `state_line` as is (a tone it names
- *  that this build doesn't know shows as running). Waiting for CI adds how long since its earliest ticket started
- *  waiting (at `now`), and links to the Checks tab on GitHub. An older server sends none, so it's worded here:
+ *  that this build doesn't know shows as running). Waiting for CI adds how long since the server's `ci_since`
+ *  (its earliest ticket waiting, at `now`), and links to the Checks tab on GitHub. An older server sends none, so it's worded here:
  *  waiting for the user (a ticket after too many changes rounds, or the final review) wins over running. */
 export function deliveryStateLine(
-  d: (Pick<IssueDelivery, "state" | "started" | "stall_reason" | "needs_human" | "state_line" | "checks_url"> & { tickets?: { waiting_for_ci?: boolean; ci_since?: string | null }[] }) | null,
+  d: Pick<IssueDelivery, "state" | "started" | "stall_reason" | "needs_human" | "state_line" | "checks_url" | "ci_since"> | null,
   now = Date.now(),
 ): { tone: DeliveryTone; text: string; href?: string } | null {
   if (!d || !d.started) return null;
@@ -44,8 +38,8 @@ export function deliveryStateLine(
     if (!d.state_line) return null;
     const tone = TONES.find((t) => t === d.state_line?.tone) ?? "running";
     if (tone !== "ci") return { tone, text: d.state_line.text };
-    const since = ciSince(d);
-    return { tone, text: since ? `${d.state_line.text} · ${fmtWait(now - Date.parse(since))}` : d.state_line.text, ...(d.checks_url ? { href: d.checks_url } : {}) };
+    const since = d.ci_since ? Date.parse(d.ci_since) : NaN;
+    return { tone, text: Number.isNaN(since) ? d.state_line.text : `${d.state_line.text} · ${fmtWait(now - since)}`, ...(d.checks_url ? { href: d.checks_url } : {}) };
   }
   switch (d.state) {
     case "stalled":

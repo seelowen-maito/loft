@@ -48,6 +48,9 @@ struct IssueDelivery: Codable, Hashable {
     /// Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); nil in a plan kept in Loft, before
     /// the PR opens or from an older backend.
     var checksUrl: String? = nil
+    /// When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; nil when
+    /// none is, or from an older backend.
+    var ciSince: String? = nil
     var spec: Bool? = nil
     var current: Current? = nil
     var tickets: [Ticket]? = nil
@@ -66,8 +69,8 @@ struct IssueDelivery: Codable, Hashable {
     /// final review) wins over running.
     var line: (tone: Tone, text: String)? { line() }
 
-    /// The card's line at `now`: waiting for CI adds how long its earliest ticket has waited ("· 6 min"), like the
-    /// web's `deliveryStateLine`.
+    /// The card's line at `now`: waiting for CI adds how long since the server's `ciSince` (its earliest ticket
+    /// waiting, "· 6 min"), like the web's `deliveryStateLine`.
     func line(now: Date = Date()) -> (tone: Tone, text: String)? {
         guard started else { return nil }
         if let stateLine {
@@ -86,12 +89,6 @@ struct IssueDelivery: Codable, Hashable {
         }
         if needsHuman == true { return (.needsYou, "Needs you: a ticket had too many rounds of changes.") }
         return (.running, "Running.")
-    }
-
-    /// When its earliest ticket waiting for CI started waiting (RFC 3339), or nil when none is.
-    var ciSince: String? {
-        (tickets ?? []).filter { $0.waitingForCi == true }.compactMap { t in t.ciSince.flatMap { s in JSONCoding.parseDate(s).map { (s, $0) } } }
-            .min { $0.1 < $1.1 }?.0
     }
 
     /// Where the line takes the user: the Checks tab on GitHub while it waits for CI, else nowhere.

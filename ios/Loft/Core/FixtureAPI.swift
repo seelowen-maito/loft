@@ -191,6 +191,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                            ticket(46, "QA", "closed"), ticket(47, "Release notes", "closed")]
                 deliveryList[0].stateLine = .init(tone: "ci", text: "Waiting for CI on #45")
                 deliveryList[0].checksUrl = "https://github.com/octo/loft/pull/47/checks"
+                deliveryList[0].ciSince = docs.ciSince
             }
         }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
@@ -942,7 +943,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
             guard let g = taskList.first(where: { $0.id == taskId })?.github,
                   let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
             return IssueDelivery(state: d.state, stateLine: d.stateLine, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
-                                 agentName: d.agentName, pr: d.pr, checksUrl: d.checksUrl, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 agentName: d.agentName, pr: d.pr, checksUrl: d.checksUrl, ciSince: d.ciSince, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
                                  tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName, waitingOn: $0.waitingOn,
                                                                 waitingForCi: $0.waitingForCi, ciSince: $0.ciSince) },
                                  waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou, waitsOn: d.waitsOn)

@@ -21,6 +21,8 @@ struct DeliverySummary: Codable, Hashable {
     var stateLine: IssueDelivery.StateLine? = nil
     /// The spec PR's Checks tab on GitHub; nil in a plan kept in Loft, before the PR opens or from an older backend.
     var checksUrl: String? = nil
+    /// When its earliest ticket waiting for CI started waiting (RFC 3339); nil when none is, or from an older backend.
+    var ciSince: String? = nil
 
     struct Current: Codable, Hashable { var number: Int; var title: String }
     struct Ticket: Codable, Hashable {

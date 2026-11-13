@@ -2031,6 +2031,12 @@ fn ci_since(t: &DeliveryTicket) -> Option<&str> {
     waiting_for_ci(t).then(|| if t.ci_since.is_empty() { t.submitted_at.as_str() } else { t.ci_since.as_str() })
 }
 
+/// When the Delivery's earliest ticket waiting for CI started waiting, or None when none is: the elapsed time on
+/// its card, for a spec and a standalone ticket alike.
+fn delivery_ci_since(d: &Delivery) -> Option<&str> {
+    d.tickets.iter().filter_map(ci_since).filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|at| (at, s))).min().map(|(_, s)| s)
+}
+
 /// The page of the Delivery's CI checks on GitHub: its PR's Checks tab (the spec PR, or a standalone
 /// ticket's PR). None for a plan kept in Loft, or before the PR is open.
 fn checks_url(d: &Delivery) -> Option<String> {
@@ -3072,8 +3078,8 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
 }
 
 /// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
-/// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page)
-/// and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
+/// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page),
+/// since when it waits for CI and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
 pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let on_ci = d.current.and_then(|n| d.ticket(n)).is_some_and(waiting_for_ci);
     let dev = state.db.get_agent(&d.dev).ok().flatten().filter(|_| !on_ci);
@@ -3091,6 +3097,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "agent_name": dev.as_ref().map(|a| a.name.clone()),
         "pr": d.pr,
         "checks_url": checks_url(d),
+        "ci_since": delivery_ci_since(d),
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
@@ -3904,6 +3911,35 @@ mod tests {
         reviewing.verdicts.insert("qa".into(), "pending".into());
         assert_eq!(line("running", "", vec![on_ci(10), reviewing]).await, says("running", "Running."), "a reviewer is on #11");
         assert_eq!(line("paused", "", vec![on_ci(10)]).await, says("paused", "Paused: Loft sends no wakes until you resume it."));
+    }
+
+    /// The card's elapsed time comes from the Delivery's `ci_since`: its earliest ticket waiting for CI, a standalone
+    /// ticket's (which sends no `tickets`) included; null while none waits.
+    #[tokio::test]
+    async fn a_delivery_carries_since_when_it_waits_for_ci_standalone_or_spec() {
+        let st = crate::planning::tests::state();
+        let on_ci = |n: i64, since: &str| {
+            let mut t = ticket(n, "", "review");
+            t.verdicts = [("qa".to_string(), "pass".to_string()), ("ci".to_string(), "pending".to_string())].into_iter().collect();
+            t.ci_since = since.into();
+            t
+        };
+        let mut one: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 7, "state": "running", "created_at": "" })).unwrap();
+        one.standalone = true;
+        one.pr = Some(12);
+        one.tickets = vec![on_ci(7, "2026-11-13T12:00:00+00:00")];
+        let v = delivery_json(&st, &one);
+        assert_eq!(v["state_line"], serde_json::json!({ "tone": "ci", "text": "Waiting for CI on #7" }));
+        assert_eq!((v["ci_since"].clone(), v["tickets"].clone()), (serde_json::json!("2026-11-13T12:00:00+00:00"), Value::Null), "a standalone ticket sends no tickets");
+        assert_eq!(v["checks_url"], "https://github.com/o/r/pull/12/checks");
+        one.tickets[0].verdicts.insert("qa".into(), "pending".into());
+        assert_eq!(delivery_json(&st, &one)["ci_since"], Value::Null, "QA is still on it");
+
+        let mut spec = one.clone();
+        spec.standalone = false;
+        spec.tickets = vec![on_ci(10, "2026-11-13T12:10:00+00:00"), on_ci(11, "2026-11-13T11:04:00.5+00:00"), ticket(12, "", "closed")];
+        spec.tickets[2].ci_since = "2026-11-13T09:00:00+00:00".into();
+        assert_eq!(delivery_json(&st, &spec)["ci_since"], "2026-11-13T11:04:00.5+00:00", "the earliest ticket still waiting");
     }
 
     /// With two tickets in flight, a stalled Delivery's reason names both and their agents, the Merge item
