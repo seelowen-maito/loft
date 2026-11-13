@@ -176,7 +176,7 @@ fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
 pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String {
     let built = crate::delivery::builders(state, d);
     let by = if built.is_empty() { String::new() } else { format!(" Built by {}.", built.join(", ")) };
-    format!("Its reviews passed: merge `{}` into `{}`.{by}", d.branch, d.base)
+    format!("Its reviews passed: merge `{}` into {}.{by}", d.branch, crate::delivery::merge_into(d))
 }
 
 fn dismiss(id: &str) -> Value {
@@ -563,7 +563,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 json!({ "label": "Pull request", "url": url }),
             ),
             _ => (
-                format!("Every ticket is done and its reviews passed: merge `{}` into `{}`.", d.branch, d.base),
+                format!("Every ticket is done and its reviews passed: merge `{}` into {}.", d.branch, crate::delivery::merge_into(&d)),
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 Value::Null,
             ),
