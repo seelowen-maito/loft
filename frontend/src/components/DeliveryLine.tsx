@@ -3,7 +3,7 @@ import { ExternalLink } from "lucide-react";
 import { cx } from "../lib/format";
 import { deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
 
-export const DELIVERY_TONE: Record<DeliveryTone, string> = {
+const DELIVERY_TONE: Record<DeliveryTone, string> = {
   running: "text-accent",
   ci: "text-accent",
   stalled: "text-bad",
