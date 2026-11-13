@@ -182,6 +182,16 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 DeliverySummary(state: "planned", agentName: nil, repo: "octo/site", spec: 40, specId: nil, local: false, current: nil,
                                 tickets: [plans, ticket(42, "Yearly toggle", "open")], waitsOn: waits),
             ]
+            // `-fixture-ci`: #42's Delivery has only CI left, on #45 for six minutes, and no agent at work.
+            if ProcessInfo.processInfo.arguments.contains("-fixture-ci") {
+                var docs = ticket(45, "Docs", "review", ["qa": "pass", "security": "pass", "ci": "pending"])
+                (docs.waitingForCi, docs.ciSince) = (true, JSONCoding.formatDate(ago(6)))
+                (deliveryList[0].agentName, deliveryList[0].current, deliveryList[0].waitingForLead, deliveryList[0].waitingOnYou) = (nil, nil, nil, nil)
+                deliveryList[0].tickets = [ticket(43, "Backend endpoints", "closed"), ticket(44, "iOS screen", "closed"), docs,
+                                           ticket(46, "QA", "closed"), ticket(47, "Release notes", "closed")]
+                deliveryList[0].stateLine = .init(tone: "ci", text: "Waiting for CI on #45")
+                deliveryList[0].checksUrl = "https://github.com/octo/loft/pull/47/checks"
+            }
         }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
@@ -931,9 +941,10 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked {
             guard let g = taskList.first(where: { $0.id == taskId })?.github,
                   let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
-            return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
-                                 agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
-                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName, waitingOn: $0.waitingOn) },
+            return IssueDelivery(state: d.state, stateLine: d.stateLine, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
+                                 agentName: d.agentName, pr: d.pr, checksUrl: d.checksUrl, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName, waitingOn: $0.waitingOn,
+                                                                waitingForCi: $0.waitingForCi, ciSince: $0.ciSince) },
                                  waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou, waitsOn: d.waitsOn)
         }
     }
