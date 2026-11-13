@@ -128,6 +128,8 @@ export type IssueDelivery = {
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
+  /** A Loft issue whose project can't hold its Delivery (no git repo of its own): why, instead of a Start button. */
+  cannot_start?: string;
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;

@@ -725,7 +725,8 @@ pub(crate) async fn after_tickets(state: &AppState, d: &crate::db::Delivery) -> 
         return Ok(Some(line));
     }
     if d.local {
-        return Ok(Some(format!("\nIt was the spec's last open ticket.{}", crate::delivery::local_ready(state, d))));
+        let last = if d.standalone { "" } else { "\nIt was the spec's last open ticket." };
+        return Ok(Some(format!("{last}{}", crate::delivery::local_ready(state, d))));
     }
     let slug = &d.repo;
     Ok(ready_if_done(state, d).await?.map(|pr| format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}")))
@@ -5327,6 +5328,135 @@ pub(crate) mod tests {
         assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready", "Merge can be pressed again");
     }
 
+    /// #447: Start delivery on a standalone Loft issue, in a project whose folder is a git repo with no
+    /// GitHub, runs it like a plan kept in Loft: its own branch, the Dev and reviewers through Loft, and Merge
+    /// in Loft. The issue is done only once it's merged.
+    #[tokio::test]
+    async fn start_delivery_on_a_standalone_loft_issue_runs_it_in_the_project_repo() {
+        let st = state();
+        let fake = own_fake(&st);
+        let project = "loft-solo";
+        planner_on(&st, project, None);
+        let dir = st.settings.boot().projects_dir.join(project);
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let team: Vec<Agent> = ["dev", "qa", "security"].iter().map(|r| busy(&st, &format!("{r} agent"), project, r)).collect();
+        let (dev, qa, sec) = (&team[0], &team[1], &team[2]);
+        let new = |title: &str, labels: Value| crate::tasks::create(&st, &json!({ "title": title, "description": "Do it.", "labels": labels, "project": project, "status": "ready" }), "user").unwrap().0;
+        let start = |id: String| crate::delivery::start_from_issue(State(st.clone()), Path(id));
+
+        let idea = new("An idea", json!([]));
+        assert_eq!(start(idea.id.clone()).await.unwrap_err().1, "This isn't an open ticket (an issue labelled `ready-for-agent`), so it has no Delivery.");
+        let t = new("Dark mode", json!(["ready-for-agent"]));
+        let under = crate::tasks::create(&st, &json!({ "title": "Part", "description": "x", "labels": ["ready-for-agent"], "project": project, "parent_id": idea.id }), "user").unwrap().0;
+        assert_eq!(start(under.id.clone()).await.unwrap_err().1, "This ticket is part of a spec: its tickets go through the spec's Delivery, not one of their own.");
+
+        let shown = |id: String| {
+            let st = st.clone();
+            async move { crate::delivery::issue_delivery(State(st), Path(id)).await.unwrap().0 }
+        };
+        assert_eq!(shown(t.id.clone()).await, Value::Null, "a git repo: the card offers Start");
+
+        let v = start(t.id.clone()).await.unwrap().0;
+        assert_eq!((&v["ok"], &v["duplicate"], &v["agent_name"], &v["started"]), (&json!(true), &json!(false), &json!("dev agent"), &json!(true)), "{v:#}");
+        assert_eq!(git_in(&dir, &["rev-parse", "ticket/1-dark-mode"]), git_in(&dir, &["rev-parse", "main"]), "the ticket branch starts at main");
+        assert_eq!(git_in(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "the checkout is left alone");
+        let w = woken(&st, dev);
+        assert_eq!(w.len(), 1);
+        for want in [
+            format!("[Loft Delivery: ticket \"Dark mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Dark mode\" (Loft issue {})", t.id),
+            format!("Work on the ticket branch `ticket/1-dark-mode` of the project's own repo `{}`", dir.canonicalize().unwrap().display()),
+            format!("each message ending with `Refs {}`", t.id),
+        ] {
+            assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
+        }
+        let v = shown(t.id.clone()).await;
+        assert_eq!((&v["started"], &v["agent_name"]), (&json!(true), &json!("dev agent")), "its page shows it");
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true, "a second press starts nothing");
+        // Published to GitHub meanwhile: it keeps its Delivery kept in Loft, and starts no second one.
+        let mut linked = st.db.get_task(&t.id).unwrap().unwrap();
+        linked.github = Some(crate::db::GithubLink { repo: "octo/solo".into(), number: 9, state: "open".into(), ..Default::default() });
+        st.db.save_task(&linked).unwrap();
+        assert_eq!(shown(t.id.clone()).await["agent_name"], "dev agent");
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        st.db.save_task(&crate::db::Task { github: None, ..linked }).unwrap();
+        // Moved to another project meanwhile: it keeps its Delivery, and starts no second one.
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("elsewhere")).unwrap();
+        let moved = st.db.get_task(&t.id).unwrap().unwrap();
+        st.db.save_task(&crate::db::Task { project: "elsewhere".into(), ..moved.clone() }).unwrap();
+        assert_eq!(shown(t.id.clone()).await["agent_name"], "dev agent");
+        assert_eq!(start(t.id.clone()).await.unwrap().0["duplicate"], true);
+        assert_eq!(st.db.all_deliveries().unwrap().len(), 1, "no second Delivery");
+        st.db.save_task(&moved).unwrap();
+        assert_eq!(woken(&st, dev).len(), 1);
+
+        tool(&st, dev, "submit_ticket", json!({ "number": t.id, "commits": ["abc1234def"] })).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": t.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let out = tool(&st, sec, "review_ticket", json!({ "number": t.id, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.ends_with("\n\"Dark mode\" passed its reviews. The ticket branch `ticket/1-dark-mode` is ready to merge into `main`: the user is offered Merge."), "{out}");
+        assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().status, "ready", "not done before it's merged");
+
+        let d = crate::delivery::local_of(&st, project, &t.id).unwrap();
+        let clone = dev_builds(&st, &d, &dir, "dark.css", "body { background: black }\n");
+        let merged = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap();
+        assert_eq!(merged, format!("Merged `ticket/1-dark-mode` into `main` in the Dev's clone `{}`.", clone.display()));
+        assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().status, "done");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
+    }
+
+    /// #451 review: a refused first Start on a Loft issue leaves no record. It's refused when an old branch of
+    /// the same name has commits not on the base, and when only an agent that doesn't work in the project is
+    /// left to build it.
+    #[tokio::test]
+    async fn a_refused_start_on_a_loft_issue_leaves_no_delivery() {
+        let st = state();
+        let project = "loft-guard";
+        planner_on(&st, project, None);
+        let dir = st.settings.boot().projects_dir.join(project);
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        // An agent working elsewhere wrote the ticket; the project has no Dev.
+        let other = busy(&st, "Other", "elsewhere", "custom");
+        let (t, _) = crate::tasks::create(&st, &json!({ "title": "Dark mode", "description": "x", "labels": ["ready-for-agent"], "project": project }), &other.id).unwrap();
+        let start = || crate::delivery::start_from_issue(State(st.clone()), Path(t.id.clone()));
+        let none_left = || {
+            assert!(st.db.all_deliveries().unwrap().is_empty(), "no record");
+        };
+        assert_eq!(start().await.unwrap_err().1, "Nobody can build the tickets: loft-guard has no Dev, and the agent that planned it is gone or doesn't work in it.");
+        none_left();
+        assert_eq!(crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0, Value::Null, "the card offers Start again");
+
+        // An old branch of the name it would take, with its own commits.
+        busy(&st, "dev agent", project, "dev");
+        git_in(&dir, &["checkout", "-q", "-b", "ticket/1-dark-mode"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "old work"]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+        let err = start().await.unwrap_err().1;
+        assert_eq!(err, format!("The Delivery didn't start: `{}` already has a branch `ticket/1-dark-mode` with commits not on `main`: rename or delete it, then start again.", dir.canonicalize().unwrap().display()));
+        none_left();
+        git_in(&dir, &["branch", "-q", "-D", "ticket/1-dark-mode"]);
+        assert_eq!(start().await.unwrap().0["agent_name"], "dev agent");
+    }
+
+    /// #451 Web QA: a Loft issue whose project folder isn't a git repo of its own (no git, or a folder of several
+    /// repos) says why on its card up front, instead of a Start that refuses after the press.
+    #[tokio::test]
+    async fn a_loft_issue_whose_project_isnt_a_repo_says_why_before_start() {
+        let st = state();
+        let projects = st.settings.boot().projects_dir.clone();
+        std::fs::create_dir_all(projects.join("plain")).unwrap();
+        std::fs::create_dir_all(projects.join("multi/api/.git")).unwrap();
+        std::fs::create_dir_all(projects.join("multi/web/.git")).unwrap();
+        for (project, why) in [
+            ("plain", "Start delivery can't run here: the project folder of plain isn't a git repo of its own in the projects folder, so Loft won't run git there."),
+            ("multi", "Start delivery can't run here: multi holds several repos, and its Delivery needs the project folder itself to be a git repo."),
+        ] {
+            let (t, _) = crate::tasks::create(&st, &json!({ "title": "Dark mode", "description": "x", "labels": ["ready-for-agent"], "project": project }), "user").unwrap();
+            let v = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
+            assert_eq!((&v["started"], &v["cannot_start"]), (&json!(false), &json!(why)), "{project}");
+        }
+    }
+
     #[tokio::test]
     async fn git_never_runs_in_a_project_that_resolves_into_an_agent_workspace() {
         let st = state();
@@ -5426,7 +5556,7 @@ pub(crate) mod tests {
         let (a, m, dev, dir) = plan_without_git(&st, "many-repos").await;
         std::fs::create_dir_all(dir.join("api/.git")).unwrap();
         let err = press(&st, &a, &m).await.unwrap_err();
-        assert_eq!(err.1, "The Delivery didn't start: many-repos holds several repos, so issues and Deliveries need one of them.");
+        assert_eq!(err.1, "The Delivery didn't start: many-repos holds several repos, and its Delivery needs the project folder itself to be a git repo.");
         assert!(woken(&st, &dev).is_empty());
     }
 

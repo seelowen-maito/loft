@@ -209,12 +209,13 @@ pub fn project_problem(state: &AppState, project: &str) -> Option<String> {
     project_dir(state, project).filter(|d| d.is_dir()).is_none().then(|| format!("There's no folder {} in the projects folder", project.trim()))
 }
 
-/// A folder holding several repos is allowed, but issues and Deliveries need one repo: a hint, not a problem.
+/// A folder holding several repos is allowed, and its issues stay in Loft: a hint, not a problem. Callers end
+/// the sentence.
 pub(crate) fn project_hint(state: &AppState, project: &str) -> Option<String> {
     let dir = project_dir(state, project).filter(|d| d.is_dir())?;
     let holds_repos = !dir.join(".git").exists()
         && std::fs::read_dir(&dir).is_ok_and(|rd| rd.flatten().any(|e| e.path().is_dir() && e.path().join(".git").exists()));
-    holds_repos.then(|| format!("{} holds several repos, so issues and Deliveries need one of them", project.trim()))
+    holds_repos.then(|| format!("{} holds several repos", project.trim()))
 }
 
 /// An agent's projects that `project_problem` refuses, each with why, for clients to flag; a folder of several
@@ -229,7 +230,7 @@ pub fn project_problems(state: &AppState, a: &crate::db::Agent) -> serde_json::V
             let kept = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p).filter(|(at, _)| at.elapsed() < PROBLEM_TTL).map(|(_, flag)| flag.clone());
             let flag = kept.unwrap_or_else(|| {
                 // Read outside the lock, so a slow disk doesn't hold up other agents' events.
-                let flag = project_problem(state, p).map(|text| Flag { hint: false, text }).or_else(|| project_hint(state, p).map(|text| Flag { hint: true, text }));
+                let flag = project_problem(state, p).map(|text| Flag { hint: false, text }).or_else(|| project_hint(state, p).map(|h| Flag { hint: true, text: format!("{h}, so its issues stay in Loft") }));
                 cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.clone(), (Instant::now(), flag.clone()));
                 flag
             });
@@ -811,7 +812,7 @@ mod tests {
         // A folder of several repos says so, instead of "isn't a git repo".
         std::fs::create_dir_all(projects.join("many/a/.git")).unwrap();
         std::fs::create_dir_all(projects.join("plain")).unwrap();
-        assert!(super::github_repo(&st, "many").await.unwrap_err().ends_with("many holds several repos, so issues and Deliveries need one of them"));
+        assert!(super::github_repo(&st, "many").await.unwrap_err().ends_with("many holds several repos"));
         assert!(super::github_repo(&st, "plain").await.unwrap_err().ends_with("plain isn't a git repo"));
         // A real repo inside the projects folder still works.
         let real = projects.join("real");

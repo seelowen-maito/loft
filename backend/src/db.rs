@@ -1608,6 +1608,12 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_delivery(&self, repo: &str, spec: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM deliveries WHERE repo = ?1 AND spec = ?2", params![repo, spec])?;
+        Ok(())
+    }
+
     /// The Deliveries on `repo`, oldest spec first; only the ones not settled yet with `unsettled`.
     pub fn deliveries(&self, repo: &str, unsettled: bool) -> Result<Vec<Delivery>> {
         let c = self.0.lock().unwrap();

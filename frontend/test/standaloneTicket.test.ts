@@ -3,8 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isDeliverableSpec, isStandaloneTicket } from "../src/lib/standaloneTicket.ts";
 
-const ticket = (o: Partial<{ state: string; github: { state: string } | null; labels: string[]; parent_id: string | null; description: string }> = {}) => ({
-  state: "open", github: { state: "open" }, labels: ["ready-for-agent"], parent_id: null, description: "## What to build\n\nA thing.", ...o,
+const ticket = (o: Partial<{ state: string; github: { state: string } | null; labels: string[]; parent_id: string | null; description: string; project: string }> = {}) => ({
+  state: "open", github: { state: "open" }, labels: ["ready-for-agent"], parent_id: null, description: "## What to build\n\nA thing.", project: "web", ...o,
 });
 
 test("an open ready-for-agent ticket under no spec is standalone", () => {
@@ -28,8 +28,14 @@ test("a Parent heading with no number, or Parent mentioned mid-text, doesn't cou
 test("a closed ticket, or one not ready for an agent, isn't started", () => {
   assert.equal(isStandaloneTicket(ticket({ state: "closed" })), false);
   assert.equal(isStandaloneTicket(ticket({ github: { state: "closed" } })), false);
-  assert.equal(isStandaloneTicket(ticket({ github: null })), false);
   assert.equal(isStandaloneTicket(ticket({ labels: ["bug"] })), false);
+});
+
+test("a Loft issue in a project is standalone too: its Delivery runs in the project's own repo", () => {
+  assert.equal(isStandaloneTicket(ticket({ github: null })), true);
+  assert.equal(isStandaloneTicket(ticket({ github: null, project: " " })), false, "no project, no repo to build in");
+  assert.equal(isStandaloneTicket(ticket({ github: null, state: "closed" })), false);
+  assert.equal(isStandaloneTicket(ticket({ github: null, parent_id: "spec" })), false);
 });
 
 test("an open spec on GitHub is delivered from its page", () => {
