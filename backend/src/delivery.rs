@@ -675,6 +675,9 @@ pub(crate) fn repo_dir(state: &AppState, project: &str, repo: &str) -> Result<st
         return own_repo(state, project);
     }
     let project = project.trim();
+    if repo.contains(['/', '\\']) {
+        return Err(format!("`{repo}` isn't a folder directly inside {project}: name the repo's own folder"));
+    }
     let root = crate::repos::project_dir(state, project).ok_or_else(|| format!("there's no folder {project} in the projects folder"))?;
     crate::repos::project_dir(state, &format!("{project}/{repo}"))
         .filter(|dir| dir.starts_with(&root) && *dir != root && crate::repos::own_git_dir(dir))
@@ -1105,6 +1108,16 @@ fn note(state: &AppState, id: &str, author: &str, text: &str) {
 async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent) -> Result<(), String> {
     if d.local {
         let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+        // A ticket published after Start, in a repo the plan hadn't branched in yet: its spec branch is made now.
+        if !t.repo.is_empty() && !d.bases.contains_key(&t.repo) {
+            let dir = repo_dir(state, &d.project, &t.repo).map_err(|e| format!("{} can't start: {e}.", tag(d, t)))?;
+            let base = local_branch(&dir, &d.branch).await.map_err(|e| format!("{} can't start: {e}.", tag(d, t)))?;
+            let r = t.repo.clone();
+            update(state, &d.repo, d.spec, |d| {
+                d.bases.insert(r, base);
+            })
+            .ok_or("The Delivery record couldn't be saved.")?;
+        }
         note(state, &t.id, &agent.id, &format!("Started by Loft's Delivery: with {} on the {} `{}`.", agent.name, branch_name(d), d.branch));
     } else {
         crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{n}/labels", d.repo), Some(json!({ "labels": ["in-progress"] })))
@@ -2340,7 +2353,8 @@ async fn branch_commits(state: &AppState, d: &Delivery, trailer: &str, known: &[
     let list: Vec<(String, String)> = if d.local {
         // Each repo's branch in turn: its commits are newest first, and the trailer tells the tickets apart.
         let mut all = vec![];
-        for (r, _) in repos_of(d) {
+        // A repo with no base has no spec branch yet: none of its tickets started.
+        for (r, _) in repos_of(d).into_iter().filter(|(_, base)| !base.is_empty()) {
             let dir = repo_dir(state, &d.project, &r)?;
             let log = git(&dir, &["log", "-n", "200", "--format=%H%x1f%B%x1e", &format!("refs/heads/{}", d.branch)]).await?;
             all.extend(log.split('\x1e').filter_map(|c| c.trim().split_once('\x1f').map(|(sha, m)| (sha.to_string(), m.to_string()))));
@@ -3585,16 +3599,20 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
         "merged" => return Ok(format!("`{}` is already merged into {}.", d.branch, merge_into(&d))),
         _ => return Err(format!("{} isn't ready to merge yet: its reviews haven't all passed.", subject(&d))),
     }
+    // Every repo is checked before any is merged: a conflict anywhere merges nothing, so a plan is never half merged.
+    let repos = repos_of(&d);
+    let one = repos.len() == 1;
+    let mut ready = vec![];
+    for (r, into) in &repos {
+        let project = repo_dir(state, &d.project, r).map_err(|e| format!("Nothing was merged: {e}."))?;
+        let at = if one { String::new() } else { format!(" in {}", if r.is_empty() { d.project.trim() } else { r }) };
+        ready.push(prepare_merge(state, &d, &project, into, &at).await?);
+    }
     let mut merged: Vec<String> = vec![];
-    for (r, base) in repos_of(&d) {
-        let done = match repo_dir(state, &d.project, &r) {
-            Ok(project) => merge_in(state, &d, &project, &base).await,
-            Err(e) => Err(format!("Nothing was merged: {e}.")),
-        };
-        match done {
+    for m in &ready {
+        match finish_merge(&d, m).await {
             Ok(line) => merged.push(line),
-            // A repo merged before stays merged: Merge again picks up where this stopped.
-            Err(e) if !merged.is_empty() => return Err(format!("{} But in {r}: {e}", merged.join(" "))),
+            Err(e) if !merged.is_empty() => return Err(format!("{} But then: {e}", merged.join(" "))),
             Err(e) => return Err(e),
         }
     }
@@ -3605,43 +3623,64 @@ pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, St
     Ok(merged.join(" "))
 }
 
-/// Merges `d`'s spec branch into `base` in the Dev's clone of the repo `project`: the line saying so.
-async fn merge_in(state: &AppState, d: &Delivery, project: &std::path::Path, into: &str) -> Result<String, String> {
+/// One repo's merge, checked and ready to write: the Dev's clone, the branch merged into and both tips, and
+/// the merged tree (None when the spec branch is already in the base).
+struct Merge {
+    dir: std::path::PathBuf,
+    into: String,
+    base: String,
+    branch: String,
+    tree: Option<String>,
+}
+
+/// Reads what merging `d`'s spec branch into `into` in the Dev's clone of the repo `project` takes, writing no
+/// branch: Err when it can't, or wouldn't merge cleanly. `at` names the repo in a plan of several (" in api").
+async fn prepare_merge(state: &AppState, d: &Delivery, project: &std::path::Path, into: &str, at: &str) -> Result<Merge, String> {
     let dir = dev_clone(state, d, project).ok_or_else(|| format!("Nothing was merged: the Dev has no clone of `{}` in its workspace.", project.display()))?;
     let shown = dir.display();
-    let (base_ref, spec_ref) = (format!("refs/heads/{into}"), format!("refs/remotes/origin/{}", d.branch));
+    let spec_ref = format!("refs/remotes/origin/{}", d.branch);
     git(&dir, &["fetch", "-q", "origin", &format!("+refs/heads/{0}:{spec_ref}", d.branch), &format!("+refs/heads/{into}:refs/remotes/origin/{into}")])
         .await
         .map_err(|e| format!("Nothing was merged: couldn't fetch `{}` into `{shown}`: {e}", d.branch))?;
-    let at = dir.as_path();
-    let tip = |r: String| async move { git(at, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).await.ok() };
+    let at_dir = dir.as_path();
+    let tip = |r: String| async move { git(at_dir, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).await.ok() };
     // The clone's own base branch, or the project's when the clone has none yet.
-    let base = match tip(base_ref.clone()).await {
+    let base = match tip(format!("refs/heads/{into}")).await {
         Some(b) => b,
         None => tip(format!("refs/remotes/origin/{into}")).await.ok_or_else(|| format!("Nothing was merged: `{into}` isn't in `{shown}`."))?,
     };
     let branch = tip(spec_ref).await.ok_or_else(|| format!("Nothing was merged: `{}` isn't in `{shown}`.", d.branch))?;
-    let merged = format!("Merged `{}` into `{into}` in the Dev's clone `{shown}`.", d.branch);
-    if git(&dir, &["merge-base", "--is-ancestor", &branch, &base]).await.is_ok() {
-        if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_err() {
-            git(&dir, &["branch", into, &base]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    let tree = if git(&dir, &["merge-base", "--is-ancestor", &branch, &base]).await.is_ok() {
+        None
+    } else {
+        let tree = git(&dir, &["merge-tree", "--write-tree", "--no-messages", &base, &branch]).await;
+        let tree = tree.ok().and_then(|t| t.lines().next().map(str::to_string)).filter(|t| !t.is_empty());
+        Some(tree.ok_or_else(|| format!("`{}` doesn't merge cleanly into `{into}`{at}, so nothing was merged.", d.branch))?)
+    };
+    Ok(Merge { dir, into: into.to_string(), base, branch, tree })
+}
+
+/// Writes a merge [`prepare_merge`] checked: the line saying so.
+async fn finish_merge(d: &Delivery, m: &Merge) -> Result<String, String> {
+    let (dir, into, base, branch) = (&m.dir, &m.into, &m.base, &m.branch);
+    let base_ref = format!("refs/heads/{into}");
+    let merged = format!("Merged `{}` into `{into}` in the Dev's clone `{}`.", d.branch, dir.display());
+    let Some(tree) = &m.tree else {
+        if git(dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_err() {
+            git(dir, &["branch", into, base]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
         }
         return Ok(merged);
-    }
-    let tree = git(&dir, &["merge-tree", "--write-tree", "--no-messages", &base, &branch]).await;
-    let Some(tree) = tree.ok().and_then(|t| t.lines().next().map(str::to_string)).filter(|t| !t.is_empty()) else {
-        return Err(format!("`{}` doesn't merge cleanly into `{into}`, so nothing was merged.", d.branch));
     };
     let message = format!("Merge {}", subject(d));
-    let commit = git(&dir, &["commit-tree", &tree, "-p", &base, "-p", &branch, "-m", &message]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
-    let on = git(&dir, &["symbolic-ref", "--quiet", "HEAD"]).await.unwrap_or_default();
+    let commit = git(dir, &["commit-tree", tree, "-p", base, "-p", branch, "-m", &message]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    let on = git(dir, &["symbolic-ref", "--quiet", "HEAD"]).await.unwrap_or_default();
     if on == base_ref {
         // The Dev has the base checked out: its files follow, and git refuses rather than lose its uncommitted work.
-        git(&dir, &["merge", "-q", "--ff-only", &commit]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+        git(dir, &["merge", "-q", "--ff-only", &commit]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
     } else {
         // Moves the branch only from the commit read above (or makes it), so a change since then fails instead of being lost.
-        let old = if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_ok() { base.as_str() } else { "" };
-        git(&dir, &["update-ref", "-m", &message, &base_ref, &commit, old]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+        let old = if git(dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_ok() { base.as_str() } else { "" };
+        git(dir, &["update-ref", "-m", &message, &base_ref, &commit, old]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
     }
     Ok(merged)
 }

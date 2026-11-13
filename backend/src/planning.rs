@@ -5577,7 +5577,7 @@ pub(crate) mod tests {
     /// #447: a plan kept in Loft in a folder of several repos. Each ticket names the repo it changes, Start says
     /// which tickets name none, and the Delivery branches and merges in each ticket's repo.
     #[tokio::test]
-    async fn a_plan_across_two_repos_in_one_folder_branches_and_merges_in_each() {
+    async fn a_plan_across_repos_in_one_folder_branches_and_merges_in_each() {
         let st = state();
         let fake = own_fake(&st);
         let name = "dine";
@@ -5585,7 +5585,7 @@ pub(crate) mod tests {
         a.project = name.into();
         st.db.save_agent(&a).unwrap();
         let dir = st.settings.boot().projects_dir.join(name);
-        for (r, base) in [("api", "main"), ("web", "master")] {
+        for (r, base) in [("api", "main"), ("web", "master"), ("pos", "main")] {
             std::fs::create_dir_all(dir.join(r)).unwrap();
             git_in(&dir.join(r), &["init", "-q", "-b", base]);
             git_in(&dir.join(r), &["commit", "-q", "--allow-empty", "-m", "init"]);
@@ -5605,8 +5605,22 @@ pub(crate) mod tests {
             let (st, a, args) = (st.clone(), a.clone(), json!({ "spec": spec.id, "tickets": ts }));
             async move { mcp_call(&st, &a, "publish_tickets", &args).await }
         };
-        let err = tickets(vec![with("Store", &[], "nope")]).await.unwrap().unwrap_err();
-        assert_eq!(err, "\"Store\": `nope` isn't a git repo of its own inside dine.");
+        // Only a git repo of its own, directly inside the folder: never a path out of it, nor a link to one.
+        let outside = st.settings.boot().projects_dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        git_in(&outside, &["init", "-q", "-b", "main"]);
+        std::os::unix::fs::symlink(&outside, dir.join("evil")).unwrap();
+        for (repo, why) in [
+            ("nope", "`nope` isn't a git repo of its own inside dine"),
+            ("..", "`..` isn't a git repo of its own inside dine"),
+            ("../outside", "`../outside` isn't a folder directly inside dine: name the repo's own folder"),
+            ("api/sub", "`api/sub` isn't a folder directly inside dine: name the repo's own folder"),
+            ("evil", "`evil` isn't a git repo of its own inside dine"),
+        ] {
+            let err = tickets(vec![with("Store", &[], repo)]).await.unwrap().unwrap_err();
+            assert_eq!(err, format!("\"Store\": {why}."), "{repo}");
+        }
+        assert!(!st.db.list_tasks().unwrap().iter().any(|t| t.title == "Store"), "nothing was saved");
         tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "")]).await.unwrap().unwrap();
         crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
         let dev = busy(&st, "Builder", name, "dev");
@@ -5627,13 +5641,37 @@ pub(crate) mod tests {
         let w = woken(&st, &dev);
         assert!(w[0].contains(&format!("of the project's own repo `{}`", dir.join("api").canonicalize().unwrap().display())), "{}", w[0]);
 
-        crate::delivery::update(&st, &d.repo, d.spec, |d| d.state = "ready".into());
-        let (api, web) = (dev_builds(&st, &d, &dir.join("api"), "store.rs", "fn store() {}\n"), dev_builds(&st, &d, &dir.join("web"), "ui.ts", "export {}\n"));
+        // A ticket published after Start, in a repo the plan hadn't branched in: its branch is made when it starts.
+        tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "web"), with("Print", &["UI"], "pos")]).await.unwrap().unwrap();
+        let ids: Vec<String> = ["Store", "UI"].iter().map(|t| loft_ticket(&st, name, t).id).collect();
+        for id in &ids {
+            tool(&st, &dev, "submit_ticket", json!({ "number": id, "commits": ["abc1234def"] })).await.unwrap();
+        }
+        assert_eq!(git_in(&dir.join("pos"), &["rev-parse", "spec/1-menu-sync"]), git_in(&dir.join("pos"), &["rev-parse", "main"]));
+        let d = crate::delivery::local_of(&st, name, &spec.id).unwrap();
+        assert_eq!(d.bases.get("pos").map(String::as_str), Some("main"));
+        assert!(woken(&st, &dev).last().unwrap().contains(&format!("of the project's own repo `{}`", dir.join("pos").canonicalize().unwrap().display())));
+        tool(&st, &dev, "submit_ticket", json!({ "number": loft_ticket(&st, name, "Print").id, "commits": ["abc1234def"] })).await.unwrap();
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready");
+
+        let clones: Vec<std::path::PathBuf> = [("api", "store.rs"), ("web", "ui.ts"), ("pos", "print.rs")].iter().map(|(r, f)| dev_builds(&st, &d, &dir.join(r), f, "x\n")).collect();
+        // web's master moved on with a change that conflicts: nothing is merged anywhere.
+        git_in(&clones[1], &["checkout", "-q", "master"]);
+        std::fs::write(clones[1].join("ui.ts"), "y\n").unwrap();
+        git_in(&clones[1], &["add", "."]);
+        git_in(&clones[1], &["commit", "-q", "-m", "ui"]);
+        let api_main = git_in(&clones[0], &["rev-parse", "main"]);
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        assert_eq!(err, "`spec/1-menu-sync` doesn't merge cleanly into `master` in web, so nothing was merged.");
+        assert_eq!(git_in(&clones[0], &["rev-parse", "main"]), api_main, "api, checked first, wasn't merged either");
+        git_in(&clones[1], &["reset", "-q", "--hard", "HEAD~1"]);
+
         let merged = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap();
-        assert_eq!(merged, format!("Merged `spec/1-menu-sync` into `main` in the Dev's clone `{}`. Merged `spec/1-menu-sync` into `master` in the Dev's clone `{}`.", api.display(), web.display()));
-        assert_eq!(git_in(&web, &["-c", "core.fsmonitor=false", "show", "master:ui.ts"]), "export {}");
+        let shown: Vec<String> = clones.iter().map(|c| c.display().to_string()).collect();
+        assert_eq!(merged, format!("Merged `spec/1-menu-sync` into `main` in the Dev's clone `{}`. Merged `spec/1-menu-sync` into `master` in the Dev's clone `{}`. Merged `spec/1-menu-sync` into `main` in the Dev's clone `{}`.", shown[0], shown[1], shown[2]));
+        assert_eq!(git_in(&clones[1], &["-c", "core.fsmonitor=false", "show", "master:ui.ts"]), "x");
         assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, "done");
-        assert_eq!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap(), "`spec/1-menu-sync` is already merged into `main` in api and `master` in web.");
+        assert_eq!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap(), "`spec/1-menu-sync` is already merged into `main` in api, `master` in web and `main` in pos.");
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
