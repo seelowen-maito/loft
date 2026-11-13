@@ -11,12 +11,17 @@ struct IssueDelivery: Codable, Hashable {
         var skipped: String
         /// The agent on it while it's started, in review, closing or needs you; nil otherwise.
         var agentName: String? = nil
+        /// Open tickets in another spec or repo it waits on (`owner/repo#n`).
+        var waitingOn: [String]? = nil
+        /// Its reviewers all passed, so only its CI is left and no agent is on it, since `ciSince` (RFC 3339).
+        var waitingForCi: Bool? = nil
+        var ciSince: String? = nil
     }
     struct Current: Codable, Hashable {
         var number: Int
         var title: String
     }
-    /// The card's state line as the server words it: `tone` is running, stalled, paused, needs_you, final or done.
+    /// The card's state line as the server words it: `tone` is running, ci, stalled, paused, needs_you, final or done.
     struct StateLine: Codable, Hashable {
         var tone: String
         var text: String
@@ -40,23 +45,39 @@ struct IssueDelivery: Codable, Hashable {
     var agentId: String?
     var agentName: String?
     var pr: Int?
+    /// Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); nil in a plan kept in Loft, before
+    /// the PR opens or from an older backend.
+    var checksUrl: String? = nil
+    /// When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; nil when
+    /// none is, or from an older backend.
+    var ciSince: String? = nil
     var spec: Bool? = nil
     var current: Current? = nil
     var tickets: [Ticket]? = nil
     /// Ready tickets nobody has yet, while the Lead hands them out.
     var waitingForLead: [Int]? = nil
     var waitingOnYou: [Int]? = nil
+    /// What the spec's tickets wait on outside it: starting it before those close leaves them waiting.
+    var waitsOn: [WaitsOn]? = nil
 
     /// How a card's state line reads: the colour it takes.
-    enum Tone: String { case running, stalled, paused, needsYou = "needs_you", final, done }
+    enum Tone: String { case running, ci, stalled, paused, needsYou = "needs_you", final, done }
 
     /// The line the card shows, or nil before it started: the server's `state_line` as is (a tone this build
     /// doesn't know takes running's colour). A backend older than it sends none, so it's worded here like the web
     /// card's fallback (deliveryState.ts): waiting for the user (a ticket after too many change rounds, or the
     /// final review) wins over running.
-    var line: (tone: Tone, text: String)? {
+    var line: (tone: Tone, text: String)? { line() }
+
+    /// The card's line at `now`: waiting for CI adds how long since the server's `ciSince` (its earliest ticket
+    /// waiting, "· 6 min"), like the web's `deliveryStateLine`.
+    func line(now: Date = Date()) -> (tone: Tone, text: String)? {
         guard started else { return nil }
-        if let stateLine { return (Tone(rawValue: stateLine.tone) ?? .running, stateLine.text) }
+        if let stateLine {
+            let tone = Tone(rawValue: stateLine.tone) ?? .running
+            guard tone == .ci, let since = ciSince, let waited = SpecViews.waited(since: since, now: now) else { return (tone, stateLine.text) }
+            return (tone, "\(stateLine.text) · \(waited)")
+        }
         switch state {
         case "stalled": return (.stalled, "Stalled: \(Self.stallWhy(stallReason)).")
         case "paused": return (.paused, "Paused: Loft sends no wakes until you resume it.")
@@ -68,6 +89,12 @@ struct IssueDelivery: Codable, Hashable {
         }
         if needsHuman == true { return (.needsYou, "Needs you: a ticket had too many rounds of changes.") }
         return (.running, "Running.")
+    }
+
+    /// Where the line takes the user: the Checks tab on GitHub while it waits for CI, else nowhere.
+    var lineLink: URL? {
+        guard line?.tone == .ci else { return nil }
+        return checksUrl.flatMap(URL.init(string:))
     }
 
     private static func stallWhy(_ reason: String?) -> String {
@@ -89,21 +116,55 @@ struct IssueDelivery: Codable, Hashable {
     /// Every ticket with an agent on it: "#43 Backend endpoints is with Backend Agent".
     var runningLines: [String] { (tickets ?? []).compactMap { t in t.agentName.map { "#\(t.number) \(t.title) is with \($0)" } } }
 
-    /// The progress line once it started: who has which ticket, on which PR and, for a spec, how many are done.
+    /// The progress line once it started: who has which ticket, on which PR and, for a spec, how many are done. While
+    /// it only waits for CI no agent is on it, so it names none.
     func progressLine(issue number: Int) -> String {
         let who = agentName ?? "the team"
+        let onCI = line?.tone == .ci
         if spec == true {
             // Several tickets can run at once: the card lists each with its agent under this line.
-            if !runningLines.isEmpty {
+            if !runningLines.isEmpty || onCI {
                 return "\(pr.map { "On spec PR #\($0). " } ?? "")\(ticketsDone) of \((tickets ?? []).count) tickets done."
             }
             let with = current.map { "#\($0.number) \($0.title) is with \(who)" } ?? "With \(who)"
             return "\(with)\(pr.map { " on spec PR #\($0)" } ?? ""). \(ticketsDone) of \((tickets ?? []).count) tickets done."
         }
+        if onCI {
+            return "Its reviewers passed\(pr.map { " on PR #\($0)" } ?? ""); Loft waits for its CI. #\(number) closes when the PR merges."
+        }
         if agentName != nil {
             return "With \(who)\(pr.map { " on PR #\($0)" } ?? ""). Its reviewers look at it next; #\(number) closes when the PR merges."
         }
         return "Started\(pr.map { " on PR #\($0)" } ?? ""); the agent building it is gone. #\(number) closes when the PR merges."
+    }
+}
+
+/// An open ticket outside a spec that one of its tickets waits on (`owner/repo#n`), and the Delivery that owns it
+/// (nil when it has none). Backend delivery.rs `waits_on`.
+struct WaitsOn: Codable, Hashable {
+    struct Owner: Codable, Hashable {
+        var repo: String
+        var spec: Int
+        var started: Bool
+        /// The spec's Loft issue, to start its Delivery from here.
+        var issueId: String?
+    }
+    var blocker: String
+    var delivery: Owner?
+
+    /// A spec to start first: its repo, number and Loft issue.
+    struct First: Hashable { var repo: String; var spec: Int; var issueId: String }
+
+    /// The specs to start first: each other spec that owns an open blocker and hasn't started, once (the web's
+    /// `specsToStartFirst`).
+    static func specsToStartFirst(_ waits: [WaitsOn]?) -> [First] {
+        var out: [First] = []
+        for case let d? in (waits ?? []).map(\.delivery) where !d.started {
+            if let id = d.issueId, !out.contains(where: { $0.repo == d.repo && $0.spec == d.spec }) {
+                out.append(First(repo: d.repo, spec: d.spec, issueId: id))
+            }
+        }
+        return out
     }
 }
 

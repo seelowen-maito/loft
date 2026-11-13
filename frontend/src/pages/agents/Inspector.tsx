@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, Dices, File, Folder, FolderGit2, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
+import { pendingClick, redrawBusy, redrawClick, type RedrawClick } from "../../lib/redraw";
 import { cx, fmtBytes, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
-import { projectsOf } from "../../lib/team";
+import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 
@@ -83,15 +84,19 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, sub, hint, children }: { label: string; sub?: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <span className="eyebrow">{label}</span>
+      {sub && <span className="block text-[11.5px] text-fg-3">{sub}</span>}
       {children}
       {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
     </label>
   );
 }
+
+/** What a project is, under the Projects label of the agent's settings and the New agent dialog. */
+export const PROJECTS_SUB = "Folders or git repositories from your projects folder";
 
 /** The Role field's hint, for the agent's settings and the New agent dialog. */
 export const roleHint = (team: string) =>
@@ -103,22 +108,31 @@ export const FRESH_CONTEXT_HINT =
   "Before Delivery starts it on a new ticket, Loft clears its context like Clear context does: always, or with Above 80k (the smart zone) or a higher threshold only once its context reaches it. Long-term memory carries over, /resume brings the old session back, and review rounds of the same ticket keep their context.";
 
 
-type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "title" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
+type Draft = { group: string; projects: string[] } & Pick<Agent, "name" | "personality" | "prompt" | "model" | "effort" | "subagent_model" | "max_subagents" | "role" | "fresh_context" | "interval_minutes" | "quiet_hours" | "permission_mode">;
 
 function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; groups: string[]; projects: string[]; onCleared: () => void }) {
   const initial = useMemo<Draft>(
     () => ({
-      name: agent.name, title: agent.title, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
+      name: agent.name, group: agent.group ?? "", projects: projectsOf(agent), personality: agent.personality, prompt: agent.prompt,
       model: agent.model, effort: agent.effort, subagent_model: agent.subagent_model ?? "", max_subagents: agent.max_subagents ?? null, role: agent.role || "custom", fresh_context: agent.fresh_context ?? "above_80k", interval_minutes: agent.interval_minutes, quiet_hours: agent.quiet_hours ?? [], permission_mode: agent.permission_mode,
     }),
     [agent],
   );
-  const [draft, setDraft] = useState<Draft>(initial);
+  const [typed, setTyped] = useState("");
+  const [shown, setDraft] = useState<Draft>(initial);
+  const draft = withTyped(shown, typed);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).
+  const [click, setClick] = useState<RedrawClick>(null);
+  useEffect(() => {
+    if (click && !pendingClick(click, agent)) setClick(null);
+  }, [click, agent]);
+  const redrawing = redrawBusy(agent, click);
   const [notice, setNotice] = useState<string | null>(null);
   const dirty = (Object.keys(initial) as (keyof Draft)[]).some((k) => JSON.stringify(initial[k]) !== JSON.stringify(draft[k]));
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
+  const discard = () => (setDraft(initial), setTyped(""));
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
   const team = draft.group.trim();
 
@@ -128,6 +142,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     setNotice(null);
     try {
       const saved = await api.updateAgent(agent.id, draft);
+      setTyped("");
       setNotice(saved.notice ?? null);
     } catch (e) {
       setErr((e as Error).message);
@@ -141,34 +156,35 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       <div className="flex items-center gap-4">
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
-          <button className="btn" onClick={() => api.randomizeAvatar(agent.id)}>
-            <Dices className="size-3.5" /> Randomize
+          <button
+            className="btn"
+            // One drawing run at a time: a second click would pay for another.
+            disabled={redrawing}
+            onClick={() => {
+              setClick(redrawClick(agent));
+              api.redrawAvatar(agent.id).catch((e) => {
+                setClick(null);
+                setErr((e as Error).message);
+              });
+            }}
+          >
+            {redrawing ? <><Loader2 className="size-3.5 animate-spin" /> Drawing…</> : <><Paintbrush className="size-3.5" /> Redraw</>}
           </button>
-          <p className="text-[11.5px] leading-snug text-fg-3">Or ask {agent.name} in chat to redraw itself. It draws its own sticker.</p>
+          <p className="text-[11.5px] leading-snug text-fg-3">{agent.name} draws a new sticker from its role, instructions and main project. Its chat and context stay as they are.</p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Name">
-          <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
-        </Field>
-        <Field label="Title">
-          <input className="input" value={draft.title} placeholder="e.g. Release captain" onChange={(e) => set("title", e.target.value)} />
-        </Field>
-      </div>
+      <Field label="Name">
+        <input className="input" value={draft.name} onChange={(e) => set("name", e.target.value)} />
+      </Field>
 
       <Field label="Group" hint="Its team, such as Acme: agents in the same group are listed together and share one Lead. Empty: no team, so it can't be Lead.">
         <GroupInput value={draft.group} groups={groups} onChange={(v) => set("group", v)} />
       </Field>
 
-      <Field label="Projects" hint="The repos it works in. The starred one is its main project: its issues go there by default.">
-        <ProjectsField value={draft.projects} projects={projects} onChange={(v) => set("projects", v)} />
-        {agent.project_problems?.length ? (
-          <div className="mt-2 space-y-1 text-[12px] text-warn">
-            <div>Pick this agent's projects: each must be one repo.</div>
-            {agent.project_problems.map((f) => <div key={f.project}>{f.problem}</div>)}
-          </div>
-        ) : null}
+      <Field label="Projects" sub={PROJECTS_SUB} hint="The repos it works in. The starred one is its main project: its issues go there by default.">
+        <ProjectsField value={shown.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => set("projects", v)} />
+        {agent.project_problems?.map((f) => <div key={f.project} className={cx("mt-2 text-[12px]", f.hint ? "text-fg-3" : "text-warn")}>{f.problem}</div>)}
       </Field>
 
       <Field label="Personality" hint="Tone, voice, quirks. Injected into its system prompt.">
@@ -279,7 +295,7 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
         <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
           <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
         </button>
-        {dirty && <button className="btn-ghost" onClick={() => setDraft(initial)}>Discard</button>}
+        {dirty && <button className="btn-ghost" onClick={discard}>Discard</button>}
         {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
         {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>

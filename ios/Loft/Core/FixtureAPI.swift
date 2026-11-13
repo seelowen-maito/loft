@@ -61,19 +61,20 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// The demo's answers come from `demoReply` instead of one fixed line.
     private let scripted: Bool
 
-    /// `grillEnded` and `setupSent` are `-fixture-grill-ended` and `-fixture-setup-sent` for unit tests.
-    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, scripted: Bool = false, grillEnded: Bool = false, setupSent: Bool = false) {
+    /// `grillEnded`, `setupSent` and `moreSpecs` are `-fixture-grill-ended`, `-fixture-setup-sent` and `-fixture-more-specs` for unit tests.
+    init(mode: Mode = .normal, grill: Bool = false, replies: Bool = false, scripted: Bool = false, grillEnded: Bool = false, setupSent: Bool = false,
+         moreSpecs: Bool = false) {
         self.mode = mode
         self.replies = replies || scripted
         self.scripted = scripted
         self.grill = grill && mode != .empty
         let now = Date()
         func ago(_ m: Double) -> Date { now.addingTimeInterval(-m * 60) }
-        func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil) -> Agent {
-            Agent(id: id, name: name, title: nil, project: project, model: "opus", effort: nil, permissionMode: "auto",
+        func agent(_ id: String, _ name: String, _ project: String, _ status: String, _ text: String, running: Bool, last: Double, ctx: Int? = nil, role: String = "custom") -> Agent {
+            Agent(id: id, name: name, project: project, model: "opus", effort: nil, permissionMode: "auto",
                   intervalMinutes: 60, status: status, statusText: text, running: running, lastRunAt: ago(last),
                   nextRunAt: nil, createdAt: ago(10000), totalCostUsd: 3.2, contextTokens: ctx, prompt: nil,
-                  sessionId: ctx == nil ? nil : "s-\(id)", freshContext: "above_80k", freshContextApplies: true)
+                  role: role, sessionId: ctx == nil ? nil : "s-\(id)", freshContext: "above_80k", freshContextApplies: true)
         }
         func task(_ id: String, _ title: String, _ status: String, agent: String?, parent: String? = nil, by: String = "user",
                   note: String = "", error: String = "", priority: String = "normal", minutes: Double) -> HBTask {
@@ -88,9 +89,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
         agentList = [
             agent("orch", "Orchestrator", "loft", "running", "Planning the settings work", running: true, last: 12, ctx: 182_000),
-            agent("be", "Backend Agent", "loft", "running", "Running cargo test", running: true, last: 8, ctx: 64_000),
-            agent("ios", "iOS Agent", "loft", "waiting", "Waiting for permission: Bash", running: true, last: 5, ctx: 214_000),
-            agent("qa", "QA Agent", "loft", "idle", "", running: false, last: 90, ctx: 12_000),
+            agent("be", "Backend Agent", "loft", "running", "Running cargo test", running: true, last: 8, ctx: 64_000, role: "dev"),
+            agent("ios", "iOS Agent", "loft", "waiting", "Waiting for permission: Bash", running: true, last: 5, ctx: 214_000, role: "dev"),
+            agent("qa", "QA Agent", "loft", "idle", "", running: false, last: 90, ctx: 12_000, role: "qa"),
             agent("docs", "Docs Agent", "website", "error", "Last run failed", running: false, last: 30),
         ]
         // The loft agents are the group "Loft"; the Orchestrator also works on the website.
@@ -170,6 +171,28 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 DeliverySummary(state: "ready", agentName: nil, repo: "octo/loft", spec: 51, specId: nil, local: false, pr: 55, current: nil,
                                 tickets: [ticket(60, "Gallery grid", "closed"), ticket(61, "Gallery detail", "closed"), ticket(62, "Gallery tests", "closed")]),
             ]
+            // Offline mode (#50) and the end card's Pricing page (octo/site#40), not started, each with a ticket waiting
+            // on an open ticket of octo/api's Billing API spec (#7), which hasn't started either.
+            let waits = [WaitsOn(blocker: "octo/api#8", delivery: .init(repo: "octo/api", spec: 7, started: false, issueId: "api7"))]
+            var cache = ticket(56, "Offline cache", "open"); cache.waitingOn = ["octo/api#8"]
+            var plans = ticket(41, "Plans table", "open"); plans.waitingOn = ["octo/api#8"]
+            deliveryList += [
+                DeliverySummary(state: "planned", agentName: nil, repo: "octo/loft", spec: 50, specId: nil, local: false, current: nil,
+                                tickets: [cache, ticket(57, "Sync queue", "open")], waitsOn: waits),
+                DeliverySummary(state: "planned", agentName: nil, repo: "octo/site", spec: 40, specId: nil, local: false, current: nil,
+                                tickets: [plans, ticket(42, "Yearly toggle", "open")], waitsOn: waits),
+            ]
+            // `-fixture-ci`: #42's Delivery has only CI left, on #45 for six minutes, and no agent at work.
+            if ProcessInfo.processInfo.arguments.contains("-fixture-ci") {
+                var docs = ticket(45, "Docs", "review", ["qa": "pass", "security": "pass", "ci": "pending"])
+                (docs.waitingForCi, docs.ciSince) = (true, JSONCoding.formatDate(ago(6)))
+                (deliveryList[0].agentName, deliveryList[0].current, deliveryList[0].waitingForLead, deliveryList[0].waitingOnYou) = (nil, nil, nil, nil)
+                deliveryList[0].tickets = [ticket(43, "Backend endpoints", "closed"), ticket(44, "iOS screen", "closed"), docs,
+                                           ticket(46, "QA", "closed"), ticket(47, "Release notes", "closed")]
+                deliveryList[0].stateLine = .init(tone: "ci", text: "Waiting for CI on #45")
+                deliveryList[0].checksUrl = "https://github.com/octo/loft/pull/47/checks"
+                deliveryList[0].ciSince = docs.ciSince
+            }
         }
         func m(_ id: Int64, _ agent: String, _ role: String, _ kind: String, _ content: String, _ minutes: Double, meta: JSONValue? = nil) -> ChatMessage {
             ChatMessage(id: id, agentId: agent, runId: nil, role: role, kind: kind, content: content, meta: meta, createdAt: ago(minutes))
@@ -218,7 +241,7 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         // `-fixture-grill-ended`: the interview is over and its end-of-planning card is in the chat
         // (`-fixture-setup-sent`: the web already sent its team setup message).
         if self.grill, grillEnded || args.contains("-fixture-grill-ended"), var s = grillState {
-            endGrill(&s, setupSent: setupSent || args.contains("-fixture-setup-sent"))
+            endGrill(&s, setupSent: setupSent || args.contains("-fixture-setup-sent"), moreSpecs: moreSpecs || args.contains("-fixture-more-specs"))
             grillState = s
         }
         if args.contains("-fixture-risky-permission") {
@@ -327,8 +350,9 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
 
     /// Ends the interview with a summary and the end-of-planning card: a spec, two tickets, no reviewer on the team.
-    /// `setupSent`: the web already sent the team setup message.
-    private func endGrill(_ s: inout GrillSession, setupSent: Bool = false) {
+    /// `setupSent`: the web already sent the team setup message. `moreSpecs`: the grill also published a spec in
+    /// another repo and one whose Delivery can't start.
+    private func endGrill(_ s: inout GrillSession, setupSent: Bool = false, moreSpecs: Bool = false) {
         s.state = .ended
         grillMessage("Ended", GrillMeta(sessionId: s.sessionId, role: .status, state: "ended", endReason: "stopped"))
         // `-fixture-plan-in-loft`: a plan kept in Loft, its issues linked as `/tasks/<id>` (the fixture's t1, t2, t3).
@@ -340,9 +364,19 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            nextMessage: inLoft ? "Implement the plan: hand its ready Loft issues to the team" : "", missingRoles: ["code_reviewer", "qa"],
                            setup: .init(agentId: "loft", message: "Set up the team for the site project: it has no Code reviewer or QA yet.",
                                         sentAt: setupSent ? JSONCoding.formatDate(Date()) : nil),
-                           delivery: inLoft ? nil : .init(repo: "octo/site", spec: 40))
+                           delivery: inLoft ? nil : .init(repo: "octo/site", spec: 40),
+                           more: moreSpecs ? Self.moreSpecs : nil)
         grillMessage("**Summary:** new visitors are the audience; show monthly and yearly, yearly highlighted.",
                      GrillMeta(sessionId: s.sessionId, role: .summary, final: true, endCard: card), role: "assistant")
+    }
+
+    private static var moreSpecs: [EndCard.Spec] {
+        let spec = { (repo: String, n: Int, t: String, tickets: [(Int, String)]) in
+            let issue = { (n: Int, t: String) in EndCard.Issue(number: n, title: t, url: URL(string: "https://github.com/\(repo)/issues/\(n)")!) }
+            return EndCard.Spec(repo: repo, spec: issue(n, t), tickets: tickets.map(issue), delivery: .init(repo: repo, spec: n))
+        }
+        return [spec("octo/api", 7, "Billing API", [(8, "Plans endpoint"), (9, "Stripe webhooks")]),
+                spec("octo/docs", 3, "Pricing docs", [(4, "Plans page")])]
     }
 
     private func grillMessage(_ text: String, _ g: GrillMeta, role: String = "assistant") {
@@ -381,18 +415,31 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
 
-    /// Like the backend: starts the card's Delivery once, on the fixture's Dev; a repeat is a duplicate.
-    func startDelivery(agentId: String, messageId: Int64, initGit: Bool) async throws -> SendMessageResponse {
+    /// Like the backend: starts the card's spec `repo`#`spec` once, the first on the fixture's Dev and the others on a
+    /// Lead that hands out their tickets; a repeat is a duplicate. octo/docs has no team, so it never starts.
+    func startDelivery(agentId: String, messageId: Int64, repo: String, spec: Int, initGit: Bool) async throws -> SendMessageResponse {
         try check()
         await slowEndCard()
         return try locked {
             guard let i = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), var m = msgs[agentId]?[i] else {
                 throw APIError.server(status: 404, message: "not found")
             }
-            guard var g = m.grill, var d = g.endCard?.delivery else { throw APIError.server(status: 400, message: "This card has no Delivery.") }
-            if d.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
-            d.started = .init(ticket: 41, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
-            g.endCard?.delivery = d
+            guard var g = m.grill, var card = g.endCard else { throw APIError.server(status: 400, message: "This card has no Delivery.") }
+            let key = "\(repo)#\(spec)"
+            if repo == "octo/docs" { throw APIError.server(status: 409, message: "octo/docs has no Dev agent.") }
+            if card.delivery?.key == key {
+                if card.delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+                // The first ticket that waits on nothing outside the spec, like the backend's ready tickets.
+                let waiting = deliveryList.first { $0.repo == repo && $0.spec == spec }?.tickets.filter { !($0.waitingOn ?? []).isEmpty }.map(\.number) ?? []
+                let first = card.tickets.map(\.number).first { !waiting.contains($0) } ?? 41
+                card.delivery?.started = .init(ticket: first, agentId: "dev", agentName: "Dev", at: JSONCoding.formatDate(Date()))
+            } else if let j = card.more?.firstIndex(where: { $0.delivery?.key == key }) {
+                if card.more?[j].delivery?.started != nil { return SendMessageResponse(ok: true, queued: nil, duplicate: true, message: m) }
+                card.more?[j].delivery?.started = .init(ticket: 0, agentId: "lead", agentName: "Lead", at: JSONCoding.formatDate(Date()))
+            } else {
+                throw APIError.server(status: 400, message: "This card has no Delivery.")
+            }
+            g.endCard = card
             m.meta = ["grill": Self.wire(g)]
             msgs[agentId]?[i] = m
             deliveriesStarted += 1
@@ -895,10 +942,11 @@ final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked {
             guard let g = taskList.first(where: { $0.id == taskId })?.github,
                   let d = deliveryList.first(where: { !$0.local && $0.repo == g.repo && $0.spec == g.number }) else { return nil }
-            return IssueDelivery(state: d.state, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
-                                 agentName: d.agentName, pr: d.pr, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
-                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName) },
-                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou)
+            return IssueDelivery(state: d.state, stateLine: d.stateLine, canPause: d.state == "running", started: d.state != "planned", agentId: nil,
+                                 agentName: d.agentName, pr: d.pr, checksUrl: d.checksUrl, ciSince: d.ciSince, spec: true, current: d.current.map { .init(number: $0.number, title: $0.title) },
+                                 tickets: d.tickets.map { .init(number: $0.number, title: $0.title, state: $0.state, skipped: "", agentName: $0.agentName, waitingOn: $0.waitingOn,
+                                                                waitingForCi: $0.waitingForCi, ciSince: $0.ciSince) },
+                                 waitingForLead: d.waitingForLead, waitingOnYou: d.waitingOnYou, waitsOn: d.waitsOn)
         }
     }
     func mergeDelivery(repo: String, spec: Int) async throws -> String {

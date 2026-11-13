@@ -34,7 +34,7 @@ struct AgentDetailView: View {
                     AgentAvatar(name: agent.name, id: agent.id, size: 56, state: state)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(agent.name).font(.title3.weight(.semibold))
-                        if let t = agent.title, !t.isEmpty { Text(t).font(.subheadline).foregroundStyle(.secondary) }
+                        Text(agent.roleLabel).font(.subheadline).foregroundStyle(.secondary)
                         StatusBadge(state)
                     }
                 }

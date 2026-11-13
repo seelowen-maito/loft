@@ -149,6 +149,6 @@ struct AgentRow: View {
         if let t = agent.statusText, !t.isEmpty { return t }
         if s == .waitingApproval, let p = store.pendingApprovals(for: agent.id).first { return p.summary }
         if let last = agent.lastRunAt { return "Last ran \(last.shortAgo == "now" ? "just now" : last.shortAgo + " ago")" }
-        return agent.title?.isEmpty == false ? agent.title! : "Hasn't run yet"
+        return agent.role != nil ? agent.roleLabel : "Hasn't run yet"
     }
 }

@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, type To, useParams, useSearchParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageSquare, NotebookPen, Plus, RefreshCw, Search, UserRound, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageSquare, NotebookPen, Plus, RefreshCw, Search, X } from "lucide-react";
 import { api, type MirrorSync, type Agent, type Task, type TaskComment } from "../lib/api";
 import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
+import { GithubUser } from "../components/GithubUser";
 import { createdByMe, filterIssues, SOURCES } from "../lib/issueFilter";
 import { isDeliverableSpec, isStandaloneTicket } from "../lib/standaloneTicket";
 import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialog, PublishCard, SpecDeliveryCard, StuckCard, TaskActions } from "./TaskActions";
@@ -340,7 +341,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
             {t.owner && (
               <div className="flex items-center gap-1.5 text-[12.5px] text-fg-2">
                 <span className="eyebrow mr-1">Owner</span>
-                <UserRound className="size-3.5 text-fg-3" /> <span className="font-mono">{t.owner}</span>
+                <GithubUser login={t.owner} size={16} />
               </div>
             )}
           </div>
@@ -421,7 +422,7 @@ function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Ta
         <div className="eyebrow mb-2">On GitHub · {g.repo}#{g.number}</div>
         <Fact label="State">{g.state === "open" ? <><CircleDot className="size-3.5 text-good" /> Open</> : <><CircleCheck className="size-3.5 text-merged" /> Closed</>}</Fact>
         <Fact label="Labels">{t.labels.length ? t.labels.map((l) => <LabelChip key={l} name={l} />) : <span className="text-fg-3">none</span>}</Fact>
-        <Fact label="Owner">{t.owner ? <><UserRound className="size-3.5 text-fg-3" /> <span className="font-mono">{t.owner}</span></> : <span className="text-fg-3">nobody</span>}</Fact>
+        <Fact label="Owner">{t.owner ? <GithubUser login={t.owner} size={16} /> : <span className="text-fg-3">nobody</span>}</Fact>
         <Fact label="Blocked by">{deps.length ? `${open} open of ${deps.length}` : <span className="text-fg-3">nothing</span>}</Fact>
         <div className="mt-2 font-mono text-[10.5px] text-fg-3">Title, description, labels, owner, open/closed and links live on GitHub; edits here go there.</div>
       </section>

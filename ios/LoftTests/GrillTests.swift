@@ -77,6 +77,17 @@ final class GrillDecodingTests: XCTestCase {
         XCTAssertNil(full.grill?.endCard?.setup)
         XCTAssertEqual(full.grill?.endCard?.teamNote, "", "a full team gets no note")
         XCTAssertNil(full.grill?.endCard?.delivery, "a standalone ticket has no Delivery yet")
+        XCTAssertEqual(card.specs.count, 1, "an older card has only its top-level spec")
+    }
+
+    /// A grill that published several specs: the first at the top, the rest in `more`, each with its own Delivery.
+    func testEndCardWithMoreSpecs() throws {
+        let m = try message(#"{"id": 15, "agent_id": "a", "role": "assistant", "kind": "text", "content": "x", "created_at": "2026-10-22T10:00:00Z", "meta": {"grill": {"role": "summary", "final": true, "end_card": {"repo": "octo/x", "spec": {"number": 1, "title": "A", "url": "https://github.com/octo/x/issues/1"}, "tickets": [], "delivery": {"repo": "octo/x", "spec": 1}, "more": [{"repo": "octo/y", "spec": {"number": 1, "title": "B", "url": "https://github.com/octo/y/issues/1"}, "tickets": [{"number": 2, "title": "B1", "url": "https://github.com/octo/y/issues/2"}], "delivery": {"repo": "octo/y", "spec": 1, "standalone": false, "started": {"ticket": 0, "agent_id": "l", "agent_name": "Lead", "at": "2026-10-22T10:01:00Z"}}}], "next_message": "", "missing_roles": [], "setup": null}}}}"#)
+        let card = try XCTUnwrap(m.grill?.endCard)
+        XCTAssertEqual(card.specs.map(\.spec?.title), ["A", "B"])
+        XCTAssertEqual(card.specs.compactMap(\.delivery?.key), ["octo/x#1", "octo/y#1"], "two repos can each have a #1")
+        XCTAssertEqual(card.specs[1].tickets.map(\.number), [2])
+        XCTAssertEqual(card.specs[1].delivery?.started?.agentName, "Lead")
     }
 
     /// A plan kept in Loft (`repo: ""`) links its issues as `/tasks/<id>`: they open in the app, GitHub links don't.
@@ -270,10 +281,31 @@ final class GrillStoreTests: XCTestCase {
         XCTAssertEqual(card.grill?.endCard?.nextMessage, "")
         XCTAssertEqual(card.grill?.endCard?.teamNote, "Delivery works with this team. Add a QA agent to have each ticket reviewed, and a Code reviewer for the spec PR.")
 
-        try await store.startDelivery(agentId: "orch", messageId: card.id)
+        try await store.startDelivery(agentId: "orch", messageId: card.id, repo: "octo/site", spec: 40)
         XCTAssertEqual(try endCard(store).grill?.endCard?.delivery?.started?.ticket, 41)
-        try await store.startDelivery(agentId: "orch", messageId: card.id)
+        try await store.startDelivery(agentId: "orch", messageId: card.id, repo: "octo/site", spec: 40)
         XCTAssertEqual(api.deliveriesStarted, 1, "a second tap starts nothing")
+        store.deactivate()
+    }
+
+    /// A grill that published several specs: each starts on its own, by repo and number, and the others stay as they were.
+    func testStartDeliveryStartsTheSpecItNames() async throws {
+        let api = FixtureAPI(grill: true, grillEnded: true, moreSpecs: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        let card = try endCard(store)
+        XCTAssertEqual(card.grill?.endCard?.specs.compactMap(\.delivery?.key), ["octo/site#40", "octo/api#7", "octo/docs#3"])
+
+        try await store.startDelivery(agentId: "orch", messageId: card.id, repo: "octo/api", spec: 7)
+        let after = try XCTUnwrap(endCard(store).grill?.endCard)
+        XCTAssertNil(after.delivery?.started, "the first spec isn't started")
+        XCTAssertEqual(after.specs[1].delivery?.started?.agentName, "Lead")
+        XCTAssertNil(after.specs[2].delivery?.started)
+        do {
+            try await store.startDelivery(agentId: "orch", messageId: card.id, repo: "octo/docs", spec: 3)
+            XCTFail("octo/docs can't start")
+        } catch {}
+        XCTAssertEqual(api.deliveriesStarted, 1)
         store.deactivate()
     }
 

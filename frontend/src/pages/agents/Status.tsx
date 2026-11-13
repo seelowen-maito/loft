@@ -11,23 +11,6 @@ export function statusOf(a: Agent): { label: string; dot: string; text: string }
   return { label: "Idle", dot: "bg-fg-3", text: "text-fg-3" };
 }
 
-/** A run that has gone quiet this long is shown as possibly stuck, with a restart. */
-export const QUIET_MINUTES = 10;
-
-/** Why a running agent may need a nudge: it replied and waits on background work, or nothing has come from it for a while. */
-export function runWatch(a: Agent, lastMessageAt: string | undefined, now: number): { kind: "waiting" | "quiet"; minutes: number; text: string } | null {
-  if (!a.running) return null;
-  const mins = (t: string | null | undefined) => (t ? Math.max(0, Math.floor((now - new Date(t).getTime()) / 60000)) : 0);
-  const tasks = a.waiting_on ?? [];
-  if (tasks.length) {
-    const more = tasks.length > 1 ? ` (+${tasks.length - 1} more)` : "";
-    return { kind: "waiting", minutes: mins(a.waiting_since), text: `Waiting on a background task: ${tasks[0]}${more}` };
-  }
-  const last = [a.last_output_at, lastMessageAt].filter(Boolean).sort().pop();
-  const m = mins(last);
-  return last && m >= QUIET_MINUTES ? { kind: "quiet", minutes: m, text: `No activity for ${m} min` } : null;
-}
-
 /** The state label, then the status text, or with `elapsed` the run time while running instead (not on a phone: the ✻ line shows it there). */
 export function StatusPill({ agent, withText = true, elapsed = false }: { agent: Agent; withText?: boolean; elapsed?: boolean }) {
   const s = statusOf(agent);

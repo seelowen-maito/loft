@@ -156,7 +156,7 @@ final class ChatItemTests: XCTestCase {
 
 private extension Agent {
     init(id: String, name: String, status: String, running: Bool?) {
-        self.init(id: id, name: name, title: nil, project: nil, model: nil, effort: nil, permissionMode: nil, intervalMinutes: nil,
+        self.init(id: id, name: name, project: nil, model: nil, effort: nil, permissionMode: nil, intervalMinutes: nil,
                   status: status, statusText: nil, running: running, lastRunAt: nil, nextRunAt: nil, createdAt: nil,
                   totalCostUsd: nil, contextTokens: nil, prompt: nil)
     }

@@ -151,7 +151,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
+            "description": "List the other Loft agents: id, name, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -217,7 +217,7 @@ fn tool_error(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": true })
 }
 
-async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
+pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
@@ -400,7 +400,6 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .iter()
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
-                        let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let group = if a.group.trim().is_empty() { String::new() } else { format!(" · group {}", a.group.trim()) };
                         let project = match a.projects.as_slice() {
                             [] if a.project.trim().is_empty() => String::new(),
@@ -413,7 +412,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{group}{project}{role} · {}", a.name, title, a.id, doing)
+                        format!("- {} · id {}{group}{project}{role} · {}", a.name, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -479,7 +478,14 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 (true, "") => return tool_error(format!("Not sent: kind is required. Use {KINDS}")),
                 (true, k) => return tool_error(format!("Not sent: kind {k:?} isn't one of the two. Use {KINDS}")),
             };
+            // A Dev whose ticket waits on the sender is woken on that ticket, and reads the message there.
+            let woke = |w: Vec<String>| text(format!("Delivered. {} was waiting on you for {}: Loft woke it on that ticket with your message.", to.name, w.join(", ")));
             if fyi {
+                // An FYI names no ticket.
+                let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), None).await;
+                if !w.is_empty() {
+                    return woke(w);
+                }
                 agents::fyi_from_agent(state, &from, &to, body.trim());
                 return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));
             }
@@ -494,6 +500,10 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(t) => t,
                 Err(e) => return tool_error(e),
             };
+            let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), ticket.as_deref()).await;
+            if !w.is_empty() {
+                return woke(w);
+            }
             // The dashboard reads the message id off a queued result to show when it's delivered.
             text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
@@ -626,6 +636,7 @@ mod tests {
         let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
         assert!(line("Checker").contains(" · role Code reviewer · "), "{t}");
         assert!(line("Plain").contains(" · role Custom · "), "{t}");
+        assert!(line("Checker").starts_with("- Checker · id "), "the name, then no title: {t}");
     }
 
     #[tokio::test]

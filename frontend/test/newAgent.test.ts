@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EMPTY_FORM, FRESH_CONTEXT, TEMPLATES, createPayload, offersFreshContext, withTeam } from "../src/lib/newAgent.ts";
+import { EMPTY_FORM, FRESH_CONTEXT, TEMPLATES, createPayload, offersFreshContext, templateOf, withTeam } from "../src/lib/newAgent.ts";
 
 test("a new agent starts Custom with Fresh context always, from a template too", () => {
   assert.equal(EMPTY_FORM.role, "custom");
@@ -47,4 +47,16 @@ test("the create payload carries group, projects, role and Fresh context", () =>
   assert.equal(p.role, "lead");
   assert.equal(p.fresh_context, "always");
   assert.deepEqual([p.group, p.projects], ["Acme", ["web", "api"]]);
+});
+
+test("a form has no title, and the template it was started from stays highlighted until its instructions change", () => {
+  assert.equal("title" in EMPTY_FORM, false);
+  for (const t of TEMPLATES) {
+    assert.equal("title" in t, false, t.label);
+    const f = { ...EMPTY_FORM, ...t };
+    assert.equal(templateOf(f), t, t.label);
+    assert.equal(templateOf({ ...f, name: "Renamed" }), t, "renaming keeps it");
+    assert.equal(templateOf({ ...f, prompt: f.prompt + " And more." }), undefined, "new instructions are the user's own");
+  }
+  assert.equal(templateOf(EMPTY_FORM), undefined);
 });

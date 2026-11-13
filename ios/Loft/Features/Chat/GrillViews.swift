@@ -461,13 +461,12 @@ struct GrillSuggestionBar: View {
     }
 }
 
-/// The end of a planning grill: links to the spec and tickets (they open GitHub), Start delivery for a spec with a
-/// Delivery (otherwise Clear context leaves the next message in the composer), and, when the team lacks a role, a
-/// button that asks `loft`. The server does each once and marks the card (`delivery.started`, `setup.sent_at`), so it
-/// shows as done everywhere and after a restart.
+/// The end of a planning grill: every spec and ticket it published (they open GitHub), each spec with its own Start
+/// delivery (otherwise Clear context leaves the next message in the composer), Start all when there are several, and,
+/// when the team lacks a role, a button that asks `loft`. The server does each once and marks the card
+/// (`delivery.started`, `setup.sent_at`), so it shows as done everywhere and after a restart.
 struct EndCardView: View {
     @Environment(LoftStore.self) private var store
-    @Environment(Router.self) private var router
     /// The final summary the card is on.
     let message: ChatMessage
     let card: EndCard
@@ -475,47 +474,39 @@ struct EndCardView: View {
     @State private var clearing = false
     @State private var sendingSetup = false
     @State private var setupError: String?
-    @State private var starting = false
-    @State private var startError: String?
-    /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
-    @State private var askGitDir: String?
-    @State private var declinedGit = false
+    @State private var startingAll = false
+    /// One spec's own Start delivery is running: Start all waits, so a stale card can't replace the newer one.
+    @State private var startingOne = false
+    /// Why a spec didn't start under Start all, by `Delivery.key`.
+    @State private var failed: [String: String] = [:]
 
     var body: some View {
+        let specs = card.specs
+        let todo = specs.compactMap(\.delivery).filter { $0.started == nil }
         VStack(alignment: .leading, spacing: 10) {
-            Text("Planning done · \(card.repo.isEmpty ? "Loft" : card.repo)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 6) {
-                if let s = card.spec { issue(s, symbol: "doc.text") }
-                ForEach(card.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
+            Text(specs.count == 1 ? "Planning done · \(card.repo.isEmpty ? "Loft" : card.repo)" : "Planning done")
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(Array(specs.enumerated()), id: \.offset) { i, spec in
+                if i > 0 { Divider() }
+                EndCardSpecView(message: message, spec: spec, showRepo: specs.count > 1, busy: startingAll || startingOne, startingOne: $startingOne,
+                                failure: spec.delivery.flatMap { failed[$0.key] }, teamNote: specs.count == 1 && card.setup != nil ? card.teamNote : nil)
             }
-            if card.setup != nil {
-                Label(card.teamNote, systemImage: "person.2")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("endCardTeamNote")
+            // Several specs: what follows is for the whole card, so it doesn't read as part of the last spec, and
+            // the team note names the repo whose team it checked.
+            if specs.count > 1 { Divider() }
+            if specs.count > 1, !todo.isEmpty {
+                Button { startAll(todo) } label: {
+                    pending(startingAll, startingAll ? "Starting…" : todo.count == specs.count ? "Start all \(todo.count)" : "Start remaining \(todo.count)",
+                            symbol: "play.fill")
+                }
+                .buttonStyle(.accent)
+                .font(.footnote)
+                .disabled(startingAll || startingOne)
+                .accessibilityIdentifier("endCardStartAll")
             }
-            if let d = card.delivery {
-                if let s = d.started {
-                    Label("Delivery started · \(d.local == true ? "“\(s.title ?? "")”" : "#\(s.ticket)") with \(s.agentName)", systemImage: "play.circle")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("endCardStarted")
-                } else {
-                    Button { start(initGit: false) } label: { pending(starting, starting ? "Starting delivery…" : "Start delivery", symbol: "play.fill") }
-                    .buttonStyle(.accent)
-                    .font(.footnote)
-                    .disabled(starting)
-                    .accessibilityIdentifier("endCardStart")
-                }
-                if let startError {
-                    Text("Not started: \(startError)").font(.caption2).foregroundStyle(.red)
-                }
-                if declinedGit && d.started == nil {
-                    Text("Nothing was set up: the plan stays as Loft issues.").font(.caption2).foregroundStyle(.secondary)
-                }
-            }
+            if specs.count > 1, card.setup != nil { EndCardTeamNote(text: "\(card.repo.isEmpty ? "Loft" : card.repo): \(card.teamNote)") }
             HStack(spacing: 8) {
-                if card.delivery == nil {
+                if specs.allSatisfy({ $0.delivery == nil }) {
                     clearButton.buttonStyle(.accent)
                 } else {
                     clearButton.buttonStyle(.bordered)
@@ -549,15 +540,25 @@ struct EndCardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
-        .confirmationDialog(
-            "Set up git?",
-            isPresented: Binding(get: { askGitDir != nil }, set: { if !$0 { askGitDir = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Set up git and start") { start(initGit: true) }
-            Button("Not now", role: .cancel) { declinedGit = true }
-        } message: {
-            Text("\(askGitDir ?? "") has no git yet. Loft runs git init, adds a .gitignore for .DS_Store and .remember/, and commits the folder as it is. Then the Delivery starts.")
+    }
+
+    /// Starts every spec not started yet, one after the other, each on its own Lead; one that can't start says why
+    /// under it and the rest go on.
+    private func startAll(_ todo: [EndCard.Delivery]) {
+        startingAll = true
+        Task {
+            for d in todo {
+                do {
+                    if try await store.startDelivery(agentId: message.agentId, messageId: message.id, repo: d.repo, spec: d.spec) != nil {
+                        failed[d.key] = "Has no git yet: start it on its own."
+                    } else {
+                        failed[d.key] = nil
+                    }
+                } catch {
+                    failed[d.key] = error.localizedDescription
+                }
+            }
+            startingAll = false
         }
     }
 
@@ -582,14 +583,112 @@ struct EndCardView: View {
             if busy { ProgressView().controlSize(.mini) } else { Image(systemName: symbol) }
         }
     }
+}
 
-    private func start(initGit: Bool) {
+/// The end card's team check, when the team lacks a role.
+private struct EndCardTeamNote: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "person.2")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("endCardTeamNote")
+    }
+}
+
+/// One spec on the end card: its tickets and its own Start delivery, then who has it or why it didn't start.
+private struct EndCardSpecView: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(Router.self) private var router
+    let message: ChatMessage
+    let spec: EndCard.Spec
+    /// Several specs: each names its repo.
+    let showRepo: Bool
+    /// Start all or another spec's Start delivery is running.
+    let busy: Bool
+    /// Set while this spec's Start delivery runs.
+    @Binding var startingOne: Bool
+    /// Why Start all didn't start it.
+    let failure: String?
+    /// The team note, between the tickets and Start delivery, on a card with one spec.
+    var teamNote: String?
+    @State private var starting = false
+    @State private var startError: String?
+    /// The project folder Start delivery found with no git: the user is asked before Loft sets it up.
+    @State private var askGitDir: String?
+    @State private var declinedGit = false
+    /// Start delivery was tapped while its tickets wait on another spec: the warning shows in its place.
+    @State private var warn = false
+
+    /// What the spec's tickets wait on in another spec, from the Deliveries list.
+    private var waits: [WaitsOn] {
+        spec.delivery.flatMap { store.deliverySummaries["\($0.repo)#\($0.spec)"]?.waitsOn } ?? []
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if showRepo {
+                Text(spec.repo.isEmpty ? "Loft" : spec.repo).font(.caption2.monospaced()).foregroundStyle(.secondary)
+            }
+            if let s = spec.spec { issue(s, symbol: "doc.text") }
+            ForEach(spec.tickets, id: \.number) { issue($0, symbol: "circle.dotted") }
+            if let teamNote { EndCardTeamNote(text: teamNote) }
+            if let d = spec.delivery {
+                if let s = d.started {
+                    Label(s.ticket == 0 ? "Delivery started · \(s.agentName) hands out the tickets"
+                          : "Delivery started · \(d.local == true ? "“\(s.title ?? "")”" : "#\(s.ticket)") with \(s.agentName)",
+                          systemImage: "play.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("endCardStarted")
+                } else if warn, !waits.isEmpty {
+                    StartWarning(waits: waits, onStart: { warn = false; start(d, initGit: false) }, onCancel: { warn = false },
+                                 onStarted: { store.loadDeliveries() })
+                } else {
+                    Button { if waits.isEmpty { start(d, initGit: false) } else { warn = true } } label: {
+                        Label {
+                            Text(starting ? "Starting delivery…" : "Start delivery")
+                        } icon: {
+                            if starting { ProgressView().controlSize(.mini) } else { Image(systemName: "play.fill") }
+                        }
+                    }
+                    .buttonStyle(.accent)
+                    .font(.footnote)
+                    .disabled(starting || busy)
+                    .accessibilityIdentifier("endCardStart")
+                    if let why = startError ?? failure {
+                        Text("Not started: \(why)").font(.caption2).foregroundStyle(.red).accessibilityIdentifier("endCardNotStarted")
+                    }
+                    if declinedGit {
+                        Text("Nothing was set up: the plan stays as Loft issues.").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        // Reads what its tickets wait on before Start delivery is tapped.
+        .onAppear { if spec.delivery.map({ $0.started == nil }) == true { store.loadDeliveries() } }
+        .confirmationDialog(
+            "Set up git?",
+            isPresented: Binding(get: { askGitDir != nil }, set: { if !$0 { askGitDir = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let d = spec.delivery { Button("Set up git and start") { start(d, initGit: true) } }
+            Button("Not now", role: .cancel) { declinedGit = true }
+        } message: {
+            Text("\(askGitDir ?? "") has no git yet. Loft runs git init, adds a .gitignore for .DS_Store and .remember/, and commits the folder as it is. Then the Delivery starts.")
+        }
+    }
+
+    private func start(_ d: EndCard.Delivery, initGit: Bool) {
         starting = true
+        startingOne = true
         startError = nil
         Task {
-            do { askGitDir = try await store.startDelivery(agentId: message.agentId, messageId: message.id, initGit: initGit) }
+            do { askGitDir = try await store.startDelivery(agentId: message.agentId, messageId: message.id, repo: d.repo, spec: d.spec, initGit: initGit) }
             catch { startError = error.localizedDescription }
             starting = false
+            startingOne = false
         }
     }
 

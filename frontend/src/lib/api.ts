@@ -8,7 +8,6 @@ export type QuietWindow = { days: number[]; start: string; end: string };
 export type Agent = {
   id: string;
   name: string;
-  title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
   /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
@@ -16,7 +15,7 @@ export type Agent = {
   /** The projects it works in, main first. Missing from servers before groups. */
   projects?: string[];
   /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
-  project_problems?: { project: string; problem: string }[];
+  project_problems?: { project: string; problem: string; hint?: boolean }[];
   personality: string;
   prompt: string;
   model: string;
@@ -52,6 +51,8 @@ export type Agent = {
   /** The agent that created this one, if an agent did. */
   created_by?: string | null;
   running?: boolean;
+  /** A Redraw waits behind its current run or is drawing now. Missing from servers before Redraw showed it. */
+  redrawing?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */
   last_output_at?: string | null;
@@ -75,6 +76,9 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
+
+/** The label an agent goes by, from its role: "Code reviewer", "Custom". No role yet reads as Custom. */
+export const roleLabel = (role?: string) => ROLES.find((r) => r.value === (role || "custom"))?.label ?? role ?? "Custom";
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -105,6 +109,9 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
+/** An open ticket outside a spec that one of its tickets waits on (`owner/repo#n`), and the Delivery that owns it (null when it has none). */
+export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number; started: boolean; issue_id: string | null } | null };
+
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
@@ -121,12 +128,21 @@ export type IssueDelivery = {
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
+  /** A Loft issue whose project can't hold its Delivery (no git repo of its own): why, instead of a Start button. */
+  cannot_start?: string;
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;
+  /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
+  checks_url?: string | null;
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
+  ci_since?: string | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
+  waits_on?: WaitsOn[];
+  /** `waiting_for_ci`: its reviewers all passed, only its CI is left (no agent on it), since `ci_since` (RFC 3339). */
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
@@ -468,12 +484,12 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error" | "blocked";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
-  /** For "restart": why the restart hasn't happened. */
+  /** For "restart": why the restart hasn't happened. For "blocked": why the checkout can't update. */
   why: string | null;
 };
 
@@ -792,7 +808,8 @@ export const api = {
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
-  randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
+  /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
+  redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),

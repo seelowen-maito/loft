@@ -7,7 +7,7 @@ export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
   spec: number;
   spec_id: string;
   local: boolean;
-  tickets: { number: number; id?: string; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null; verdicts?: Record<string, string> }[];
+  tickets: { number: number; id?: string; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null; verdicts?: Record<string, string> }[];
 };
 
 export type Stage = "planned" | "delivery" | "ready" | "shipped" | "dropped";
@@ -23,6 +23,9 @@ export const DROPPED = { key: "dropped" as Stage, label: "Dropped" };
 /** Where a spec comes from, so a spec mirrored from both a fork and its upstream reads as two: `owner/repo#12`, or the Loft project of a plan kept in Loft. */
 export const specRef = (spec: Task) => (spec.github ? `${spec.github.repo}#${spec.github.number}` : `Loft${spec.project ? ` · ${spec.project}` : ""}`);
 
+/** What a spec card's meta line says: where the spec lives, then its project, unless the ref already names it (a plan kept in Loft). */
+export const specMeta = (spec: Task): { ref: string; project: string | null } => ({ ref: specRef(spec), project: spec.github && spec.project ? spec.project : null });
+
 /** The Delivery of a spec's issue: a GitHub spec by repo and number, a plan kept in Loft by its issue. */
 export function deliveryOf(spec: Task, all: DeliverySummary[]): DeliverySummary | null {
   return all.find((d) => (d.local ? d.spec_id === spec.id : !!spec.github && d.repo === spec.github.repo && d.spec === spec.github.number)) ?? null;
@@ -37,8 +40,20 @@ export function stageOf(spec: Task, d: DeliverySummary | null): Stage {
   return "delivery";
 }
 
-/** A ticket's state in a few words and a tone. */
-export function ticketLabel(state: string): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
+/** A spec card's badge: its stage, and while In Delivery what it's at: the final review, fixes, needs you, or
+ *  "Waiting for CI" in place of the stage when no agent is at work and only CI is left (the server's `ci` tone). */
+export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "state_line"> | null): string {
+  const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
+  if (stage !== "delivery") return label;
+  if (d?.state_line?.tone === "ci") return "Waiting for CI";
+  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : d?.state === "needs_human" ? " · needs you" : "";
+  return label + sub;
+}
+
+/** A ticket's state in a few words and a tone. An open one waiting on tickets outside its spec says which (`owner/repo#n`); one in review whose reviewers all passed is waiting for CI. */
+export function ticketLabel(state: string, waitingOn: string[] = [], waitingForCi = false): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
+  if (state === "open" && waitingOn.length) return { text: `waiting on ${waitingOn.join(", ")}`, tone: "warn" };
+  if (state === "review" && waitingForCi) return { text: "waiting for CI", tone: "accent" };
   switch (state) {
     case "closed": return { text: "done", tone: "good" };
     case "started": return { text: "building", tone: "accent" };
@@ -52,14 +67,14 @@ export function ticketLabel(state: string): { text: string; tone: "good" | "acce
 
 /* ---------- the board's tickets ---------- */
 
-export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null };
+export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waitingOn?: string[]; waitingForCi?: boolean };
 
 /** A spec's tickets: its Delivery's when it has them, else its sub-issues in Loft. Each knows its own issue, to open it. */
 export function ticketsOf(spec: Task, d: DeliverySummary | null, tasks: Task[]): BoardTicket[] {
   if (d?.tickets.length)
     return d.tickets.map((t) => {
       const own = t.id ? tasks.find((x) => x.id === t.id) : tasks.find((x) => !!spec.github && x.github?.repo === spec.github.repo && x.github.number === t.number);
-      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null };
+      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null, waitingOn: t.waiting_on, waitingForCi: !!t.waiting_for_ci };
     });
   return tasks
     .filter((x) => x.parent_id === spec.id && x.status !== "cancelled")

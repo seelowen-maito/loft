@@ -22,18 +22,21 @@ struct SpecDeliverySection: View {
         Group {
             if let d {
                 Section {
-                    HStack {
-                        if !underCard {
-                            Text(SpecViews.deliveryLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
-                                .accessibilityIdentifier("deliveryState")
-                        }
-                        Spacer()
-                        if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
-                            Link(destination: url) {
-                                HStack(spacing: 4) { Image(systemName: "arrow.triangle.pull"); Text("Spec PR #\(pr)") }.font(.subheadline)
+                    // Under the card with no spec PR yet, the row would be empty.
+                    if !underCard || d.pr != nil {
+                        HStack {
+                            if !underCard {
+                                Text(SpecViews.badge(d)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
+                                    .accessibilityIdentifier("deliveryState")
                             }
-                            .buttonStyle(.borderless)
-                                .accessibilityIdentifier("specPRLink")
+                            Spacer()
+                            if let pr = d.pr, let g = spec.github, let url = URL(string: "https://github.com/\(g.repo)/pull/\(pr)") {
+                                Link(destination: url) {
+                                    HStack(spacing: 4) { Image(systemName: "arrow.triangle.pull"); Text("Spec PR #\(pr)") }.font(.subheadline)
+                                }
+                                .buttonStyle(.borderless)
+                                    .accessibilityIdentifier("specPRLink")
+                            }
                         }
                     }
                     if !underCard {
@@ -107,11 +110,16 @@ private struct TicketRow: View {
                 if let n = ticket.number { Text("#\(n)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 Text(ticket.title).readableLineLimit(2)
                 Spacer(minLength: 4)
-                Text(SpecViews.ticketLabel(ticket.state)).font(.caption.weight(.medium)).foregroundStyle(tone)
+                if ticket.waitingForCi {
+                    // Counts its minutes while it waits.
+                    TimelineView(.periodic(from: .now, by: 30)) { tl in label(now: tl.date) }
+                } else {
+                    label(now: Date())
+                }
             }
-            if !ticket.verdicts.isEmpty {
+            if !ticket.shownVerdicts.isEmpty {
                 HStack(spacing: 8) {
-                    ForEach(ticket.verdicts.sorted { $0.key < $1.key }, id: \.key) { role, v in
+                    ForEach(ticket.shownVerdicts, id: \.role) { role, v in
                         HStack(spacing: 3) {
                             Image(systemName: v == "pass" ? "checkmark.circle.fill" : "clock")
                             Text("\(role) \(v == "pass" ? "passed" : "waiting")")
@@ -125,8 +133,14 @@ private struct TicketRow: View {
         .accessibilityIdentifier("ticketRow-\(ticket.title)")
     }
 
+    private func label(now: Date) -> some View {
+        Text(SpecViews.ticketLabel(ticket.state, waitingOn: ticket.waitingOn, waitingForCi: ticket.waitingForCi, ciSince: ticket.ciSince, now: now))
+            .font(.caption.weight(.medium)).foregroundStyle(tone)
+    }
+
     private var tone: Color {
-        switch ticket.state {
+        if ticket.state == "open" && !ticket.waitingOn.isEmpty { return Theme.attention }
+        return switch ticket.state {
         case "closed": Theme.working
         case "needs_human": Theme.attention
         case "started", "review", "closing": Theme.accent

@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { createPayload, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, TEMPLATES, withTeam } from "../../lib/newAgent";
-import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
+import { createPayload, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, TEMPLATES, templateOf, withTeam } from "../../lib/newAgent";
+import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, PROJECTS_SUB, roleHint } from "./Inspector";
 import { GroupInput, ProjectsField } from "./ProjectsField";
-import { teamOf } from "../../lib/team";
+import { teamOf, withTyped } from "../../lib/team";
 
 export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }: { groups: string[]; projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
   const [form, setForm] = useState(EMPTY_FORM);
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Set when creating it took the Lead role from another agent: the dialog stays open to say so, as Save does in the settings.
@@ -27,7 +28,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
     setBusy(true);
     setErr(null);
     try {
-      const { notice, ...a } = await api.createAgent(createPayload(form));
+      const { notice, ...a } = await api.createAgent(createPayload(withTyped(form, typed)));
       if (notice) {
         setMoved({ agent: a, notice });
         setBusy(false);
@@ -59,7 +60,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             {TEMPLATES.map((t) => (
               <button
                 key={t.label}
-                className={cx("btn text-[12px]", form.title === t.title && "border-accent/50 text-accent")}
+                className={cx("btn text-[12px]", templateOf(form) === t && "border-accent/50 text-accent")}
                 onClick={() => setForm((f) => ({ ...f, ...t }))}
               >
                 <Sparkles className="size-3" /> {t.label}
@@ -67,16 +68,10 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             ))}
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <label className="space-y-1.5">
-              <span className="eyebrow">Name</span>
-              <input autoFocus className="input" placeholder="e.g. Moss" value={form.name} onChange={(e) => set("name", e.target.value)} />
-            </label>
-            <label className="space-y-1.5">
-              <span className="eyebrow">Title</span>
-              <input className="input" placeholder="e.g. Repo janitor" value={form.title} onChange={(e) => set("title", e.target.value)} />
-            </label>
-          </div>
+          <label className="block space-y-1.5">
+            <span className="eyebrow">Name</span>
+            <input autoFocus className="input" placeholder="e.g. Moss" value={form.name} onChange={(e) => set("name", e.target.value)} />
+          </label>
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-3">
               <label className="space-y-1.5">
@@ -96,8 +91,9 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             </div>
             <div className="space-y-1.5">
               <span className="eyebrow">Projects</span>
+              <span className="block text-[11.5px] text-fg-3">{PROJECTS_SUB}</span>
               {/* Only an agent with a group can be Lead: clearing it drops it back to Custom. */}
-              <ProjectsField value={form.projects} projects={projects} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
+              <ProjectsField value={form.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
             </div>
             <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(team)}</p>
           </div>

@@ -321,7 +321,7 @@ struct TalkAgentPicker: View {
     static func sections(_ agents: [Agent], query: String) -> [(title: String, agents: [Agent])] {
         let q = query.trimmingCharacters(in: .whitespaces)
         let hits = agents.filter { a in
-            q.isEmpty || ([a.name, a.title ?? "", a.group ?? ""] + a.allProjects).contains { $0.localizedCaseInsensitiveContains(q) }
+            q.isEmpty || ([a.name, a.roleLabel, a.group ?? ""] + a.allProjects).contains { $0.localizedCaseInsensitiveContains(q) }
         }
         let byGroup = Dictionary(grouping: hits) { ($0.group ?? "").trimmingCharacters(in: .whitespaces) }
         return byGroup.keys

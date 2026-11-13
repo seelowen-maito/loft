@@ -6,7 +6,6 @@ import Foundation
 struct Agent: Codable, Identifiable, Hashable {
     let id: String
     var name: String
-    var title: String?
     var project: String?
     var model: String?
     var effort: String?
@@ -48,6 +47,19 @@ struct Agent: Codable, Identifiable, Hashable {
     /// Leads its team; it wears a captain hat.
     var isLead: Bool { role == "lead" }
 
+    /// Every role and how the user sees it, in the backend's order (`planning::ROLES`).
+    static let roles: [(id: String, label: String)] = [("lead", "Lead"), ("dev", "Dev"), ("code_reviewer", "Code reviewer"),
+                                                       ("qa", "QA"), ("security", "Security"), ("custom", "Custom")]
+
+    /// The label a role goes by: "Code reviewer", "Custom". No role (an older server) reads as Custom; an unknown one as it is.
+    static func roleLabel(_ role: String?) -> String {
+        let r = (role ?? "").isEmpty ? "custom" : role!
+        return roles.first { $0.id == r }?.label ?? r
+    }
+
+    /// The label it goes by, in place of the Title agents used to have.
+    var roleLabel: String { Agent.roleLabel(role) }
+
     /// Its team: the group; empty when it has none (backend `Agent::team`).
     var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
 
@@ -55,6 +67,17 @@ struct Agent: Codable, Identifiable, Hashable {
     var allProjects: [String] {
         if let projects, !projects.isEmpty { return projects }
         return (project ?? "").isEmpty ? [] : [project!]
+    }
+
+    /// The order of every agent picker for an issue: those working in its `project` first, Devs first within each
+    /// part, then by name (web `issuePickerOrder`). The first one is the default, so a hand-off goes to an agent that builds.
+    static func issuePickerOrder(_ agents: [Agent], project: String) -> [Agent] {
+        let p = project.trimmingCharacters(in: .whitespaces)
+        func rank(_ a: Agent) -> Int { (!p.isEmpty && a.allProjects.contains(p) ? 0 : 2) + (a.role == "dev" ? 0 : 1) }
+        return agents.sorted {
+            let a = rank($0), b = rank($1)
+            return a != b ? a < b : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
     }
 }
 
@@ -166,7 +189,8 @@ struct PermissionRequest: Codable, Identifiable, Hashable {
     /// Whether Always allow can save something. A Kill's rule is only ever one Loft made for a program it can
     /// name (the backend checks it), so an empty rule means none.
     var canAlwaysAllow: Bool {
-        toolName != "Kill" || !(rule ?? "").isEmpty
+        // A change to the user's checkout is only ever allowed once.
+        toolName != "Checkout" && (toolName != "Kill" || !(rule ?? "").isEmpty)
     }
 
     /// The whole request as text, for the explainer: the command, the file, the URL, or the input as JSON.

@@ -56,7 +56,7 @@ struct SpecRow: View {
     private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
     private var stage: SpecStage { SpecViews.stage(of: spec, delivery) }
 
-    private var badge: String? { delivery.map { SpecViews.deliveryLabel($0.state) } }
+    private var badge: String? { delivery.map(SpecViews.badge) }
 
     /// Each running ticket with its agent, then the tickets waiting for the Lead.
     private var onIt: [String] {
@@ -70,6 +70,10 @@ struct SpecRow: View {
             Text(spec.title).font(.body).readableLineLimit(2)
             HStack(spacing: 6) {
                 Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                if let project = SpecViews.project(spec) {
+                    Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                        .accessibilityLabel("Project \(project)")
+                }
                 if let badge {
                     Text(badge).font(.caption2.weight(.medium))
                         .padding(.horizontal, 6).padding(.vertical, 2)

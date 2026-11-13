@@ -36,6 +36,35 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertEqual(SpecViews.waitingLine(d.waitingForLead), "Waiting for the Lead to assign #343")
     }
 
+    /// #434: a spec whose tickets wait on tickets in another spec: what they wait on, and which spec to start first.
+    func testDecodesWhatItsTicketsWaitOnAndWhichSpecToStartFirst() throws {
+        let d = try delivery(#"""
+        {"state":"planned","started":false,"agent_id":null,"agent_name":null,"pr":null,"spec":true,"current":null,
+         "tickets":[{"number":5,"title":"Screen","state":"open","skipped":"","waiting_on":["octo/api#12","octo/api#13"]},
+                    {"number":6,"title":"Docs","state":"open","skipped":"","waiting_on":[]}],
+         "waits_on":[{"blocker":"octo/api#12","delivery":{"repo":"octo/api","spec":10,"started":false,"issue_id":"api10"}},
+                     {"blocker":"octo/api#13","delivery":{"repo":"octo/api","spec":10,"started":false,"issue_id":"api10"}},
+                     {"blocker":"octo/web#3","delivery":{"repo":"octo/web","spec":1,"started":true,"issue_id":"web1"}},
+                     {"blocker":"octo/x#4","delivery":{"repo":"octo/x","spec":2,"started":false,"issue_id":null}},
+                     {"blocker":"octo/y#5","delivery":null}]}
+        """#)
+        XCTAssertEqual(d.tickets?.map(\.waitingOn), [["octo/api#12", "octo/api#13"], []])
+        XCTAssertEqual(d.waitsOn?.map(\.blocker), ["octo/api#12", "octo/api#13", "octo/web#3", "octo/x#4", "octo/y#5"])
+        XCTAssertEqual(d.waitsOn?.first?.delivery?.issueId, "api10")
+        XCTAssertNil(d.waitsOn?.last?.delivery)
+        // Once each, only specs not started yet, and only those Loft can start (with a Loft issue).
+        XCTAssertEqual(WaitsOn.specsToStartFirst(d.waitsOn), [.init(repo: "octo/api", spec: 10, issueId: "api10")])
+        XCTAssertEqual(WaitsOn.specsToStartFirst(nil), [])
+    }
+
+    func testTheStartWarningReadsLikeTheWebs() throws {
+        let one = [WaitsOn(blocker: "octo/api#12", delivery: nil)]
+        XCTAssertEqual(StartWarning.text(one, canStartFirst: true),
+                       "Tickets of this spec wait on octo/api#12, which isn't done yet. Start the spec that builds it first, or start this one and let those tickets wait.")
+        XCTAssertEqual(StartWarning.text(one + [WaitsOn(blocker: "octo/web#3", delivery: nil)], canStartFirst: false),
+                       "Tickets of this spec wait on octo/api#12, octo/web#3, which aren't done yet. Start anyway and those tickets wait until it closes.")
+    }
+
     func testEachStateReadsLikeTheWebCard() throws {
         func line(_ state: String, _ extra: String = "") throws -> String? {
             try delivery(#"{"state":"\#(state)","started":\#(state != "planned"),"agent_id":null,"agent_name":null,"pr":null\#(extra)}"#).line?.text
@@ -96,6 +125,34 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertNil(planned.line)
         // An older backend sends no state_line: today's wording (testEachStateReadsLikeTheWebCard has each state).
         XCTAssertEqual(try delivery(Self.spec).line?.text, "Stalled: its run was lost when Loft restarted.")
+    }
+
+    /// #424: waiting for CI, the line says how long since the Delivery's `ci_since` (its earliest ticket waiting, a
+    /// standalone ticket's too) and opens the Checks tab; no Dev is named on it.
+    func testWaitingForCIShowsHowLongAndOpensTheChecks() throws {
+        let d = try delivery(#"""
+        {"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #41, #42"},"started":true,"agent_id":null,"agent_name":null,
+         "pr":500,"checks_url":"https://github.com/o/r/pull/500/checks","ci_since":"2026-11-13T12:04:00.5+00:00","spec":true,"current":null,
+         "tickets":[{"number":40,"title":"A","state":"closed","skipped":"","waiting_for_ci":false,"ci_since":null},
+                    {"number":41,"title":"B","state":"review","skipped":"","agent_name":null,"waiting_for_ci":true,"ci_since":"2026-11-13T12:10:00+00:00"},
+                    {"number":42,"title":"C","state":"review","skipped":"","agent_name":null,"waiting_for_ci":true,"ci_since":"2026-11-13T12:04:00.5+00:00"}]}
+        """#)
+        let now = JSONCoding.parseDate("2026-11-13T12:10:30Z")!
+        XCTAssertEqual(d.line(now: now)?.tone, .ci)
+        XCTAssertEqual(d.line(now: now)?.text, "Waiting for CI on #41, #42 · 6 min", "from the Delivery's ci_since")
+        XCTAssertEqual(d.lineLink?.absoluteString, "https://github.com/o/r/pull/500/checks")
+        XCTAssertEqual(d.runningLines, [])
+        XCTAssertEqual(d.progressLine(issue: 420), "On spec PR #500. 1 of 3 tickets done.")
+
+        // A standalone ticket sends no tickets: its card counts from ci_since all the same.
+        let one = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"checks_url":"https://github.com/o/r/pull/12/checks","ci_since":"2026-11-13T12:08:00+00:00"}"#)
+        XCTAssertEqual(one.line(now: now)?.text, "Waiting for CI on #7 · 2 min")
+        XCTAssertEqual(one.lineLink?.absoluteString, "https://github.com/o/r/pull/12/checks")
+        XCTAssertEqual(one.progressLine(issue: 7), "Its reviewers passed on PR #12; Loft waits for its CI. #7 closes when the PR merges.")
+        let noTime = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"ci_since":null}"#)
+        XCTAssertEqual(noTime.line(now: now)?.text, "Waiting for CI on #7", "no start time, no elapsed")
+        let running = try delivery(#"{"state":"running","state_line":{"tone":"running","text":"Running."},"started":true,"agent_id":"dev","agent_name":"Dev","pr":12,"checks_url":"https://github.com/o/r/pull/12/checks"}"#)
+        XCTAssertNil(running.lineLink, "only waiting for CI links to the checks")
     }
 
     func testAButtonsAnswerCarriesTheDeliveryAndWhatItDid() throws {

@@ -17,16 +17,29 @@
 //! (`loft kill-guard`) and before any runtime starts. It looks through wrappers (`xargs`, `find -exec`, `watch`,
 //! `env -S`, ...), `sh -c`, `eval`, and shells that read their script from a heredoc or a piped `echo`.
 //!
+//! It also asks the user before a command changes one of the user's own project checkouts, which agents must leave
+//! alone: they work in their own clones under `agent-local-storage`. Every git command but the ones that only read
+//! (`status`, `log`, `diff`, `fetch`, `branch` listing, ...) and a build or install (`cargo build`, `pnpm install`,
+//! `xcodebuild`) in a folder outside `agent-local-storage` goes to Loft (`POST /guard/<agent id>`), which asks the
+//! user about each such folder under the projects folder. The folder is the command's working directory, as `cd`,
+//! `cd -`, `pushd` and `popd` leave it (a subshell's stays in it), or the one a folder option names (`git -C`,
+//! `--work-tree`, `--git-dir`, `GIT_DIR`, `GIT_WORK_TREE`, `--manifest-path`, `pnpm --dir`, `npm --prefix`).
+//! Left out on purpose: `make`, `pnpm run <script>` and other scripts, which may do anything, and `export GIT_DIR`.
+//!
 //! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
 //! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
 //! (osascript, python, node). It fails open: input it can't read lets the command run.
 
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
 /// The argument that makes this binary run as the hook.
 pub const ARG: &str = "kill-guard";
+/// Where the hook asks Loft about a change to a user's checkout: `http://127.0.0.1:<port>/guard/<agent id>`, in
+/// claude's environment.
+pub const URL_VAR: &str = "LOFT_GUARD_URL";
 
 const REFUSAL: &str = "Loft refused this command: it runs kill, pkill or killall by path, through sudo, `command` \
 or `builtin`, as another shell's `kill`, with PATH changed, or after unsetting or redefining Loft's kill, where Loft \
@@ -34,7 +47,8 @@ can't tell whose processes it stops. Run kill, pkill or killall by name, right i
 your own processes, and asks the user before stopping any other.";
 
 /// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows stderr to
-/// the agent, for a kill that skips Loft's. Input it can't read passes.
+/// the agent, for a kill that skips Loft's or a change to a user's checkout the user didn't allow. Input it can't
+/// read passes, and so does a change when Loft doesn't answer.
 pub fn hook() -> ! {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -42,13 +56,32 @@ pub fn hook() -> ! {
         eprintln!("{why}");
         std::process::exit(2);
     }
+    let changes = outside_changes(&input);
+    if let (false, Ok(url)) = (changes.is_empty(), std::env::var(URL_VAR)) {
+        let body = json!({ "changes": changes });
+        if let Ok(v) = crate::processes::post(&url, &body.to_string())
+            && v["allow"] == false
+        {
+            eprintln!("{}", v["message"].as_str().unwrap_or_default());
+            std::process::exit(2);
+        }
+    }
     std::process::exit(0)
 }
 
-/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`.
+/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`. It may wait for the user that long.
 pub fn hooks(exe: &std::path::Path) -> Value {
     let command = format!("'{}' {ARG}", exe.to_string_lossy().replace('\'', r"'\''"));
-    json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] }] })
+    let timeout = crate::agents::TOOL_WAIT.as_secs();
+    json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
+}
+
+/// The changes a hook input's command makes to checkouts outside `agent-local-storage`.
+fn outside_changes(input: &str) -> Vec<Change> {
+    let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
+    let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
+    let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
+    checkout_changes(command, &cwd).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -63,6 +96,335 @@ fn check(input: &str) -> Result<(), &'static str> {
 pub fn unscoped(command: &str) -> bool {
     let f = scan(command, 0, false);
     f.unscoped || (f.kill && f.path)
+}
+
+// ---- changes to a checkout ----------------------------------------------
+
+/// A command that changes the checkout in `folder`.
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Change {
+    pub folder: PathBuf,
+    /// The simple command that does it, as its words.
+    pub command: String,
+}
+
+/// Package manager commands that build or install into the folder they run in.
+const PM_CHANGES: &[&str] = &["install", "i", "ci", "add", "remove", "rm", "uninstall", "update", "up", "build"];
+/// cargo commands that write into the folder (`target/`, `Cargo.lock`).
+const CARGO_CHANGES: &[&str] = &["build", "b", "run", "r", "test", "t", "check", "c", "clean", "update", "install", "add", "remove"];
+
+/// Where a command runs, as the commands before it leave it: its folder (None when the guard can't tell, as after
+/// `cd "$dir"`), the folder before the last `cd` (for `cd -`) and the `pushd` stack. A `cd -` or `popd` past what the
+/// command set goes to where it started: the agent's own folder, which may be inside the user's checkout.
+#[derive(Clone, Default)]
+struct Dirs {
+    start: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    old: Option<PathBuf>,
+    stack: Vec<Option<PathBuf>>,
+}
+
+impl Dirs {
+    /// `path` from the current folder; an absolute one (`/x`, `~/x`, `$HOME/x`) even when that is unknown.
+    fn at(&self, path: &str) -> Option<PathBuf> {
+        let absolute = path.starts_with(['/', '~']) || path.starts_with("$HOME") || path.starts_with("${HOME}");
+        resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path)
+    }
+
+    fn cd(&mut self, to: Option<PathBuf>) {
+        self.old = std::mem::replace(&mut self.cwd, to);
+    }
+}
+
+/// Every change `command`, run in `cwd`, makes to a checkout (see the module docs), each folder once. A folder the
+/// guard can't tell (`cd "$dir"`) lets the commands after it run.
+pub fn checkout_changes(command: &str, cwd: &Path) -> Vec<Change> {
+    let mut found = vec![];
+    let start = Some(cwd.to_path_buf());
+    changes(command, &mut Dirs { start: start.clone(), cwd: start, ..Default::default() }, 0, &mut found);
+    let mut out: Vec<Change> = vec![];
+    for c in found {
+        // A symlink into a user's checkout counts as that checkout.
+        let folder = real(c.folder);
+        if !out.iter().any(|o| o.folder == folder) {
+            out.push(Change { folder, ..c });
+        }
+    }
+    out
+}
+
+fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let cmds = parse(text);
+    // The folders as each open subshell found them, to go back to when it ends.
+    let mut saved: Vec<(usize, Dirs)> = vec![];
+    for i in 0..cmds.len() {
+        let scope = &cmds[i].scope;
+        while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
+            *dirs = saved.pop().unwrap().1;
+        }
+        for &s in &scope[saved.len()..] {
+            saved.push((s, dirs.clone()));
+        }
+        let all = &cmds[i].words;
+        let words = match unwrap(all, &mut false) {
+            Run::Words(words) => words,
+            Run::Text(text) => {
+                changes(&text, dirs, depth + 1, out);
+                continue;
+            }
+        };
+        // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
+        let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
+        let Some((name, args)) = words.split_first() else { continue };
+        let folders = match base(name) {
+            "cd" => {
+                let to = match args.iter().find(|a| !matches!(a.as_str(), "-L" | "-P" | "-e" | "-@")).map(String::as_str) {
+                    None => dirs::home_dir(),
+                    Some("-") => dirs.old.clone().or(dirs.start.clone()),
+                    Some(dir) => dirs.at(dir),
+                };
+                dirs.cd(to);
+                continue;
+            }
+            "pushd" => {
+                let to = match args.iter().find(|a| *a != "-n").map(String::as_str) {
+                    // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
+                    None => dirs.stack.pop().unwrap_or_default(),
+                    Some(d) if d.starts_with(['+', '-']) => None,
+                    Some(dir) => dirs.at(dir),
+                };
+                let from = dirs.cwd.clone();
+                dirs.stack.push(from);
+                dirs.cd(to);
+                continue;
+            }
+            "popd" => {
+                let to = match dirs.stack.pop() {
+                    Some(d) if args.is_empty() => d,
+                    _ => dirs.start.clone(),
+                };
+                dirs.cd(to);
+                continue;
+            }
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
+                if let Some(t) = shell_script(&cmds, i, args) {
+                    changes(&t, &mut dirs.clone(), depth + 1, out);
+                }
+                continue;
+            }
+            "eval" => {
+                changes(&args.join(" "), dirs, depth + 1, out);
+                continue;
+            }
+            "git" => git_changes(dirs, &vars, args),
+            "cargo" => match flags(args, &["--manifest-path"]) {
+                (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
+                    Some(m) => dirs.at(m).and_then(|m| m.parent().map(Path::to_path_buf)).into_iter().collect(),
+                    None => dirs.cwd.clone().into_iter().collect(),
+                },
+                _ => vec![],
+            },
+            pm @ ("npm" | "pnpm" | "yarn" | "bun") => {
+                let dir_flags: &[&str] = match pm {
+                    "npm" => &["--prefix"],
+                    "pnpm" => &["--dir", "-C"],
+                    _ => &["--cwd"],
+                };
+                match flags(args, dir_flags) {
+                    (dir, Some(s)) if PM_CHANGES.contains(&s) => dir.map_or(dirs.cwd.clone(), |d| dirs.at(d)).into_iter().collect(),
+                    (dir, None) if pm == "yarn" => dir.map_or(dirs.cwd.clone(), |d| dirs.at(d)).into_iter().collect(), // a bare `yarn` installs
+                    _ => vec![],
+                }
+            }
+            "xcodebuild" => {
+                let reads = ["-list", "-showBuildSettings", "-version", "-showsdks", "-showdestinations", "-help"];
+                if args.iter().any(|a| reads.contains(&a.as_str())) { vec![] } else { dirs.cwd.clone().into_iter().collect() }
+            }
+            _ => vec![],
+        };
+        out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+    }
+}
+
+/// The value of the first of the folder `options` in `args` (`--dir x` or `--dir=x`), and the first other word
+/// that isn't an option: the subcommand.
+fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&'a str>) {
+    let (mut value, mut sub) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if options.contains(&a.as_str()) {
+            value = value.or(it.next().map(String::as_str));
+        } else if let Some(v) = options.iter().find_map(|o| a.strip_prefix(o).and_then(|r| r.strip_prefix('='))) {
+            value = value.or(Some(v));
+        } else if !a.starts_with(['-', '+']) {
+            sub = sub.or(Some(a.as_str()));
+        }
+    }
+    (value, sub)
+}
+
+/// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
+/// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
+/// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
+/// it. Every subcommand changes them but the ones that only read (`git_reads`).
+fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
+    let mut dirs = dirs.clone();
+    let (mut tree, mut git_dir) = (None, None);
+    for v in vars {
+        if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
+            tree = Some(dirs.at(d));
+        } else if let Some(d) = v.strip_prefix("GIT_DIR=") {
+            git_dir = Some(dirs.at(d));
+        }
+    }
+    let mut it = args.iter();
+    let sub = loop {
+        let Some(a) = it.next() else { return vec![] };
+        let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
+        match a.as_str() {
+            "-C" => {
+                let to = it.next().and_then(|d| dirs.at(d));
+                dirs.cwd = to;
+            }
+            "--work-tree" => tree = Some(it.next().and_then(|d| dirs.at(d))),
+            "--git-dir" => git_dir = Some(it.next().and_then(|d| dirs.at(d))),
+            _ if value("--work-tree").is_some() => tree = Some(value("--work-tree").and_then(|d| dirs.at(d))),
+            _ if value("--git-dir").is_some() => git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d))),
+            "-c" | "--namespace" | "--config-env" | "--super-prefix" => {
+                it.next();
+            }
+            o if o.starts_with('-') => {}
+            sub => break sub,
+        }
+    };
+    let rest: Vec<&str> = it.map(String::as_str).collect();
+    if git_reads(sub, &rest) || (sub == "config" && rest.iter().any(|a| matches!(*a, "--global" | "--system"))) {
+        return vec![];
+    }
+    // `clone` and `init` make a new repository: in the folder they name, or the folder they run in, not the one around it.
+    if let Some(valued) = match sub {
+        "clone" => Some(&["-b", "--branch", "-o", "--origin", "-c", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "-u", "--upload-pack", "-j", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri"][..]),
+        "init" => Some(&["-b", "--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format"][..]),
+        _ => None,
+    } {
+        let (mut words, mut git_dir) = (vec![], None);
+        let mut it = rest.iter();
+        while let Some(a) = it.next() {
+            if *a == "--separate-git-dir" {
+                git_dir = it.next().copied();
+            } else if let Some(d) = a.strip_prefix("--separate-git-dir=") {
+                git_dir = Some(d);
+            } else if valued.contains(a) {
+                it.next();
+            } else if !a.starts_with('-') {
+                words.push(*a);
+            }
+        }
+        // `clone <repository> [<folder>]`, `init [<folder>]`, and the repository's own folder when it's apart.
+        let target = words.get(if sub == "clone" { 1 } else { 0 });
+        let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
+        return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
+    }
+    let found = dirs.cwd.map(repo_root);
+    // The checkout a `.git` folder belongs to.
+    let repo = git_dir.unwrap_or(found.clone()).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
+    [tree.unwrap_or(found), repo].into_iter().flatten().collect()
+}
+
+/// `path` with symlinks followed, even when it doesn't exist yet (a folder `clone` will make): its nearest folder that
+/// exists is resolved, and the rest put back on. A dangling symlink on the way counts as where it points.
+fn real(path: PathBuf) -> PathBuf {
+    real_at(path, 0)
+}
+
+fn real_at(path: PathBuf, links: usize) -> PathBuf {
+    for base in path.ancestors() {
+        let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
+        if let Ok(r) = std::fs::canonicalize(base) {
+            return r.join(rest);
+        }
+        // As many links as the system follows (a loop never resolves).
+        if links < 40
+            && let Ok(to) = std::fs::read_link(base)
+        {
+            let to = base.parent().map_or(to.clone(), |p| p.join(&to));
+            return real_at(to.join(rest), links + 1);
+        }
+    }
+    path
+}
+
+/// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
+/// Symlinks are followed first, as git does.
+fn repo_root(folder: PathBuf) -> PathBuf {
+    let folder = real(folder);
+    folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
+}
+
+/// Whether a git subcommand, with its arguments, only reads.
+fn git_reads(sub: &str, rest: &[&str]) -> bool {
+    let has = |opts: &[&str]| rest.iter().any(|a| opts.contains(a));
+    let words = || rest.iter().filter(|a| !a.starts_with('-'));
+    let first = rest.first().copied();
+    match sub {
+        "status" | "log" | "diff" | "show" | "fetch" | "rev-parse" | "rev-list" | "ls-files" | "ls-tree" | "ls-remote" | "blame"
+        | "grep" | "describe" | "shortlog" | "cat-file" | "show-ref" | "for-each-ref" | "merge-base" | "name-rev"
+        | "range-diff" | "cherry" | "check-ignore" | "count-objects" | "var" | "help" | "version" => true,
+        // Listing: no name given, or a listing option (`--merged` and the like imply `--list`).
+        "branch" => {
+            let lists = ["--list", "-l", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"];
+            let changes = ["-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description"];
+            !has(&changes) && !rest.iter().any(|a| a.starts_with("--set-upstream-to=")) && (words().next().is_none() || has(&lists))
+        }
+        "tag" => !has(&["-d", "--delete", "-a", "-s", "-f", "--force", "-m", "-F", "-u"]) && (words().next().is_none() || has(&["-l", "--list"])),
+        "remote" => matches!(first, None | Some("-v" | "--verbose" | "show" | "get-url")),
+        "stash" => matches!(first, Some("list" | "show")),
+        "clean" => has(&["-n", "--dry-run"]),
+        "worktree" => first == Some("list"),
+        "submodule" => matches!(first, Some("status" | "summary")),
+        "reflog" => matches!(first, None | Some("show" | "exists")),
+        // `config <key>` reads it; `config <key> <value>` sets it.
+        "config" => {
+            let sets = rest.iter().any(|a| ["--unset", "--add", "--replace", "--remove", "--rename", "--edit", "-e"].iter().any(|o| a.starts_with(o)));
+            has(&["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"])
+                || matches!(first, Some("get" | "list"))
+                || (!sets && words().count() == 1)
+        }
+        _ => false,
+    }
+}
+
+/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded. None when it holds another variable or a substitution.
+fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
+    let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let path = match path {
+        p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
+        p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
+        p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
+        p => p.to_string(),
+    };
+    if path.contains(['$', '`']) {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for c in cwd.join(path).components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// Whether `folder` is in an agent's workspace: under a folder named `agent-local-storage`.
+pub fn in_agent_storage(folder: &Path) -> bool {
+    folder.components().any(|c| c.as_os_str() == "agent-local-storage")
 }
 
 /// What a piece of shell text, or one simple command in it, does that the guard cares about.
@@ -356,6 +718,8 @@ struct Cmd {
     pipes: Vec<(usize, usize)>,
     /// Its heredoc bodies and herestrings.
     stdin: String,
+    /// The subshells it runs in (`( )`, `$( )`, backticks), outermost first, by number: a `cd` there stays there.
+    scope: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -380,6 +744,16 @@ struct Frame {
 struct Parse {
     cmds: Vec<Cmd>,
     pipes: usize,
+    /// The subshells open, and how many there have been.
+    scope: Vec<usize>,
+    scopes: usize,
+}
+
+impl Parse {
+    fn open_scope(&mut self) {
+        self.scopes += 1;
+        self.scope.push(self.scopes);
+    }
 }
 
 /// Splits shell text into its simple commands, including the commands inside `$(...)`, backticks and `<(...)`.
@@ -415,7 +789,7 @@ impl Level {
     /// The command being lexed, started if need be.
     fn cmd(&mut self, p: &mut Parse) -> usize {
         *self.cur.get_or_insert_with(|| {
-            p.cmds.push(Cmd::default());
+            p.cmds.push(Cmd { scope: p.scope.clone(), ..Default::default() });
             p.cmds.len() - 1
         })
     }
@@ -492,6 +866,10 @@ impl Level {
 /// commands it finds to `p`. Returns the index it stopped at.
 fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     let mut l = Level::new();
+    let scope = p.scope.len();
+    if stop.is_some() {
+        p.open_scope();
+    }
     let mut depth = 0; // subshell parens open inside a `$(`
     let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
     while let Some(&ch) = c.get(i) {
@@ -602,6 +980,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 }
                 l.end(p);
                 l.frames.push(Frame::default());
+                p.open_scope();
             }
             ')' if stop == Some(')') && depth == 0 => break,
             ')' => {
@@ -611,6 +990,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.end(p);
                 if l.frames.len() > 1 {
                     l.frames.pop();
+                }
+                if p.scope.len() > scope + stop.is_some() as usize {
+                    p.scope.pop();
                 }
             }
             ';' => {
@@ -683,6 +1065,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
         }
     }
     l.end(p);
+    p.scope.truncate(scope);
     i
 }
 
@@ -751,6 +1134,55 @@ fn read_heredocs(p: &mut Parse, c: &[char], mut i: usize, heredocs: &mut Vec<(St
     }
     i.min(c.len())
 }
+
+// ---- Loft's side: `POST /guard/<agent id>` ------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct GuardRequest {
+    changes: Vec<Change>,
+}
+
+/// Asks the user about each change to a checkout under the projects folder (that isn't an agent's workspace), one
+/// after the other within one `ASK_TIMEOUT` (the hook's own timeout covers one), and answers the hook with whether
+/// the command may run. It is Allow once or Deny only: there is no rule to save.
+pub async fn handle(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<GuardRequest>,
+) -> axum::Json<Value> {
+    let projects = state.settings.get().projects_dir;
+    let projects = std::fs::canonicalize(&projects).unwrap_or(projects);
+    let deadline = tokio::time::Instant::now() + ASK_TIMEOUT;
+    for change in req.changes {
+        // Read again each time: an "Always allow" for one folder may cover the next.
+        let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
+        if !change.folder.starts_with(&projects) || in_agent_storage(&change.folder) {
+            continue;
+        }
+        let folder = change.folder.display().to_string();
+        let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
+        let input = json!({ "command": change.command, "folder": folder });
+        let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
+        if d.allow {
+            continue;
+        }
+        let why = d.message.unwrap_or_else(|| "The user denied it.".into());
+        let ws = crate::agents::workspace(&state, &a.id);
+        let message = format!(
+            "Loft didn't run this: it changes {folder}, the user's own checkout, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
+            ws.display()
+        );
+        return axum::Json(json!({ "allow": false, "message": message }));
+    }
+    axum::Json(json!({ "allow": true }))
+}
+
+/// How long a change to a user's checkout waits for the user.
+#[cfg(not(test))]
+const ASK_TIMEOUT: std::time::Duration = crate::agents::PERMISSION_TIMEOUT;
+#[cfg(test)]
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[cfg(test)]
 mod tests {
@@ -967,5 +1399,334 @@ mod tests {
         let hook = &hooks["PreToolUse"][0];
         assert_eq!(hook["matcher"], "Bash");
         assert_eq!(hook["hooks"][0]["command"], r"'/Apps/it'\''s here/loft' kill-guard");
+        // It may wait for the user about a change to their checkout.
+        assert_eq!(hook["hooks"][0]["timeout"], crate::agents::TOOL_WAIT.as_secs());
+    }
+
+    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo.
+    const USER: &str = "/nowhere/dev/loft";
+    const CLONE: &str = "/nowhere/dev/loft/agent-local-storage/abc/loft";
+
+    /// The folders the hook would ask Loft about, for `cmd` run in `cwd`.
+    fn asks_all(cmd: &str, cwd: &str) -> Vec<PathBuf> {
+        let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
+        outside_changes(&input).into_iter().map(|c| c.folder).collect()
+    }
+
+    /// The one folder the hook would ask Loft about.
+    fn asks(cmd: &str, cwd: &str) -> Option<PathBuf> {
+        let all = asks_all(cmd, cwd);
+        assert!(all.len() <= 1, "{cmd}: {all:?}");
+        all.into_iter().next()
+    }
+
+    #[test]
+    fn changes_to_a_users_checkout_go_to_loft_with_the_folder() {
+        let user = Some(PathBuf::from(USER));
+        for (cmd, cwd) in [
+            // What happened on 2026-11-12.
+            ("cd /nowhere/dev/loft; git checkout --detach 3ddf495c", CLONE),
+            ("cd ../../..; git checkout main", CLONE),
+            ("cd ../../.. && cargo build", CLONE),
+            ("git -C /nowhere/dev/loft switch main", CLONE),
+            ("git -C ../../.. pull --ff-only", CLONE),
+            ("git --work-tree=/nowhere/dev/loft reset --hard", CLONE),
+            ("git reset --hard origin/main", USER),
+            ("git pull", USER),
+            ("git merge feat", USER),
+            ("git rebase main", USER),
+            ("git commit -am wip", USER),
+            ("git stash", USER),
+            ("git stash pop", USER),
+            ("git clean -fdx", USER),
+            ("git -c core.pager=cat checkout -b x", USER),
+            ("cargo build --release", USER),
+            ("cargo test", USER),
+            ("pnpm install", USER),
+            ("npm ci", USER),
+            ("yarn", USER),
+            ("xcodebuild -scheme Loft -destination 'platform=iOS Simulator,id=1' build", USER),
+            ("sh -c 'cd /nowhere/dev/loft && git pull'", CLONE),
+            ("eval 'git checkout main'", USER),
+            ("git status && git checkout main", USER),
+        ] {
+            assert_eq!(asks(cmd, cwd), user, "should ask: {cmd} (in {cwd})");
+        }
+        assert_eq!(asks("cd frontend && pnpm install", USER), Some(PathBuf::from("/nowhere/dev/loft/frontend")));
+    }
+
+    #[test]
+    fn the_agents_own_clone_and_reading_run_without_asking() {
+        for (cmd, cwd) in [
+            // In the agent's own clone.
+            ("git checkout --detach 3ddf495c", CLONE),
+            ("git reset --hard origin/main && cargo build", CLONE),
+            ("cd /nowhere/dev/loft/agent-local-storage/abc/loft && pnpm install", USER),
+            ("git -C /nowhere/dev/loft/agent-local-storage/abc/loft switch main", USER),
+            ("cd ..; git clone /nowhere/dev/loft", CLONE),
+            // Reading the user's checkout.
+            ("git status", USER),
+            ("git log --oneline -5", USER),
+            ("git diff HEAD~1", USER),
+            ("git fetch origin", USER),
+            ("git stash list", USER),
+            ("git clean -n", USER),
+            ("git -C /nowhere/dev/loft show HEAD", CLONE),
+            ("cat README.md && rg checkout backend/src", USER),
+            ("cargo --version", USER),
+            ("xcodebuild -list", USER),
+            ("pnpm run dev", USER),
+            // A folder the guard can't tell.
+            ("cd \"$DIR\" && git pull", CLONE),
+        ] {
+            assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
+        }
+        assert!(asks("git pull", USER).is_some());
+        assert!(outside_changes("not json").is_empty());
+    }
+
+    #[test]
+    fn every_folder_a_command_changes_is_asked_about() {
+        let (other, user) = (PathBuf::from("/nowhere/dev/other"), PathBuf::from(USER));
+        assert_eq!(asks_all("git -C /nowhere/dev/other pull; git -C /nowhere/dev/loft pull", CLONE), [other.clone(), user.clone()]);
+        assert_eq!(asks_all("git pull && cd ../other && cargo build && git -C ../loft pull", USER), [user.clone(), other]);
+        // Each folder once.
+        assert_eq!(asks_all("cd /nowhere/dev/loft; git pull; cargo build; pnpm install", CLONE), [user]);
+    }
+
+    #[test]
+    fn cd_dash_pushd_and_popd_follow_the_folder() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "cd /nowhere/dev/loft; cd /tmp; cd -; git pull",
+            "pushd /nowhere/dev/loft; git pull",
+            "pushd /nowhere/dev/loft; pushd /tmp; popd; git pull",
+            "pushd /nowhere/dev/loft; pushd /tmp; pushd; git pull",
+            "cd /nowhere/dev/loft; cd; cd -; git pull",
+        ] {
+            assert_eq!(asks(cmd, CLONE), user, "should ask: {cmd}");
+        }
+        for cmd in [
+            // Back in the clone.
+            "pushd /nowhere/dev/loft; popd; git pull",
+            "cd /nowhere/dev/loft; cd -; git pull",
+            // Where the shell was before this command can't be told: the folder it started in stands for it.
+            "cd -; git pull",
+            "popd; git pull",
+        ] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+        assert_eq!(asks("cd -; git pull", USER), user);
+        assert_eq!(asks("cd /tmp; popd; git pull", USER), user);
+    }
+
+    #[test]
+    fn a_subshells_cd_stays_in_it() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in ["(cd /nowhere/dev/loft); git pull", "(cd /nowhere/dev/loft && ls); git pull", "echo $(cd /nowhere/dev/loft; pwd); git pull", "x=`cd /nowhere/dev/loft`; git pull"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+        for cmd in ["(cd /nowhere/dev/loft && git pull)", "(cd /tmp); cd /nowhere/dev/loft; git pull", "(cd /tmp; (cd /x)); cd /nowhere/dev/loft && git pull", "{ cd /nowhere/dev/loft; }; git pull"] {
+            assert_eq!(asks(cmd, CLONE), user, "should ask: {cmd}");
+        }
+    }
+
+    #[test]
+    fn git_dir_and_work_tree_name_the_checkout() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "git --git-dir=/nowhere/dev/loft/.git checkout main",
+            "git --git-dir /nowhere/dev/loft/.git reset --hard",
+            "GIT_DIR=/nowhere/dev/loft/.git git checkout main",
+            "GIT_DIR=../../../.git git pull",
+            "env GIT_WORK_TREE=/nowhere/dev/loft git checkout .",
+            "GIT_WORK_TREE=/nowhere/dev/loft GIT_DIR=.git git checkout .",
+            "git --work-tree /nowhere/dev/loft checkout .",
+        ] {
+            assert!(asks_all(cmd, CLONE).contains(&PathBuf::from(USER)), "should ask: {cmd}");
+        }
+        assert_eq!(asks("git --git-dir=/nowhere/dev/loft/.git log", CLONE), None);
+        assert_eq!(asks("GIT_DIR=/nowhere/dev/loft/.git git status", CLONE), None);
+        assert_eq!(asks("git --git-dir=/nowhere/dev/loft/agent-local-storage/abc/loft/.git pull", USER), user);
+    }
+
+    #[test]
+    fn build_tools_folder_options_name_the_folder() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "cargo build --manifest-path /nowhere/dev/loft/Cargo.toml",
+            "cargo test --manifest-path=../../../Cargo.toml",
+            "pnpm --dir /nowhere/dev/loft install",
+            "pnpm -C /nowhere/dev/loft build",
+            "pnpm install --dir=/nowhere/dev/loft",
+            "npm --prefix /nowhere/dev/loft ci",
+            "npm install --prefix=/nowhere/dev/loft",
+            "yarn --cwd /nowhere/dev/loft",
+        ] {
+            assert_eq!(asks(cmd, CLONE), user, "should ask: {cmd}");
+        }
+        assert_eq!(asks("cargo build --manifest-path backend/Cargo.toml", USER), Some(PathBuf::from("/nowhere/dev/loft/backend")));
+        assert_eq!(asks("pnpm -C /nowhere/dev/loft run dev", CLONE), None);
+        assert_eq!(asks("pnpm -C frontend install", CLONE), None);
+    }
+
+    #[test]
+    fn every_git_subcommand_asks_but_the_ones_that_only_read() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "git add -A", "git rm x", "git mv a b", "git apply p.diff", "git branch -D main", "git branch -f main HEAD~1",
+            "git branch -m old new", "git branch feat", "git tag -d v1", "git tag v2", "git worktree add ../x",
+            "git worktree remove x", "git submodule update", "git config user.name x", "git config --unset user.name",
+            "git gc", "git update-ref refs/heads/main HEAD", "git bisect start", "git init", "git notes add",
+            "git remote add up x", "git stash push", "git reflog expire --all", "git -C /nowhere/dev/loft branch -D x",
+        ] {
+            assert_eq!(asks(cmd, USER), user, "should ask: {cmd}");
+        }
+        for cmd in [
+            "git status", "git log -5", "git diff", "git show HEAD", "git fetch", "git rev-parse HEAD", "git ls-files",
+            "git blame x", "git grep foo", "git describe", "git remote -v", "git remote", "git remote get-url origin",
+            "git branch", "git branch -a", "git branch -vv", "git branch --show-current", "git branch --list 'feat/*'",
+            "git branch --merged main", "git tag", "git tag -l 'v*'", "git worktree list", "git config user.name",
+            "git config --get user.name", "git config --list", "git stash show", "git reflog", "git --version",
+            "git help", "git submodule status", "git -c color.ui=never log",
+        ] {
+            assert_eq!(asks(cmd, USER), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn git_in_a_workspace_that_isnt_a_clone_changes_the_checkout_around_it() {
+        let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");
+        let ws = project.join("agent-local-storage/x");
+        let clone = ws.join("loft");
+        for d in [project.join(".git"), ws.join("notes"), clone.join(".git"), clone.join("backend")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        let at = |p: &Path| p.display().to_string();
+        for cwd in [&ws, &ws.join("notes")] {
+            for cmd in ["git checkout main", "git reset --hard origin/main", "git stash"] {
+                assert_eq!(asks(cmd, &at(cwd)), Some(project.clone()), "should ask: {cmd} (in {})", cwd.display());
+            }
+            assert_eq!(asks("git status", &at(cwd)), None);
+            assert_eq!(asks("git -C loft pull", &at(&ws)), None);
+        }
+        // A new repository is where it's made, not in the checkout around it; global config is no checkout's.
+        for cmd in ["git clone /nowhere/dev/loft", "git clone https://github.com/x/loft.git", "git clone -b main /src loft2", "git init scratch-repo", "git init", "git config --global user.name x", "git config --system core.x y"] {
+            assert_eq!(asks(cmd, &at(&ws)), None, "should run: {cmd}");
+        }
+        assert_eq!(asks(&format!("git clone /src {}", at(&project.join("sub"))), &at(&ws)), Some(project.join("sub")));
+        assert_eq!(asks("git init", &at(&project)), Some(project.clone()));
+        assert_eq!(asks("git config user.name x", &at(&ws)), Some(project.clone()));
+        // A symlink in the workspace to a folder of another checkout: git acts on the checkout around the target.
+        let other = project.parent().unwrap().join("other");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        std::fs::create_dir_all(other.join("src")).unwrap();
+        std::os::unix::fs::symlink(other.join("src"), ws.join("link")).unwrap();
+        assert_eq!(asks("cd link && git reset --hard", &at(&ws)), Some(other.clone()));
+        assert_eq!(asks("git -C link checkout main", &at(&ws)), Some(other.clone()));
+        // A new folder through that link is in the other checkout, though it doesn't exist yet.
+        let new = std::fs::canonicalize(other.join("src")).unwrap().join("new");
+        assert_eq!(asks("git clone /src link/new", &at(&ws)), Some(new.clone()));
+        assert_eq!(asks("git init link/new", &at(&ws)), Some(new));
+        // A dangling symlink: where it points, not where it sits.
+        std::os::unix::fs::symlink(other.join("missing"), ws.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("../../../other/gone", ws.join("relative")).unwrap();
+        assert_eq!(asks("git clone /src dangling", &at(&ws)), Some(other.join("missing")));
+        assert_eq!(asks("git init dangling/sub", &at(&ws)), Some(other.join("missing/sub")));
+        assert_eq!(asks("git clone /src relative", &at(&ws)), Some(other.join("gone")));
+        // A loop of links doesn't hang: it stays where it is.
+        std::os::unix::fs::symlink(ws.join("loop"), ws.join("loop")).unwrap();
+        assert_eq!(asks("git clone /src loop", &at(&ws)), None);
+        // A repository kept apart from its folder is judged by where it goes too.
+        let apart = project.join("repo.git");
+        for cmd in [format!("git clone --separate-git-dir {} /src mine", at(&apart)), format!("git init --separate-git-dir={} mine", at(&apart))] {
+            assert_eq!(asks(&cmd, &at(&ws)), Some(apart.clone()), "should ask: {cmd}");
+        }
+        assert_eq!(asks("git clone --separate-git-dir ../x/mine.git /src mine", &at(&ws)), None);
+        // Before this command, the shell may have been anywhere: the workspace stands for it.
+        for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
+            assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
+        }
+        assert_eq!(asks("cd -; git checkout main", &at(&clone)), None);
+        // In the agent's clone, or a folder of it: its own repository.
+        assert_eq!(asks("git checkout main", &at(&clone)), None);
+        assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
+        // A work tree given from the workspace: git still finds the user's repository from the folder.
+        assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
+        std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loft_asks_the_user_about_a_change_under_the_projects_folder() {
+        use axum::extract::{Path as P, State};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Web QA");
+        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let user = projects.join("loft");
+        let guard = |folder: PathBuf| {
+            let (st, id) = (st.clone(), a.id.clone());
+            let req = GuardRequest { changes: vec![Change { folder, command: "git checkout --detach 3ddf495c".into() }] };
+            tokio::spawn(async move { handle(State(st), P(id), axum::Json(req)).await.0 })
+        };
+        let pending = || st.db.list_permissions(Some(&a.id)).unwrap().into_iter().filter(|p| p.status == "pending").collect::<Vec<_>>();
+
+        // Outside the projects folder, or in an agent's workspace there: no question.
+        assert_eq!(guard(PathBuf::from("/tmp/elsewhere")).await.unwrap()["allow"], true);
+        assert_eq!(guard(user.join("agent-local-storage/x/loft")).await.unwrap()["allow"], true);
+        assert!(pending().is_empty());
+
+        // Denied: the agent is told to use its own clone.
+        let asking = guard(user.clone());
+        crate::agents::tests::until("a permission request", 5, || pending().len() == 1).await;
+        let req = pending().remove(0);
+        assert_eq!(req.tool_name, "Checkout");
+        assert_eq!(req.input["folder"], user.display().to_string());
+        assert!(req.reason.contains("git checkout --detach 3ddf495c"), "{}", req.reason);
+        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        let v = asking.await.unwrap();
+        assert_eq!(v["allow"], false);
+        assert!(v["message"].as_str().unwrap().contains("Work in your own clone in your workspace"), "{v}");
+
+        // No rule to save: Always allow is refused, even with a rule posted, and the agent's tools stay as they were.
+        let asking = guard(user.clone());
+        crate::agents::tests::until("a second permission request", 5, || pending().len() == 1).await;
+        let id = pending()[0].id.clone();
+        assert_eq!(pending()[0].rule, "");
+        let tools = st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools;
+        assert!(crate::agents::decide(&st, &id, "allow_always", None, None).is_err());
+        assert!(crate::agents::decide(&st, &id, "allow_always", Some(format!("Checkout({})", user.display())), None).is_err());
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, tools);
+
+        // Allowed once: this command runs, and the next change there asks again.
+        crate::agents::decide(&st, &id, "allow_once", None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["allow"], true);
+        let again = guard(user.join("frontend"));
+        crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
+        crate::agents::decide(&st, &pending()[0].id, "deny", None, None).unwrap();
+        assert_eq!(again.await.unwrap()["allow"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_checkout_a_command_changes_is_asked_about_in_turn() {
+        use axum::extract::{Path as P, State};
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Web QA");
+        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let (one, two) = (projects.join("one"), projects.join("two"));
+        let change = |f: &PathBuf| Change { folder: f.clone(), command: "git pull".into() };
+        let pending = || st.db.list_permissions(Some(&a.id)).unwrap().into_iter().filter(|p| p.status == "pending").collect::<Vec<_>>();
+        let req = GuardRequest { changes: vec![change(&one), change(&two)] };
+        let asking = tokio::spawn(handle(State(st.clone()), P(a.id.clone()), axum::Json(req)));
+
+        // Allowing the first doesn't let the second run unasked.
+        crate::agents::tests::until("the first question", 5, || pending().len() == 1).await;
+        assert_eq!(pending()[0].input["folder"], one.display().to_string());
+        crate::agents::decide(&st, &pending()[0].id, "allow", None, None).unwrap();
+        crate::agents::tests::until("the second question", 5, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
+        crate::agents::decide(&st, &pending()[0].id, "deny", None, None).unwrap();
+        let v = asking.await.unwrap().0;
+        assert_eq!(v["allow"], false);
+        assert!(v["message"].as_str().unwrap().contains(&two.display().to_string()), "{v}");
     }
 }

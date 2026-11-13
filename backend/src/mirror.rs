@@ -43,6 +43,8 @@ pub struct Mirror {
     skipped: std::sync::Mutex<HashMap<String, String>>,
     /// ETag of each issue of another repo last read by number (`repo#n`), so an unchanged one answers 304.
     etags: std::sync::Mutex<HashMap<String, String>>,
+    /// The same for the blockers a Delivery waits on (`repo#n`, lower case), kept apart: reading one here must not make the other poll see 304.
+    pub(crate) wait_etags: std::sync::Mutex<HashMap<String, String>>,
     /// Other repos already logged as unreadable this run, so the log says it once.
     unreadable: std::sync::Mutex<HashSet<String>>,
 }
@@ -603,7 +605,10 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
     if t.project.trim().is_empty() {
         return Err("Pick a project first: this Loft issue has no project, so there's no GitHub repo to publish it to.".into());
     }
-    let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| format!("{e}, so there's no GitHub repo to publish it to."))?;
+    let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| match crate::repos::project_hint(state, &t.project) {
+        Some(hint) => format!("{hint}, so this issue stays in Loft. Pick one of its repos to publish it on GitHub."),
+        None => format!("{e}, so there's no GitHub repo to publish it to."),
+    })?;
     if crate::github::token(state).is_none() {
         return Err("GitHub isn't connected: add a GitHub token in Settings or run `gh auth login`.".into());
     }
@@ -1741,6 +1746,11 @@ pub(crate) mod tests {
         let (plain, _) = crate::tasks::create(&st, &json!({ "title": "Plain", "project": "pub-plain" }), "user").unwrap();
         let err = publish_route(State(st.clone()), axum::extract::Path(plain.id.clone())).await.unwrap_err();
         assert!(err.1.contains("isn't a git repo, so there's no GitHub repo to publish it to"), "{}", err.1);
+        // A folder of several repos says why, in the words of the hint.
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("pub-many/a/.git")).unwrap();
+        let (many, _) = crate::tasks::create(&st, &json!({ "title": "Many", "project": "pub-many" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(many.id.clone())).await.unwrap_err();
+        assert_eq!(err.1, "pub-many holds several repos, so this issue stays in Loft. Pick one of its repos to publish it on GitHub.");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(st.db.get_task(&plain.id).unwrap().unwrap().github.is_none());
         assert_eq!(fake.seen("/repos/").len(), 1, "only the one auto-published issue");

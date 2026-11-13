@@ -5,7 +5,8 @@ import { cx, timeAgo } from "../lib/format";
 import { Origin } from "../components/Origin";
 import { parseFilters, withFilters } from "../lib/issueFilters";
 import { Sticker } from "../components/Sticker";
-import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specRef, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
+import { GithubUser } from "../components/GithubUser";
+import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specMeta, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
 /* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable).
@@ -22,7 +23,10 @@ const sections = (specs: Task[], byProject: boolean) =>
 /** Grid columns by how many columns show (at least the Issues column or a spec stage). */
 const GRID = ["", "grid-cols-1", "grid-cols-2", "grid-cols-3", "grid-cols-4", "grid-cols-5", "grid-cols-6"];
 
-const Dot = ({ state }: { state: string }) => <span className={cx("inline-block size-2 shrink-0 rounded-full", TONE_BG[ticketLabel(state).tone])} title={ticketLabel(state).text} />;
+const Dot = ({ state, waitingOn, waitingForCi }: { state: string; waitingOn?: string[]; waitingForCi?: boolean }) => {
+  const l = ticketLabel(state, waitingOn, waitingForCi);
+  return <span className={cx("inline-block size-2 shrink-0 rounded-full", TONE_BG[l.tone])} title={l.text} />;
+};
 
 function Verdicts({ v }: { v: Record<string, string> }) {
   return <>{Object.entries(v).map(([r, x]) => <span key={r} className={cx("rounded-full border border-line px-1.5 font-mono text-[10px]", x === "pass" ? "text-good" : "text-fg-3")} title={`${r}: ${x}`}>{r} {x === "pass" ? "✓" : "…"}</span>)}</>;
@@ -30,16 +34,16 @@ function Verdicts({ v }: { v: Record<string, string> }) {
 
 /** A ticket as a card: opens its own issue. */
 function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
-  const l = ticketLabel(t.state), a = t.agentId ? agentById.get(t.agentId) : undefined;
+  const l = ticketLabel(t.state, t.waitingOn, t.waitingForCi), a = t.agentId ? agentById.get(t.agentId) : undefined;
   const body = (
     <>
       <div className="flex items-start gap-1.5">
         <span className="font-mono text-[10.5px] text-fg-3">{t.number ? `#${t.number}` : "·"}</span>
         <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12px]" : "text-[12.5px]", t.state === "closed" && "text-fg-3")}>{t.title}</span>
       </div>
-      {(!dense || t.current) && (
+      {(!dense || t.current || !!t.waitingOn?.length || t.waitingForCi) && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
-          <span className={cx("font-mono text-[10px]", TONE_TEXT[l.tone])}>{l.text}</span>
+          <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])}>{l.text}</span>
           <Verdicts v={t.verdicts} />
           {a && <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-fg-2"><Sticker avatar={a.avatar} lead={a.role === "lead"} size={14} />{a.name}</span>}
         </div>
@@ -64,20 +68,25 @@ function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; age
         <span>{t.github ? `#${t.github.number}` : "Loft"}</span>
         {t.project && <span>{t.project}</span>}
         <span>{timeAgo(t.updated_at)}</span>
-        {!dense && a && <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-fg-2"><Sticker avatar={a.avatar} lead={a.role === "lead"} size={14} />{a.name}</span>}
+        {(t.owner || (!dense && a)) && (
+          <span className="ml-auto inline-flex min-w-0 items-center gap-2 text-[10.5px] text-fg-2">
+            {t.owner && <GithubUser login={t.owner} bare />}
+            {!dense && a && <span className="inline-flex items-center gap-1"><Sticker avatar={a.avatar} lead={a.role === "lead"} size={14} />{a.name}</span>}
+          </span>
+        )}
       </div>
     </button>
   );
 }
 
 function SpecHead({ s, v, children }: { s: Task; v: View; children?: React.ReactNode }) {
-  const d = deliveryOf(s, v.deliveries), stage = stageOf(s, d), p = progressOf(s, d, v.tasks);
+  const d = deliveryOf(s, v.deliveries), stage = stageOf(s, d), p = progressOf(s, d, v.tasks), m = specMeta(s);
   return (
     <button onClick={() => v.openSpec(s.id)} className="block w-full space-y-1.5 text-left">
       <div className="flex flex-wrap items-start gap-x-2 gap-y-1"><span className={cx("min-w-[9rem] flex-1 leading-snug", v.o.dense ? "truncate text-[12.5px]" : "text-[13px]")}>{s.title}</span><Badge stage={stage} d={d} /></div>
       {p && <Bar {...p} stage={stage} />}
       {!v.o.dense && <Who d={d} agentById={v.agentById} />}
-      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{specRef(s)}</span>{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}</div>
+      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{m.ref}</span>{m.project && <span title="Project">{m.project}</span>}{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}{s.owner && <span className="ml-auto text-fg-2"><GithubUser login={s.owner} bare /></span>}</div>
       {children}
     </button>
   );
@@ -126,7 +135,7 @@ function Cards(v: View) {
                           <>
                             <button onClick={() => toggle(s.id)} aria-expanded={isOpen} className="mt-2 flex w-full items-center gap-1.5 text-left text-[11.5px] text-fg-3 hover:text-fg">
                               <ChevronRight className={cx("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} />)}</span>
+                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} waitingOn={t.waitingOn} waitingForCi={t.waitingForCi} />)}</span>
                               <span className="ml-auto font-mono text-[10.5px]">{ts.length} {ts.length === 1 ? "ticket" : "tickets"}</span>
                             </button>
                             {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} dense agentById={v.agentById} open={v.openTicket} />)}</div>}

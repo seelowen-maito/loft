@@ -4,7 +4,8 @@ import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2
 import { cx } from "../../lib/format";
 import { teamNote } from "../../lib/teamNote";
 import { StartDeliveryButton } from "../../components/StartDeliveryButton";
-import { api, type DeliveryStarted, type EndCard as Card, type CardSpec, type PlannedIssue } from "../../lib/api";
+import { StartWarning } from "../../components/StartWarning";
+import { api, type WaitsOn, type DeliveryStarted, type EndCard as Card, type CardSpec, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
 function Issue({ i, icon, inLoft }: { i: PlannedIssue; icon: React.ReactNode; inLoft: boolean }) {
@@ -38,8 +39,17 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
   const [askGit, setAskGit] = useState<string | null>(null);
   const [declined, setDeclined] = useState(false);
   const delivery = item.delivery;
+  // What the spec's tickets wait on in another spec, read while it hasn't started: Start delivery warns first.
+  const [waits, setWaits] = useState<WaitsOn[]>([]);
+  const [warn, setWarn] = useState(false);
+  const notStarted = !!delivery && !delivery.started && !started;
+  const reloadWaits = () => {
+    if (delivery) api.deliverySummaries().then((all) => setWaits(all.find((d) => d.repo === delivery.repo && d.spec === delivery.spec)?.waits_on ?? [])).catch(() => {});
+  };
+  useEffect(reloadWaits, [delivery?.repo, delivery?.spec, notStarted]);
   const start = (initGit: boolean) =>
     run("start", async () => {
+      setWarn(false);
       if (!delivery) return;
       const r = await api.startDelivery(agentId, messageId, delivery.repo, delivery.spec, initGit);
       if (r.needs_git) return setAskGit(r.dir ?? "the project folder");
@@ -82,6 +92,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
       {note}
+      {warn && !startedOn && waits.length > 0 && <StartWarning waits={waits} onStart={() => start(false)} onCancel={() => setWarn(false)} onStarted={reloadWaits} />}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
           <StartDeliveryButton
@@ -89,7 +100,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
             pending={busy === "start"}
             disabled={busy !== null}
             title={delivery.standalone ? `Opens #${delivery.spec}'s branch and draft PR and starts it on the team's Dev.` : `Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
-            onClick={() => start(false)}
+            onClick={() => (waits.length ? setWarn(true) : start(false))}
           />
         )}
         {delivery && startedOn && (
