@@ -99,6 +99,10 @@ pub struct Delivery {
     /// For a plan kept in Loft: the branch the spec branch started from and merges into.
     #[serde(default)]
     pub base: String,
+    /// For a plan kept in Loft whose tickets name repos inside the project folder: each repo's base, by the
+    /// repo's subfolder (`DeliveryTicket::repo`). `base` stays the project folder's.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bases: std::collections::BTreeMap<String, String>,
     /// For a plan kept in Loft: the spec's title, to name it.
     #[serde(default)]
     pub title: String,
@@ -189,6 +193,10 @@ pub struct DeliveryTicket {
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
+    /// In a plan kept in Loft in a folder of several repos: the repo inside the project folder it changes, its
+    /// subfolder (`api`). Its spec branch is made and merged there. Empty: the project folder itself.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
@@ -1583,6 +1591,7 @@ impl Db {
                 local: false,
                 spec_id: String::new(),
                 base: String::new(),
+                bases: Default::default(),
                 title: String::new(),
                 created_at: now(),
             };
