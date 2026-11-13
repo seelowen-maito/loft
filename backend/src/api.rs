@@ -50,7 +50,7 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     v["unread_reply"] = json!(a.unread_reply());
     v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
-    // Projects that aren't one folder of one repo any more (or never were): the user picks again.
+    // Projects whose folder is gone are problems; a folder of several repos is a hint.
     v["project_problems"] = crate::repos::project_problems(state, a);
     v
 }
@@ -206,7 +206,7 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "Bash(git *)", "Bash(ls *)", "Bash(cat *)", "Bash(mkdir *)", "WebSearch",
 ];
 
-/// Refuses a project the agent doesn't have yet when it isn't one folder that is, or will become, one repo.
+/// Refuses a project the agent doesn't have yet when its folder is missing.
 /// Projects it already has stay, however they look: they are flagged instead (`project_problems`), from the
 /// disk as it is now, so a folder fixed before this save clears its flag in the reply.
 fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), ApiError> {
@@ -1405,7 +1405,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_folder_of_repos_or_a_missing_folder_is_refused_and_existing_ones_are_flagged() {
+    async fn a_missing_folder_is_refused_and_flagged_and_a_folder_of_repos_is_only_a_hint() {
         let st = crate::tasks::tests::state();
         let root = st.settings.boot().projects_dir.clone();
         std::fs::create_dir_all(root.join("Dineout/api/.git")).unwrap();
@@ -1413,13 +1413,17 @@ pub(crate) mod tests {
         std::fs::create_dir_all(root.join("fresh")).unwrap();
         std::fs::create_dir_all(root.join("solo/.git")).unwrap();
 
-        // A new agent and a patch: refused, naming the project.
-        for bad in [serde_json::json!({ "projects": ["Dineout"] }), serde_json::json!({ "project": "Passora" })] {
+        // A new agent and a patch: a missing folder is refused, naming the project.
+        for bad in [serde_json::json!({ "projects": ["Passora"] }), serde_json::json!({ "project": "Passora" })] {
             let e = super::new_agent(&st, "x".into(), &serde_json::json!({ "name": "A" }).as_object().unwrap().iter().chain(bad.as_object().unwrap()).map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Value>(), None).unwrap_err();
-            assert!(e.1 == "Dineout holds several repos: pick one of them" || e.1 == "There's no folder Passora in the projects folder", "{}", e.1);
+            assert_eq!(e.1, "There's no folder Passora in the projects folder");
         }
+        // No project at all is fine, and so is a folder of several repos.
+        super::new_agent(&st, "a0".into(), &serde_json::json!({ "name": "None" }), None).unwrap();
+        super::new_agent(&st, "a2".into(), &serde_json::json!({ "name": "Many", "projects": ["Dineout"] }), None).unwrap();
         let (mut a, _) = super::new_agent(&st, "a1".into(), &serde_json::json!({ "name": "A", "projects": ["solo", "fresh"] }), None).unwrap();
-        assert!(apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Dineout"] })).is_err());
+        assert!(apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Passora"] })).is_err());
+        apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Dineout"] })).unwrap();
         assert_eq!(super::agent_json(&st, &a)["project_problems"], serde_json::json!([]));
 
         // An agent that already has them keeps them, flagged; saving its other fields still works.
@@ -1428,8 +1432,8 @@ pub(crate) mod tests {
         apply_patch(&st, &mut a, &serde_json::json!({ "name": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
         assert_eq!(a.projects, ["Dineout", "Passora", "solo"]);
         let flags = super::agent_json(&st, &a)["project_problems"].clone();
-        let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| f["project"].as_str().unwrap()).collect();
-        assert_eq!(flagged, ["Dineout", "Passora"]);
+        let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| (f["project"].as_str().unwrap(), f["hint"].as_bool().unwrap())).collect();
+        assert_eq!(flagged, [("Dineout", true), ("Passora", false)]);
     }
 
     #[tokio::test]
@@ -1445,8 +1449,8 @@ pub(crate) mod tests {
         st.db.save_agent(&a).unwrap();
         let problems = super::agent_json(&st, &a)["project_problems"].clone();
         assert_eq!(problems, serde_json::json!([
-            { "project": "dine", "problem": "dine holds several repos: pick one of them" },
-            { "project": "gone", "problem": "There's no folder gone in the projects folder" },
+            { "project": "dine", "problem": "dine holds several repos, so its issues stay in Loft", "hint": true },
+            { "project": "gone", "problem": "There's no folder gone in the projects folder", "hint": false },
         ]), "short, without the Mac's paths");
 
         // The settings panel takes the saved agent from the live event: fixing the projects clears the flag there.

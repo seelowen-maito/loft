@@ -34,6 +34,11 @@ export function withProject(projects: string[], p: string, main = false): string
   return main ? [name, ...rest] : [...rest, name];
 }
 
+/** `form` with the project name still typed in the add field taken in, so saving doesn't drop it. */
+export function withTyped<T extends { projects: string[] }>(form: T, typed: string): T {
+  return { ...form, projects: withProject(form.projects, typed) };
+}
+
 /** The projects a new issue for `agent` can go to: its own (main first), then every other one known, dimmed in the form. */
 export function projectChoices(agent: Teamed | undefined, known: string[]): { mine: string[]; others: string[] } {
   const mine = agent ? projectsOf(agent) : [];

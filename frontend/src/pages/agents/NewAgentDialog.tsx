@@ -3,12 +3,13 @@ import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { createPayload, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, TEMPLATES, templateOf, withTeam } from "../../lib/newAgent";
-import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, roleHint } from "./Inspector";
+import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, PROJECTS_SUB, roleHint } from "./Inspector";
 import { GroupInput, ProjectsField } from "./ProjectsField";
-import { teamOf } from "../../lib/team";
+import { teamOf, withTyped } from "../../lib/team";
 
 export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }: { groups: string[]; projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
   const [form, setForm] = useState(EMPTY_FORM);
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Set when creating it took the Lead role from another agent: the dialog stays open to say so, as Save does in the settings.
@@ -27,7 +28,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
     setBusy(true);
     setErr(null);
     try {
-      const { notice, ...a } = await api.createAgent(createPayload(form));
+      const { notice, ...a } = await api.createAgent(createPayload(withTyped(form, typed)));
       if (notice) {
         setMoved({ agent: a, notice });
         setBusy(false);
@@ -90,8 +91,9 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             </div>
             <div className="space-y-1.5">
               <span className="eyebrow">Projects</span>
+              <span className="block text-[11.5px] text-fg-3">{PROJECTS_SUB}</span>
               {/* Only an agent with a group can be Lead: clearing it drops it back to Custom. */}
-              <ProjectsField value={form.projects} projects={projects} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
+              <ProjectsField value={form.projects} projects={projects} adding={typed} onAdding={setTyped} onChange={(v) => setForm((f) => withTeam(f, { projects: v }))} />
             </div>
             <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(team)}</p>
           </div>
