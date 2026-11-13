@@ -38,7 +38,9 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
 
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
   const running = d?.tickets.filter((t) => t.agent_id) ?? [];
-  if (!d || (!running.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
+  // Waiting for CI: no agent is on it, Loft follows its CI on GitHub.
+  const onCi = d?.tickets.filter((t) => t.waiting_for_ci) ?? [];
+  if (!d || (!running.length && !onCi.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
   return (
     <div className="space-y-0.5 text-[11.5px] text-fg-2">
       {running.map((t) => {
@@ -50,6 +52,13 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
           </div>
         );
       })}
+      {onCi.map((t) => (
+        <div key={t.number} className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate"><span className="font-mono text-[10.5px] text-fg-3">#{t.number}</span> {t.title}</span>
+          <span className="shrink-0 font-mono text-[10.5px] text-accent">{ticketLabel(t.state, t.waiting_on, true).text}</span>
+          <span className="shrink-0 font-mono text-[10px] text-fg-3" title="ci: pending">ci …</span>
+        </div>
+      ))}
       {!!d.waiting_on_you?.length && <div className="text-warn">Waiting on you: {d.waiting_on_you.map((n) => `#${n}`).join(", ")}</div>}
       {!!d.waiting_for_lead?.length && <div className="text-warn">Waiting for the Lead: {d.waiting_for_lead.map((n) => `#${n}`).join(", ")}</div>}
     </div>
@@ -60,7 +69,7 @@ const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ?
 
 function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
   // A ticket its Dev reported waiting says so, with what on in its tooltip.
-  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state, t.waiting_on);
+  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state, t.waiting_on, t.waiting_for_ci);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>

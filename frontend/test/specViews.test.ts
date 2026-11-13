@@ -134,6 +134,15 @@ test("the Issues column holds the issues that are no spec and no spec's ticket, 
   assert.deepEqual(boardIssues(all, [], true, o, false).map((x) => x.id), ["b", "a", "e"], "loaded with no Deliveries: all stay");
 });
 
+test("a ticket in review whose reviewers all passed reads waiting for CI", () => {
+  assert.deepEqual(ticketLabel("review", [], true), { text: "waiting for CI", tone: "accent" });
+  assert.equal(ticketLabel("review", []).text, "in review");
+  assert.equal(ticketLabel("started", [], true).text, "building", "only a ticket in review waits for CI");
+  const s = task({ id: "s", github: { repo: "o/r", number: 9 } });
+  const d = del({ tickets: [{ number: 10, title: "A", state: "review", skipped: "", agent_id: null, waiting_for_ci: true, ci_since: "2026-11-13T10:00:00Z", verdicts: { qa: "pass", ci: "pending" } }] });
+  assert.deepEqual(ticketsOf(s, d, [s]).map((t) => [t.waitingForCi, t.current, t.agentId]), [[true, false, null]]);
+});
+
 test("an open ticket waiting on another spec's ticket says which", () => {
   assert.deepEqual(ticketLabel("open", ["o/ext#9", "o/ext#10"]), { text: "waiting on o/ext#9, o/ext#10", tone: "warn" });
   assert.equal(ticketLabel("open", []).text, "open");

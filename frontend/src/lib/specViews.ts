@@ -7,7 +7,7 @@ export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
   spec: number;
   spec_id: string;
   local: boolean;
-  tickets: { number: number; id?: string; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; verdicts?: Record<string, string> }[];
+  tickets: { number: number; id?: string; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null; verdicts?: Record<string, string> }[];
 };
 
 export type Stage = "planned" | "delivery" | "ready" | "shipped" | "dropped";
@@ -40,9 +40,10 @@ export function stageOf(spec: Task, d: DeliverySummary | null): Stage {
   return "delivery";
 }
 
-/** A ticket's state in a few words and a tone. An open one waiting on tickets outside its spec says which (`owner/repo#n`). */
-export function ticketLabel(state: string, waitingOn: string[] = []): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
+/** A ticket's state in a few words and a tone. An open one waiting on tickets outside its spec says which (`owner/repo#n`); one in review whose reviewers all passed is waiting for CI. */
+export function ticketLabel(state: string, waitingOn: string[] = [], waitingForCi = false): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
   if (state === "open" && waitingOn.length) return { text: `waiting on ${waitingOn.join(", ")}`, tone: "warn" };
+  if (state === "review" && waitingForCi) return { text: "waiting for CI", tone: "accent" };
   switch (state) {
     case "closed": return { text: "done", tone: "good" };
     case "started": return { text: "building", tone: "accent" };
@@ -56,14 +57,14 @@ export function ticketLabel(state: string, waitingOn: string[] = []): { text: st
 
 /* ---------- the board's tickets ---------- */
 
-export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waitingOn?: string[] };
+export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waitingOn?: string[]; waitingForCi?: boolean };
 
 /** A spec's tickets: its Delivery's when it has them, else its sub-issues in Loft. Each knows its own issue, to open it. */
 export function ticketsOf(spec: Task, d: DeliverySummary | null, tasks: Task[]): BoardTicket[] {
   if (d?.tickets.length)
     return d.tickets.map((t) => {
       const own = t.id ? tasks.find((x) => x.id === t.id) : tasks.find((x) => !!spec.github && x.github?.repo === spec.github.repo && x.github.number === t.number);
-      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null, waitingOn: t.waiting_on };
+      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null, waitingOn: t.waiting_on, waitingForCi: !!t.waiting_for_ci };
     });
   return tasks
     .filter((x) => x.parent_id === spec.id && x.status !== "cancelled")
