@@ -1,7 +1,7 @@
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { CircleDot, ExternalLink, FileText, GitPullRequest, Search, X } from "lucide-react";
-import { api, type Agent, type PullRequest, type Task } from "../lib/api";
+import { api, roleLabel, type Agent, type PullRequest, type Task } from "../lib/api";
 import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
@@ -191,7 +191,7 @@ function Switcher({ onClose }: { onClose: () => void }) {
   }, []);
 
   const shown = useMemo<Hit[]>(() => {
-    const found = switcherAgents(agents ?? [], query, recent);
+    const found = switcherAgents(agents ?? [], query, recent, (a) => roleLabel(a.role));
     const agentHits = (query.trim() ? found.slice(0, 5) : found).map((a): Hit => ({ kind: "agent", key: `a:${a.id}`, agent: a }));
     if (!query.trim()) return agentHits;
     const issues = tasks ?? [];
@@ -293,7 +293,7 @@ function HitRow({ h }: { h: Hit }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13.5px]">{a.name}</div>
-          <div className="truncate font-mono text-[10.5px] text-fg-3">{[teamOf(a), a.title].filter(Boolean).join(" · ")}</div>
+          <div className="truncate font-mono text-[10.5px] text-fg-3">{[teamOf(a), roleLabel(a.role)].filter(Boolean).join(" · ")}</div>
         </div>
         <span className={cx("shrink-0 font-mono text-[10.5px] uppercase tracking-wider", s.text)}>{s.label}</span>
       </>

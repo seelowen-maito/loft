@@ -2,7 +2,6 @@
 
 export type NewAgentForm = {
   name: string;
-  title: string;
   /** Its group, and its projects with the main one first. */
   group: string;
   projects: string[];
@@ -15,7 +14,7 @@ export type NewAgentForm = {
 };
 
 export const EMPTY_FORM: NewAgentForm = {
-  name: "", title: "", group: "", projects: [], role: "custom", fresh_context: "always", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
+  name: "", group: "", projects: [], role: "custom", fresh_context: "always", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
 };
 
 /** Fresh context for each Delivery ticket, as the backend's `agents::FRESH_CONTEXT`. A new agent starts Always. */
@@ -34,7 +33,6 @@ export const TEMPLATES = [
   {
     label: "Repo janitor",
     name: "Moss",
-    title: "Repo janitor",
     role: "custom",
     personality: "Calm, tidy, slightly dry. Speaks in short, precise sentences. Loves a clean working tree.",
     prompt:
@@ -44,7 +42,6 @@ export const TEMPLATES = [
   {
     label: "Research scout",
     name: "Wren",
-    title: "Research scout",
     role: "custom",
     personality: "Curious and enthusiastic, but ruthless about signal over noise. Always cites sources.",
     prompt:
@@ -54,13 +51,15 @@ export const TEMPLATES = [
   {
     label: "Pair programmer",
     name: "Bolt",
-    title: "Pair programmer",
     role: "dev",
     personality: "Direct, pragmatic senior engineer. Proposes a plan before big changes and explains trade-offs briefly.",
     prompt: "Help me with coding tasks on request. Clone repos into your workspace, make changes on a branch, run the tests, and summarize the diff.",
     interval_minutes: 0,
   },
 ];
+
+/** The template the form was started from, while its instructions are still the template's: the one the dialog highlights. */
+export const templateOf = (f: NewAgentForm) => TEMPLATES.find((t) => t.prompt === f.prompt);
 
 /** Its team (`teamOf`): the group. */
 const formTeam = (f: NewAgentForm) => f.group.trim();

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
-import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
+import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, fmtNum, timeAgo } from "../../lib/format";
 import { contextWarns, listedContext } from "../../lib/context";
@@ -305,7 +305,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{s.label}</span>
                           ) : (
-                            <>{[a.title || "agent", shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
+                            <>{[roleLabel(a.role), shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>

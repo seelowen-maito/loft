@@ -44,7 +44,7 @@ const LOFT_PROMPT: &str = r#"You are Loft's own agent. You come with Loft and th
 
 ## What Loft is
 Loft is a small layer on top of the coding agent the user already uses (Claude Code). It runs agents for them, keeps them working on a schedule, lets them talk to each other and gives them memory that lasts. The user watches and steers from the web dashboard or the iPhone app.
-- Every agent has a name, a title, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
+- Every agent has a name, a role, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
 - A schedule (`interval_minutes`) wakes an agent on its own. Quiet hours hold those wake-ups during the user's working day so background runs don't eat the usage they need while they work. The user can always message an agent directly.
 - Agents ask for permissions in the chat; the user approves once or always. They keep long-term memory, share a task list, message each other, and open pull requests that show up as live cards.
 - Agents in the same project are grouped together and can @-mention each other.
@@ -88,7 +88,6 @@ const KICKOFF: &str = "[Loft: first launch] Loft just started with you in it. Th
 pub struct Template {
     pub key: &'static str,
     pub name: &'static str,
-    pub title: &'static str,
     /// When this agent is worth having, for the agent that picks templates.
     pub fits: &'static str,
     /// When it isn't.
@@ -114,7 +113,6 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         key: "dev",
         name: "Dev",
-        title: "Feature developer",
         fits: "Projects the user is actively building and wants to push forward: apps, products, tools with a roadmap or a backlog of ideas. Suggest it for the most active projects.",
         skip: "Projects that already have a developer agent the user set up, finished or archived projects, and repos that only hold notes, config or dotfiles.",
         personality: "A builder who loves shipping. Curious about where the user wants to take the project, asks sharp questions before writing code, then delivers in small, reviewable steps. Upbeat, but never pads a reply.",
@@ -152,7 +150,6 @@ On each check-in, and whenever the user asks:
     Template {
         key: "lead",
         name: "Lead",
-        title: "Team lead",
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets for the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
@@ -183,7 +180,6 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
     Template {
         key: "reviewer",
         name: "Reviewer",
-        title: "Code reviewer",
         fits: "Any project that changes often: recent commits, open pull requests, more than one contributor or agent working on it.",
         skip: "Repos that rarely change, generated code, notes or dotfiles.",
         personality: "Careful and specific. Points at the exact line and says why, separates real bugs from taste, and keeps praise and nitpicks short.",
@@ -207,7 +203,6 @@ If nothing changed, say so in one line."#,
     Template {
         key: "security",
         name: "Security",
-        title: "Security auditor",
         fits: "Anything that can be reached or fed input by someone else: web apps, APIs, servers, mobile apps, browser extensions, bots, services that handle accounts, payments, personal data or secrets, and libraries other people install.",
         skip: "Local scripts, dotfiles, notes, static content with no input, throwaway experiments. Nothing reaches them from outside, so there is nothing to attack.",
         personality: "Calm and precise. Rates findings honestly, never inflates severity, and always explains how an attack would actually work.",
@@ -232,7 +227,6 @@ If you found nothing new, say so in one line."#,
     Template {
         key: "tests",
         name: "QA",
-        title: "Test keeper",
         fits: "Projects with real logic and a test setup, or ones that clearly need one: apps, services, libraries, CLIs.",
         skip: "Docs, notes, config and dotfiles repos, and tiny one-file scripts where a test would only repeat the code.",
         personality: "Methodical and skeptical. Trusts a passing test only once it has seen it fail for the right reason.",
@@ -256,7 +250,6 @@ If everything passes and nothing new needs tests, say so in one line."#,
     Template {
         key: "deps",
         name: "Deps",
-        title: "Dependency keeper",
         fits: "Projects with a dependency manifest (package.json, Cargo.toml, requirements.txt or pyproject.toml, go.mod, Gemfile, Podfile, Package.swift) that are still in use.",
         skip: "Projects with no dependencies, archived projects, and ones pinned on purpose.",
         personality: "Conservative. Small, safe upgrades over big jumps, and always reads the changelog first.",
@@ -280,7 +273,6 @@ If everything is current, say so in one line."#,
     Template {
         key: "docs",
         name: "Docs",
-        title: "Docs keeper",
         fits: "Projects other people read or use: libraries, public repos, APIs, apps with setup steps, projects with a docs folder.",
         skip: "Personal scripts, private experiments, and repos with no README worth keeping.",
         personality: "Clear and plain-spoken. Writes for a newcomer, cuts jargon, and keeps docs short.",
@@ -303,7 +295,6 @@ If the docs are already accurate, say so in one line."#,
     Template {
         key: "triage",
         name: "Triage",
-        title: "Issue triage",
         fits: "Projects on GitHub that get issues, especially from other people.",
         skip: "Projects with no GitHub remote, or with issues turned off or never used.",
         personality: "Friendly and organized. Thanks reporters, asks for exactly what's missing, and never closes an issue it isn't sure about.",
@@ -327,7 +318,6 @@ If there is nothing new, say so in one line."#,
     Template {
         key: "ci",
         name: "CI",
-        title: "CI watcher",
         fits: "Projects on GitHub with CI workflows (.github/workflows) that run on every push or pull request.",
         skip: "Projects with no CI, or CI that only runs by hand.",
         personality: "Quick and to the point. Finds the first real error in a wall of logs and says what broke it.",
@@ -406,7 +396,6 @@ pub fn ensure_loft(state: &AppState) {
             let projects = state.settings.boot().projects_dir.display().to_string();
             let patch = json!({
                 "name": LOFT_NAME,
-                "title": "Your Loft guide",
                 "personality": LOFT_PERSONALITY,
                 "prompt": LOFT_PROMPT.replace("{projects}", &projects),
                 "model": "sonnet",
@@ -476,7 +465,6 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "group": { "type": "string", "description": "Its group, the label that makes its team, e.g. \"Loft\". Leave it out and it has no group, so no team and no part in a Delivery." },
                 "name": { "type": "string", "description": "Short name, unique within its main project. Defaults to the template's." },
-                "title": { "type": "string" },
                 "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per group: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
@@ -511,11 +499,10 @@ fn list_templates() -> String {
         .iter()
         .map(|t| {
             format!(
-                "## {key}: {name} ({title})\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
+                "## {key}: {name}\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
                 key = t.key,
                 role = t.role,
                 name = t.name,
-                title = t.title,
                 fits = t.fits,
                 skip = t.skip,
                 every = if t.interval_minutes > 0 { format!("every {}", every(t.interval_minutes)) } else { "no schedule (only runs when messaged, until it sets its own)".into() },
@@ -660,7 +647,6 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     // Only these fields: an agent can't hand another agent more tools, MCP servers or a looser permission mode.
     let patch = json!({
         "name": name,
-        "title": Some(s("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.title.to_string())),
         "project": project,
         "group": s("group"),
         "personality": Some(s("personality")).filter(|p| !p.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.personality.to_string())),
@@ -817,6 +803,8 @@ mod tests {
         assert_eq!(a.created_by.as_deref(), Some(me.id.as_str()));
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
+        let schema = mcp_tools().into_iter().find(|t| t["name"] == "create_agent").unwrap();
+        assert!(schema["inputSchema"]["properties"].get("title").is_none() && schema["inputSchema"]["properties"].get("role").is_some());
 
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         // A project that isn't one: refused before anyone is asked.
@@ -1050,8 +1038,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             assert!(t.prompt.contains("{project}") && t.prompt.contains("{path}"), "{}", t.key);
             assert!(t.interval_minutes == 0 || t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
         }
-        assert!(list_templates().contains("## security: Security (Security auditor)"));
-        assert!(list_templates().contains("## lead: Lead (Team lead)"));
+        assert!(list_templates().contains("## security: Security\n"));
+        assert!(list_templates().contains("## lead: Lead\n"));
+        assert!(!list_templates().contains("Security auditor") && !list_templates().contains("Team lead"), "no titles");
         let roles: Vec<_> = TEMPLATES.iter().map(|t| (t.key, t.role)).collect();
         assert_eq!(roles[..5], [("dev", "dev"), ("lead", "lead"), ("reviewer", "code_reviewer"), ("security", "security"), ("tests", "qa")]);
         assert!(roles[5..].iter().all(|(_, r)| *r == "custom"), "{roles:?}");
@@ -1141,7 +1130,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         }
         assert!(!lead.prompt.contains("{project}") && !lead.prompt.contains("{path}"));
         let t = template("lead").unwrap();
-        assert_eq!((t.name, t.title, t.model, t.planning, t.role), ("Lead", "Team lead", "opus", true, "lead"));
+        assert_eq!((t.name, t.model, t.planning, t.role), ("Lead", "opus", true, "lead"));
 
         // Planning's rules win over standing instructions on specs and tickets.
         let sys = crate::agents::system_prompt(&st, &lead);

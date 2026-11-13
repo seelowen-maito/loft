@@ -70,6 +70,10 @@ struct SpecRow: View {
             Text(spec.title).font(.body).readableLineLimit(2)
             HStack(spacing: 6) {
                 Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                if let project = SpecViews.project(spec) {
+                    Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                        .accessibilityLabel("Project \(project)")
+                }
                 if let badge {
                     Text(badge).font(.caption2.weight(.medium))
                         .padding(.horizontal, 6).padding(.vertical, 2)
