@@ -56,7 +56,7 @@ struct SpecRow: View {
     private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
     private var stage: SpecStage { SpecViews.stage(of: spec, delivery) }
 
-    private var badge: String? { delivery.map { SpecViews.deliveryLabel($0.state) } }
+    private var badge: String? { delivery.map(SpecViews.badge) }
 
     /// Each running ticket with its agent, then the tickets waiting for the Lead.
     private var onIt: [String] {

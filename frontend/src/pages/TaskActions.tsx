@@ -10,7 +10,8 @@ import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "..
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
 import { StartWarning } from "../components/StartWarning";
-import { deliveryButtons, deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
+import { deliveryButtons } from "../lib/deliveryState";
+import { DeliveryLine } from "../components/DeliveryLine";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { latestOnly } from "../lib/latest";
 
@@ -184,21 +185,11 @@ function useIssueDelivery(t: Task) {
   return [d, latest.set, reload] as const;
 }
 
-const TONE: Record<DeliveryTone, string> = {
-  running: "text-accent",
-  stalled: "text-bad",
-  paused: "text-fg-3",
-  needs_you: "text-warn",
-  final: "text-accent",
-  done: "text-good",
-};
-
-/** Where a started Delivery stands: running, stalled (and why), paused, needs you, final review or done. */
+/** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
-  const line = deliveryStateLine(d);
   return (
     <>
-      {line && <div className={cx("mt-1 text-[12.5px]", TONE[line.tone])} data-delivery-state={line.tone}>{line.text}</div>}
+      <DeliveryLine d={d} className="mt-1" />
       {d?.behind && <div className="mt-1 text-[12.5px] text-warn" data-delivery-behind>{d.behind.count} behind {d.behind.base}: the Dev merges it in before submitting.</div>}
     </>
   );

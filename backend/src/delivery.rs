@@ -364,8 +364,7 @@ pub fn stall_lost_runs(state: &AppState) {
 /// One that only waits for its CI waits on Loft, which follows it again after a restart, and so does one
 /// waiting on an issue or an agent.
 fn lost_run(t: &DeliveryTicket) -> bool {
-    let only_ci = t.verdicts.get("ci").is_some_and(|v| v == "pending") && t.verdicts.iter().all(|(r, v)| r == "ci" || v == "pass");
-    t.state == "started" && t.wait_for.is_empty() || t.state == "review" && !only_ci
+    t.state == "started" && t.wait_for.is_empty() || t.state == "review" && !waiting_for_ci(t)
 }
 
 /// The call a stalled Delivery waited on for ticket #n came after all (say the user nudged the agent): it
@@ -1224,6 +1223,7 @@ async fn to_user(state: &AppState, d: &Delivery, t: &DeliveryTicket, rounds: u32
             (t.rounds, t.state) = (rounds, "needs_human".into());
             t.notes = notes.into();
             t.verdicts.clear();
+            t.ci_since.clear();
         }
         d.last_notes = notes.into();
     })
@@ -1239,6 +1239,7 @@ async fn send_back(state: &AppState, d: &Delivery, n: i64, rounds: u32, notes: &
         if let Some(t) = d.ticket_mut(n) {
             (t.rounds, t.notes) = (rounds, notes.into());
             t.verdicts.clear();
+            t.ci_since.clear();
             (t.state, t.changes) = ("changes".into(), brief);
         }
         d.last_notes = notes.into();
@@ -1501,6 +1502,8 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
                 t.verdicts.insert("ci".into(), "pending".into());
             }
             t.submitted_at = crate::db::now();
+            // With no reviewer to wait for, only its CI is left from the submit on.
+            t.ci_since = if ci && reviewers.is_empty() { t.submitted_at.clone() } else { String::new() };
         }
     })
     .ok_or("The Delivery record couldn't be saved.")?;
@@ -1814,6 +1817,9 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let d = update(state, &slug, d.spec, |d| {
             if let Some(t) = d.ticket_mut(n) {
                 t.verdicts.insert(role.into(), "pass".into());
+                if waiting_for_ci(t) {
+                    t.ci_since = crate::db::now();
+                }
             }
         })
         .ok_or("The Delivery record couldn't be saved.")?;
@@ -2013,6 +2019,30 @@ fn waits_for_ci(t: &DeliveryTicket) -> bool {
     t.state == "review" && t.verdicts.get("ci").is_some_and(|v| v == "pending")
 }
 
+/// Whether ticket `t` is waiting for CI: its reviewers all passed it, so only its CI is left and no agent
+/// works on it.
+pub(crate) fn waiting_for_ci(t: &DeliveryTicket) -> bool {
+    waits_for_ci(t) && t.verdicts.iter().all(|(r, v)| r == "ci" || v == "pass")
+}
+
+/// When ticket `t` started waiting for CI, or None when it isn't. A ticket saved before Loft kept the time
+/// gives its submit.
+fn ci_since(t: &DeliveryTicket) -> Option<&str> {
+    waiting_for_ci(t).then(|| if t.ci_since.is_empty() { t.submitted_at.as_str() } else { t.ci_since.as_str() })
+}
+
+/// When the Delivery's earliest ticket waiting for CI started waiting, or None when none is: the elapsed time on
+/// its card, for a spec and a standalone ticket alike.
+fn delivery_ci_since(d: &Delivery) -> Option<&str> {
+    d.tickets.iter().filter_map(ci_since).filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|at| (at, s))).min().map(|(_, s)| s)
+}
+
+/// The page of the Delivery's CI checks on GitHub: its PR's Checks tab (the spec PR, or a standalone
+/// ticket's PR). None for a plan kept in Loft, or before the PR is open.
+fn checks_url(d: &Delivery) -> Option<String> {
+    d.pr.filter(|_| !d.local).map(|pr| format!("https://github.com/{}/pull/{pr}/checks", d.repo))
+}
+
 /// What the checks of a commit say.
 enum Ci {
     /// Some still run, or none showed up yet.
@@ -2196,6 +2226,7 @@ async fn ci_passed(state: &AppState, repo: &str, spec: i64, n: i64, why: &str) -
     let d = update(state, repo, spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             t.verdicts.insert("ci".into(), "pass".into());
+            t.ci_since.clear();
         }
     })
     .ok_or("The Delivery record couldn't be saved.")?;
@@ -2507,6 +2538,7 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
                 if let Some(t) = d.ticket_mut(t.number) {
                     (t.rounds, t.state) = (0, "started".into());
                     t.verdicts.clear();
+                    t.ci_since.clear();
                 }
                 d.current = Some(t.number);
             }
@@ -3007,8 +3039,9 @@ pub(crate) fn closes_issue(body: &str, n: i64) -> bool {
 }
 
 /// A Delivery card's state line, `{ tone, text }`, or null before it started: the web and iOS cards show it as
-/// is and only map its tone (running, stalled, paused, needs_you, final or done) to a colour. Waiting for the
-/// user (a ticket after too many change rounds, or the final review) wins over running.
+/// is and only map its tone (running, ci, stalled, paused, needs_you, final or done) to a colour. Waiting for the
+/// user (a ticket after too many change rounds, or the final review) wins over running. A running Delivery with no
+/// agent at work and tickets waiting for CI says which, with the `ci` tone.
 fn state_line(state: &AppState, d: &Delivery) -> Value {
     let stalled;
     let (tone, text) = match d.state.as_str() {
@@ -3027,7 +3060,13 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
         _ => {
             // Waiting tickets say what they wait on; the Delivery still runs.
             let waits: Vec<String> = d.tickets.iter().filter(|t| t.state == "started" && !t.wait_for.is_empty()).map(|t| format!("{} is {}", tag(d, t), waiting_text(state, d, t))).collect();
-            if waits.is_empty() {
+            // No agent at work and only CI left on some tickets: the Delivery waits for CI. Clients add how long.
+            let on_ci: Vec<String> = d.tickets.iter().filter(|t| waiting_for_ci(t)).map(|t| tag(d, t)).collect();
+            let at_work = d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing") && !waiting_for_ci(t));
+            if !on_ci.is_empty() && !at_work {
+                stalled = format!("Waiting for CI on {}", on_ci.join(", "));
+                ("ci", stalled.as_str())
+            } else if waits.is_empty() {
                 ("running", "Running.")
             } else {
                 stalled = format!("Running. {}", waits.join(" "));
@@ -3039,10 +3078,12 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
 }
 
 /// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
-/// whether a ticket or its final review waits for the user), whether it started, who has it, its PR and, for a spec, its tickets.
+/// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page),
+/// since when it waits for CI and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
 pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
-    let dev = state.db.get_agent(&d.dev).ok().flatten();
-    let current = d.current.and_then(|n| d.ticket(n)).filter(|t| t.state != "needs_human");
+    let on_ci = d.current.and_then(|n| d.ticket(n)).is_some_and(waiting_for_ci);
+    let dev = state.db.get_agent(&d.dev).ok().flatten().filter(|_| !on_ci);
+    let current = d.current.and_then(|n| d.ticket(n)).filter(|t| t.state != "needs_human" && !waiting_for_ci(t));
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
@@ -3055,13 +3096,15 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "agent_id": dev.as_ref().map(|a| a.id.clone()),
         "agent_name": dev.as_ref().map(|a| a.name.clone()),
         "pr": d.pr,
+        "checks_url": checks_url(d),
+        "ci_since": delivery_ci_since(d),
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
         v["spec"] = json!(true);
         v["current"] = json!(current.map(|t| json!({ "number": t.number, "title": t.title })));
-        let agent = |t: &DeliveryTicket| state.db.get_agent(builder_id(d, t)).ok().flatten().filter(|_| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing"));
-        v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": agent(t).map(|a| a.id), "agent_name": agent(t).map(|a| a.name), "waiting": (t.state == "started" && !t.wait_for.is_empty()).then(|| waiting_text(state, d, t)) })).collect::<Vec<_>>());
+        let agent = |t: &DeliveryTicket| state.db.get_agent(builder_id(d, t)).ok().flatten().filter(|_| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing") && !waiting_for_ci(t));
+        v["tickets"] = json!(d.tickets.iter().map(|t| json!({ "number": t.number, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": agent(t).map(|a| a.id), "agent_name": agent(t).map(|a| a.name), "waiting": (t.state == "started" && !t.wait_for.is_empty()).then(|| waiting_text(state, d, t)), "waiting_for_ci": waiting_for_ci(t), "ci_since": ci_since(t) })).collect::<Vec<_>>());
         v["waits_on"] = json!(waits_on(state, d));
         // Ready tickets nobody has yet, while the Lead hands them out.
         let waiting: Vec<i64> = if d.state == "running" && lead_of(state, d).is_some() { ready_tickets(d).iter().map(|t| t.number).collect() } else { vec![] };
@@ -3111,7 +3154,7 @@ pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String
 
 /// `GET /api/deliveries/summary`: every spec's Delivery in one read, for the Issues page's spec views:
 /// what `issue_delivery` shows, plus `repo` and `spec` (and `spec_id` for a plan kept in Loft) to tell
-/// which issue it belongs to, and each ticket's review verdicts.
+/// which issue it belongs to, and each ticket's review verdicts (and whether it is waiting for CI, since when).
 pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
     let ds = state.db.all_deliveries()?;
     let out: Vec<Value> = ds
@@ -3124,7 +3167,7 @@ pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
             v["spec_id"] = json!(d.spec_id);
             v["local"] = json!(d.local);
             let tickets = v["tickets"].take();
-            v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "waiting": j["waiting"], "verdicts": t.verdicts })).collect::<Vec<_>>());
+            v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "waiting": j["waiting"], "waiting_for_ci": j["waiting_for_ci"], "ci_since": j["ci_since"], "verdicts": t.verdicts })).collect::<Vec<_>>());
             v
         })
         .collect();
@@ -3855,6 +3898,48 @@ mod tests {
         for done in ["ready", "settled", "merged"] {
             assert_eq!(line(done, "", vec![]).await, says("done", "Done: every review passed."), "{done}");
         }
+        // Only CI left: the Delivery waits for CI on those tickets, until an agent works on another one.
+        let on_ci = |n: i64| {
+            let mut t = ticket(n, "", "review");
+            t.verdicts = [("qa".to_string(), "pass".to_string()), ("ci".to_string(), "pending".to_string())].into_iter().collect();
+            t
+        };
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "open")]).await, says("ci", "Waiting for CI on #10"));
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "closed"), on_ci(12)]).await, says("ci", "Waiting for CI on #10, #12"));
+        assert_eq!(line("running", "", vec![on_ci(10), ticket(11, "", "started")]).await, says("running", "Running."), "an agent builds #11");
+        let mut reviewing = on_ci(11);
+        reviewing.verdicts.insert("qa".into(), "pending".into());
+        assert_eq!(line("running", "", vec![on_ci(10), reviewing]).await, says("running", "Running."), "a reviewer is on #11");
+        assert_eq!(line("paused", "", vec![on_ci(10)]).await, says("paused", "Paused: Loft sends no wakes until you resume it."));
+    }
+
+    /// The card's elapsed time comes from the Delivery's `ci_since`: its earliest ticket waiting for CI, a standalone
+    /// ticket's (which sends no `tickets`) included; null while none waits.
+    #[tokio::test]
+    async fn a_delivery_carries_since_when_it_waits_for_ci_standalone_or_spec() {
+        let st = crate::planning::tests::state();
+        let on_ci = |n: i64, since: &str| {
+            let mut t = ticket(n, "", "review");
+            t.verdicts = [("qa".to_string(), "pass".to_string()), ("ci".to_string(), "pending".to_string())].into_iter().collect();
+            t.ci_since = since.into();
+            t
+        };
+        let mut one: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 7, "state": "running", "created_at": "" })).unwrap();
+        one.standalone = true;
+        one.pr = Some(12);
+        one.tickets = vec![on_ci(7, "2026-11-13T12:00:00+00:00")];
+        let v = delivery_json(&st, &one);
+        assert_eq!(v["state_line"], serde_json::json!({ "tone": "ci", "text": "Waiting for CI on #7" }));
+        assert_eq!((v["ci_since"].clone(), v["tickets"].clone()), (serde_json::json!("2026-11-13T12:00:00+00:00"), Value::Null), "a standalone ticket sends no tickets");
+        assert_eq!(v["checks_url"], "https://github.com/o/r/pull/12/checks");
+        one.tickets[0].verdicts.insert("qa".into(), "pending".into());
+        assert_eq!(delivery_json(&st, &one)["ci_since"], Value::Null, "QA is still on it");
+
+        let mut spec = one.clone();
+        spec.standalone = false;
+        spec.tickets = vec![on_ci(10, "2026-11-13T12:10:00+00:00"), on_ci(11, "2026-11-13T11:04:00.5+00:00"), ticket(12, "", "closed")];
+        spec.tickets[2].ci_since = "2026-11-13T09:00:00+00:00".into();
+        assert_eq!(delivery_json(&st, &spec)["ci_since"], "2026-11-13T11:04:00.5+00:00", "the earliest ticket still waiting");
     }
 
     /// With two tickets in flight, a stalled Delivery's reason names both and their agents, the Merge item

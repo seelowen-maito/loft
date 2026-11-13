@@ -127,6 +127,34 @@ final class DeliveryCardTests: XCTestCase {
         XCTAssertEqual(try delivery(Self.spec).line?.text, "Stalled: its run was lost when Loft restarted.")
     }
 
+    /// #424: waiting for CI, the line says how long since the Delivery's `ci_since` (its earliest ticket waiting, a
+    /// standalone ticket's too) and opens the Checks tab; no Dev is named on it.
+    func testWaitingForCIShowsHowLongAndOpensTheChecks() throws {
+        let d = try delivery(#"""
+        {"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #41, #42"},"started":true,"agent_id":null,"agent_name":null,
+         "pr":500,"checks_url":"https://github.com/o/r/pull/500/checks","ci_since":"2026-11-13T12:04:00.5+00:00","spec":true,"current":null,
+         "tickets":[{"number":40,"title":"A","state":"closed","skipped":"","waiting_for_ci":false,"ci_since":null},
+                    {"number":41,"title":"B","state":"review","skipped":"","agent_name":null,"waiting_for_ci":true,"ci_since":"2026-11-13T12:10:00+00:00"},
+                    {"number":42,"title":"C","state":"review","skipped":"","agent_name":null,"waiting_for_ci":true,"ci_since":"2026-11-13T12:04:00.5+00:00"}]}
+        """#)
+        let now = JSONCoding.parseDate("2026-11-13T12:10:30Z")!
+        XCTAssertEqual(d.line(now: now)?.tone, .ci)
+        XCTAssertEqual(d.line(now: now)?.text, "Waiting for CI on #41, #42 · 6 min", "from the Delivery's ci_since")
+        XCTAssertEqual(d.lineLink?.absoluteString, "https://github.com/o/r/pull/500/checks")
+        XCTAssertEqual(d.runningLines, [])
+        XCTAssertEqual(d.progressLine(issue: 420), "On spec PR #500. 1 of 3 tickets done.")
+
+        // A standalone ticket sends no tickets: its card counts from ci_since all the same.
+        let one = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"checks_url":"https://github.com/o/r/pull/12/checks","ci_since":"2026-11-13T12:08:00+00:00"}"#)
+        XCTAssertEqual(one.line(now: now)?.text, "Waiting for CI on #7 · 2 min")
+        XCTAssertEqual(one.lineLink?.absoluteString, "https://github.com/o/r/pull/12/checks")
+        XCTAssertEqual(one.progressLine(issue: 7), "Its reviewers passed on PR #12; Loft waits for its CI. #7 closes when the PR merges.")
+        let noTime = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"ci_since":null}"#)
+        XCTAssertEqual(noTime.line(now: now)?.text, "Waiting for CI on #7", "no start time, no elapsed")
+        let running = try delivery(#"{"state":"running","state_line":{"tone":"running","text":"Running."},"started":true,"agent_id":"dev","agent_name":"Dev","pr":12,"checks_url":"https://github.com/o/r/pull/12/checks"}"#)
+        XCTAssertNil(running.lineLink, "only waiting for CI links to the checks")
+    }
+
     func testAButtonsAnswerCarriesTheDeliveryAndWhatItDid() throws {
         let r = try JSONCoding.decoder.decode(IssueDeliveryReply.self, from: Data(#"{"ok":true,"message":"Paused spec #333.","state":"paused","started":true,"can_resume":true,"agent_id":"dev","agent_name":"Dev","pr":334}"#.utf8))
         XCTAssertEqual(r.message, "Paused spec #333.")

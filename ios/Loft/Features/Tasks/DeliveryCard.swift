@@ -27,11 +27,27 @@ struct DeliveryCardSection: View {
                 if let waiting = SpecViews.waitingLine(d?.waitingForLead) {
                     Text(waiting).font(.subheadline).foregroundStyle(Theme.attentionInk).accessibilityIdentifier("deliveryWaiting")
                 }
-                if let line = d?.line {
-                    Text(line.text)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(color(line.tone))
-                        .accessibilityIdentifier("deliveryState")
+                if let d, d.line != nil {
+                    // Waiting for CI counts its minutes, and opens the Checks tab on GitHub.
+                    TimelineView(.periodic(from: .now, by: 30)) { tl in
+                        if let line = d.line(now: tl.date) {
+                            if let url = d.lineLink {
+                                Link(destination: url) {
+                                    HStack(spacing: 4) { Text(line.text); Image(systemName: "arrow.up.right.square").imageScale(.small) }
+                                }
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(color(line.tone))
+                                .buttonStyle(.borderless)
+                                .accessibilityHint("Opens the CI checks on GitHub")
+                                .accessibilityIdentifier("deliveryState")
+                            } else {
+                                Text(line.text)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(color(line.tone))
+                                    .accessibilityIdentifier("deliveryState")
+                            }
+                        }
+                    }
                 }
             }
             .padding(.vertical, 2)
@@ -84,7 +100,7 @@ struct DeliveryCardSection: View {
 
     private func color(_ tone: IssueDelivery.Tone) -> Color {
         switch tone {
-        case .running, .final: Theme.accent
+        case .running, .ci, .final: Theme.accent
         case .stalled: Theme.failureInk
         case .paused: .secondary
         case .needsYou: Theme.attentionInk

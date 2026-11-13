@@ -4152,6 +4152,81 @@ pub(crate) mod tests {
         assert_eq!(fake.seen(&runs).len(), 3);
     }
 
+    /// Ticket #41 of `slug`'s Delivery as the issue page and the deliveries summary show it, and the
+    /// Delivery's checks link (the same in both).
+    async fn shown_41(st: &AppState, slug: &str) -> (Value, Value, Value) {
+        let page = crate::delivery::delivery_json(st, &delivery(st, slug));
+        let all = crate::delivery::summary_route(axum::extract::State(st.clone())).await.unwrap().0;
+        let summary = all.as_array().unwrap().iter().find(|d| d["repo"] == slug).unwrap().clone();
+        assert_eq!(page["checks_url"], summary["checks_url"]);
+        (page["tickets"][0].clone(), summary["tickets"][0].clone(), page["checks_url"].clone())
+    }
+
+    #[tokio::test]
+    async fn a_ticket_its_reviewers_passed_while_its_ci_runs_is_waiting_for_ci_with_no_dev_on_it() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-wait";
+        let (dev, team) = building(&st, &fake, "ci-wait", &["qa"]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.in_turn("GET", &runs, vec![(200, json!({ "check_runs": [run("in_progress", None)] })), (200, json!({ "check_runs": [run("completed", Some("success"))] }))]);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+
+        // In review: QA has yet to pass it, so it isn't waiting for CI and its Dev is still shown on it.
+        let (page, summary, checks) = shown_41(&st, slug).await;
+        assert_eq!(checks, "https://github.com/octo/ci-wait/pull/500/checks");
+        for t in [&page, &summary] {
+            assert_eq!((t["waiting_for_ci"].clone(), t["ci_since"].clone(), t["agent_id"].clone()), (json!(false), Value::Null, json!(dev.id)));
+        }
+        assert!(delivery(&st, slug).ticket(41).unwrap().ci_since.is_empty());
+
+        // QA passes while the CI runs: it waits for CI from that pass, not from the submit.
+        let submitted = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = submitted.clone());
+        let before = chrono::Utc::now();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let since = delivery(&st, slug).ticket(41).unwrap().ci_since.clone();
+        assert!(chrono::DateTime::parse_from_rfc3339(&since).unwrap() >= before, "{since}");
+        let (page, summary, _) = shown_41(&st, slug).await;
+        for t in [&page, &summary] {
+            assert_eq!((t["state"].clone(), t["waiting_for_ci"].clone(), t["ci_since"].clone()), (json!("review"), json!(true), json!(since)));
+            assert_eq!((t["agent_id"].clone(), t["agent_name"].clone()), (Value::Null, Value::Null), "no Dev on a ticket waiting for CI");
+        }
+        let d = crate::delivery::delivery_json(&st, &delivery(&st, slug));
+        assert_eq!((d["current"].clone(), d["agent_id"].clone()), (Value::Null, Value::Null), "nor on the Delivery");
+
+        // Green CI closes it, and it no longer waits.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+        assert!(delivery(&st, slug).ticket(41).unwrap().ci_since.is_empty());
+        let (page, _, _) = shown_41(&st, slug).await;
+        assert_eq!((page["waiting_for_ci"].clone(), page["ci_since"].clone()), (json!(false), Value::Null));
+    }
+
+    #[tokio::test]
+    async fn with_no_reviewers_a_ticket_waits_for_ci_from_its_submit_and_a_red_ci_clears_it() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-alone";
+        let (dev, _) = building(&st, &fake, "ci-alone", &[]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.in_turn("GET", &runs, vec![(200, json!({ "check_runs": [run("in_progress", None)] })), (200, json!({ "check_runs": [run("completed", Some("failure"))] }))]);
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("panicked"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+
+        let t = delivery(&st, slug).ticket(41).unwrap().clone();
+        assert_eq!(t.ci_since, t.submitted_at, "the submit starts the wait");
+        let (page, summary, _) = shown_41(&st, slug).await;
+        for v in [&page, &summary] {
+            assert_eq!((v["waiting_for_ci"].clone(), v["ci_since"].clone(), v["agent_id"].clone()), (json!(true), json!(t.submitted_at), Value::Null));
+        }
+
+        // Red CI: a fix round for the Dev, which is on it again.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "started");
+        assert!(delivery(&st, slug).ticket(41).unwrap().ci_since.is_empty());
+        let (page, _, _) = shown_41(&st, slug).await;
+        assert_eq!((page["waiting_for_ci"].clone(), page["ci_since"].clone(), page["agent_id"].clone()), (json!(false), Value::Null, json!(dev.id)));
+    }
+
     #[tokio::test]
     async fn a_red_ci_is_a_changes_round_with_its_log_and_counts_toward_the_limit() {
         let (fake, st) = (fake_github(), state());
@@ -4944,7 +5019,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -5019,7 +5094,7 @@ pub(crate) mod tests {
         let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
         let shape: Vec<(i64, &str, Vec<i64>, Vec<String>)> = d.tickets.iter().map(|t| (t.number, t.state.as_str(), t.blocked_by.clone(), t.waiting_on.clone())).collect();
         assert_eq!(shape, vec![(41, "closed", vec![], vec![]), (42, "elsewhere", vec![], vec![]), (43, "open", vec![42], vec![]), (45, "started", vec![41], vec![]), (46, "open", vec![], vec!["octo/elsewhere#98".to_string()])]);
-        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "waiting_on": [], "agent_id": null, "agent_name": null, "waiting": null }));
+        assert_eq!(v["tickets"][1], json!({ "number": 42, "title": "Ticket 42", "state": "elsewhere", "skipped": "is labelled in-progress", "waiting_on": [], "agent_id": null, "agent_name": null, "waiting": null, "waiting_for_ci": false, "ci_since": null }));
         assert_eq!(v["current"], json!({ "number": 45, "title": "Ticket 45" }));
 
         // Again, or on another device: who has it, and nothing started twice.

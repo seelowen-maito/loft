@@ -40,6 +40,10 @@ _Avoid_: Stuck, failed, paused
 A ticket its Dev reported, with `wait_ticket`, as unable to go on until an issue closes or another agent answers. Its Delivery keeps running and shows "waiting on …" with the reason, not a stall. Loft wakes the Dev on it when that issue closes or that agent messages it, and the Dev may take another ready ticket meanwhile.
 _Avoid_: Blocked (a ticket's blockers are set when it's published), parked
 
+**Waiting for CI** (ticket):
+A ticket in review whose reviewers have all passed, so only its CI on GitHub is left. Loft follows the CI itself and closes the ticket when it is green, or sends the Dev a fix round when it fails. No agent works on it meanwhile: the Delivery shows it as waiting for CI, not as running or stalled.
+_Avoid_: Waiting (that is a Dev's `wait_ticket`), pending, CI running
+
 **Paused**:
 A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
 _Avoid_: Stopped, cancelled, on hold

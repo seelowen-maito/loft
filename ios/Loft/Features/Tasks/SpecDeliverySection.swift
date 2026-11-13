@@ -26,7 +26,7 @@ struct SpecDeliverySection: View {
                     if !underCard || d.pr != nil {
                         HStack {
                             if !underCard {
-                                Text(SpecViews.deliveryLabel(d.state)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
+                                Text(SpecViews.badge(d)).font(.subheadline.weight(.semibold)).foregroundStyle(stage == .ready ? Theme.attention : Theme.accent)
                                     .accessibilityIdentifier("deliveryState")
                             }
                             Spacer()
@@ -110,11 +110,16 @@ private struct TicketRow: View {
                 if let n = ticket.number { Text("#\(n)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 Text(ticket.title).readableLineLimit(2)
                 Spacer(minLength: 4)
-                Text(SpecViews.ticketLabel(ticket.state, waitingOn: ticket.waitingOn)).font(.caption.weight(.medium)).foregroundStyle(tone)
+                if ticket.waitingForCi {
+                    // Counts its minutes while it waits.
+                    TimelineView(.periodic(from: .now, by: 30)) { tl in label(now: tl.date) }
+                } else {
+                    label(now: Date())
+                }
             }
-            if !ticket.verdicts.isEmpty {
+            if !ticket.shownVerdicts.isEmpty {
                 HStack(spacing: 8) {
-                    ForEach(ticket.verdicts.sorted { $0.key < $1.key }, id: \.key) { role, v in
+                    ForEach(ticket.shownVerdicts, id: \.role) { role, v in
                         HStack(spacing: 3) {
                             Image(systemName: v == "pass" ? "checkmark.circle.fill" : "clock")
                             Text("\(role) \(v == "pass" ? "passed" : "waiting")")
@@ -126,6 +131,11 @@ private struct TicketRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("ticketRow-\(ticket.title)")
+    }
+
+    private func label(now: Date) -> some View {
+        Text(SpecViews.ticketLabel(ticket.state, waitingOn: ticket.waitingOn, waitingForCi: ticket.waitingForCi, ciSince: ticket.ciSince, now: now))
+            .font(.caption.weight(.medium)).foregroundStyle(tone)
     }
 
     private var tone: Color {
