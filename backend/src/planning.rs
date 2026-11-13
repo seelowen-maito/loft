@@ -57,6 +57,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "title": { "type": "string", "description": "What the slice delivers, in a few words." },
                 "body": { "type": "string", "description": "The ticket in Markdown, following the ticket template." },
                 "project": { "type": "string", "description": "The project whose repo gets this ticket, one of yours: its Repo line. Defaults to the spec's project. On GitHub it stays a sub-issue of the spec and keeps its blockers across repos." },
+                "repo": { "type": "string", "description": "Only for a plan kept in Loft whose project folder holds several repos: the repo inside it this ticket changes, as its subfolder (`api`). Its Delivery branches and merges there. Leave it out otherwise." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "What must land before this one: the title of a ticket in this list, or a blocker outside it written `owner/repo#n` (a ticket of another spec or repo, say one of the API that a UI ticket needs). Loft links it as a GitHub dependency and the Delivery waits until it closes. Publish the spec with the blockers first, so you have their numbers. Never guess a blocker: name only what the ticket needs, and the breakdown round lets the user confirm it." }
             }, "required": ["title", "body"] } }
         }, "required": ["tickets"] }
@@ -301,6 +302,12 @@ mod in_loft {
             }
             None => None,
         };
+        for t in ts.iter().filter(|t| !t.repo.is_empty()) {
+            if spec.is_none() {
+                return Err(format!("\"{}\" names a repo, which only a spec's tickets do: publish the spec first.", t.title));
+            }
+            crate::delivery::repo_dir(state, &project, &t.repo).map_err(|e| format!("\"{}\": {e}.", t.title))?;
+        }
         let _held = state.publish_locks.of(&format!("loft:{project}")).lock_owned().await;
         // A spec's tickets are under it in whichever project they went to.
         let siblings: Vec<Task> = match &spec {
@@ -326,14 +333,15 @@ mod in_loft {
                 }
             };
             if let Some(s) = &spec {
-                crate::delivery::record_local_ticket(state, &project, &s.id, &made.id, &t.title, &blockers);
+                crate::delivery::record_local_ticket(state, &project, &s.id, &made.id, &t.title, &blockers, &t.repo);
             }
             let spec_link = spec.as_ref().map(|s| IssueLink { number: 0, title: s.title.clone(), id: s.id.clone(), repo: String::new() });
             crate::grill::record_published(state, &me.id, "", spec_link, vec![IssueLink { number: pos as i64 + 1, title: t.title.clone(), id: made.id.clone(), repo: String::new() }]);
             let by: Vec<String> = t.blocked_by.iter().map(|&b| format!("\"{}\"", ts[b].title)).collect();
             let by = if by.is_empty() { String::new() } else { format!(", blocked by {}", by.join(", ")) };
             let was = if new { "" } else { ", already saved" };
-            lines.push(format!("- {} (Loft issue {}){by}{was}", t.title, made.id));
+            let at = if t.repo.is_empty() { String::new() } else { format!(", in `{}`", t.repo) };
+            lines.push(format!("- {} (Loft issue {}){at}{by}{was}", t.title, made.id));
             ids[i] = Some(made.id);
         }
         let head = match &spec {
@@ -787,6 +795,8 @@ struct Ticket {
     blocked_by: Vec<usize>,
     /// Blockers that are issues on GitHub, not among these tickets: repo and number.
     external: Vec<(String, i64)>,
+    /// In a plan kept in Loft in a folder of several repos: the repo inside it the ticket changes.
+    repo: String,
     /// The planner as if the ticket's project were its only one: the `project` the ticket names, one of
     /// the planner's own (`all`), else the spec's (`me`).
     home: Agent,
@@ -835,7 +845,8 @@ fn tickets_in(all: &Agent, me: &Agent, args: &Value) -> Result<Vec<Ticket>, Stri
                 None => return Err(format!("\"{title}\" is blocked by \"{b}\", which isn't one of these tickets")),
             }
         }
-        out.push(Ticket { title, body, blocked_by, external, home });
+        let repo = t["repo"].as_str().map(str::trim).unwrap_or("").trim_matches('/').to_string();
+        out.push(Ticket { title, body, blocked_by, external, repo, home });
     }
     Ok(out)
 }
@@ -922,6 +933,9 @@ async fn publish_tickets(state: &AppState, all: &Agent, me: &Agent, args: &Value
             return in_loft::tickets(state, me, id, &ts, &order, &why).await;
         }
     };
+    if let Some(t) = ts.iter().find(|t| !t.repo.is_empty()) {
+        return Err(format!("\"{}\" names a repo, which only a plan kept in Loft uses: on GitHub a ticket goes to its project's repo, so pass `project` instead.", t.title));
+    }
     let spec = args["spec"].as_i64();
     if given && spec.is_none() {
         return Err(format!("This project's plan goes to GitHub ({slug}): pass the spec's GitHub issue number as `spec`."));
@@ -5467,7 +5481,7 @@ pub(crate) mod tests {
         git_in(&inside, &["commit", "-q", "--allow-empty", "-m", "init"]);
         std::os::unix::fs::symlink(&inside, st.settings.boot().projects_dir.join("sneaky")).unwrap();
         crate::delivery::record_local_spec(&st, "sneaky", "spec-id", "Offline mode", "");
-        crate::delivery::record_local_ticket(&st, "sneaky", "spec-id", "t1", "Store", &[]);
+        crate::delivery::record_local_ticket(&st, "sneaky", "spec-id", "t1", "Store", &[], "");
         busy(&st, "Builder", "sneaky", "dev");
         let d = crate::delivery::local_of(&st, "sneaky", "spec-id").unwrap();
 
@@ -5556,8 +5570,109 @@ pub(crate) mod tests {
         let (a, m, dev, dir) = plan_without_git(&st, "many-repos").await;
         std::fs::create_dir_all(dir.join("api/.git")).unwrap();
         let err = press(&st, &a, &m).await.unwrap_err();
-        assert_eq!(err.1, "The Delivery didn't start: many-repos holds several repos, and its Delivery needs the project folder itself to be a git repo.");
+        assert_eq!(err.1, "The Delivery didn't start: many-repos isn't a git repo itself, so each ticket names the repo inside it that it changes, and \"Store\" names none yet. Publish it again with `repo` set.");
         assert!(woken(&st, &dev).is_empty());
+    }
+
+    /// #447: a plan kept in Loft in a folder of several repos. Each ticket names the repo it changes, Start says
+    /// which tickets name none, and the Delivery branches and merges in each ticket's repo.
+    #[tokio::test]
+    async fn a_plan_across_repos_in_one_folder_branches_and_merges_in_each() {
+        let st = state();
+        let fake = own_fake(&st);
+        let name = "dine";
+        let mut a = planner(&st, name);
+        a.project = name.into();
+        st.db.save_agent(&a).unwrap();
+        let dir = st.settings.boot().projects_dir.join(name);
+        for (r, base) in [("api", "main"), ("web", "master"), ("pos", "main")] {
+            std::fs::create_dir_all(dir.join(r)).unwrap();
+            git_in(&dir.join(r), &["init", "-q", "-b", base]);
+            git_in(&dir.join(r), &["commit", "-q", "--allow-empty", "-m", "init"]);
+        }
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        crate::grill::tests::send(&st, &a).unwrap();
+        publish(&st, &a, "Menu sync").await.unwrap();
+        let spec = st.db.list_tasks().unwrap().into_iter().find(|t| t.project == name && t.labels == ["spec"]).unwrap();
+        let with = |title: &str, by: &[&str], repo: &str| {
+            let mut t = ticket(title, by);
+            if !repo.is_empty() {
+                t["repo"] = json!(repo);
+            }
+            t
+        };
+        let tickets = |ts: Vec<Value>| {
+            let (st, a, args) = (st.clone(), a.clone(), json!({ "spec": spec.id, "tickets": ts }));
+            async move { mcp_call(&st, &a, "publish_tickets", &args).await }
+        };
+        // Only a git repo of its own, directly inside the folder: never a path out of it, nor a link to one.
+        let outside = st.settings.boot().projects_dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        git_in(&outside, &["init", "-q", "-b", "main"]);
+        std::os::unix::fs::symlink(&outside, dir.join("evil")).unwrap();
+        for (repo, why) in [
+            ("nope", "`nope` isn't a git repo of its own inside dine"),
+            ("..", "`..` isn't a git repo of its own inside dine"),
+            ("../outside", "`../outside` isn't a folder directly inside dine: name the repo's own folder"),
+            ("api/sub", "`api/sub` isn't a folder directly inside dine: name the repo's own folder"),
+            ("evil", "`evil` isn't a git repo of its own inside dine"),
+        ] {
+            let err = tickets(vec![with("Store", &[], repo)]).await.unwrap().unwrap_err();
+            assert_eq!(err, format!("\"Store\": {why}."), "{repo}");
+        }
+        assert!(!st.db.list_tasks().unwrap().iter().any(|t| t.title == "Store"), "nothing was saved");
+        tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "")]).await.unwrap().unwrap();
+        crate::grill::mcp_call(&st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
+        let dev = busy(&st, "Builder", name, "dev");
+        let m = summary(&st, &a);
+
+        let err = press(&st, &a, &m).await.unwrap_err();
+        assert_eq!(err.1, "The Delivery didn't start: dine isn't a git repo itself, so each ticket names the repo inside it that it changes, and \"UI\" names none yet. Publish it again with `repo` set.");
+        assert!(git_in(&dir.join("api"), &["branch", "--list", "spec/*"]).is_empty(), "nothing was branched");
+        let out = tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "web")]).await.unwrap().unwrap();
+        assert!(out.contains(", in `web`, blocked by \"Store\", already saved"), "{out}");
+
+        press(&st, &a, &m).await.unwrap();
+        for (r, base) in [("api", "main"), ("web", "master")] {
+            assert_eq!(git_in(&dir.join(r), &["rev-parse", "spec/1-menu-sync"]), git_in(&dir.join(r), &["rev-parse", base]), "{r}'s spec branch starts at {base}");
+        }
+        let d = crate::delivery::local_of(&st, name, &spec.id).unwrap();
+        assert_eq!(d.bases, [("api".to_string(), "main".to_string()), ("web".to_string(), "master".to_string())].into());
+        let w = woken(&st, &dev);
+        assert!(w[0].contains(&format!("of the project's own repo `{}`", dir.join("api").canonicalize().unwrap().display())), "{}", w[0]);
+
+        // A ticket published after Start, in a repo the plan hadn't branched in: its branch is made when it starts.
+        tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "web"), with("Print", &["UI"], "pos")]).await.unwrap().unwrap();
+        let ids: Vec<String> = ["Store", "UI"].iter().map(|t| loft_ticket(&st, name, t).id).collect();
+        for id in &ids {
+            tool(&st, &dev, "submit_ticket", json!({ "number": id, "commits": ["abc1234def"] })).await.unwrap();
+        }
+        assert_eq!(git_in(&dir.join("pos"), &["rev-parse", "spec/1-menu-sync"]), git_in(&dir.join("pos"), &["rev-parse", "main"]));
+        let d = crate::delivery::local_of(&st, name, &spec.id).unwrap();
+        assert_eq!(d.bases.get("pos").map(String::as_str), Some("main"));
+        assert!(woken(&st, &dev).last().unwrap().contains(&format!("of the project's own repo `{}`", dir.join("pos").canonicalize().unwrap().display())));
+        tool(&st, &dev, "submit_ticket", json!({ "number": loft_ticket(&st, name, "Print").id, "commits": ["abc1234def"] })).await.unwrap();
+        assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready");
+
+        let clones: Vec<std::path::PathBuf> = [("api", "store.rs"), ("web", "ui.ts"), ("pos", "print.rs")].iter().map(|(r, f)| dev_builds(&st, &d, &dir.join(r), f, "x\n")).collect();
+        // web's master moved on with a change that conflicts: nothing is merged anywhere.
+        git_in(&clones[1], &["checkout", "-q", "master"]);
+        std::fs::write(clones[1].join("ui.ts"), "y\n").unwrap();
+        git_in(&clones[1], &["add", "."]);
+        git_in(&clones[1], &["commit", "-q", "-m", "ui"]);
+        let api_main = git_in(&clones[0], &["rev-parse", "main"]);
+        let err = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap_err();
+        assert_eq!(err, "`spec/1-menu-sync` doesn't merge cleanly into `master` in web, so nothing was merged.");
+        assert_eq!(git_in(&clones[0], &["rev-parse", "main"]), api_main, "api, checked first, wasn't merged either");
+        git_in(&clones[1], &["reset", "-q", "--hard", "HEAD~1"]);
+
+        let merged = crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap();
+        let shown: Vec<String> = clones.iter().map(|c| c.display().to_string()).collect();
+        assert_eq!(merged, format!("Merged `spec/1-menu-sync` into `main` in the Dev's clone `{}`. Merged `spec/1-menu-sync` into `master` in the Dev's clone `{}`. Merged `spec/1-menu-sync` into `main` in the Dev's clone `{}`.", shown[0], shown[1], shown[2]));
+        assert_eq!(git_in(&clones[1], &["-c", "core.fsmonitor=false", "show", "master:ui.ts"]), "x");
+        assert_eq!(st.db.get_task(&spec.id).unwrap().unwrap().status, "done");
+        assert_eq!(crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap(), "`spec/1-menu-sync` is already merged into `main` in api, `master` in web and `main` in pos.");
+        assert!(fake.seen("/").is_empty(), "no GitHub at all");
     }
 
     #[test]

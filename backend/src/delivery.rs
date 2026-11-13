@@ -77,6 +77,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             local: false,
             spec_id: String::new(),
             base: String::new(),
+            bases: Default::default(),
             title: String::new(),
             created_at: crate::db::now(),
         },
@@ -132,16 +133,21 @@ pub fn record_local_spec(state: &AppState, project: &str, spec_id: &str, title: 
 }
 
 /// Adds a ticket of a plan kept in Loft to its Delivery: numbered in the plan, blocked by the tickets with
-/// the Loft issues `blocked_by`. One already there is left as it is.
-pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &str, title: &str, blocked_by: &[String]) {
+/// the Loft issues `blocked_by`, changing `repo` inside the project folder (empty: the folder itself). One
+/// already there is left as it is, but takes a `repo` given before the Delivery starts.
+pub fn record_local_ticket(state: &AppState, project: &str, spec_id: &str, id: &str, title: &str, blocked_by: &[String], repo: &str) {
     let Some(d) = local_of(state, project, spec_id) else { return };
     update(state, &d.repo, d.spec, |d| {
-        if d.tickets.iter().any(|t| t.id == id) {
+        let planned = d.state == "planned";
+        if let Some(t) = d.tickets.iter_mut().find(|t| t.id == id) {
+            if planned && !repo.is_empty() {
+                t.repo = repo.into();
+            }
             return;
         }
         let number = d.tickets.iter().map(|t| t.number).max().unwrap_or(0) + 1;
         let blocked_by = d.tickets.iter().filter(|t| blocked_by.contains(&t.id)).map(|t| t.number).collect();
-        d.tickets.push(DeliveryTicket { id: id.into(), ..DeliveryTicket::new(number, title, blocked_by, "open") });
+        d.tickets.push(DeliveryTicket { id: id.into(), repo: repo.into(), ..DeliveryTicket::new(number, title, blocked_by, "open") });
     });
 }
 
@@ -662,9 +668,53 @@ fn own_repo(state: &AppState, project: &str) -> Result<std::path::PathBuf, Strin
         .ok_or_else(|| crate::repos::project_hint(state, project).map(|h| format!("{h}, and its Delivery needs the project folder itself to be a git repo")).unwrap_or_else(|| format!("the project folder of {} isn't a git repo of its own in the projects folder, so Loft won't run git there", project.trim())))
 }
 
-/// The project's folder as briefs name it.
-fn project_shown(state: &AppState, d: &Delivery) -> String {
-    project_dir(state, d).unwrap_or_else(|_| state.settings.boot().projects_dir.join(d.project.trim())).display().to_string()
+/// The folder of `repo`, a ticket's repo in a plan kept in Loft: the project folder itself when empty, else
+/// that subfolder of it, which must stay inside it and be a git repo of its own. Err says why, mid-sentence.
+pub(crate) fn repo_dir(state: &AppState, project: &str, repo: &str) -> Result<std::path::PathBuf, String> {
+    if repo.is_empty() {
+        return own_repo(state, project);
+    }
+    let project = project.trim();
+    if repo.contains(['/', '\\']) {
+        return Err(format!("`{repo}` isn't a folder directly inside {project}: name the repo's own folder"));
+    }
+    let root = crate::repos::project_dir(state, project).ok_or_else(|| format!("there's no folder {project} in the projects folder"))?;
+    crate::repos::project_dir(state, &format!("{project}/{repo}"))
+        .filter(|dir| dir.starts_with(&root) && *dir != root && crate::repos::own_git_dir(dir))
+        .ok_or_else(|| format!("`{repo}` isn't a git repo of its own inside {project}"))
+}
+
+/// A ticket's repo as briefs name it.
+fn repo_shown(state: &AppState, d: &Delivery, repo: &str) -> String {
+    repo_dir(state, &d.project, repo).unwrap_or_else(|_| state.settings.boot().projects_dir.join(d.project.trim()).join(repo)).display().to_string()
+}
+
+/// The repos a plan kept in Loft changes, each once in ticket order (empty: the project folder), with the
+/// branch its spec branch merges into there.
+fn repos_of(d: &Delivery) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    for t in &d.tickets {
+        if !out.iter().any(|(r, _)| *r == t.repo) {
+            let base = if t.repo.is_empty() { d.base.clone() } else { d.bases.get(&t.repo).cloned().unwrap_or_default() };
+            out.push((t.repo.clone(), base));
+        }
+    }
+    if out.is_empty() {
+        out.push((String::new(), d.base.clone()));
+    }
+    out
+}
+
+/// What Merge merges a plan kept in Loft's branch into: "`main`", or "`main` in api and `master` in web".
+pub(crate) fn merge_into(d: &Delivery) -> String {
+    let repos = repos_of(d);
+    if let [(r, base)] = repos.as_slice()
+        && r.is_empty()
+    {
+        return format!("`{base}`");
+    }
+    let each: Vec<String> = repos.iter().map(|(r, base)| format!("`{base}` in {}", if r.is_empty() { d.project.trim() } else { r })).collect();
+    list_of(&each)
 }
 
 /// How Needs you and its push name a Delivery: the spec's (or standalone ticket's) title, else its subject.
@@ -763,7 +813,7 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         _ => format!(" and its spec #{}", d.spec),
     };
     let work = if d.local {
-        format!("Work on the {} `{}` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin {}`. There is no PR.", branch_name(d), d.branch, project_shown(state, d), d.branch)
+        format!("Work on the {} `{}` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin {}`. There is no PR.", branch_name(d), d.branch, repo_shown(state, d, &t.repo), d.branch)
     } else {
         format!("Work on the {} `{}`: pull it, commit there and push.{pr}", branch_name(d), d.branch)
     };
@@ -812,10 +862,34 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     if d.state != "planned" {
         return Ok(Started { ticket: d.current.unwrap_or_default(), agent, already: true });
     }
-    let d = if d.local && d.base.is_empty() {
-        let dir = project_dir(state, &d).map_err(|e| format!("The Delivery didn't start: {e}."))?;
-        let base = local_branch(&dir, &d.branch).await.map_err(|e| format!("The Delivery didn't start: {e}."))?;
-        update(state, repo, spec, |d| d.base = base).ok_or("The Delivery record couldn't be saved.")?
+    let d = if d.local && d.base.is_empty() && d.bases.is_empty() {
+        let repos = repos_of(&d);
+        // In a folder of several repos, every ticket names the one it changes.
+        let unnamed: Vec<String> = d.tickets.iter().filter(|t| t.repo.is_empty()).map(|t| format!("\"{}\"", t.title)).collect();
+        let named = d.tickets.iter().any(|t| !t.repo.is_empty()) || crate::repos::project_hint(state, &d.project).is_some();
+        if named && !unnamed.is_empty() && project_dir(state, &d).is_err() {
+            let (verb, them) = if unnamed.len() == 1 { ("names", "it") } else { ("name", "them") };
+            return Err(format!(
+                "The Delivery didn't start: {} isn't a git repo itself, so each ticket names the repo inside it that it changes, and {} {verb} none yet. Publish {them} again with `repo` set.",
+                d.project.trim(),
+                list_of(&unnamed)
+            ));
+        }
+        let mut bases = vec![];
+        for (r, _) in &repos {
+            let dir = repo_dir(state, &d.project, r).map_err(|e| format!("The Delivery didn't start: {e}."))?;
+            bases.push((r.clone(), local_branch(&dir, &d.branch).await.map_err(|e| format!("The Delivery didn't start: {e}."))?));
+        }
+        update(state, repo, spec, |d| {
+            for (r, base) in bases {
+                if r.is_empty() {
+                    d.base = base;
+                } else {
+                    d.bases.insert(r, base);
+                }
+            }
+        })
+        .ok_or("The Delivery record couldn't be saved.")?
     } else if d.standalone && d.pr.is_none() {
         let title = d.tickets.first().map(|t| t.title.clone()).unwrap_or_default();
         crate::planning::branch_and_pr(state, repo, spec, &title, "ticket", None).await.map_err(|e| format!("The Delivery didn't start: {e}."))?;
@@ -1034,6 +1108,16 @@ fn note(state: &AppState, id: &str, author: &str, text: &str) {
 async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent) -> Result<(), String> {
     if d.local {
         let t = d.ticket(n).ok_or("The ticket left the Delivery record.")?;
+        // A ticket published after Start, in a repo the plan hadn't branched in yet: its spec branch is made now.
+        if !t.repo.is_empty() && !d.bases.contains_key(&t.repo) {
+            let dir = repo_dir(state, &d.project, &t.repo).map_err(|e| format!("{} can't start: {e}.", tag(d, t)))?;
+            let base = local_branch(&dir, &d.branch).await.map_err(|e| format!("{} can't start: {e}.", tag(d, t)))?;
+            let r = t.repo.clone();
+            update(state, &d.repo, d.spec, |d| {
+                d.bases.insert(r, base);
+            })
+            .ok_or("The Delivery record couldn't be saved.")?;
+        }
         note(state, &t.id, &agent.id, &format!("Started by Loft's Delivery: with {} on the {} `{}`.", agent.name, branch_name(d), d.branch));
     } else {
         crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{n}/labels", d.repo), Some(json!({ "labels": ["in-progress"] })))
@@ -1186,7 +1270,7 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
     let repo = &d.repo;
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     let pr = d.pr.map(|pr| format!(" ({} https://github.com/{repo}/pull/{pr})", pr_name(d))).unwrap_or_default();
-    let place = if d.local { format!(" of the project's own repo `{}`", project_shown(state, d)) } else { String::new() };
+    let place = if d.local { format!(" of the project's own repo `{}`", repo_shown(state, d, &t.repo)) } else { String::new() };
     let posted = if d.local { "on the ticket's Loft issue".to_string() } else { format!("on the {}", pr_name(d)) };
     let (who, job) = match role {
         "qa" => ("QA", "Test that they deliver the ticket's acceptance criteria: run the tests and try the behaviour the ticket changes."),
@@ -2267,9 +2351,15 @@ fn has_trailer(message: &str, trailer: &str) -> bool {
 /// in Loft in the project's own repo.
 async fn branch_commits(state: &AppState, d: &Delivery, trailer: &str, known: &[String]) -> Result<Vec<String>, String> {
     let list: Vec<(String, String)> = if d.local {
-        let dir = project_dir(state, d)?;
-        let log = git(&dir, &["log", "-n", "200", "--format=%H%x1f%B%x1e", &format!("refs/heads/{}", d.branch)]).await?;
-        log.split('\x1e').filter_map(|c| c.trim().split_once('\x1f').map(|(sha, m)| (sha.to_string(), m.to_string()))).collect()
+        // Each repo's branch in turn: its commits are newest first, and the trailer tells the tickets apart.
+        let mut all = vec![];
+        // A repo with no base has no spec branch yet: none of its tickets started.
+        for (r, _) in repos_of(d).into_iter().filter(|(_, base)| !base.is_empty()) {
+            let dir = repo_dir(state, &d.project, &r)?;
+            let log = git(&dir, &["log", "-n", "200", "--format=%H%x1f%B%x1e", &format!("refs/heads/{}", d.branch)]).await?;
+            all.extend(log.split('\x1e').filter_map(|c| c.trim().split_once('\x1f').map(|(sha, m)| (sha.to_string(), m.to_string()))));
+        }
+        all
     } else {
         let v = crate::github::get(state, &format!("/repos/{}/commits?sha={}&per_page=100", d.repo, d.branch)).await.map_err(|e| e.to_string())?;
         v.as_array().into_iter().flatten().filter_map(|c| Some((c["sha"].as_str()?.to_string(), c["commit"]["message"].as_str().unwrap_or("").to_string()))).collect()
@@ -2782,8 +2872,8 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
         Ok(s) => s,
         Err(e) => {
             // A refused first start leaves no record, so the card offers Start again only for what can start.
-            if fresh && state.db.get_delivery(&d.repo, d.spec)?.is_some_and(|d| d.state == "planned") {
-                state.db.delete_delivery(&d.repo, d.spec)?;
+            if fresh {
+                forget_unstarted(state, &d.repo, d.spec).await?;
             }
             return Err(bad(e));
         }
@@ -2795,6 +2885,16 @@ async fn start_loft_issue(state: &AppState, t: &crate::db::Task) -> ApiResult<Va
     v["agent_id"] = json!(s.agent.id);
     v["agent_name"] = json!(s.agent.name);
     Ok(Json(v))
+}
+
+/// Deletes the Delivery of spec #spec on `repo` if it still hasn't started, under the repo's publish lock, so a
+/// Start that got in since keeps its record.
+async fn forget_unstarted(state: &AppState, repo: &str, spec: i64) -> Result<(), crate::api::ApiError> {
+    let _held = state.publish_locks.of(repo).lock_owned().await;
+    if state.db.get_delivery(repo, spec)?.is_some_and(|d| d.state == "planned") {
+        state.db.delete_delivery(repo, spec)?;
+    }
+    Ok(())
 }
 
 /// Start delivery on spec #spec's Loft issue, for a spec published before this build or whose end-of-planning
@@ -3127,7 +3227,7 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
     };
     if d.local {
         return format!(
-            "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: {done}, and you review the whole {bname} `{branch}` once, in the project's own repo `{dir}`, against `{base}` (`git diff {base}...{branch}`).\n\
+            "[Loft Delivery: {about}] This is not a message from the user. You are the Code reviewer on this Delivery: {done}, and you review the whole {bname} `{branch}` once, {place}.\n\
              - Review the whole diff: correctness first (logic errors, edge cases, error handling, data loss, races), then what only shows across tickets: pieces that don't fit together, duplication, gaps in the tests.{again}\n\
              - Don't fix the work yourself.\n\
              - {own}\n\
@@ -3137,8 +3237,13 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
             bname = branch_name(d),
             spec_id = d.spec_id,
             branch = d.branch,
-            dir = project_shown(state, d),
-            base = d.base,
+            place = {
+                let each = |(r, base): &(String, String)| format!("`{}`, against `{base}` (`git diff {base}...{}`)", repo_shown(state, d, r), d.branch);
+                match repos_of(d).as_slice() {
+                    [one] => format!("in the project's own repo {}", each(one)),
+                    all => format!("in each repo it changes: {}", all.iter().map(each).collect::<Vec<_>>().join("; ")),
+                }
+            },
             own = own_rules("review it"),
         );
     }
@@ -3377,7 +3482,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
 pub(crate) fn local_ready(state: &AppState, d: &Delivery) -> String {
     update(state, &d.repo, d.spec, |d| d.state = "ready".into());
     done(state, &d.repo, d.spec);
-    format!(" The {} `{}` is ready to merge into `{}`: the user is offered Merge.", branch_name(d), d.branch, d.base)
+    format!(" The {} `{}` is ready to merge into {}: the user is offered Merge.", branch_name(d), d.branch, merge_into(d))
 }
 
 /// The Delivery is done: Loft marked its spec PR ready, or set a plan kept in Loft to ready. Only the first
@@ -3419,7 +3524,7 @@ fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
     let named = if d.local || title == about { about.clone() } else { format!("{about} \"{title}\"") };
     let lead = if lead { " You get this as the team's Lead: the agent that planned it is gone." } else { "" };
     let ready = if d.local {
-        format!("Its {} `{}` is ready to merge into `{}`: the user is offered Merge.", branch_name(d), d.branch, d.base)
+        format!("Its {} `{}` is ready to merge into {}: the user is offered Merge.", branch_name(d), d.branch, merge_into(d))
     } else {
         format!("Loft marked its {} https://github.com/{}/pull/{} ready for review: the user merges it.", pr_name(d), d.repo, d.pr.unwrap_or_default())
     };
@@ -3484,61 +3589,100 @@ fn dev_clone(state: &AppState, d: &Delivery, project: &std::path::Path) -> Optio
 }
 
 /// Merges a plan kept in Loft whose last review passed: its spec branch, as the Dev last pushed it, into
-/// the branch it started from, in the Dev's own clone. The project's folder is only read from, never
-/// written to. Its spec's Loft issue is then done.
+/// the branch it started from, in the Dev's own clone of each repo it changes. The project's folders are only
+/// read from, never written to. Its spec's Loft issue is then done.
 pub async fn merge(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.filter(|d| d.local).ok_or("There's no plan kept in Loft with that Delivery.")?;
     match d.state.as_str() {
         "ready" => {}
-        "merged" => return Ok(format!("`{}` is already merged into `{}`.", d.branch, d.base)),
+        "merged" => return Ok(format!("`{}` is already merged into {}.", d.branch, merge_into(&d))),
         _ => return Err(format!("{} isn't ready to merge yet: its reviews haven't all passed.", subject(&d))),
     }
-    let project = project_dir(state, &d).map_err(|e| format!("Nothing was merged: {e}."))?;
-    let dir = dev_clone(state, &d, &project).ok_or_else(|| format!("Nothing was merged: the Dev has no clone of `{}` in its workspace.", project.display()))?;
+    // Every repo is checked before any is merged: a conflict anywhere merges nothing, so a plan is never half merged.
+    let repos = repos_of(&d);
+    let one = repos.len() == 1;
+    let mut ready = vec![];
+    for (r, into) in &repos {
+        let project = repo_dir(state, &d.project, r).map_err(|e| format!("Nothing was merged: {e}."))?;
+        let at = if one { String::new() } else { format!(" in {}", if r.is_empty() { d.project.trim() } else { r }) };
+        ready.push(prepare_merge(state, &d, &project, into, &at).await?);
+    }
+    let mut merged: Vec<String> = vec![];
+    for m in &ready {
+        match finish_merge(&d, m).await {
+            Ok(line) => merged.push(line),
+            Err(e) if !merged.is_empty() => return Err(format!("{} But then: {e}", merged.join(" "))),
+            Err(e) => return Err(e),
+        }
+    }
+    update(state, repo, spec, |d| d.state = "merged".into());
+    if let Ok(Some(mut t)) = state.db.get_task(&d.spec_id) {
+        crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into {}", d.branch, merge_into(&d))));
+    }
+    Ok(merged.join(" "))
+}
+
+/// One repo's merge, checked and ready to write: the Dev's clone, the branch merged into and both tips, and
+/// the merged tree (None when the spec branch is already in the base).
+struct Merge {
+    dir: std::path::PathBuf,
+    into: String,
+    base: String,
+    branch: String,
+    tree: Option<String>,
+}
+
+/// Reads what merging `d`'s spec branch into `into` in the Dev's clone of the repo `project` takes, writing no
+/// branch: Err when it can't, or wouldn't merge cleanly. `at` names the repo in a plan of several (" in api").
+async fn prepare_merge(state: &AppState, d: &Delivery, project: &std::path::Path, into: &str, at: &str) -> Result<Merge, String> {
+    let dir = dev_clone(state, d, project).ok_or_else(|| format!("Nothing was merged: the Dev has no clone of `{}` in its workspace.", project.display()))?;
     let shown = dir.display();
-    let (base_ref, spec_ref) = (format!("refs/heads/{}", d.base), format!("refs/remotes/origin/{}", d.branch));
-    git(&dir, &["fetch", "-q", "origin", &format!("+refs/heads/{0}:{spec_ref}", d.branch), &format!("+refs/heads/{0}:refs/remotes/origin/{0}", d.base)])
+    let spec_ref = format!("refs/remotes/origin/{}", d.branch);
+    git(&dir, &["fetch", "-q", "origin", &format!("+refs/heads/{0}:{spec_ref}", d.branch), &format!("+refs/heads/{into}:refs/remotes/origin/{into}")])
         .await
         .map_err(|e| format!("Nothing was merged: couldn't fetch `{}` into `{shown}`: {e}", d.branch))?;
-    let at = dir.as_path();
-    let tip = |r: String| async move { git(at, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).await.ok() };
+    let at_dir = dir.as_path();
+    let tip = |r: String| async move { git(at_dir, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).await.ok() };
     // The clone's own base branch, or the project's when the clone has none yet.
-    let base = match tip(base_ref.clone()).await {
+    let base = match tip(format!("refs/heads/{into}")).await {
         Some(b) => b,
-        None => tip(format!("refs/remotes/origin/{}", d.base)).await.ok_or_else(|| format!("Nothing was merged: `{}` isn't in `{shown}`.", d.base))?,
+        None => tip(format!("refs/remotes/origin/{into}")).await.ok_or_else(|| format!("Nothing was merged: `{into}` isn't in `{shown}`."))?,
     };
     let branch = tip(spec_ref).await.ok_or_else(|| format!("Nothing was merged: `{}` isn't in `{shown}`.", d.branch))?;
-    let done = |how: String| {
-        update(state, repo, spec, |d| d.state = "merged".into());
-        if let Ok(Some(mut t)) = state.db.get_task(&d.spec_id) {
-            crate::tasks::set_status(state, &mut t, "done", "user", Some(&format!("Merged `{}` into `{}`", d.branch, d.base)));
-        }
-        how
+    let tree = if git(&dir, &["merge-base", "--is-ancestor", &branch, &base]).await.is_ok() {
+        None
+    } else {
+        let tree = git(&dir, &["merge-tree", "--write-tree", "--no-messages", &base, &branch]).await;
+        let tree = tree.ok().and_then(|t| t.lines().next().map(str::to_string)).filter(|t| !t.is_empty());
+        Some(tree.ok_or_else(|| format!("`{}` doesn't merge cleanly into `{into}`{at}, so nothing was merged.", d.branch))?)
     };
-    let merged = format!("Merged `{}` into `{}` in the Dev's clone `{shown}`.", d.branch, d.base);
-    if git(&dir, &["merge-base", "--is-ancestor", &branch, &base]).await.is_ok() {
-        if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_err() {
-            git(&dir, &["branch", &d.base, &base]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    Ok(Merge { dir, into: into.to_string(), base, branch, tree })
+}
+
+/// Writes a merge [`prepare_merge`] checked: the line saying so.
+async fn finish_merge(d: &Delivery, m: &Merge) -> Result<String, String> {
+    let (dir, into, base, branch) = (&m.dir, &m.into, &m.base, &m.branch);
+    let base_ref = format!("refs/heads/{into}");
+    let merged = format!("Merged `{}` into `{into}` in the Dev's clone `{}`.", d.branch, dir.display());
+    let Some(tree) = &m.tree else {
+        if git(dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_err() {
+            git(dir, &["branch", into, base]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
         }
-        return Ok(done(merged));
-    }
-    let tree = git(&dir, &["merge-tree", "--write-tree", "--no-messages", &base, &branch]).await;
-    let Some(tree) = tree.ok().and_then(|t| t.lines().next().map(str::to_string)).filter(|t| !t.is_empty()) else {
-        return Err(format!("`{}` doesn't merge cleanly into `{}`, so nothing was merged.", d.branch, d.base));
+        return Ok(merged);
     };
-    let message = format!("Merge {}", subject(&d));
-    let commit = git(&dir, &["commit-tree", &tree, "-p", &base, "-p", &branch, "-m", &message]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
-    let on = git(&dir, &["symbolic-ref", "--quiet", "HEAD"]).await.unwrap_or_default();
+    let message = format!("Merge {}", subject(d));
+    let commit = git(dir, &["commit-tree", tree, "-p", base, "-p", branch, "-m", &message]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+    let on = git(dir, &["symbolic-ref", "--quiet", "HEAD"]).await.unwrap_or_default();
     if on == base_ref {
         // The Dev has the base checked out: its files follow, and git refuses rather than lose its uncommitted work.
-        git(&dir, &["merge", "-q", "--ff-only", &commit]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+        git(dir, &["merge", "-q", "--ff-only", &commit]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
     } else {
         // Moves the branch only from the commit read above (or makes it), so a change since then fails instead of being lost.
-        let old = if git(&dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_ok() { base.as_str() } else { "" };
-        git(&dir, &["update-ref", "-m", &message, &base_ref, &commit, old]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
+        let old = if git(dir, &["rev-parse", "--verify", "--quiet", &base_ref]).await.is_ok() { base.as_str() } else { "" };
+        git(dir, &["update-ref", "-m", &message, &base_ref, &commit, old]).await.map_err(|e| format!("Nothing was merged: {e}"))?;
     }
-    Ok(done(merged))
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -3633,6 +3777,30 @@ mod tests {
     }
 
     /// One read lists every spec's Delivery with its tickets and verdicts, and leaves out a standalone ticket's.
+    /// #451 security L4: a refused Start forgets its record only while it's still planned, read under the publish
+    /// lock, so a Start that got in meanwhile keeps its own.
+    #[tokio::test]
+    async fn a_refused_start_forgets_only_an_unstarted_record() {
+        let st = crate::planning::tests::state();
+        record_local_spec(&st, "web", "spec-id", "Dark mode", "");
+        let d = local_of(&st, "web", "spec-id").unwrap();
+        let held = st.publish_locks.of(&d.repo).lock_owned().await;
+        let forget = tokio::spawn({
+            let (st, repo) = (st.clone(), d.repo.clone());
+            async move { forget_unstarted(&st, &repo, 1).await.unwrap() }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Another Start won the lock first and started it.
+        update(&st, &d.repo, d.spec, |d| d.state = "running".into());
+        drop(held);
+        forget.await.unwrap();
+        assert!(st.db.get_delivery(&d.repo, d.spec).unwrap().is_some(), "a started Delivery keeps its record");
+
+        update(&st, &d.repo, d.spec, |d| d.state = "planned".into());
+        forget_unstarted(&st, &d.repo, d.spec).await.unwrap();
+        assert!(st.db.get_delivery(&d.repo, d.spec).unwrap().is_none(), "an unstarted one is forgotten");
+    }
+
     #[tokio::test]
     async fn summary_lists_every_spec_delivery_but_not_standalone_tickets() {
         let st = crate::planning::tests::state();
