@@ -66,12 +66,16 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
+            title={t.label}
+            aria-label={t.label}
             className={cx(
               "relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] transition",
               tab === t.id ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
             )}
           >
-            {t.icon} {t.label}
+            {t.icon}
+            {/* Only the open tab keeps its name: five names don't fit the panel. */}
+            {tab === t.id && t.label}
             {!!t.badge && <span className="ml-0.5 rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{t.badge}</span>}
           </button>
         ))}

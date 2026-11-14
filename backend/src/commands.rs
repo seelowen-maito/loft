@@ -47,7 +47,7 @@ const LOFT: [(&str, &str); 6] = [
 ];
 
 /// What the CLI's own commands do, for the ones the CLI doesn't describe in its init event.
-const BUILT_IN: [(&str, &str); 12] = [
+const BUILT_IN: &[(&str, &str)] = &[
     ("init", "Create a CLAUDE.md for this project."),
     ("mcp", "Show the MCP servers the agent has."),
     ("config", "Show Claude Code's settings."),
@@ -60,6 +60,48 @@ const BUILT_IN: [(&str, &str); 12] = [
     ("model", "Switch the model."),
     ("effort", "Set how hard the model thinks."),
     ("usage", "Show plan usage."),
+    ("deep-research", "Research a question across many sources and report what was found."),
+    ("design", "Design a screen or a visual from a description."),
+    ("slides", "Make a slide deck."),
+    ("design-sync", "Sync a design with its source."),
+    ("design-consent", "Allow Claude to use your design files."),
+    ("design-revoke", "Take back that design access."),
+    ("dataviz", "Make a chart or a dashboard that reads well."),
+    ("artifact-diagramming", "Draw a diagram for an artifact."),
+    ("artifact-capabilities", "Add live data or saved state to an artifact page."),
+    ("whiteboard", "Sketch an idea on a whiteboard."),
+    ("update-config", "Change Claude Code's settings, permissions or hooks."),
+    ("verify", "Check that a change really works."),
+    ("batch", "Run one change across many files in parallel."),
+    ("fewer-permission-prompts", "Allow the safe commands you keep approving, so it asks less."),
+    ("schedule", "Run a prompt later or on a schedule."),
+    ("claude-api", "Help with building on the Claude API."),
+    ("workflow-authoring", "Write a multi-agent workflow script."),
+    ("run", "Start the project's app to see a change working."),
+    ("run-skill-generator", "Write a skill that knows how to launch this project."),
+    ("plugin-authoring", "Make or change a Claude Code plugin."),
+    ("advisor", "Ask a stronger model for a second opinion."),
+    ("agents", "Manage subagents."),
+    ("auto-mode-setup", "Set up auto permission mode."),
+    ("autocompact", "Set when the context compacts by itself."),
+    ("color", "Pick the prompt bar color."),
+    ("output-style", "Pick how replies are written."),
+    ("fast", "Toggle fast mode."),
+    ("focus", "Toggle the focus view."),
+    ("heapdump", "Write a memory dump for debugging."),
+    ("import", "Import settings or sessions from another tool."),
+    ("workflow-launch-exec", "Start a multi-agent workflow."),
+    ("reload-plugins", "Reload the plugins."),
+    ("reload-skills", "Reload the skills."),
+    ("rename", "Rename this session."),
+    ("usage-credits", "Show the usage credits left."),
+    ("extra-usage", "Turn on extra usage past the plan limit."),
+    ("insights", "Show patterns in how you use Claude Code."),
+    ("recap", "Summarize what happened in this session."),
+    ("skill-doctor", "Check the skills for problems."),
+    ("goal", "Set a goal the agent keeps working toward."),
+    ("list-agents", "List the running agents."),
+    ("team-onboarding", "Write an onboarding guide for the team."),
 ];
 
 /// The `description:` of the user's own command or skill of that name in the Claude folder, if it has one.
@@ -86,7 +128,7 @@ pub fn merged(reported: &Reported, claude_dir: &Path) -> Vec<Command> {
     for n in cli {
         let description = user_description(claude_dir, n)
             .or_else(|| BUILT_IN.iter().find(|(b, _)| b == n).map(|(_, d)| d.to_string()))
-            .unwrap_or_default();
+            .unwrap_or_else(|| "A Claude Code command or skill.".to_string());
         let terminal = reported.terminal.contains(n);
         out.push(Command {
             name: format!("/{n}"),
@@ -215,6 +257,7 @@ mod tests {
         assert_eq!(doctor.description, "Check the Claude Code installation.");
         assert_eq!(list.iter().find(|c| c.name == "/ship").unwrap().description, "Ship the branch", "a user's command is described by its file");
         assert!(list.iter().find(|c| c.name == "/review").unwrap().reason.is_none());
+        assert!(list.iter().all(|c| !c.description.is_empty()), "no row is left without a description");
     }
 
     #[test]
