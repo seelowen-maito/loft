@@ -294,6 +294,17 @@ export function Chat({
     }
   };
 
+  const scheduleCommand = async (rest: string) => {
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.scheduleAdd(agent.id, rest);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
   const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
@@ -329,6 +340,11 @@ export function Chat({
       // Picked from the menu: leave room for the interval and prompt; Enter again starts it.
       setText("/loop ");
       setCmdNote("Add an interval and a prompt, like 10m check the deploy, then press Enter.");
+      return;
+    }
+    if (name === "/schedule") {
+      setText("/schedule ");
+      setCmdNote("Add when and a prompt, like tomorrow 9:00 run the tests, then press Enter.");
       return;
     }
     if (name === "/resume") {
@@ -384,6 +400,7 @@ export function Chat({
     if (cmd?.command === "/compact") return compactContext(cmd.rest);
     if (cmd?.command === "/grill") return startGrill(cmd.rest);
     if (cmd?.command === "/loop") return loopCommand(cmd.rest);
+    if (cmd?.command === "/schedule") return scheduleCommand(cmd.rest);
     // A command the CLI knows, typed first, goes to it as the message ("/review 12"); a terminal-only one doesn't.
     const known = cmd && commands.find((c) => c.name === cmd.command);
     if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
@@ -575,6 +592,7 @@ export function Chat({
             </div>
           )}
           {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
+          {agent.schedules?.map((s) => <ScheduleRow key={s.id} agentId={agent.id} s={s} onError={setCmdError} />)}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -858,7 +876,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     );
   }
   if (m.kind === "run_start") {
-    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "loop" ? "loop" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
+    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "loop" ? "loop" : m.meta?.trigger === "scheduled" ? "scheduled message" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
     return (
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />
@@ -1076,6 +1094,36 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
       </div>
       <button className="btn shrink-0" onClick={stop} disabled={busy}>
         <Square className="size-3.5" /> Stop
+      </button>
+    </div>
+  );
+}
+
+/** One of the agent's /schedule entries, with its next run and a Cancel. */
+function ScheduleRow({ agentId, s, onError }: { agentId: string; s: NonNullable<Agent["schedules"]>[number]; onError: (e: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const cancel = async () => {
+    setBusy(true);
+    try {
+      await api.scheduleCancel(agentId, s.id);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const when = s.every ? `Every ${s.every} at ${s.time}` : "Once";
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
+      <Clock className="size-4 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] text-fg">{s.prompt}</div>
+        <div className="truncate font-mono text-[11px] text-fg-3">
+          {when} · next {new Date(s.next_at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}
+        </div>
+      </div>
+      <button className="btn shrink-0" onClick={cancel} disabled={busy}>
+        Cancel
       </button>
     </div>
   );

@@ -608,7 +608,7 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
         }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
-    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
+    let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
     start(state, agent_id, prompt, trigger, for_user);
     msg
@@ -3031,7 +3031,7 @@ esac
     async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
         let (st, a) = fake_claude_state();
         let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
-        assert_eq!(none.as_array().unwrap().len(), 6, "before a run: Loft's own commands only");
+        assert_eq!(none.as_array().unwrap().len(), 7, "before a run: Loft's own commands only");
         let _ = send(&st, &a.id, "hello").await.ok().unwrap();
         idle(&st, &a.id).await;
         let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;

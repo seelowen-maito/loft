@@ -37,12 +37,13 @@ pub struct Command {
 }
 
 /// Loft's own: they run in Loft, not in the CLI, even where the CLI has one of the same name.
-const LOFT: [(&str, &str); 6] = [
+const LOFT: [(&str, &str); 7] = [
     ("clear", "Clear the conversation context and start fresh. Memory is kept."),
     ("compact", "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary."),
     ("resume", "Go back to one of this agent's past sessions."),
     ("code", "Open this agent's workspace folder in VS Code."),
     ("loop", "Repeat a prompt every interval until stopped: /loop 10m check the deploy. /loop stop ends it."),
+    ("schedule", "Send a prompt later or on repeat: /schedule tomorrow 9:00 run the tests, /schedule in 2h ..., /schedule every weekday 9:30 ..."),
     ("grill", "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it."),
 ];
 
@@ -74,7 +75,6 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("verify", "Check that a change really works."),
     ("batch", "Run one change across many files in parallel."),
     ("fewer-permission-prompts", "Allow the safe commands you keep approving, so it asks less."),
-    ("schedule", "Run a prompt later or on a schedule."),
     ("claude-api", "Help with building on the Claude API."),
     ("workflow-authoring", "Write a multi-agent workflow script."),
     ("run", "Start the project's app to see a change working."),
@@ -249,7 +249,7 @@ mod tests {
         let tags: Vec<_> = list.iter().map(|c| (c.name.as_str(), c.tag)).collect();
         assert_eq!(
             tags,
-            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
+            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/schedule", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
             "the CLI's internal __ commands are left out"
         );
         let doctor = list.iter().find(|c| c.name == "/doctor").unwrap();
