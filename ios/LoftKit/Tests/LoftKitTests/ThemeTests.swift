@@ -87,7 +87,8 @@ final class ThemeTests: XCTestCase {
     func testWidgetAmberTextIsReadableOnWhiteAndUnchangedInDark() {
         for amber in [UsageTone.usage(80), UsageTone.level("warm"), WidgetTheme.attention] {
             XCTAssertGreaterThanOrEqual(contrastOnWhite(amber), 4.5)
-            XCTAssertEqual(hex(amber, .darkAqua), "FFB840")
+            // Dark keeps the bright amber: on the Mac that is the web's `warn` (#456).
+            XCTAssertEqual(hex(amber, .darkAqua), hex(Theme.attention, .darkAqua))
         }
         XCTAssertLessThan(contrastOnWhite(Theme.attention), 4.5, "the bright amber is why")
     }
